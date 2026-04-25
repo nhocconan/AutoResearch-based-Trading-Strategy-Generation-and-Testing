@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeFilter
-Hypothesis: Camarilla R1/S1 breakout on 12h with daily EMA50 trend filter and volume confirmation.
-Long when price breaks above R1 in uptrend (close > daily EMA50) with volume spike.
-Short when price breaks below S1 in downtrend (close < daily EMA50) with volume spike.
-Exit when price re-enters Camarilla H3/L3 range or trend reverses. Designed for low trade frequency (<30/year) and robustness in both bull and bear markets.
+4h_VWAP_Reversion_1dTrend_VolumeFilter
+Hypothesis: Mean reversion to VWAP on 4h with 1d EMA50 trend filter and volume spike confirmation.
+Long when price < VWAP in uptrend with volume spike, short when price > VWAP in downtrend with volume spike.
+Exit when price crosses VWAP or trend reverses. Designed for low trade frequency and robustness in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,46 +20,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculations (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for VWAP calculation (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Camarilla pivot points (based on previous day's OHLC)
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1/12
-    # S1 = C - (H - L) * 1.1/12
-    # R3 = C + (H - L) * 1.1/4
-    # S3 = C - (H - L) * 1.1/4
-    # H3 = C + (H - L) * 1.1/6
-    # L3 = C - (H - L) * 1.1/6
-    prev_high = pd.Series(high_12h).shift(1).values
-    prev_low = pd.Series(low_12h).shift(1).values
-    prev_close = pd.Series(close_12h).shift(1).values
+    # Typical price for VWAP
+    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # VWAP: cumulative(typical_price * volume) / cumulative(volume) reset each 4h bar
+    # We'll use session VWAP (within each 4h bar) approximated by rolling 20-period
+    pv_4h = typical_price_4h * volume_4h
+    vol_sum_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).sum().values
+    pv_sum_4h = pd.Series(pv_4h).rolling(window=20, min_periods=20).sum().values
+    vwap_4h = pv_sum_4h / vol_sum_4h
+    vwap_4h = np.where(vol_sum_4h == 0, typical_price_4h, vwap_4h)  # avoid div by zero
     
-    r1 = pivot + range_hl * 1.1 / 12
-    s1 = pivot - range_hl * 1.1 / 12
-    h3 = pivot + range_hl * 1.1 / 6
-    l3 = pivot - range_hl * 1.1 / 6
-    r3 = pivot + range_hl * 1.1 / 4
-    s3 = pivot - range_hl * 1.1 / 4
+    # Align VWAP to original timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
     
-    # Align Camarilla levels to original timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    
-    # Get daily data for trend filter (EMA50)
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -71,7 +55,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average on LTF
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_ma_20)
     
@@ -83,26 +67,26 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         ema_trend = ema_50_1d_aligned[i]
+        vwap = vwap_aligned[i]
         
         if position == 0:
             # Regime-based entry logic
             if close[i] > ema_trend:  # Uptrend regime (daily)
-                # Long: break above R1 with volume spike
-                long_signal = (close[i] > r1_aligned[i]) and vol_spike[i]
-                # Short: break below S1 only if extreme volume spike (counter-trend fade)
-                short_signal = (close[i] < s1_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
+                # Long: mean reversion to VWAP (price below VWAP) with volume spike
+                long_signal = (close[i] < vwap) and vol_spike[i]
+                # Short: only on extreme deviation (mean reversion fade)
+                short_signal = (close[i] > vwap * 1.02) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
             else:  # Downtrend regime (daily)
-                # Short: break below S1 with volume spike
-                short_signal = (close[i] < s1_aligned[i]) and vol_spike[i]
-                # Long: break above R1 only if extreme volume spike (counter-trend fade)
-                long_signal = (close[i] > r1_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
+                # Short: mean reversion to VWAP (price above VWAP) with volume spike
+                short_signal = (close[i] > vwap) and vol_spike[i]
+                # Long: only on extreme deviation (mean reversion fade)
+                long_signal = (close[i] < vwap * 0.98) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
             
             if long_signal:
                 signals[i] = 0.25
@@ -115,22 +99,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: re-enter H3/L3 range or trend reversal
-            exit_signal = (close[i] < h3_aligned[i]) or (close[i] < ema_trend * 0.99)
+            # Exit conditions: price crosses above VWAP or trend reversal
+            exit_signal = (close[i] > vwap) or (close[i] < ema_trend * 0.99)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: re-enter H3/L3 range or trend reversal
-            exit_signal = (close[i] > l3_aligned[i]) or (close[i] > ema_trend * 1.01)
+            # Exit conditions: price crosses below VWAP or trend reversal
+            exit_signal = (close[i] < vwap) or (close[i] > ema_trend * 1.01)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeFilter"
-timeframe = "12h"
+name = "4h_VWAP_Reversion_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
