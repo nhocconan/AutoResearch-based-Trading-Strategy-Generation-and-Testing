@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h Bollinger Band Squeeze Breakout with 4h Trend Filter and Volume Spike
-Hypothesis: Bollinger Band squeeze (low volatility) precedes breakouts. Combined with 4h EMA50 trend filter and volume spike (>2.0x 20-bar vol MA) to capture strong momentum moves. Works in bull markets via upside breakouts and in bear markets via downside breakdowns. Uses session filter (08-20 UTC) to reduce noise. Target: 15-35 trades/year to avoid fee drag.
+6h Williams Alligator + 1d EMA50 Trend Filter + Volume Spike Confirmation
+Hypothesis: Williams Alligator (jaw/teeth/lips) identifies trend absence/presence on 6h. Combined with 1d EMA50 for higher timeframe trend filter and volume spike (>2.0x 20-bar vol MA) to capture strong momentum moves. Works in bull markets via long when lips>teeth>jaw and price above EMA50; in bear markets via short when lips<teeth<jaw and price below EMA50. Targeting 12-30 trades per year to avoid fee drag while maintaining edge in both regimes.
 """
 
 import numpy as np
@@ -18,40 +18,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 51:  # Need 50 for EMA + 1 for shift
+    # Get 1d data for EMA50 trend filter (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:  # Need 50 for EMA
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = pd.Series(df_4h['close'])
-    ema_50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Bollinger Bands (20, 2.0) on 1h
-    bb_period = 20
-    bb_std = 2.0
-    bb_ma = np.full(n, np.nan)
-    bb_upper = np.full(n, np.nan)
-    bb_lower = np.full(n, np.nan)
-    bb_width = np.full(n, np.nan)
+    # Williams Alligator on 6h: SMA of median price (HL/2)
+    # Jaw: 13-period SMA, shifted 8 bars
+    # Teeth: 8-period SMA, shifted 5 bars
+    # Lips: 5-period SMA, shifted 3 bars
+    median_price = (high + low) / 2
     
-    for i in range(bb_period - 1, n):
-        bb_ma[i] = np.mean(close[i-bb_period+1:i+1])
-        bb_std_dev = np.std(close[i-bb_period+1:i+1])
-        bb_upper[i] = bb_ma[i] + bb_std_dev * bb_std
-        bb_lower[i] = bb_ma[i] - bb_std_dev * bb_std
-        bb_width[i] = (bb_upper[i] - bb_lower[i]) / bb_ma[i] if bb_ma[i] != 0 else np.nan
+    # Jaw (blue line)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth (red line)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips (green line)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Bollinger Band Squeeze: width < 20-period average width * 0.5
-    bb_width_ma = np.full(n, np.nan)
-    width_ma_period = 20
-    for i in range(width_ma_period - 1, n):
-        bb_width_ma[i] = np.mean(bb_width[i-width_ma_period+1:i+1])
-    
-    bb_squeeze = bb_width < (bb_width_ma * 0.5)
-    
-    # Calculate 20-period volume MA for volume spike confirmation
+    # Calculate 20-period volume MA for volume spike confirmation (6h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -59,74 +49,65 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
-    # Start index: need enough for EMA50, BB, and volume MA
-    start_idx = max(50, bb_period, width_ma_period, 20)
+    # Start index: need enough for Alligator, EMA50, and volume MA
+    start_idx = max(16, 50, 20)  # 16 for lips (5+3 shift), 50 for EMA50, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(bb_ma[i]) or 
-            np.isnan(bb_width_ma[i]) or 
-            np.isnan(vol_ma_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume = volume[i]
-        ema_50_val = ema_50_4h_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation: current volume > 2.0 * 20-period average
         volume_confirm = curr_volume > 2.0 * vol_ma
         
-        # Trend filter: price above/below 4h EMA50
+        # Alligator alignment: bullish (lips>teeth>jaw) or bearish (lips<teeth<jaw)
+        alligator_bullish = lips_val > teeth_val > jaw_val
+        alligator_bearish = lips_val < teeth_val < jaw_val
+        
+        # Trend filter: price above/below 1d EMA50
         price_above_ema = curr_close > ema_50_val
         price_below_ema = curr_close < ema_50_val
         
         if position == 0:
-            # Long: BB squeeze breakout above upper band + price above 4h EMA50 + volume confirmation
-            long_signal = bb_squeeze[i] and (curr_high > bb_upper[i]) and price_above_ema and volume_confirm
-            # Short: BB squeeze breakout below lower band + price below 4h EMA50 + volume confirmation
-            short_signal = bb_squeeze[i] and (curr_low < bb_lower[i]) and price_below_ema and volume_confirm
+            # Long: bullish Alligator + price above 1d EMA50 + volume confirmation
+            long_signal = alligator_bullish and price_above_ema and volume_confirm
+            # Short: bearish Alligator + price below 1d EMA50 + volume confirmation
+            short_signal = alligator_bearish and price_below_ema and volume_confirm
             
             if long_signal:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_signal:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below upper band OR price crosses below 4h EMA50
-            if (curr_close < bb_upper[i]) or (curr_close < ema_50_val):
+            # Exit long: Alligator turns bearish OR price crosses below 1d EMA50
+            if not alligator_bullish or (curr_close < ema_50_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above lower band OR price crosses above 4h EMA50
-            if (curr_close > bb_lower[i]) or (curr_close > ema_50_val):
+            # Exit short: Alligator turns bullish OR price crosses above 1d EMA50
+            if not alligator_bearish or (curr_close > ema_50_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_BollingerSqueeze_Breakout_4hEMA50_Trend_VolumeSpike"
-timeframe = "1h"
+name = "6h_Williams_Alligator_1dEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
