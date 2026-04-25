@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v11
-Hypothesis: Further tighten entry by increasing volume spike threshold to >15.0x average and requiring ADX > 30 for strong trend confirmation. Target 5-15 trades/year to minimize fee drag while maintaining edge via Camarilla pivot breaks with 1d trend alignment. Focus on high-conviction breakouts in both bull and bear markets.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v12
+Hypothesis: Target high-conviction Camarilla R1/S1 breakouts with 1d trend alignment and extreme volume spikes (>20x). Uses discrete position sizing (0.0, ±0.30) and requires ADX > 25 for trend strength. Designed for low trade frequency (<15/year) to minimize fee drag while capturing strong breakouts in bull/bear regimes. Prioritizes ETH/BTC edge via volume confirmation and regime alignment.
 """
 
 import numpy as np
@@ -112,22 +112,22 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
             
         # Determine 1d trend (bullish = price above EMA34)
         df_1d_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
         if np.isnan(df_1d_close_aligned[i]):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
         htf_1d_bullish = df_1d_close_aligned[i] > ema_34_1d_aligned[i]
         htf_1d_bearish = df_1d_close_aligned[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation: need extreme spike (vol_ratio > 15.0) - much stricter
-        volume_confirmed = vol_ratio[i] > 15.0
+        # Volume confirmation: need extreme spike (vol_ratio > 20.0) - much stricter
+        volume_confirmed = vol_ratio[i] > 20.0
         
-        # ADX trend strength filter: only trade when trend is very strong (ADX > 30)
-        trend_filter = adx[i] > 30.0 if not np.isnan(adx[i]) else False
+        # ADX trend strength filter: only trade when trend is strong (ADX > 25)
+        trend_filter = adx[i] > 25.0 if not np.isnan(adx[i]) else False
         
         if position == 0:
             # Long setup: price breaks above Camarilla R1 + 1d uptrend + volume confirmation + trend strength
@@ -137,23 +137,23 @@ def generate_signals(prices):
             short_setup = (close[i] < camarilla_s1_aligned[i]) and htf_1d_bearish and volume_confirmed and trend_filter
             
             if long_setup:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_setup:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
+            signals[i] = 0.30
             # Exit: price touches Camarilla S1 (opposite level) OR 1d trend turns bearish
             if (close[i] <= camarilla_s1_aligned[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
+            signals[i] = -0.30
             # Exit: price touches Camarilla R1 (opposite level) OR 1d trend turns bullish
             if (close[i] >= camarilla_r1_aligned[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
@@ -161,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v11"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v12"
 timeframe = "4h"
 leverage = 1.0
