@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v10
-Hypothesis: Tighten entry further by requiring volume spike >10.0x average and adding ADX trend strength filter (ADX > 25) to avoid false breakouts. Target 10-20 trades/year to minimize fee drag while maintaining edge in both bull and bear markets via Camarilla pivot breaks with 1d trend alignment.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v11
+Hypothesis: Further tighten entry by increasing volume spike threshold to >15.0x average and requiring ADX > 30 for strong trend confirmation. Target 5-15 trades/year to minimize fee drag while maintaining edge via Camarilla pivot breaks with 1d trend alignment. Focus on high-conviction breakouts in both bull and bear markets.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter (proven stability)
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
@@ -123,11 +123,11 @@ def generate_signals(prices):
         htf_1d_bullish = df_1d_close_aligned[i] > ema_34_1d_aligned[i]
         htf_1d_bearish = df_1d_close_aligned[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation: need significant spike (vol_ratio > 10.0) - much stricter
-        volume_confirmed = vol_ratio[i] > 10.0
+        # Volume confirmation: need extreme spike (vol_ratio > 15.0) - much stricter
+        volume_confirmed = vol_ratio[i] > 15.0
         
-        # ADX trend strength filter: only trade when trend is strong (ADX > 25)
-        trend_filter = adx[i] > 25.0 if not np.isnan(adx[i]) else False
+        # ADX trend strength filter: only trade when trend is very strong (ADX > 30)
+        trend_filter = adx[i] > 30.0 if not np.isnan(adx[i]) else False
         
         if position == 0:
             # Long setup: price breaks above Camarilla R1 + 1d uptrend + volume confirmation + trend strength
@@ -161,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v10"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v11"
 timeframe = "4h"
 leverage = 1.0
