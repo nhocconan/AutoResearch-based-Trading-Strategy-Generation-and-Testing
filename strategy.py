@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter_v3
-Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and choppiness regime filter (CHOP > 61.8 = range, < 38.2 = trending).
-Targets 20-50 trades/year by requiring: 1) price breaks R1/S1 levels, 2) aligned with 1d EMA trend, 3) market is trending (CHOP < 38.2).
-Uses tighter entry conditions to avoid overtrading fee drag while maintaining edge in both bull and bear markets via regime adaptation.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSp
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Targets 25-40 trades/year by requiring: 1) price breaks R1/S1 levels with momentum (close > open for long, close < open for short), 
+2) aligned with 1d EMA34 trend, 3) volume > 2.0x 20-period average. Uses discrete position sizing (0.25) to minimize fee churn.
+Designed to work in both bull (trend-following breakouts) and bear (mean reversion from extreme levels) markets.
 """
 
 import numpy as np
@@ -44,35 +45,19 @@ def generate_signals(prices):
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Choppiness Index on 1d timeframe (trending: CHOP < 38.2, ranging: CHOP > 61.8)
-    atr_1d = []
-    for i in range(len(df_1d)):
-        if i < 14:
-            atr_1d.append(np.nan)
-        else:
-            tr = np.maximum(
-                df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-                np.maximum(
-                    np.abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-                    np.abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
-                )
-            )
-            atr_1d.append(tr)
-    atr_1d = np.array(atr_1d)
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=14, min_periods=14).mean().values
-    chop_1d = 100 * np.log10(atr_ma_1d * 14 / np.log(df_1d['high'].rolling(14).max() - df_1d['low'].rolling(14).min())) / np.log10(10)
-    chop_1d = np.nan_to_num(chop_1d, nan=50.0)  # default to neutral when undefined
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average (moderate spike)
+    # Volume confirmation: current volume > 2.0 * 20-period average (volume spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.5)
+    volume_confirm = volume > (vol_ma * 2.0)
+    
+    # Momentum filter: close > open for long, close < open for short
+    bullish_momentum = close > open_price
+    bearish_momentum = close < open_price
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA34 (34) and 1d data (2 for shift)
+    # Start index: need enough for 1d EMA34 (34) and 1d pivots (2)
     start_idx = 34
     
     for i in range(start_idx, n):
@@ -82,8 +67,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -95,15 +80,12 @@ def generate_signals(prices):
         uptrend = curr_close > ema_34_1d_aligned[i]
         downtrend = curr_close < ema_34_1d_aligned[i]
         
-        # Regime filter: only trade in trending markets (CHOP < 38.2)
-        trending_market = chop_1d_aligned[i] < 38.2
-        
         if position == 0:
-            # Look for entry signals with volume confirmation, trend alignment, and trending regime
-            # Long breakout: price breaks above R1 with uptrend, volume confirmation, and trending market
-            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i] and trending_market
-            # Short breakout: price breaks below S1 with downtrend, volume confirmation, and trending market
-            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i] and trending_market
+            # Look for entry signals with volume confirmation, trend alignment, and momentum
+            # Long breakout: price breaks above R1 with uptrend, volume confirmation, and bullish momentum
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i] and bullish_momentum[i]
+            # Short breakout: price breaks below S1 with downtrend, volume confirmation, and bearish momentum
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i] and bearish_momentum[i]
             
             if long_breakout:
                 signals[i] = 0.25
@@ -127,8 +109,8 @@ def generate_signals(prices):
             if curr_close < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks below S1 (mean reversion) or trend changes or market becomes ranging
-            elif curr_close < S1_aligned[i] or not uptrend or chop_1d_aligned[i] >= 61.8:
+            # Exit if price breaks below S1 (mean reversion) or trend changes
+            elif curr_close < S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -145,8 +127,8 @@ def generate_signals(prices):
             if curr_close > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks above R1 (mean reversion) or trend changes or market becomes ranging
-            elif curr_close > R1_aligned[i] or not downtrend or chop_1d_aligned[i] >= 61.8:
+            # Exit if price breaks above R1 (mean reversion) or trend changes
+            elif curr_close > R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -154,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter_v3"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSp"
 timeframe = "4h"
 leverage = 1.0
