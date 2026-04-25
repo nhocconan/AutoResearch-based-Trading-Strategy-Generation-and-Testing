@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level with 1d uptrend (price > EMA34) and volume spike (>2.0x avg); enter short when price breaks below S1 level with 1d downtrend (price < EMA34) and volume spike. Exit on opposite Camarilla level touch (S1 for long, R1 for short) or trend reversal. Uses discrete sizing (0.25) to minimize fee churn. Target: 20-40 trades/year by requiring tight confluence of Camarilla breakout, 1d trend alignment, and volume confirmation.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level with 1d uptrend (price > EMA34) and volume spike (>2.0x avg); enter short when price breaks below S1 level with 1d downtrend (price < EMA34) and volume spike. Exit on opposite Camarilla level touch (S1 for long, R1 for short) or trend reversal. Uses discrete sizing (0.25) to minimize fee churn. Target: 20-40 trades/year by requiring tight confluence of Camarilla breakout, 1d trend alignment, and volume confirmation. Fixed: use aligned 1d close for trend filter and proper warmup.
 """
 
 import numpy as np
@@ -42,6 +42,9 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
+    # Align 1d close price for trend filter
+    df_1d_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    
     # Calculate 4h volume ratio (current vs 24-period average = 6h)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
@@ -49,22 +52,20 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA and volume MA
-    start_idx = max(40, 34, 24)
+    # Start index: need warmup for EMA (34) and volume MA (24)
+    start_idx = max(40, 34, 24)  # 40 for Camarilla shift, 34 for EMA, 24 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(df_1d_close_aligned[i])):
+            # Hold current position until data is ready
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
             
         # Determine 1d trend (bullish = price above EMA34)
-        htf_1d_bullish = close_1d[-1] > ema_34_1d_aligned[i] if len(close_1d) > 0 else False
-        # More robust: use aligned 1d close price
-        df_1d_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        if np.isnan(df_1d_close_aligned[i]):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
         htf_1d_bullish = df_1d_close_aligned[i] > ema_34_1d_aligned[i]
         htf_1d_bearish = df_1d_close_aligned[i] < ema_34_1d_aligned[i]
         
@@ -103,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
