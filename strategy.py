@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Adaptive_Kelly_Donchian_20_1wTrend_Filter
-Hypothesis: Daily Donchian(20) breakouts in direction of weekly trend with adaptive Kelly position sizing.
-Uses weekly EMA50 as trend filter to avoid counter-trend trades. Adaptive Kelly scales position by volatility
-(inverse ATR) to maintain consistent risk. Designed for low trade frequency (~10-20/year) to work in both
-bull and bear markets via trend alignment and volatility-adjusted sizing. Donchian breakouts capture strong
-momentum shifts with clear entry/exit rules.
+12h_Camarilla_R3S3_Breakout_1dTrend_Filter
+Hypothesis: 12h Camarilla R3/S3 breakouts with 1d EMA34 trend filter. 
+Only trade breakouts in direction of daily trend to avoid counter-trend whipsaws.
+Uses volume confirmation (>1.5x 20-period average) to filter low-quality breakouts.
+Designed for low trade frequency (~15-25/year) to work in both bull and bear markets via trend alignment.
+Camarilla levels provide precise intraday support/resistance with high breakout fidelity.
 """
 
 import numpy as np
@@ -20,91 +20,86 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1w close for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w, additional_delay_bars=1)
+    # Calculate EMA34 on 1d close for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d, additional_delay_bars=1)
     
-    # Calculate ATR(14) for volatility normalization
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr2])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period volume average for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for ATR(14) and Donchian(20)
-    start_idx = max(20, 14)
+    # Start index: need warmup for EMA34 (34) and volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(atr[i]) or atr[i] == 0 or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i])):
+        if np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Base Kelly fraction (conservative)
-        base_kelly = 0.15
-        
-        # Volatility scaling (inverse ATR normalized to median)
-        if i >= 50:
-            vol_scaling = np.median(atr[i-50:i]) / atr[i]
-            vol_scaling = np.clip(vol_scaling, 0.5, 2.0)  # Limit scaling
+        # Calculate Camarilla levels for 12h timeframe using previous bar's OHLC
+        if i >= 1:
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            daily_range = prev_high - prev_low
+            
+            if daily_range > 0:  # Avoid division by zero
+                camarilla_r3 = prev_close + daily_range * 1.1 / 4
+                camarilla_s3 = prev_close - daily_range * 1.1 / 4
+            else:
+                camarilla_r3 = prev_close
+                camarilla_s3 = prev_close
         else:
-            vol_scaling = 1.0
-        
-        # Adaptive position size
-        position_size = base_kelly * vol_scaling
-        position_size = min(position_size, 0.35)  # Cap at 35%
+            camarilla_r3 = close[i]
+            camarilla_s3 = close[i]
         
         if position == 0:
-            # Look for Donchian breakout signals with weekly trend filter
-            # Long: price breaks above 20-period high in uptrend (close > weekly EMA50)
-            # Short: price breaks below 20-period low in downtrend (close < weekly EMA50)
-            long_signal = (close[i] > highest_high[i]) and (close[i] > ema50_1w_aligned[i])
-            short_signal = (close[i] < lowest_low[i]) and (close[i] < ema50_1w_aligned[i])
+            # Look for Camarilla breakout signals with trend and volume filters
+            # Long: price breaks above R3 in uptrend (close > EMA34) with volume confirmation
+            # Short: price breaks below S3 in downtrend (close < EMA34) with volume confirmation
+            volume_ok = volume[i] > 1.5 * vol_ma[i]
+            long_signal = (close[i] > camarilla_r3) and (close[i] > ema34_aligned[i]) and volume_ok
+            short_signal = (close[i] < camarilla_s3) and (close[i] < ema34_aligned[i]) and volume_ok
             
             if long_signal:
-                signals[i] = position_size
+                signals[i] = 0.25
                 position = 1
             elif short_signal:
-                signals[i] = -position_size
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = position_size
-            # Exit when price moves back below 20-period low (mean reversion)
-            exit_signal = close[i] < lowest_low[i]
+            signals[i] = 0.25
+            # Exit when price moves back below EMA34 (trend reversal)
+            exit_signal = close[i] < ema34_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -position_size
-            # Exit when price moves back above 20-period high (mean reversion)
-            exit_signal = close[i] > highest_high[i]
+            signals[i] = -0.25
+            # Exit when price moves back above EMA34 (trend reversal)
+            exit_signal = close[i] > ema34_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Adaptive_Kelly_Donchian_20_1wTrend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
