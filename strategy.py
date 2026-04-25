@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrend_RegimeFilter
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volatility regime filter.
-In trending markets (price > 4h EMA50 + low volatility), trade breakouts in direction of trend.
-In ranging markets (high volatility or weak trend), fade at Camarilla extremes.
-Uses discrete sizing (0.20) to minimize fee churn. Target: 15-30 trades/year per symbol.
-Works in bull via trend-following breakouts, in bear via mean reversion at extremes when trend weakens.
+6h_Ichimoku_Kumo_Twist_WeeklyTrend_Confirm
+Hypothesis: 6h Ichimoku TK cross with weekly trend filter and volume confirmation.
+In weekly uptrend (price > weekly EMA200), take long signals when TK crosses up and price > cloud.
+In weekly downtrend (price < weekly EMA200), take short signals when TK crosses down and price < cloud.
+Uses Ichimoku cloud (Senkou Span A/B) as dynamic support/resistance. Volume spike confirms momentum.
+Target: 12-37 trades/year (50-150 over 4 years). Works in bull via TK cross longs above cloud,
+in bear via TK cross shorts below cloud. Weekly trend filter prevents counter-trend trading.
 """
 
 import numpy as np
@@ -17,128 +18,114 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla calculations and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
+    # Get weekly data for trend filter (EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Calculate Camarilla levels for each 4h bar (based on previous bar)
-    R1_4h = np.full(len(close_4h), np.nan)
-    S1_4h = np.full(len(close_4h), np.nan)
-    R2_4h = np.full(len(close_4h), np.nan)
-    S2_4h = np.full(len(close_4h), np.nan)
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    for i in range(1, len(close_4h)):
-        # Camarilla levels based on previous 4h bar's range
-        high_prev = high_4h[i-1]
-        low_prev = low_4h[i-1]
-        close_prev = close_4h[i-1]
-        range_prev = high_prev - low_prev
-        
-        if range_prev > 0:
-            R2_4h[i] = close_prev + (range_prev * 1.1 / 2)  # R2 level
-            S2_4h[i] = close_prev - (range_prev * 1.1 / 2)  # S2 level
-            R1_4h[i] = close_prev + (range_prev * 1.1 / 4)  # R1 level
-            S1_4h[i] = close_prev - (range_prev * 1.1 / 4)  # S1 level
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Align Camarilla levels to original timeframe
-    R1_4h_aligned = align_htf_to_ltf(prices, df_4h, R1_4h)
-    S1_4h_aligned = align_htf_to_ltf(prices, df_4h, S1_4h)
-    R2_4h_aligned = align_htf_to_ltf(prices, df_4h, R2_4h)
-    S2_4h_aligned = align_htf_to_ltf(prices, df_4h, S2_4h)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # 4h EMA50 for trend direction
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    # Volatility regime filter: ATR ratio (current ATR vs 24-period average)
-    # High ATR = choppy/ranging market, Low ATR = trending market
-    tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
-    tr[0] = high[0] - low[0]  # First bar
-    atr_current = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_24 = pd.Series(tr).rolling(window=24, min_periods=24).mean().values
-    atr_ratio = atr_current / atr_ma_24
-    # Low volatility regime: ATR ratio < 0.8 (trending)
-    # High volatility regime: ATR ratio > 1.2 (choppy/ranging)
+    # Chikou Span (Lagging Span): close shifted 26 periods behind
+    # Not used for signals as it requires look-ahead
     
-    # Session filter: 08-20 UTC (reduce noise trades)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, prices, tenkan_sen)  # same timeframe, no alignment needed
+    kijun_aligned = align_htf_to_ltf(prices, prices, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, prices, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, prices, senkou_b)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for calculations
+    # Start index: need warmup for Ichimoku calculations (max 52 periods)
     start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(R1_4h_aligned[i]) or np.isnan(S1_4h_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_ratio[i]) or
-            not in_session[i]):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        # Skip if data not ready
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or np.isnan(senkou_a_aligned[i]) or 
+            np.isnan(senkou_b_aligned[i]) or np.isnan(vol_ma_20[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_50_4h_aligned[i]
-        volatility_regime = atr_ratio[i]  # < 0.8 = trending, > 1.2 = ranging
+        weekly_trend_up = close[i] > ema_200_1w_aligned[i]
+        weekly_trend_down = close[i] < ema_200_1w_aligned[i]
+        
+        # Cloud top and bottom
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # TK cross signals
+        tk_cross_up = (tenkan_aligned[i] > kijun_aligned[i]) and (tenkan_aligned[i-1] <= kijun_aligned[i-1])
+        tk_cross_down = (tenkan_aligned[i] < kijun_aligned[i]) and (tenkan_aligned[i-1] >= kijun_aligned[i-1])
         
         if position == 0:
-            # Regime-based entry logic
-            if volatility_regime < 0.8:  # Low volatility = trending market
-                # Trend-following: break in direction of 4h EMA50 trend
-                if close[i] > ema_trend:  # Uptrend
-                    long_signal = close[i] > R1_4h_aligned[i]
-                    short_signal = False  # No counter-trend in strong trend
-                else:  # Downtrend
-                    short_signal = close[i] < S1_4h_aligned[i]
-                    long_signal = False  # No counter-trend in strong trend
-            else:  # High volatility = ranging/choppy market
-                # Mean reversion: fade at Camarilla extremes
-                long_signal = close[i] < S1_4h_aligned[i]  # Buy at support
-                short_signal = close[i] > R1_4h_aligned[i]  # Sell at resistance
-            
-            if long_signal:
-                signals[i] = 0.20
-                position = 1
-            elif short_signal:
-                signals[i] = -0.20
-                position = -1
+            # Weekly uptrend: look for long signals
+            if weekly_trend_up:
+                long_signal = tk_cross_up and price_above_cloud and vol_spike[i]
+                if long_signal:
+                    signals[i] = 0.25
+                    position = 1
+            # Weekly downtrend: look for short signals
+            elif weekly_trend_down:
+                short_signal = tk_cross_down and price_below_cloud and vol_spike[i]
+                if short_signal:
+                    signals[i] = -0.25
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.20
-            # Exit conditions: touch opposite level or trend reversal
-            if volatility_regime < 0.8:  # Trending market
-                exit_signal = close[i] < ema_trend * 0.995  # Trend reversal
-            else:  # Ranging market
-                exit_signal = close[i] > (R1_4h_aligned[i] + S1_4h_aligned[i]) / 2  # Mean reversion to midpoint
+            signals[i] = 0.25
+            # Exit: TK cross down OR price breaks below cloud bottom
+            exit_signal = tk_cross_down or (close[i] < cloud_bottom)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.20
-            # Exit conditions: touch opposite level or trend reversal
-            if volatility_regime < 0.8:  # Trending market
-                exit_signal = close[i] > ema_trend * 1.005  # Trend reversal
-            else:  # Ranging market
-                exit_signal = close[i] < (R1_4h_aligned[i] + S1_4h_aligned[i]) / 2  # Mean reversion to midpoint
+            signals[i] = -0.25
+            # Exit: TK cross up OR price breaks above cloud top
+            exit_signal = tk_cross_up or (close[i] > cloud_top)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_RegimeFilter"
-timeframe = "1h"
+name = "6h_Ichimoku_Kumo_Twist_WeeklyTrend_Confirm"
+timeframe = "6h"
 leverage = 1.0
