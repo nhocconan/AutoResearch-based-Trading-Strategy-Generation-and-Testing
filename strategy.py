@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Trailing Stop
-Hypothesis: Uses 1d EMA34 for stronger trend filter on 12h timeframe, reducing noise and whipsaw.
-Camarilla breakouts from prior 12h bar capture momentum. Volume spike confirms participation.
-ATR trailing stop manages risk. Designed for 50-150 trades over 4 years (12-37/year).
-Works in bull/bear via trend alignment: only long when price > 1d EMA34, short when price < 1d EMA34.
+4h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Trailing Stop
+Hypothesis: Combines Camarilla pivot breakouts with 1d EMA34 trend filter for stronger directional bias.
+Volume spike confirms momentum. ATR trailing stop manages risk. Designed for 75-150 trades over 4 years.
+Uses 1d EMA34 as HTF trend filter (proven effective in DB top performers) to work in both bull and bear markets.
 """
 
 import numpy as np
@@ -44,7 +43,7 @@ def generate_signals(prices):
     ema_34_1d = calculate_ema(df_1d['close'].values, 34)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Previous 12h bar for Camarilla pivots (using previous bar)
+    # 4h data for Camarilla pivots (using previous bar)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -134,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
