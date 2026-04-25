@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
-Long when price breaks above R1 with 12h EMA50 uptrend and volume spike.
-Short when price breaks below S1 with 12h EMA50 downtrend and volume spike.
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_SessionFilter
+Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike.
+Long when price breaks above R1 with 4h EMA50 uptrend and volume spike (08-20 UTC).
+Short when price breaks below S1 with 4h EMA50 downtrend and volume spike (08-20 UTC).
 Exit on opposite band touch or trend reversal.
-Uses discrete sizing (0.25) to minimize fees. Target: 20-50 trades/year.
+Uses discrete sizing (0.20) to minimize fees. Target: 15-37 trades/year.
 Works in bull via trend-following breakouts, in bear via mean reversion at bands.
 """
 
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla calculations (primary timeframe)
+    # Get 4h data for Camarilla calculations
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 5:
         return np.zeros(n)
@@ -57,19 +57,18 @@ def generate_signals(prices):
     R4_4h_aligned = align_htf_to_ltf(prices, df_4h, R4_4h)
     S4_4h_aligned = align_htf_to_ltf(prices, df_4h, S4_4h)
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    # 12h EMA50 for trend
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Get 4h data for trend filter (EMA50)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_ma_20)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,43 +79,43 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(R1_4h_aligned[i]) or np.isnan(S1_4h_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with uptrend and volume spike
-            long_signal = (close[i] > R1_4h_aligned[i]) and (close[i] > ema_50_12h_aligned[i]) and vol_spike[i]
-            # Short: price breaks below S1 with downtrend and volume spike
-            short_signal = (close[i] < S1_4h_aligned[i]) and (close[i] < ema_50_12h_aligned[i]) and vol_spike[i]
+            # Long: price breaks above R1 with uptrend and volume spike (session filter)
+            long_signal = (close[i] > R1_4h_aligned[i]) and (close[i] > ema_50_4h_aligned[i]) and vol_spike[i] and in_session[i]
+            # Short: price breaks below S1 with downtrend and volume spike (session filter)
+            short_signal = (close[i] < S1_4h_aligned[i]) and (close[i] < ema_50_4h_aligned[i]) and vol_spike[i] and in_session[i]
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
+            signals[i] = 0.20
             # Exit conditions: price touches S1 or trend reverses
-            exit_signal = (close[i] < S1_4h_aligned[i]) or (close[i] < ema_50_12h_aligned[i])
+            exit_signal = (close[i] < S1_4h_aligned[i]) or (close[i] < ema_50_4h_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
+            signals[i] = -0.20
             # Exit conditions: price touches R1 or trend reverses
-            exit_signal = (close[i] > R1_4h_aligned[i]) or (close[i] > ema_50_12h_aligned[i])
+            exit_signal = (close[i] > R1_4h_aligned[i]) or (close[i] > ema_50_4h_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_SessionFilter"
+timeframe = "1h"
 leverage = 1.0
