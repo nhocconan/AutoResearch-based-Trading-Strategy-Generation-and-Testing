@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike
-Hypothesis: Donchian channel breakouts capture strong momentum moves. 
-1w EMA50 filters for primary trend direction to avoid counter-trend trades.
-Volume spike confirms institutional participation. 
-ATR-based stoploss manages risk. Designed for 12h timeframe to limit trade frequency.
-Target: 12-37 trades/year on 12h timeframe.
+4h Camarilla R1/S1 Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+Hypothesis: Camarilla pivot levels (R1/S1) act as intraday support/resistance.
+Breakouts above R1 or below S1 with volume confirmation and 1d EMA34 trend filter
+capture momentum moves. Choppiness index filter avoids whipsaws in ranging markets.
+Designed for 4h timeframe to balance trade frequency and signal quality.
+Target: 20-50 trades/year (75-200 total over 4 years) to minimize fee drag.
+Works in bull/bear via trend filter and volatility-based stops.
 """
 
 import numpy as np
@@ -22,14 +23,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for stoploss and volatility filter
     if len(close) >= 14:
@@ -41,6 +42,18 @@ def generate_signals(prices):
     else:
         atr = np.full(n, 0.0)
     
+    # Calculate Choppiness Index (14) for regime filter
+    if len(close) >= 14:
+        hl_range = pd.Series(high) - pd.Series(low)
+        atr_14 = pd.Series(atr)  # ATR already calculated
+        sum_atr = atr_14.rolling(window=14, min_periods=14).sum()
+        max_hh = pd.Series(high).rolling(window=14, min_periods=14).max()
+        min_ll = pd.Series(low).rolling(window=14, min_periods=14).min()
+        chop = 100 * np.log10(sum_atr / (max_hh - min_ll)) / np.log10(14)
+        chop_values = chop.values
+    else:
+        chop_values = np.full(n, 50.0)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -50,8 +63,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(chop_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,33 +75,75 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_50 = ema_50_aligned[i]
+        ema_34 = ema_34_aligned[i]
         atr_val = atr[i]
+        chop_val = chop_values[i]
         
-        # Calculate Donchian channels (20-period) using only past data
-        if i >= 20:
-            highest_high = np.max(high[i-19:i+1])
-            lowest_low = np.min(low[i-19:i+1])
+        # Calculate Camarilla levels from previous day
+        if i >= 24:  # Need at least 24 4h bars (1 day) for previous day's OHLC
+            # Get index of 24 bars ago (previous day close)
+            prev_day_idx = i - 24
+            if prev_day_idx >= 0:
+                # Previous day's OHLC (24 bars ago close is yesterday's close)
+                # We need the day before yesterday's close for today's Camarilla
+                # Actually, for bar i, we want Camarilla from day before current bar's day
+                # Simpler: use 24*2 = 48 bars ago for 2 days ago
+                if i >= 48:
+                    day_before_yesterday_idx = i - 48
+                    if day_before_yesterday_idx >= 0:
+                        # Get high, low, close from 2 days ago (24*2 bars back)
+                        # But we need the previous day's complete OHLC
+                        # Instead, use rolling window of 24 bars to get daily OHLC
+                        lookback_start = max(0, i - 48)
+                        lookback_end = i - 24
+                        if lookback_end > lookback_start:
+                            day_high = np.max(high[lookback_start:lookback_end])
+                            day_low = np.min(low[lookback_start:lookback_end])
+                            day_close = close[lookback_end - 1] if lookback_end > 0 else close[0]
+                            
+                            if day_high > day_low and day_close > 0:
+                                range_val = day_high - day_low
+                                camarilla_r1 = day_close + (range_val * 1.1 / 12)
+                                camarilla_s1 = day_close - (range_val * 1.1 / 12)
+                            else:
+                                camarilla_r1 = curr_close
+                                camarilla_s1 = curr_close
+                        else:
+                            camarilla_r1 = curr_close
+                            camarilla_s1 = curr_close
+                    else:
+                        camarilla_r1 = curr_close
+                        camarilla_s1 = curr_close
+                else:
+                    camarilla_r1 = curr_close
+                    camarilla_s1 = curr_close
+            else:
+                camarilla_r1 = curr_close
+                camarilla_s1 = curr_close
         else:
-            highest_high = np.max(high[:i+1])
-            lowest_low = np.min(low[:i+1])
+            camarilla_r1 = curr_close
+            camarilla_s1 = curr_close
         
-        # Volume spike: current volume > 2.0 * 50-period average
-        if i >= 50:
-            vol_ma_50 = np.mean(volume[i-49:i+1])
+        # Volume spike: current volume > 1.8 * 30-period average
+        if i >= 30:
+            vol_ma_30 = np.mean(volume[i-29:i+1])
         else:
-            vol_ma_50 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_50
+            vol_ma_30 = np.mean(volume[:i+1])
+        volume_spike = curr_volume > 1.8 * vol_ma_30
         
         # Trend filter
-        uptrend = curr_close > ema_50
-        downtrend = curr_close < ema_50
+        uptrend = curr_close > ema_34
+        downtrend = curr_close < ema_34
+        
+        # Chop filter: avoid ranging markets (Chop > 61.8) and extreme trends (Chop < 38.2)
+        # We want moderate chop: 38.2 <= Chop <= 61.8 for breakout trading
+        chop_filter = (chop_val >= 38.2) and (chop_val <= 61.8)
         
         if position == 0:
-            # Long: price breaks above upper Donchian band AND volume spike AND uptrend
-            long_condition = (curr_high > highest_high) and volume_spike and uptrend
-            # Short: price breaks below lower Donchian band AND volume spike AND downtrend
-            short_condition = (curr_low < lowest_low) and volume_spike and downtrend
+            # Long: price breaks above Camarilla R1 AND volume spike AND uptrend AND chop filter
+            long_condition = (curr_close > camarilla_r1) and volume_spike and uptrend and chop_filter
+            # Short: price breaks below Camarilla S1 AND volume spike AND downtrend AND chop filter
+            short_condition = (curr_close < camarilla_s1) and volume_spike and downtrend and chop_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -98,15 +154,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.5*ATR below entry) or trend reversal
-            if curr_close <= entry_price - 2.5 * atr_val or not uptrend:
+            # Exit long: stoploss (2.0*ATR below entry) or trend reversal or chop extreme
+            if (curr_close <= entry_price - 2.0 * atr_val) or (not uptrend) or (chop_val > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.5*ATR above entry) or trend reversal
-            if curr_close >= entry_price + 2.5 * atr_val or not downtrend:
+            # Exit short: stoploss (2.0*ATR above entry) or trend reversal or chop extreme
+            if (curr_close >= entry_price + 2.0 * atr_val) or (not downtrend) or (chop_val > 70):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +170,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
