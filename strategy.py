@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1h Williams %R Mean Reversion + 4h EMA50 Trend Filter + Volume Spike + Session Filter (08-20 UTC)
-Hypothesis: Williams %R identifies overbought/oversold conditions for mean reversion entries.
-4h EMA50 ensures we only take mean reversion trades in the direction of the higher timeframe trend.
-Volume spike confirms momentum behind the move. Session filter (08-20 UTC) avoids low-liquidity hours.
-Discrete sizing (0.20) limits drawdown. Targets 15-35 trades/year on 1h timeframe.
-Works in bull/bear via trend filter - in uptrends we take oversold bounces, in downtrends we take overbought pullbacks.
+6h Ichimoku Cloud Breakout with Weekly Kumo Twist Filter
+Hypothesis: Ichimoku cloud acts as dynamic support/resistance. Weekly Kumo twist (Senkou Span A/B cross) indicates major trend regime change. 
+Entry: Price breaks above/below cloud with TK cross confirmation in same direction. Exit: Price re-enters cloud or TK cross reverses.
+Weekly Kumo twist filter ensures we only trade in alignment with major weekly trend (bullish when Senkou A > B, bearish when A < B).
+This avoids counter-trend trades during major regime shifts. Works in bull/bear via trend filter and discrete sizing (0.25).
+Targets 50-150 trades over 4 years on 6h timeframe.
 """
 
 import numpy as np
@@ -20,89 +20,123 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load weekly data ONCE before loop for Kumo twist filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Weekly Ichimoku components for Kumo twist
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Williams %R(14) on 1h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen_1w = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
+                     pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen_1w = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
+                    pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a_1w = ((tenkan_sen_1w + kijun_sen_1w) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b_1w = ((pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
+                         pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Kumo twist: Senkou Span A > B = bullish twist, A < B = bearish twist
+    kumO_twist_bullish = senkou_span_a_1w > senkou_span_b_1w
+    kumO_twist_bearish = senkou_span_a_1w < senkou_span_b_1w
+    kumO_twist_bullish_aligned = align_htf_to_ltf(prices, df_1w, kumO_twist_bullish.values, additional_delay_bars=1)
+    kumO_twist_bearish_aligned = align_htf_to_ltf(prices, df_1w, kumO_twist_bearish.values, additional_delay_bars=1)
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Load daily data for 6h Ichimoku calculation (more stable than 6h alone)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
+        return np.zeros(n)
+    
+    # Daily Ichimoku for 6h timeframe alignment
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                     pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                    pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a_1d = ((tenkan_sen_1d + kijun_sen_1d) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b_1d = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                         pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2)
+    
+    # Align daily Ichimoku to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d.values)
+    
+    # TK Cross: Tenkan-sen crossing above/below Kijun-sen
+    tk_cross_bullish = tenkan_sen_aligned > kijun_sen_aligned
+    tk_cross_bearish = tenkan_sen_aligned < kijun_sen_aligned
+    
+    # Cloud boundaries: Senkou Span A/B form the cloud
+    upper_cloud = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    lower_cloud = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for all indicators
-    start_idx = max(50, 14, 20) + 1
+    # Start index: need enough for all indicators (52 for Senkou Span B)
+    start_idx = 52 + 26  # 52 for calculation + 26 for forward shift
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(kumO_twist_bullish_aligned[i]) or np.isnan(kumO_twist_bearish_aligned[i])):
             signals[i] = 0.0
             continue
         
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
+        curr_close = close[i]
         
-        wr = williams_r[i]
-        vol_spike = volume_spike[i]
-        
-        # Trend filter: price relative to 4h EMA50
-        bullish_bias = close[i] > ema_4h_aligned[i]
-        bearish_bias = close[i] < ema_4h_aligned[i]
+        # Cloud breakout conditions
+        bullish_breakout = curr_close > upper_cloud[i]
+        bearish_breakout = curr_close < lower_cloud[i]
         
         if position == 0:
-            # Look for entry signals - require: Williams %R extreme + trend + volume spike
-            # Long: Williams %R < -80 (oversold) AND bullish bias AND volume spike
-            long_entry = (wr < -80) and bullish_bias and vol_spike
-            # Short: Williams %R > -20 (overbought) AND bearish bias AND volume spike
-            short_entry = (wr > -20) and bearish_bias and vol_spike
+            # Look for entry signals
+            # Long: bullish breakout + bullish TK cross + bullish weekly Kumo twist
+            long_entry = (bullish_breakout and tk_cross_bullish[i] and kumO_twist_bullish_aligned[i])
+            # Short: bearish breakout + bearish TK cross + bearish weekly Kumo twist
+            short_entry = (bearish_breakout and tk_cross_bearish[i] and kumO_twist_bearish_aligned[i])
             
             if long_entry:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_entry:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Williams %R rises above -50 (momentum fading) OR loss of bullish bias
-            if (wr > -50) or (close[i] < ema_4h_aligned[i]):
+            # Exit: price re-enters cloud (below upper cloud) OR TK cross turns bearish
+            if (curr_close < upper_cloud[i]) or (not tk_cross_bullish[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: Williams %R falls below -50 (momentum fading) OR loss of bearish bias
-            if (wr < -50) or (close[i] > ema_4h_aligned[i]):
+            # Exit: price re-enters cloud (above lower cloud) OR TK cross turns bullish
+            if (curr_close > lower_cloud[i]) or (not tk_cross_bearish[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_WilliamsR_MeanReversion_4hEMA50_Trend_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Breakout_WeeklyKumoTwist_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
