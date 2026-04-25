@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ADX_Trend_ElderRay_Pullback_v1
-Hypothesis: Combine 6h ADX trend strength with Elder Ray (Bull/Bear Power) pullback entries in the direction of the 1d trend. 
-In strong 1d uptrend (ADX>25 on 1d), wait for 6h Bull Power to turn positive after a dip (Bear Power<0 then >0) for longs. 
-In strong 1d downtrend (ADX>25 on 1d), wait for 6h Bear Power to turn negative after a rally (Bull Power>0 then <0) for shorts. 
-This captures momentum continuations after pullbacks in strong trends, working in both bull and bear markets by following the 1d ADX trend filter.
-Uses discrete position sizing (0.25) to target ~20-40 trades/year.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirm_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA50 trend filter and volume confirmation. In bullish 1d trend (close > EMA50), buy when price breaks above R1; in bearish 1d trend (close < EMA50), sell when price breaks below S1. Volume spike (1.5x 20-bar avg) confirms participation. Uses discrete position sizing (0.25) to minimize fee drag and target ~15-30 trades/year. Designed to work in both bull and bear markets by following the higher timeframe trend.
 """
 
 import numpy as np
@@ -20,92 +16,60 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter (ADX)
+    # Get 1d data for HTF trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate ADX on 1d for trend strength filter
+    # Calculate EMA50 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Calculate Camarilla R1 and S1 levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    # Camarilla R1 and S1 levels
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + 1.1 * camarilla_range / 12
+    s1 = close_1d - 1.1 * camarilla_range / 12
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Align Camarilla levels to 12h timeframe (1-day lagged)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1, additional_delay_bars=1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1, additional_delay_bars=1)
     
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-    def wilde_rma(values, period):
-        """Wilder's RMA (same as EMA with alpha=1/period)"""
-        return pd.Series(values).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    period = 14
-    tr_mask = ~np.isnan(tr)
-    if tr_mask.sum() < period:
-        return np.zeros(n)
-    atr = wilde_rma(tr, period)
-    plus_dm_smooth = wilde_rma(plus_dm, period)
-    minus_dm_smooth = wilde_rma(minus_dm, period)
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilde_rma(dx, period)
-    
-    # Align 1d ADX to 6h timeframe (need completed 1d bar + extra delay for ADX smoothing)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx, additional_delay_bars=2)
-    
-    # Calculate Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Previous values for crossover detection
-    bull_power_prev = np.roll(bull_power, 1)
-    bear_power_prev = np.roll(bear_power, 1)
-    bull_power_prev[0] = np.nan
-    bear_power_prev[0] = np.nan
+    # Volume confirmation: 1.5x 20-bar average volume (10 days on 12h)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for ADX and EMA
-    start_idx = max(34, 13)  # ADX needs ~34 bars (14*2+6), EMA13 needs 13
+    # Start index: need warmup for EMA50 and volume MA
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(bull_power_prev[i]) or
-            np.isnan(bear_power_prev[i])):
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend strength: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Determine 1d HTF trend: price above/below EMA50
+        trend_bullish = close[i] > ema_50_aligned[i]
+        trend_bearish = close[i] < ema_50_aligned[i]
         
         if position == 0:
-            # Look for pullback reversal signals in direction of strong trend
-            # Long: Bear Power turns positive after being negative (bullish reversal)
-            long_signal = strong_trend and (bear_power[i] > 0) and (bear_power_prev[i] <= 0)
-            # Short: Bull Power turns negative after being positive (bearish reversal)
-            short_signal = strong_trend and (bull_power[i] < 0) and (bull_power_prev[i] >= 0)
+            # Look for breakout signals with volume confirmation and trend alignment
+            long_signal = close[i] > r1_aligned[i] and volume_spike[i] and trend_bullish
+            short_signal = close[i] < s1_aligned[i] and volume_spike[i] and trend_bearish
             
             if long_signal:
                 signals[i] = 0.25
@@ -118,22 +82,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when Bear Power turns negative again or trend weakens
-            exit_signal = (bear_power[i] < 0) or (adx_aligned[i] < 20)
+            # Exit when price breaks below S1 or trend reverses
+            exit_signal = close[i] < s1_aligned[i] or not trend_bullish
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when Bull Power turns positive again or trend weakens
-            exit_signal = (bull_power[i] > 0) or (adx_aligned[i] < 20)
+            # Exit when price breaks above R1 or trend reverses
+            exit_signal = close[i] > r1_aligned[i] or not trend_bearish
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ADX_Trend_ElderRay_Pullback_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
