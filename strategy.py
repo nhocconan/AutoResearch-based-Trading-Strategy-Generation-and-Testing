@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_1wTrend_VolumeConfirm_v1
-Hypothesis: Trade daily Donchian(20) breakouts with 1-week EMA50 trend filter and volume confirmation.
-In bull markets: buy when price breaks above 20-day high and price > weekly EMA50.
-In bear markets: sell when price breaks below 20-day low and price < weekly EMA50.
-Requires volume > 1.5x 20-day average for confirmation.
-Exit on opposite Donchian level touch or trend reversal.
-Position size: 0.25 to limit drawdown.
-Target: 30-100 total trades over 4 years = 7-25/year.
-Works in bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets.
+6h_ADX_WilliamsAlligator_v1
+Hypothesis: Combine ADX(14) trend strength with Williams Alligator (SMAs 13,8,5) on 6h timeframe. 
+Enter long when ADX > 25 (strong trend) + price > Alligator Jaw (13-period SMA) + Alligator aligned bullish (Teeth > Lips). 
+Enter short when ADX > 25 + price < Alligator Jaw + Alligator aligned bearish (Teeth < Lips). 
+Exit when ADX < 20 (weakening trend) or Alligator alignment reverses. 
+Position size: 0.25. Uses 1-day EMA50 as higher timeframe filter to avoid counter-trend trades. 
+Target: 50-150 total trades over 4 years = 12-37/year. 
+Works in bull (ADX up + price > Jaw) and bear (ADX up + price < Jaw) markets when trend is strong.
 """
 
 import numpy as np
@@ -23,67 +22,98 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need sufficient data for EMA
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50 for HTF trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate 20-day average volume for confirmation (using 1d data)
+    # Get 1d data for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate daily EMA50 for HTF trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels for each 1d bar (20-period high/low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Williams Alligator on 6h: Jaw (13), Teeth (8), Lips (5) SMAs
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
     
-    # Rolling window of 20 days for Donchian channels
-    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # ADX calculation
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
-    # Align Donchian levels and volume MA to match prices index
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Smoothed values with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[1:period+1])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    period = 14
+    tr_sum = wilder_smooth(tr, period)
+    plus_dm_sum = wilder_smooth(plus_dm, period)
+    minus_dm_sum = wilder_smooth(minus_dm, period)
+    
+    # Avoid division by zero
+    divisor = np.where(tr_sum != 0, tr_sum, 1e-10)
+    plus_di = 100 * plus_dm_sum / divisor
+    minus_di = 100 * minus_dm_sum / divisor
+    
+    dx = np.full_like(plus_di, np.nan)
+    dx_divisor = np.where((plus_di + minus_di) != 0, (plus_di + minus_di), 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / dx_divisor
+    
+    adx = wilder_smooth(dx, period)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for Donchian (20) and volume MA (20)
-    start_idx = 20
+    # Start index: need warmup for Alligator (13) and ADX (14*2)
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i])):
+        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend (bullish = price above weekly EMA50)
-        htf_1w_bullish = close[i] > ema_50_1w_aligned[i]
-        htf_1w_bearish = close[i] < ema_50_1w_aligned[i]
+        # Determine 1d HTF trend (bullish = price above daily EMA50)
+        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        volume_confirm = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Alligator alignment
+        alligator_bullish = teeth[i] > lips[i]  # Teeth above Lips
+        alligator_bearish = teeth[i] < lips[i]  # Teeth below Lips
+        
+        # ADX trend strength
+        strong_trend = adx[i] > 25
+        weak_trend = adx[i] < 20
         
         if position == 0:
-            # Long setup: price breaks above 20-day high + 1w uptrend + volume confirmation
-            long_setup = (close[i] > donchian_high_aligned[i]) and htf_1w_bullish and volume_confirm
+            # Long setup: strong trend + price > Jaw + Alligator bullish + 1d uptrend
+            long_setup = (strong_trend and 
+                         close[i] > jaw[i] and 
+                         alligator_bullish and 
+                         htf_1d_bullish)
             
-            # Short setup: price breaks below 20-day low + 1w downtrend + volume confirmation
-            short_setup = (close[i] < donchian_low_aligned[i]) and htf_1w_bearish and volume_confirm
+            # Short setup: strong trend + price < Jaw + Alligator bearish + 1d downtrend
+            short_setup = (strong_trend and 
+                          close[i] < jaw[i] and 
+                          alligator_bearish and 
+                          htf_1d_bearish)
             
             if long_setup:
                 signals[i] = 0.25
@@ -96,20 +126,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches 20-day low (stop) OR 1w trend turns bearish
-            if (close[i] <= donchian_low_aligned[i]) or (not htf_1w_bullish):
+            # Exit: weakening trend OR Alligator alignment turns bearish OR 1d trend turns bearish
+            if (weak_trend or not alligator_bullish or not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches 20-day high (stop) OR 1w trend turns bullish
-            if (close[i] >= donchian_high_aligned[i]) or (htf_1w_bullish):
+            # Exit: weakening trend OR Alligator alignment turns bullish OR 1d trend turns bullish
+            if (weak_trend or alligator_bullish or htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wTrend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_ADX_WilliamsAlligator_v1"
+timeframe = "6h"
 leverage = 1.0
