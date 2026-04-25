@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: Trade 12h timeframe using daily Camarilla R3/S3 levels as breakout triggers with 1-day EMA34 trend filter and volume confirmation.
-Camarilla R3/S3 provide strong intraday support/resistance levels. In bull markets: buy when price breaks above daily R3 and price > daily EMA34.
-In bear markets: sell when price breaks below daily S3 and price < daily EMA34. Requires volume > 1.8x 20-period average for confirmation.
-Exit on opposite Camarilla level touch (R3/S3) or trend reversal. Position size: 0.25 to limit drawdown.
-Target: 50-150 total trades over 4 years = 12-37/year. Daily levels reduce noise vs weekly, improving win rate in both bull and bear markets.
+4h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm_v1
+Hypothesis: Trade Camarilla R3/S3 breakouts from 1-day levels on 4h timeframe with 1-day EMA34 trend filter and volume confirmation. 
+R3/S3 levels provide strong intraday support/resistance. In bull markets: buy when price breaks above daily R3 and price > daily EMA34. 
+In bear markets: sell when price breaks below daily S3 and price < daily EMA34. 
+Requires volume > 1.8x 20-period average for confirmation to filter weak breakouts. 
+Exit on opposite Camarilla level touch (R3/S3) or trend reversal. 
+Position size: 0.30 to balance profit potential and drawdown control. 
+Target: 100-200 total trades over 4 years = 25-50/year. 
+Daily levels reduce noise vs weekly, improving win rate in both bull and bear markets with proper trend/volume filters.
 """
 
 import numpy as np
@@ -14,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,9 +25,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels, trend filter and volume confirmation
+    # Get 1d data for Camarilla levels, trend filter, and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:  # Need sufficient daily data for EMA34
         return np.zeros(n)
     
     # Calculate daily EMA34 for HTF trend filter
@@ -47,7 +50,7 @@ def generate_signals(prices):
     r3_1d = close_1d + (1.1 * hl_range_1d / 2)  # R3 = close + 1.1*(high-low)/2
     s3_1d = close_1d - (1.1 * hl_range_1d / 2)  # S3 = close - 1.1*(high-low)/2
     
-    # Align daily Camarilla levels to 12h prices
+    # Align daily Camarilla levels to 4h prices
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -63,7 +66,7 @@ def generate_signals(prices):
             np.isnan(vol_ma_20_aligned[i]) or
             np.isnan(r3_aligned[i]) or
             np.isnan(s3_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
         
         # Determine 1d HTF trend (bullish = price above daily EMA34)
@@ -81,23 +84,23 @@ def generate_signals(prices):
             short_setup = (close[i] < s3_aligned[i]) and htf_1d_bearish and volume_confirm
             
             if long_setup:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_setup:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
+            signals[i] = 0.30
             # Exit: price touches daily Camarilla S3 (stop) OR 1d trend turns bearish
             if (close[i] <= s3_aligned[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
+            signals[i] = -0.30
             # Exit: price touches daily Camarilla R3 (stop) OR 1d trend turns bullish
             if (close[i] >= r3_aligned[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
@@ -105,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
