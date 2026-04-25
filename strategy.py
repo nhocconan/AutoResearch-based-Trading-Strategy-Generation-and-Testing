@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H4L4_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: Daily Camarilla H4/L4 levels act as strong support/resistance. 
-Breakouts above H4 or below L4 with volume spike and 1d EMA34 trend alignment 
-capture institutional moves. Designed for 12h timeframe with 50-150 total trades 
-over 4 years (12-37/year) to minimize fee drag. Works in bull/bear via 1d EMA34 
-trend filter (only trade in trend direction).
+4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: Camarilla H3/L3 levels represent stronger support/resistance than R1/S1.
+Breakouts above H3 or below L3 with volume spike and 1d EMA34 trend alignment capture
+institutional moves. Designed for 75-200 trades over 4 years on 4h timeframe.
 """
 
 import numpy as np
@@ -36,7 +34,11 @@ def calculate_camarilla(high, low, close):
     s3 = close - (range_hl * 1.1 / 4)
     s4 = close - (range_hl * 1.1 / 2)
     
-    return r1, r2, r3, r4, s1, s2, s3, s4
+    # H3 and L3 are the same as R3 and S3 in Camarilla
+    h3 = r3
+    l3 = s3
+    
+    return r1, r2, r3, r4, s1, s2, s3, s4, h3, l3
 
 def generate_signals(prices):
     n = len(prices)
@@ -48,21 +50,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA34 trend filter and Camarilla levels (loaded ONCE)
+    # 1d data for EMA34 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA34 trend filter
     ema_34_1d = calculate_ema(df_1d['close'].values, 34)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Camarilla levels from 1d data (H4/L4 for 12h breakout signals)
-    h4, l4 = calculate_camarilla(
+    # Camarilla levels from 1d data (for 4h breakout signals)
+    # We use 1d high/low/close to calculate Camarilla levels for the current 4h bar
+    r1, r2, r3, r4, s1, s2, s3, s4, h3, l3 = calculate_camarilla(
         df_1d['high'].values, 
         df_1d['low'].values, 
         df_1d['close'].values
-    )[3:5]  # Extract H4 (index 3) and L4 (index 4)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    )
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,17 +79,17 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla H4/L4 breakout + volume spike + 1d EMA34 trend alignment
-            long_entry = (curr_close > h4_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close > ema_34_1d_aligned[i])
-            short_entry = (curr_close < l4_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close < ema_34_1d_aligned[i])
+            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment
+            long_entry = (curr_close > h3_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close > ema_34_1d_aligned[i])
+            short_entry = (curr_close < l3_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close < ema_34_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
@@ -97,15 +100,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below H4 or trend turns bearish
-            if curr_close < h4_aligned[i] or curr_close < ema_34_1d_aligned[i]:
+            # Long position: exit when price closes below H3 or trend turns bearish
+            if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price closes above L4 or trend turns bullish
-            if curr_close > l4_aligned[i] or curr_close > ema_34_1d_aligned[i]:
+            # Short position: exit when price closes above L3 or trend turns bullish
+            if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
