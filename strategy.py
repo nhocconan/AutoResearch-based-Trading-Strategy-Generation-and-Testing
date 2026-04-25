@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Trailing Stop
-Hypothesis: Camarilla pivot levels (H3/L3) from daily chart act as strong support/resistance.
-Breakouts above H3 or below L3 with volume confirmation and aligned with 1d EMA34 trend capture
-swing moves in both bull and bear markets. ATR trailing stop manages risk. Designed for 12h
-timeframe to limit trades (target: 50-150 over 4 years) and avoid fee drag.
+4h Camarilla R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance. Breakouts beyond these levels with volume confirmation capture significant moves. 1d EMA34 ensures alignment with daily trend. Designed for 4h timeframe to balance trade frequency and capture swings in both bull and bear markets. Uses discrete position sizing (0.30) to minimize fee churn and ATR-based trailing stop for risk management.
 """
 
 import numpy as np
@@ -21,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and EMA34 (call ONCE before loop)
+    # Get 1d data for EMA34 trend and Camarilla pivots (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -31,17 +28,14 @@ def generate_signals(prices):
     ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels (H3, L3) from 1d OHLC
-    # Camarilla: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    camarilla_h3 = close_1d_arr + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l3 = close_1d_arr - 1.1 * (high_1d - low_1d) / 2
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Calculate Camarilla pivot levels (R3, S3) from 1d OHLC
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    camarilla_r3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 2
+    camarilla_s3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 2
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     
-    # Calculate ATR(14) for dynamic stop
+    # Calculate ATR(14) for dynamic sizing and stop
     atr = np.full(n, np.nan)
     tr = np.zeros(n)
     for i in range(1, n):
@@ -59,13 +53,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for EMA34, ATR, volume MA
+    # Start index: need enough for EMA34, ATR, volume MA, and Camarilla levels
     start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,8 +72,8 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         ema_34_val = ema_34_1d_aligned[i]
-        h3_val = camarilla_h3_aligned[i]
-        l3_val = camarilla_l3_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
         
@@ -87,22 +81,22 @@ def generate_signals(prices):
         uptrend = curr_close > ema_34_val
         downtrend = curr_close < ema_34_val
         
-        # Volume confirmation: current volume > 2.0 * 20-period average (stricter to reduce trades)
-        volume_confirm = curr_volume > 2.0 * vol_ma
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        volume_confirm = curr_volume > 1.5 * vol_ma
         
         if position == 0:
-            # Look for breakout signals at Camarilla H3/L3 levels
-            # Long: price breaks above H3 with volume confirmation in uptrend
-            long_breakout = (curr_close > h3_val) and volume_confirm and uptrend
-            # Short: price breaks below L3 with volume confirmation in downtrend
-            short_breakout = (curr_close < l3_val) and volume_confirm and downtrend
+            # Look for breakout signals at Camarilla R3/S3 levels
+            # Long: price breaks above R3 with volume confirmation in uptrend
+            long_breakout = (curr_close > r3_val) and volume_confirm and uptrend
+            # Short: price breaks below S3 with volume confirmation in downtrend
+            short_breakout = (curr_close < s3_val) and volume_confirm and downtrend
             
             if long_breakout:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 highest_since_entry = curr_close
             elif short_breakout:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 lowest_since_entry = curr_close
             else:
@@ -111,27 +105,27 @@ def generate_signals(prices):
             # Long position management
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit conditions: price closes below L3 OR 2.5*ATR trailing stop OR EMA34 trend turns down
-            if curr_close < l3_val or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_34_val:
+            # Exit conditions: price closes below S3 OR 2.5*ATR trailing stop OR EMA34 trend turns down
+            if curr_close < s3_val or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short position management
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit conditions: price closes above H3 OR 2.5*ATR trailing stop OR EMA34 trend turns up
-            if curr_close > h3_val or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_34_val:
+            # Exit conditions: price closes above R3 OR 2.5*ATR trailing stop OR EMA34 trend turns up
+            if curr_close > r3_val or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
