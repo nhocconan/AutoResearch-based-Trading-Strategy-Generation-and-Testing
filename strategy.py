@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter and volume confirmation.
-Targets 12-37 trades/year by requiring: 1) price breaks daily R1/S1 levels from prior day, 
-2) aligned with 1d EMA34 trend direction, 3) volume > 1.8x 30-period average. Uses 12h timeframe 
-to minimize fee drag while capturing significant multi-day moves. Volume spike filter reduces 
-false breakouts. Works in both bull and bear markets by following the 1d trend direction.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: 4-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter and volume confirmation.
+Targets 20-40 trades/year by requiring: 1) price breaks daily R1/S1 levels, 2) aligned with 1d EMA34 trend,
+3) volume > 2.0x 20-period average. Uses 4h timeframe to balance trade frequency and capture significant moves.
+Volume spike filter reduces false breakouts. Designed to work in both bull and bear markets by following the
+1d trend direction, avoiding counter-trend entries that fail in ranging/volatile conditions.
 """
 
 import numpy as np
@@ -37,24 +37,24 @@ def generate_signals(prices):
     R1 = prev_close + 1.1 * prev_range * (1.0/4.0)
     S1 = prev_close - 1.1 * prev_range * (1.0/4.0)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d indicators to 12h timeframe
+    # Align 1d levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 1.8 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (vol_ma * 1.8)
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d previous data (1) + EMA34 (34) + volume MA (30)
-    start_idx = 34 + 30 + 1  # Conservative warmup
+    # Start index: need enough for 1d previous data (1) + 1d EMA34 (34) + volume MA (20)
+    start_idx = 34 + 20 + 1  # Conservative warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
