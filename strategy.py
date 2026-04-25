@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1-week EMA50 trend filter and volume confirmation (2.0x 24-bar avg). In bullish 1w trend (close > EMA50), buy when price breaks above R1; in bearish 1w trend (close < EMA50), sell when price breaks below S1. Volume spike confirms participation. Discrete position sizing (0.25) minimizes fee drag. Target ~20-40 trades/year. Designed to work in both bull and bear markets by following the higher timeframe trend.
+1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on daily timeframe with 1-week EMA50 trend filter and volume confirmation. In bullish weekly trend (weekly close > EMA50), buy when price breaks above R1; in bearish weekly trend (weekly close < EMA50), sell when price breaks below S1. Volume spike (2.0x 20-day avg) confirms participation. Uses discrete position sizing (0.25) to minimize fee drag and target ~10-25 trades/year. Designed to work in both bull and bear markets by following the higher timeframe trend.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter and Camarilla levels
+    # Get 1w data for HTF trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -28,31 +28,36 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Calculate Camarilla R1 and S1 levels from previous week
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for Camarilla levels (previous day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla R1 and S1 levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Camarilla R1 and S1 levels
     # R1 = close + 1.1*(high - low)/12
     # S1 = close - 1.1*(high - low)/12
-    camarilla_range = high_1w - low_1w
-    r1 = close_1w + 1.1 * camarilla_range / 12
-    s1 = close_1w - 1.1 * camarilla_range / 12
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + 1.1 * camarilla_range / 12
+    s1 = close_1d - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 4h timeframe (1-week lagged)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1, additional_delay_bars=1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1, additional_delay_bars=1)
+    # Align Camarilla levels to 1d timeframe (1-day lagged)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1, additional_delay_bars=1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1, additional_delay_bars=1)
     
-    # Volume confirmation: 2.0x 24-bar average volume (4 days on 4h)
-    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: 2.0x 20-day average volume
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need warmup for EMA50 and volume MA
-    start_idx = max(50, 24)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -62,7 +67,7 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend: price above/below EMA50
+        # Determine 1w HTF trend: weekly close above/below EMA50
         trend_bullish = close[i] > ema_50_aligned[i]
         trend_bearish = close[i] < ema_50_aligned[i]
         
@@ -98,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
