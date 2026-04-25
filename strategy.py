@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_1wEMA34_Trend_VolumeFilter
-Hypothesis: On 1d timeframe, Camarilla R1/S1 breakouts with 1w EMA34 trend filter and volume confirmation captures institutional breakouts with low trade frequency (target: 30-100 total trades over 4 years). The 1w trend filter ensures alignment with long-term momentum, reducing false breakouts in choppy markets. Volume confirmation ensures participation. Designed to work in both bull and bear markets by taking breakouts in the direction of the 1w trend. Uses discrete position sizing (0.25) to minimize fee churn.
+12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) captures institutional breakouts with controlled trade frequency. R1/S1 levels provide sensitive entry points while 1d trend ensures alignment with long-term momentum. Volume spike confirms participation. Designed for 12-37 trades/year to minimize fee drag. Works in bull markets via long breakouts and bear markets via short breakouts. Uses discrete position sizing (0.25) to reduce churn. Primary timeframe: 12h, HTF: 1d.
 """
 
 import numpy as np
@@ -18,33 +18,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend and Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for HTF trend and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1w for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate EMA34 on 1d for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 1w bar (R1, S1)
+    # Calculate Camarilla levels from previous 1d bar (R1, S1)
     # Camarilla: R1 = close + 1.1*(high-low)*1.1/12, S1 = close - 1.1*(high-low)*1.1/12
-    # Use previous completed 1w bar to avoid look-ahead
-    prev_close = np.concatenate([[np.nan], close_1w[:-1]])
-    prev_high = np.concatenate([[np.nan], high_1w[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1w[:-1]])
+    # Use previous completed 1d bar to avoid look-ahead
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
     
     camarilla_range = prev_high - prev_low
     r1 = prev_close + 1.1 * camarilla_range * 1.1 / 12
     s1 = prev_close - 1.1 * camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume average (20-period) for volume spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,7 +54,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start index: need warmup for calculations
-    start_idx = max(50, 20)  # EMA34, vol MA
+    start_idx = max(34, 20)  # EMA34, vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -81,8 +81,8 @@ def generate_signals(prices):
         high_val = high[i]
         low_val = low[i]
         
-        # Volume spike condition: current volume > 1.5x 20-period average
-        volume_spike = vol_val > 1.5 * vol_ma_val
+        # Volume spike condition: current volume > 2.0x 20-period average
+        volume_spike = vol_val > 2.0 * vol_ma_val
         
         if position == 0:
             # Look for entry signals: Camarilla R1/S1 breakout with trend and volume
@@ -122,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_1wEMA34_Trend_VolumeFilter"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
