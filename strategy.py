@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: Camarilla H3/L3 breakout on 12h with 1d EMA34 trend filter and volume confirmation.
-Uses discrete position sizing (0.25) to limit fee drag. Targets 12-37 trades/year.
+4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: Camarilla H3/L3 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
+Uses discrete position sizing (0.30) to limit fee drag. Targets 20-40 trades/year.
 Works in bull markets (breakouts with trend) and bear markets (fades from extremes with volume).
 """
 
@@ -22,19 +22,19 @@ def generate_signals(prices):
     
     # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Camarilla levels: H3/L3 from 1d
+    # Camarilla levels: H3/L3 from prior 1d bar
     camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
+    # Align to 4h timeframe (completed 1d bar only)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -45,8 +45,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA34 (34), volume MA (20)
-    start_idx = max(34, 20)
+    # Start index: need warmup for EMA34 (34), volume MA (20), Camarilla (1)
+    start_idx = max(34, 20, 1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -68,16 +68,16 @@ def generate_signals(prices):
                           volume_spike[i]
             
             if long_setup:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_setup:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
+            signals[i] = 0.30
             # Exit: price closes below L3 OR 1d trend turns down
             if (close[i] < camarilla_l3_aligned[i]) or \
                (close[i] < ema_34_1d_aligned[i]):
@@ -85,7 +85,7 @@ def generate_signals(prices):
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
+            signals[i] = -0.30
             # Exit: price closes above H3 OR 1d trend turns up
             if (close[i] > camarilla_h3_aligned[i]) or \
                (close[i] > ema_34_1d_aligned[i]):
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
