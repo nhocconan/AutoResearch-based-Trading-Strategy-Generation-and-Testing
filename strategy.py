@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Trade 6h Camarilla R1/S1 breakouts only when 1d EMA34 confirms trend (price above/below EMA) and volume spikes (>2.0x 20-bar MA). Camarilla levels from 1d provide institutional support/resistance. Uses discrete sizing 0.25 to limit fee drag. Target 12-30 trades/year on 6h timeframe.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts only when 1d EMA34 confirms trend (price above/below EMA) and volume spikes (>2.0x 20-bar MA). Camarilla levels from 1d provide institutional support/resistance. Uses discrete sizing 0.25 to limit fee drag. Target 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -30,14 +30,14 @@ def generate_signals(prices):
     camarilla_R1 = close_1d + camarilla_range
     camarilla_S1 = close_1d - camarilla_range
     
-    # Align Camarilla levels to 6h (completed 1d bar only)
+    # Align Camarilla levels to 4h (completed 1d bar only)
     camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
     camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
     # Calculate EMA34 on 1d for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h (completed 1d bar only)
+    # Align 1d EMA34 to 4h (completed 1d bar only)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: current volume > 2.0x 20-period average
@@ -96,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
