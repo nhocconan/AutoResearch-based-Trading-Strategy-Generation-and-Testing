@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + SuperTrend(12h) + Volume Spike
-Hypothesis: Elder Ray (Bull/Bear power) identifies institutional buying/selling pressure.
-SuperTrend(12h) filters for higher-timeframe trend direction. Volume spike confirms participation.
-Long when Bull Power > 0, Bear Power < 0, price above SuperTrend(12h), and volume spike.
-Short when Bear Power < 0, Bull Power < 0, price below SuperTrend(12h), and volume spike.
-Works in bull/bear markets by requiring alignment of short-term power, higher-TF trend, and volume.
-Target: 12-37 trades/year (50-150 over 4 years).
+4h Camarilla R1/S1 Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Camarilla pivot levels (R1/S1) act as strong intraday support/resistance. 
+Breakouts above R1 or below S1 with volume confirmation and 1d EMA34 trend filter capture 
+institutional participation. Works in both bull/bear markets by trend-filtering breakouts.
+Target: 20-50 trades/year (75-200 over 4 years).
 """
 
 import numpy as np
@@ -23,98 +21,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for SuperTrend calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate SuperTrend on 12h: ATR(10), multiplier=3.0
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first TR is NaN
+    # Calculate Camarilla pivot levels from previous day
+    # Typical price for pivot calculation
+    typical_price = (high + low + close) / 3.0
     
-    # ATR(10)
-    atr_12h = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Shift to get previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     
-    # Basic Upper/Lower Bands
-    hl2 = (high_12h + low_12h) / 2.0
-    upper_basic = hl2 + 3.0 * atr_12h
-    lower_basic = hl2 - 3.0 * atr_12h
+    # First bar: use current values (will be filtered out by min_periods anyway)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Final Upper/Lower Bands
-    upper_final = np.full_like(close_12h, np.nan)
-    lower_final = np.full_like(close_12h, np.nan)
-    upper_final[0] = upper_basic[0]
-    lower_final[0] = lower_basic[0]
+    # Camarilla pivot calculation
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    for i in range(1, len(close_12h)):
-        if close_12h[i-1] <= upper_final[i-1]:
-            upper_final[i] = min(upper_basic[i], upper_final[i-1])
-        else:
-            upper_final[i] = upper_basic[i]
-            
-        if close_12h[i-1] >= lower_final[i-1]:
-            lower_final[i] = max(lower_basic[i], lower_final[i-1])
-        else:
-            lower_final[i] = lower_basic[i]
-    
-    # SuperTrend direction: 1 = uptrend, -1 = downtrend
-    supertrend_dir = np.full_like(close_12h, np.nan)
-    supertrend_dir[0] = 1
-    
-    for i in range(1, len(close_12h)):
-        if supertrend_dir[i-1] == -1 and close_12h[i] > upper_final[i-1]:
-            supertrend_dir[i] = 1
-        elif supertrend_dir[i-1] == 1 and close_12h[i] < lower_final[i-1]:
-            supertrend_dir[i] = -1
-        else:
-            supertrend_dir[i] = supertrend_dir[i-1]
-    
-    # Align SuperTrend to 6h
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, supertrend_dir)
-    
-    # Calculate Elder Ray on 6h: EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Camarilla levels
+    R1 = pivot + (range_hl * 1.1 / 12)
+    S1 = pivot - (range_hl * 1.1 / 12)
+    R2 = pivot + (range_hl * 1.1 / 6)
+    S2 = pivot - (range_hl * 1.1 / 6)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA13 (13) + volume MA (20)
-    start_idx = 20
+    # Start index: need enough for Camarilla calculation (1) + EMA34 warmup
+    start_idx = 34
     
     for i in range(start_idx, n):
-        # Skip if SuperTrend not ready
-        if np.isnan(supertrend_dir_aligned[i]):
+        # Skip if any data not ready
+        if np.isnan(ema_34_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_bull = bull_power[i]
-        curr_bear = bear_power[i]
-        st_dir = supertrend_dir_aligned[i]
-        vol_spike = volume_spike[i]
+        curr_volume = volume[i]
+        ema_trend = ema_34_aligned[i]
+        r1_level = R1[i]
+        s1_level = S1[i]
         
-        # Entry conditions
+        # Volume spike: current volume > 2.0 * 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-19:i+1])
+        else:
+            vol_ma_20 = np.mean(volume[:i+1])
+        volume_spike = curr_volume > 2.0 * vol_ma_20
+        
+        # Breakout signals with trend filter
         if position == 0:
-            # Long: Bull Power > 0, Bear Power < 0, SuperTrend uptrend, volume spike
-            long_condition = (curr_bull > 0) and (curr_bear < 0) and (st_dir == 1) and vol_spike
-            # Short: Bear Power < 0, Bull Power < 0, SuperTrend downtrend, volume spike
-            short_condition = (curr_bear < 0) and (curr_bull < 0) and (st_dir == -1) and vol_spike
+            # Long: price breaks above R1 AND above 1d EMA34 (uptrend filter)
+            long_condition = (curr_close > r1_level) and (curr_close > ema_trend) and volume_spike
+            # Short: price breaks below S1 AND below 1d EMA34 (downtrend filter)
+            short_condition = (curr_close < s1_level) and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -123,15 +95,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 or SuperTrend turns down
-            if curr_bull <= 0 or st_dir == -1:
+            # Exit long: price returns to pivot or trend breaks
+            if curr_close <= pivot[i] or curr_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 or SuperTrend turns up
-            if curr_bear >= 0 or st_dir == 1:
+            # Exit short: price returns to pivot or trend breaks
+            if curr_close >= pivot[i] or curr_close > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_SuperTrend12h_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
