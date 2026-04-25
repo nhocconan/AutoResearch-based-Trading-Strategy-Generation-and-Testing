@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Regime_Volume_Breakout_v1
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-combined with choppiness regime filter and volume confirmation to avoid whipsaws.
-Enter long when price > KAMA + chop regime indicates trending + volume > 1.5x average.
-Enter short when price < KAMA + chop regime indicates trending + volume > 1.5x average.
-Exit when price crosses back below/above KAMA or chop regime shifts to ranging.
-This adaptive approach works in both bull (KAMA catches trends) and bear (KAMA adapts quickly to downtrends)
-markets while avoiding false signals in ranging conditions via chop filter.
-Target: 20-80 trades over 4 years (5-20/year) to minimize fee drag.
+6h_PivotHighLow_Breakout_12hTrend_VolumeConfirm_v1
+Hypothesis: Trade breakouts above prior 12h pivot highs and below prior 12h pivot lows on 6h timeframe with 12h EMA50 trend filter and volume confirmation. 
+Pivot highs/lows identify significant swing points where price reversed, making them robust support/resistance levels.
+In bull markets: buy when price breaks above prior 12h pivot high and price > 12h EMA50. 
+In bear markets: sell when price breaks below prior 12h pivot low and price < 12h EMA50. 
+Requires volume > 1.3x 20-period average for confirmation to avoid false breakouts.
+Exit on opposite pivot level touch or trend reversal. 
+Position size: 0.25 to limit drawdown. 
+Target: 50-150 total trades over 4 years = 12-37/year.
+Works in bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets.
 """
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,79 +26,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter (more stable than 1d for regime)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # Need sufficient data for weekly calculations
+    # Get 12h data for pivot points and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:  # Need sufficient data for volume average
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for HTF trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 12h EMA50 for HTF trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate KAMA on daily close
-    # KAMA parameters: ER length=10, fast=2, slow=30
-    close_s = pd.Series(close)
-    change = abs(close_s - close_s.shift(10))
-    volatility = abs(close_s.diff()).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    # Calculate 20-period average volume for confirmation
+    volume_12h = df_12h['volume'].values
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
-    # Calculate Choppiness Index on daily data (14-period)
-    # CHOP = 100 * log10(sum(ATR1) / (n * log(n))) / log10(n)
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr1 = np.maximum(tr1, np.absolute(low - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]  # first TR
-    atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
-    high_roll = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    low_roll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr1 / (high_roll - low_roll)) / np.log10(14)
-    # Handle division by zero or invalid cases
-    chop = np.where((high_roll - low_roll) == 0, 50, chop)
-    chop = np.where(np.isnan(chop), 50, chop)
+    # Calculate pivot highs and lows from 12h data
+    # Pivot high: high > previous high AND high > next high
+    # Pivot low: low < previous low AND low < next low
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Volume confirmation: current volume > 1.3x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Initialize arrays for pivot points
+    pivot_high_12h = np.full_like(high_12h, np.nan)
+    pivot_low_12h = np.full_like(low_12h, np.nan)
+    
+    # Calculate pivot points (need at least 3 points: previous, current, next)
+    for i in range(1, len(high_12h) - 1):
+        # Pivot high: current high is higher than both neighbors
+        if high_12h[i] > high_12h[i-1] and high_12h[i] > high_12h[i+1]:
+            pivot_high_12h[i] = high_12h[i]
+        # Pivot low: current low is lower than both neighbors
+        if low_12h[i] < low_12h[i-1] and low_12h[i] < low_12h[i+1]:
+            pivot_low_12h[i] = low_12h[i]
+    
+    # Forward fill pivot points to get the most recent pivot level
+    pivot_high_series = pd.Series(pivot_high_12h)
+    pivot_low_series = pd.Series(pivot_low_12h)
+    pivot_high_ffilled = pivot_high_series.ffill().values
+    pivot_low_ffilled = pivot_low_series.ffill().values
+    
+    # Align pivot levels and indicators to 6h timeframe
+    pivot_high_aligned = align_htf_to_ltf(prices, df_12h, pivot_high_ffilled)
+    pivot_low_aligned = align_htf_to_ltf(prices, df_12h, pivot_low_ffilled)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for KAMA (10), ATR (14), volume MA (20)
-    start_idx = 20
+    # Start index: need warmup for EMA50 (50) and volume MA (20)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or 
-            np.isnan(chop[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(pivot_high_aligned[i]) or
+            np.isnan(pivot_low_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend (bullish = price above weekly EMA20)
-        htf_1w_bullish = close[i] > ema_20_1w_aligned[i]
-        htf_1w_bearish = close[i] < ema_20_1w_aligned[i]
-        
-        # Regime filter: chop < 38.2 = trending (good for breakout/trend following)
-        # chop > 61.8 = ranging (avoid trend signals)
-        trending_regime = chop[i] < 38.2
-        ranging_regime = chop[i] > 61.8
+        # Determine 12h HTF trend (bullish = price above 12h EMA50)
+        htf_12h_bullish = close[i] > ema_50_12h_aligned[i]
+        htf_12h_bearish = close[i] < ema_50_12h_aligned[i]
         
         # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirm = volume[i] > 1.3 * vol_ma_20[i]
+        volume_confirm = volume[i] > 1.3 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long setup: price > KAMA + trending regime + volume confirmation + 1w uptrend
-            long_setup = (close[i] > kama[i]) and trending_regime and volume_confirm and htf_1w_bullish
+            # Long setup: price breaks above prior 12h pivot high + 12h uptrend + volume confirmation
+            long_setup = (close[i] > pivot_high_aligned[i]) and htf_12h_bullish and volume_confirm
             
-            # Short setup: price < KAMA + trending regime + volume confirmation + 1w downtrend
-            short_setup = (close[i] < kama[i]) and trending_regime and volume_confirm and htf_1w_bearish
+            # Short setup: price breaks below prior 12h pivot low + 12h downtrend + volume confirmation
+            short_setup = (close[i] < pivot_low_aligned[i]) and htf_12h_bearish and volume_confirm
             
             if long_setup:
                 signals[i] = 0.25
@@ -110,20 +112,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price < KAMA OR chop > 50 (ranging) OR 1w trend turns bearish
-            if (close[i] < kama[i]) or (chop[i] > 50) or (not htf_1w_bullish):
+            # Exit: price touches prior 12h pivot low (stop) OR 12h trend turns bearish
+            if (close[i] <= pivot_low_aligned[i]) or (not htf_12h_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price > KAMA OR chop > 50 (ranging) OR 1w trend turns bullish
-            if (close[i] > kama[i]) or (chop[i] > 50) or (htf_1w_bullish):
+            # Exit: price touches prior 12h pivot high (stop) OR 12h trend turns bullish
+            if (close[i] >= pivot_high_aligned[i]) or (htf_12h_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Regime_Volume_Breakout_v1"
-timeframe = "1d"
+name = "6h_PivotHighLow_Breakout_12hTrend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
