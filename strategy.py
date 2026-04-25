@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Williams Alligator + 1d EMA50 Trend + Volume Spike
-Hypothesis: Williams Alligator (jaw/teeth/lips) identifies trend absence/presence on 4h.
-When Alligator is "sleeping" (jaw>teeth>lips or lips>teeth>jaw) we avoid trades.
-When "awakening" (teeth crosses jaw/lips) we trade in direction of cross with 1d EMA50 trend filter and volume spike.
-Designed for 4h timeframe to target 20-50 trades/year. Works in bull markets via trend continuation
-and in bear markets via filtering out false signals during chop/sleeping periods.
+1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation + ATR stoploss
+Hypothesis: Donchian channel breakouts from weekly EMA50 trend filter with volume confirmation
+provides robust edge in both bull and bear markets. 1d timeframe targets 7-25 trades/year.
+Works in bull via breakout continuation, bear via mean-reversion from extreme levels when
+trend aligns. Uses proven patterns from top performers with tight entry conditions.
 """
 
 import numpy as np
@@ -22,56 +21,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Williams Alligator (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
-        return np.zeros(n)
-    
-    # Calculate Williams Alligator on 4h: SMAs of median price
-    # Jaw: 13-period SMMA shifted 8 bars
-    # Teeth: 8-period SMMA shifted 5 bars
-    # Lips: 5-period SMMA shifted 3 bars
-    median_price_4h = (df_4h['high'].values + df_4h['low'].values) / 2
-    
-    def smma(arr, period):
-        """Smoothed Moving Average (SMMA) aka Wilder's MA"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw_4h = smma(median_price_4h, 13)
-    teeth_4h = smma(median_price_4h, 8)
-    lips_4h = smma(median_price_4h, 5)
-    
-    # Apply shifts: jaw shifted 8, teeth shifted 5, lips shifted 3
-    jaw_4h = np.roll(jaw_4h, 8)
-    teeth_4h = np.roll(teeth_4h, 5)
-    lips_4h = np.roll(lips_4h, 3)
-    # Set shifted values to NaN
-    jaw_4h[:8] = np.nan
-    teeth_4h[:5] = np.nan
-    lips_4h[:3] = np.nan
-    
-    jaw_4h_aligned = align_htf_to_ltf(prices, df_4h, jaw_4h)
-    teeth_4h_aligned = align_htf_to_ltf(prices, df_4h, teeth_4h)
-    lips_4h_aligned = align_htf_to_ltf(prices, df_4h, lips_4h)
-    
-    # Get 1d data for EMA50 trend filter (call ONCE before loop)
+    # Get 1d data for Donchian channels (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Donchian channels (20-period) on 1d data
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    donchian_high = np.full(len(daily_high), np.nan)
+    donchian_low = np.full(len(daily_low), np.nan)
     
-    # Calculate ATR(14) for stoploss on primary timeframe
+    for i in range(len(daily_high)):
+        if i >= 19:
+            start_idx = i - 19
+            donchian_high[i] = np.max(daily_high[start_idx:i+1])
+            donchian_low[i] = np.min(daily_low[start_idx:i+1])
+    
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Get 1w data for EMA50 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        ema_50_1w = np.full(n, np.nan)
+    else:
+        close_1w = df_1w['close'].values
+        ema_50_1w_vals = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+        ema_50_1w = align_htf_to_ltf(prices, df_1w, ema_50_1w_vals)
+    
+    # Calculate ATR(14) for stoploss on 1d data
     if len(close) >= 14:
         tr1 = np.abs(np.diff(close, prepend=close[0]))
         tr2 = np.abs(high - np.roll(close, 1))
@@ -96,15 +75,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for Alligator, EMA50_1d, ATR, and volume MA to propagate
-    start_idx = max(50, 13, 14, 20)
+    # Start index: need enough for Donchian, EMA50_1w, ATR, and volume MA to propagate
+    start_idx = max(20, 50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw_4h_aligned[i]) or 
-            np.isnan(teeth_4h_aligned[i]) or 
-            np.isnan(lips_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_50_1w[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -113,41 +91,23 @@ def generate_signals(prices):
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
-        jaw = jaw_4h_aligned[i]
-        teeth = teeth_4h_aligned[i]
-        lips = lips_4h_aligned[i]
-        ema50_1d = ema_50_1d_aligned[i]
+        upper_channel = donchian_high_aligned[i]
+        lower_channel = donchian_low_aligned[i]
+        ema50_1w = ema_50_1w[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
-        volume_spike = curr_volume > 2.0 * vol_ma
-        
-        # Alligator sleeping condition: jaw > teeth > lips OR lips > teeth > jaw (no clear trend)
-        sleeping = ((jaw > teeth) and (teeth > lips)) or ((lips > teeth) and (teeth > jaw))
-        # Awakening condition: teeth crosses jaw or lips (trend emerging)
-        teeth_above_jaw = teeth > jaw
-        teeth_above_lips = teeth > lips
-        # Previous bar values for crossover detection
-        if i > start_idx:
-            prev_jaw = jaw_4h_aligned[i-1]
-            prev_teeth = teeth_4h_aligned[i-1]
-            prev_lips = lips_4h_aligned[i-1]
-            prev_teeth_above_jaw = prev_teeth > prev_jaw
-            prev_teeth_above_lips = prev_teeth > prev_lips
-            # Teeth crosses jaw (bullish) or crosses lips (bearish)
-            jaw_cross = (not prev_teeth_above_jaw) and teeth_above_jaw
-            lips_cross = prev_teeth_above_lips and (not teeth_above_lips)
-        else:
-            jaw_cross = False
-            lips_cross = False
+        # Volume spike: current volume > 1.5 * 20-period average
+        volume_spike = curr_volume > 1.5 * vol_ma
         
         if position == 0:
-            # Long: teeth crosses above jaw (bullish) AND uptrend (price > 1d EMA50) AND volume spike AND not sleeping
-            long_condition = jaw_cross and (curr_close > ema50_1d) and volume_spike and (not sleeping)
-            # Short: teeth crosses below lips (bearish) AND downtrend (price < 1d EMA50) AND volume spike AND not sleeping
-            short_condition = lips_cross and (curr_close < ema50_1d) and volume_spike and (not sleeping)
+            # Long: price breaks above upper channel AND above weekly EMA50 AND volume spike
+            long_condition = (curr_close > upper_channel) and (curr_close > ema50_1w) and volume_spike
+            # Short: price breaks below lower channel AND below weekly EMA50 AND volume spike
+            short_condition = (curr_close < lower_channel) and (curr_close < ema50_1w) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -158,15 +118,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or teeth crosses below lips (reversal signal)
-            if curr_close <= entry_price - 2.0 * atr_val or lips_cross:
+            # Exit long: stoploss (2.0*ATR below entry) or price breaks below lower channel (reversal)
+            if curr_close <= entry_price - 2.0 * atr_val or curr_close < lower_channel:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or teeth crosses above jaw (reversal signal)
-            if curr_close >= entry_price + 2.0 * atr_val or jaw_cross:
+            # Exit short: stoploss (2.0*ATR above entry) or price breaks above upper channel (reversal)
+            if curr_close >= entry_price + 2.0 * atr_val or curr_close > upper_channel:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -174,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
