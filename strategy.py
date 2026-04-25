@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSp
-Hypothesis: 12h timeframe with Camarilla H3/L3 breakouts, confirmed by 1d EMA34 trend and volume spike (>2x average). Uses discrete position sizing (0.25) to limit fee drag. Target: 12-37 trades/year (50-150 total over 4 years). Works in bull markets via breakouts with trend, and in bear markets via mean-reversion exits at opposite Camarilla levels.
+4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSp_V4
+Hypothesis: Tighten volume confirmation to 3.0x average and add ATR-based volatility filter (ATR > 0.6 * ATR_ma) to reduce false breakouts. Target: 15-25 trades/year per symbol. Uses Camarilla R1/S1 from 1d, 1d EMA34 for trend, and 4h ATR for stops.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivots, EMA34 trend filter (loaded ONCE)
+    # 1d data for Camarilla pivots, EMA34, ATR regime filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
     # 1d Camarilla pivot levels (based on previous day's OHLC)
@@ -27,33 +27,51 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_range = prev_high - prev_low
     
-    # H3 and L3 levels (Camarilla: H3 = close + 1.1/1.6 * range, L3 = close - 1.1/1.6 * range)
-    H3 = prev_close + 1.1/1.6 * prev_range
-    L3 = prev_close - 1.1/1.6 * prev_range
+    R1 = prev_close + 0.5 * prev_range
+    S1 = prev_close - 0.5 * prev_range
     
-    # Align 1d pivot levels to 12h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align 1d pivot levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Volume spike: current volume > 3.0 * 20-period average (tighter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 3.0)
+    
+    # 1d ATR for volatility regime filter (loaded ONCE)
+    tr1 = df_1d['high'].values - df_1d['low'].values
+    tr2 = np.abs(df_1d['high'].values - df_1d['close'].shift(1).values)
+    tr3 = np.abs(df_1d['low'].values - df_1d['close'].shift(1).values)
+    tr_daily = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr_daily).rolling(window=14, min_periods=14).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    volatility_filter = atr_1d > (atr_ma_1d * 0.6)  # Only trade when volatility is above 60% of MA
+    
+    # Align volatility filter to 4h timeframe
+    volatility_filter_aligned = align_htf_to_ltf(prices, df_1d, volatility_filter)
     
     # 1d EMA34 for trend filter (loaded ONCE)
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
+    # ATR for stoploss (using 4h data)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d indicators (34 for EMA, 20 for vol MA)
+    # Start index: need enough for 1d indicators (34 for EMA, 20 for ATR MA, 14 for ATR)
     start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(volatility_filter_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -66,11 +84,11 @@ def generate_signals(prices):
         downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals with volume spike and trend alignment
-            # Long breakout: price breaks above H3 with uptrend and volume spike
-            long_breakout = (curr_close > H3_aligned[i]) and uptrend and volume_spike[i]
-            # Short breakout: price breaks below L3 with downtrend and volume spike
-            short_breakout = (curr_close < L3_aligned[i]) and downtrend and volume_spike[i]
+            # Look for entry signals with volume spike, volatility filter, and trend alignment
+            # Long breakout: price breaks above R1 with uptrend, volume spike, and sufficient volatility
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_spike[i] and volatility_filter_aligned[i]
+            # Short breakout: price breaks below S1 with downtrend, volume spike, and sufficient volatility
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_spike[i] and volatility_filter_aligned[i]
             
             if long_breakout:
                 signals[i] = 0.25
@@ -83,15 +101,25 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit if price breaks below L3 (mean reversion) or trend changes
-            if curr_close < L3_aligned[i] or not uptrend:
+            # Long position: exit conditions
+            # Stoploss: 2.0 * ATR below entry
+            if curr_close < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price breaks below S1 (mean reversion) or trend changes
+            elif curr_close < S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit if price breaks above H3 (mean reversion) or trend changes
-            if curr_close > H3_aligned[i] or not downtrend:
+            # Short position: exit conditions
+            # Stoploss: 2.0 * ATR above entry
+            if curr_close > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price breaks above R1 (mean reversion) or trend changes
+            elif curr_close > R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSp"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSp_V4"
+timeframe = "4h"
 leverage = 1.0
