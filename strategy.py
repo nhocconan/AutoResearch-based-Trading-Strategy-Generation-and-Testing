@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power + 12h SuperTrend + Volume Spike
-Hypothesis: Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA13.
-12h SuperTrend filters trend direction. Volume spike confirms institutional participation.
-Works in bull/bear markets: Long when Bull Power > 0, Bear Power < 0, price > SuperTrend (uptrend).
-Short when Bull Power < 0, Bear Power > 0, price < SuperTrend (downtrend). Volume spike ensures
-moves have conviction. 6h timeframe balances trade frequency and responsiveness.
+4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Donchian breakouts capture strong momentum moves. Combined with 1d EMA34 trend filter and volume confirmation, this avoids false breakouts. ATR-based stoploss manages risk. Works in both bull and bear markets via trend filter - only takes longs in uptrend, shorts in downtrend. Target 25-35 trades/year on 4h timeframe to minimize fee drag.
 """
 
 import numpy as np
@@ -22,70 +18,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for SuperTrend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h SuperTrend (ATR=10, mult=3.0)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first element NaN
+    # Calculate 4h Donchian channels (20-period)
+    if n < 20:
+        return np.zeros(n)
     
-    # ATR(10)
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Rolling max/min for Donchian channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # SuperTrend calculation
-    hl2 = (high_12h + low_12h) / 2
-    upper_band = hl2 + 3.0 * atr_10
-    lower_band = hl2 - 3.0 * atr_10
+    # Calculate ATR(14) for stoploss
+    if n < 14:
+        return np.zeros(n)
     
-    supertrend = np.full_like(close_12h, np.nan)
-    direction = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_12h)):
-        if np.isnan(atr_10[i-1]) or np.isnan(close_12h[i-1]):
-            continue
-            
-        if close_12h[i-1] > supertrend[i-1]:
-            upper_band[i] = min(upper_band[i], upper_band[i-1])
-        else:
-            lower_band[i] = max(lower_band[i], lower_band[i-1])
-        
-        if close_12h[i] > upper_band[i]:
-            direction[i] = 1
-            supertrend[i] = upper_band[i]
-        elif close_12h[i] < lower_band[i]:
-            direction[i] = -1
-            supertrend[i] = lower_band[i]
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1:
-                supertrend[i] = upper_band[i]
-            else:
-                supertrend[i] = lower_band[i]
-    
-    # Align SuperTrend and direction to 6h
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0]-low[0], np.abs(high[0]-close[0]), np.abs(low[0]-close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Start index: need enough for Elder Ray calculation
-    start_idx = 13
+    # Start index: need enough for Donchian and ATR warmup
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(supertrend_aligned[i]) or 
-            np.isnan(direction_aligned[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,57 +67,49 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
+        ema_trend = ema_34_aligned[i]
+        donchian_upper = highest_high[i]
+        donchian_lower = lowest_low[i]
+        atr_val = atr[i]
         
-        # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-        if i >= 13:
-            ema_13 = np.mean(close[i-12:i+1])
-        else:
-            ema_13 = np.mean(close[:i+1])
-        
-        bull_power = curr_high - ema_13
-        bear_power = curr_low - ema_13
-        
-        # Volume spike: current volume > 2.0 * 20-period average
+        # Volume spike: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-19:i+1])
         else:
             vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_20
-        
-        supertrend_val = supertrend_aligned[i]
-        trend_dir = direction_aligned[i]
+        volume_spike = curr_volume > 1.5 * vol_ma_20
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure), Bear Power < 0 (no selling pressure),
-            # price above SuperTrend (uptrend), volume spike
-            long_condition = (bull_power > 0) and (bear_power < 0) and (curr_close > supertrend_val) and volume_spike
-            # Short: Bull Power < 0 (no buying pressure), Bear Power > 0 (selling pressure),
-            # price below SuperTrend (downtrend), volume spike
-            short_condition = (bull_power < 0) and (bear_power > 0) and (curr_close < supertrend_val) and volume_spike
+            # Long: price breaks above Donchian upper AND above 1d EMA34 (uptrend filter) AND volume spike
+            long_condition = (curr_close > donchian_upper) and (curr_close > ema_trend) and volume_spike
+            # Short: price breaks below Donchian lower AND below 1d EMA34 (downtrend filter) AND volume spike
+            short_condition = (curr_close < donchian_lower) and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
+                entry_price = curr_close
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
+                entry_price = curr_close
         elif position == 1:
-            # Exit long: Bull Power turns negative or price breaks below SuperTrend
-            if bull_power <= 0 or curr_close < supertrend_val:
+            # Exit long: stoploss hit OR price returns below Donchian lower OR trend breaks
+            if (curr_close <= entry_price - 2.0 * atr_val) or (curr_close < donchian_lower) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Bear Power turns negative or price breaks above SuperTrend
-            if bear_power <= 0 or curr_close > supertrend_val:
+            # Exit short: stoploss hit OR price returns above Donchian upper OR trend breaks
+            if (curr_close >= entry_price + 2.0 * atr_val) or (curr_close > donchian_upper) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_ElderRay_Power_12hSuperTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
