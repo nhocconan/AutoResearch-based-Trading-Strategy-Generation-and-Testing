@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-1d KAMA + RSI + Chop Regime Filter
-Hypothesis: Kaufman's Adaptive Moving Average (KAMA) identifies trend direction while adapting to market noise. Combined with RSI extremes and choppiness index regime filter, this strategy captures trending moves in both bull and bear markets while avoiding choppy sideways action. Daily timeframe reduces trade frequency to minimize fee drag, targeting 30-80 trades over 4 years.
+6h Elder Ray Index with 12h Supertrend Filter and Volume Confirmation
+Hypothesis: Elder Ray (Bull/Bear Power) measures bull/bear strength relative to EMA13.
+Combined with 12h Supertrend for regime filter and volume confirmation to avoid false signals.
+Works in bull/bear via Supertrend regime filter. Discrete sizing (0.25) limits fee drag (~60-100 trades over 4 years).
 """
 
 import numpy as np
@@ -10,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,126 +20,148 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and chop regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for Supertrend regime filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close (ER=10, fast=2, slow=30)
-    close_s = pd.Series(close)
-    change = np.abs(close_s.diff(10).values)
-    volatility = np.abs(close_s.diff(1)).rolling(window=10, min_periods=1).sum().values
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 12h Supertrend (ATR=10, mult=3.0) for regime filter
+    hl2_12h = (df_12h['high'] + df_12h['low']) / 2
+    tr1_12h = df_12h['high'][1:] - df_12h['low'][1:]
+    tr2_12h = np.abs(df_12h['high'][1:] - df_12h['close'][:-1])
+    tr3_12h = np.abs(df_12h['low'][1:] - df_12h['close'][:-1])
+    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
+    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
+    upper_12h = hl2_12h + 3.0 * atr_12h
+    lower_12h = hl2_12h - 3.0 * atr_12h
+    supertrend_12h = np.full_like(hl2_12h, np.nan, dtype=float)
+    direction_12h = np.ones_like(hl2_12h, dtype=int)  # 1 for uptrend, -1 for downtrend
     
-    # Calculate 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    for i in range(1, len(hl2_12h)):
+        if np.isnan(supertrend_12h[i-1]):
+            supertrend_12h[i] = lower_12h[i]
+            direction_12h[i] = 1
+        else:
+            if close_12h := df_12h['close'].iloc[i]:
+                close_12h_val = df_12h['close'].iloc[i]
+            else:
+                close_12h_val = df_12h['close'].values[i]
+            if direction_12h[i-1] == 1:
+                supertrend_12h[i] = max(lower_12h[i], supertrend_12h[i-1])
+                if close_12h_val < supertrend_12h[i]:
+                    direction_12h[i] = -1
+                    supertrend_12h[i] = upper_12h[i]
+                else:
+                    direction_12h[i] = 1
+            else:
+                supertrend_12h[i] = min(upper_12h[i], supertrend_12h[i-1])
+                if close_12h_val > supertrend_12h[i]:
+                    direction_12h[i] = 1
+                    supertrend_12h[i] = lower_12h[i]
+                else:
+                    direction_12h[i] = -1
     
-    # Calculate RSI(14) on daily close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    supertrend_dir_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h.astype(float))
     
-    # Calculate Choppiness Index on weekly data
-    def true_range(h, l, c_prev):
-        tr1 = h - l
-        tr2 = np.abs(h - c_prev)
-        tr3 = np.abs(l - c_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate EMA13 for Elder Ray (primary timeframe)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Need weekly close for TR calculation
-    wc = df_1w['close'].values
-    wh = df_1w['high'].values
-    wl = df_1w['low'].values
-    wc_prev = np.roll(wc, 1)
-    wc_prev[0] = wc[0]
-    tr = true_range(wh, wl, wc_prev)
-    atr_w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    highest_h = pd.Series(wh).rolling(window=14, min_periods=14).max().values
-    lowest_l = pd.Series(wl).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(np.sum(atr_w[-13:]) / np.log(10) / (highest_h - lowest_l)) if len(atr_w) >= 14 else 50
-    # For simplicity, use rolling calculation aligned to daily
-    chop_series = pd.Series(index=range(len(wh)), dtype=float)
-    for j in range(14, len(wh)):
-        tr_sum = pd.Series(true_range(wh[j-13:j+1], wl[j-13:j+1], wc_prev[j-13:j+1])).sum()
-        hh = np.max(wh[j-13:j+1])
-        ll = np.min(wl[j-13:j+1])
-        chop_series.iloc[j] = 100 * np.log10(tr_sum / np.log(10) / (hh - ll)) if hh != ll else 50
-    chop_values = chop_series.fillna(50).values
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_values)
+    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Calculate ATR for stop loss (using 20 periods)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Start index: need enough for indicators
-    start_idx = 50
+    # Start index: need enough for EMA13 (13), ATR (20), and Supertrend (10)
+    start_idx = max(13, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama[i]) or np.isnan(ema_34_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(atr[i]) or 
+            np.isnan(supertrend_dir_12h_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        kama_val = kama[i]
-        ema_trend = ema_34_aligned[i]
-        rsi_val = rsi[i]
-        chop_val = chop_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        ema13_val = ema_13[i]
+        atr_value = atr[i]
+        supertrend_dir = supertrend_dir_12h_aligned[i]
+        bull_pwr = bull_power[i]
+        bear_pwr = bear_power[i]
         
-        # Regime filter: chop < 61.8 = trending (favor trend following)
-        # chop > 38.2 = ranging (we avoid ranging markets)
-        trending_regime = chop_val < 61.8
+        # Volume spike: current volume > 1.8 * 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-19:i+1])
+        else:
+            vol_ma_20 = np.mean(volume[:i+1])
+        volume_spike = curr_volume > 1.8 * vol_ma_20
         
-        # Exit conditions
+        # Update tracking variables for trailing stop logic
+        if position == 1:
+            highest_since_entry = max(highest_since_entry, curr_high)
+        elif position == -1:
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+        
+        # Exit conditions: trailing stop or regime/volume change
         if position != 0:
             exit_signal = False
             
             if position == 1:
-                # Exit long: price below KAMA OR RSI overbought AND chop high
-                if curr_close < kama_val or (rsi_val > 70 and chop_val > 50):
+                # Trailing stop: exit if price drops 2.5*ATR from highest since entry
+                if curr_close < highest_since_entry - 2.5 * atr_value:
                     exit_signal = True
+                # Exit if Supertrend turns bearish OR volume dies AND weak bull power
+                elif supertrend_dir <= 0 or (not volume_spike and bull_pwr < 0):
+                    exit_signal = True
+                    
             elif position == -1:
-                # Exit short: price above KAMA OR RSI oversold AND chop high
-                if curr_close > kama_val or (rsi_val < 30 and chop_val > 50):
+                # Trailing stop: exit if price rises 2.5*ATR from lowest since entry
+                if curr_close > lowest_since_entry + 2.5 * atr_value:
+                    exit_signal = True
+                # Exit if Supertrend turns bullish OR volume dies AND weak bear power
+                elif supertrend_dir >= 0 or (not volume_spike and bear_pwr > 0):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
                 continue
         
-        # Entry conditions: KAMA direction + RSI extreme + trending regime
+        # Entry conditions: Elder Ray + Supertrend regime + volume
         if position == 0:
-            # Long: price above KAMA AND above weekly EMA AND RSI not extreme AND trending
-            long_condition = (curr_close > kama_val and 
-                            curr_close > ema_trend and
-                            rsi_val < 70 and  # not overbought
-                            trending_regime)
-            
-            # Short: price below KAMA AND below weekly EMA AND RSI not extreme AND trending
-            short_condition = (curr_close < kama_val and
-                             curr_close < ema_trend and
-                             rsi_val > 30 and  # not oversold
-                             trending_regime)
+            # Long: Supertrend bullish AND bull power positive AND volume spike
+            long_condition = (supertrend_dir > 0) and (bull_pwr > 0) and volume_spike
+            # Short: Supertrend bearish AND bear power negative AND volume spike
+            short_condition = (supertrend_dir < 0) and (bear_pwr < 0) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
                 position = 1
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
             elif short_condition:
                 signals[i] = -0.25
                 position = -1
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
         elif position == 1:
             signals[i] = 0.25
         elif position == -1:
@@ -145,6 +169,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_ChopRegime_v1"
-timeframe = "1d"
+name = "6h_ElderRay_Supertrend12h_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
