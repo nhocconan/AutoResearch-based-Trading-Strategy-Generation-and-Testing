@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume spike confirmation. 
-Uses tighter entry (R1/S1) to reduce trade count and improve selectivity. Volume spike confirms breakout strength. 
-Discrete sizing (0.25) to limit fee drag. Target: 12-37 trades/year per symbol for better generalization. 
-1d HTF provides more stable trend filter for 12h timeframe, reducing whipsaw in sideways markets.
-Works in both bull and bear markets by following the higher timeframe trend while using volume to confirm breakout strength.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike confirmation. Uses discrete sizing (0.25) to limit fee drag. Target: 20-40 trades/year per symbol. The 1d EMA34 provides a stable long-term trend filter that works in both bull and bear markets by avoiding whipsaw. Volume spike confirms breakout strength. Exit on opposite Camarilla level touch or trend reversal.
 """
 
 import numpy as np
@@ -22,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter
+    # Get 1d data for HTF trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -32,23 +28,18 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 12h data for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Camarilla levels: R1/S1 (using close of previous 12h bar)
+    # Camarilla levels: R1/S1 (using close of previous 1d bar)
     # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_12h + 1.1 * (high_12h - low_12h) / 12
-    camarilla_s1 = close_12h - 1.1 * (high_12h - low_12h) / 12
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume spike: current volume > 2.0 * 20-period volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -104,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
