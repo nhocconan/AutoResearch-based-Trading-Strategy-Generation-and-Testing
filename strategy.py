@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrendFilter_VolumeSpike_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 1h with 4h EMA34 trend filter and volume spike confirmation. 
-Camarilla R1/S1 levels provide tight reversal/breakout points. In strong 4h trends (price above/below EMA34), 
-breakouts of R1 (resistance) or S1 (support) continue the trend. Volume spike confirms institutional participation. 
-Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20) limits fee drift. Target: 15-35 trades/year per symbol.
+6h_Ichimoku_TK_Cross_1wTrendFilter_v1
+Hypothesis: Trade Ichimoku Tenkan-Kijun cross on 6h with 1w EMA50 trend filter. TK cross provides timely momentum signals while weekly EMA50 ensures alignment with major trend, reducing whipsaws in ranging/bear markets. Discrete sizing (0.25) limits fee drag. Target: 12-30 trades/year per symbol to survive 2021-2026 regimes.
 """
 
 import numpy as np
@@ -16,97 +13,82 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get 4h data for HTF trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA34 for HTF trend filter
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Calculate 1w EMA50 for HTF trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for Camarilla pivot calculation (yesterday's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Ichimoku calculations on 6h data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: R1/S1, R2/S2 (using close of previous day)
-    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
-    
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume spike: current volume > 2.0 * 20-period volume MA
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA34 (34) and volume MA (20)
-    start_idx = max(34, 20)
+    # Start index: need warmup for Ichimoku (26) and 1w EMA50 (50)
+    start_idx = max(26, 50)
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma[i]) or not in_session[i]):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        # Skip if data not ready
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(tenkan[i]) or np.isnan(kijun[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 4h HTF trend (bullish = price above EMA34)
-        htf_4h_bullish = close[i] > ema_34_4h_aligned[i]
-        htf_4h_bearish = close[i] < ema_34_4h_aligned[i]
+        # Determine 1w HTF trend (bullish = price above EMA50)
+        htf_1w_bullish = close[i] > ema_50_1w_aligned[i]
+        htf_1w_bearish = close[i] < ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long setup: price breaks above R1 + 4h uptrend + volume spike
-            long_setup = (close[i] > camarilla_r1_aligned[i]) and htf_4h_bullish and volume_spike[i]
+            # Long setup: Tenkan crosses above Kijun + 1w uptrend
+            tk_cross_up = (tenkan[i] > kijun[i]) and (tenkan[i-1] <= kijun[i-1])
             
-            # Short setup: price breaks below S1 + 4h downtrend + volume spike
-            short_setup = (close[i] < camarilla_s1_aligned[i]) and htf_4h_bearish and volume_spike[i]
+            # Short setup: Tenkan crosses below Kijun + 1w downtrend
+            tk_cross_down = (tenkan[i] < kijun[i]) and (tenkan[i-1] >= kijun[i-1])
             
-            if long_setup:
-                signals[i] = 0.20
+            if tk_cross_up and htf_1w_bullish:
+                signals[i] = 0.25
                 position = 1
-            elif short_setup:
-                signals[i] = -0.20
+            elif tk_cross_down and htf_1w_bearish:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.20
-            # Exit: price touches S1 (stop) OR 4h trend turns bearish
-            if (close[i] <= camarilla_s1_aligned[i]) or (not htf_4h_bullish):
+            signals[i] = 0.25
+            # Exit: Tenkan crosses below Kijun (trend weakening) OR 1w trend turns bearish
+            tk_cross_down = (tenkan[i] < kijun[i]) and (tenkan[i-1] >= kijun[i-1])
+            if tk_cross_down or (not htf_1w_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.20
-            # Exit: price touches R1 (stop) OR 4h trend turns bullish
-            if (close[i] >= camarilla_r1_aligned[i]) or (htf_4h_bullish):
+            signals[i] = -0.25
+            # Exit: Tenkan crosses above Kijun (trend weakening) OR 1w trend turns bullish
+            tk_cross_up = (tenkan[i] > kijun[i]) and (tenkan[i-1] <= kijun[i-1])
+            if tk_cross_up or htf_1w_bullish:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrendFilter_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Ichimoku_TK_Cross_1wTrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
