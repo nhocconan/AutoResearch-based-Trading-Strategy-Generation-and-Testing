@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla R3/S3 Breakout + 12h EMA50 Trend + Volume Spike
-Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance on 4h.
-Breakout through these levels with 12h EMA50 trend alignment and volume confirmation
-captures institutional flow. Works in bull/bear by following 12h trend while using
-Camarilla levels for precise entry/exit. Target: 75-200 total trades over 4 years.
+1h Volume Spike + 4h EMA Trend + Session Filter
+Hypothesis: On 1h, volume spikes (>2x 20-period average) combined with 4h EMA50 trend alignment
+and UTC 08-20 session filter capture institutional participation while avoiding low-liquidity periods.
+The 4h EMA provides the directional bias, reducing whipsaws. Volume spike confirms momentum.
+Works in bull/bear by following 4h trend. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -21,51 +21,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # Using daily high/low/close to compute R3, S3 levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Pre-compute session hours (08-20 UTC) - prices.index is DatetimeIndex
+    session_hours = prices.index.hour
+    in_session = (session_hours >= 8) & (session_hours <= 20)
+    
+    # 4h EMA50 for trend filter - loaded ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values  # Previous day high
-    prev_low = df_1d['low'].shift(1).values    # Previous day low
-    prev_close = df_1d['close'].shift(1).values # Previous day close
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align daily data to 4h timeframe
-    prev_high_4h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_4h = align_htf_to_ltf(prices, df_1d, prev_low)
-    prev_close_4h = align_htf_to_ltf(prices, df_1d, prev_close)
-    
-    # Calculate Camarilla levels: R3/S3
-    # R3 = Close + (High - Low) * 1.1/4
-    # S3 = Close - (High - Low) * 1.1/4
-    rng = prev_high_4h - prev_low_4h
-    r3 = prev_close_4h + rng * 1.1 / 4.0
-    s3 = prev_close_4h - rng * 1.1 / 4.0
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # 4h volume average for confirmation
+    # 1h volume average for spike detection
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Camarilla (1d) + EMA50 + VolMA20
+    # Start index: need enough for EMA50 + VolMA20
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if outside trading session or data not ready
+        if not in_session[i] or np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,44 +53,42 @@ def generate_signals(prices):
         
         curr_close = close[i]
         curr_volume = volume[i]
-        ema_50_level = ema_50_12h_aligned[i]
+        ema_50_level = ema_50_4h_aligned[i]
         
-        # Volume spike: current volume > 1.8 * 20-period average
-        volume_spike = curr_volume > 1.8 * vol_ma_20[i]
+        # Volume spike: current volume > 2.0 * 20-period average
+        volume_spike = curr_volume > 2.0 * vol_ma_20[i]
         
-        # Breakout conditions
-        bullish_breakout = curr_close > r3[i]  # Break above R3
-        bearish_breakout = curr_close < s3[i]  # Break below S3
-        
-        # Exit conditions: reverse breakout or trend change
+        # Exit conditions: opposite volume spike or trend change
         if position != 0:
-            if position == 1 and (curr_close < s3[i] or curr_close < ema_50_level):
+            if position == 1 and (curr_close < ema_50_level or 
+                                  (volume_spike and curr_close < close[i-1])):
                 signals[i] = 0.0
                 position = 0
                 continue
-            elif position == -1 and (curr_close > r3[i] or curr_close > ema_50_level):
+            elif position == -1 and (curr_close > ema_50_level or 
+                                     (volume_spike and curr_close > close[i-1])):
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Entry conditions: Breakout + trend + volume
+        # Entry conditions: Volume spike + trend alignment
         if position == 0:
-            long_condition = bullish_breakout and (curr_close > ema_50_level) and volume_spike
-            short_condition = bearish_breakout and (curr_close < ema_50_level) and volume_spike
+            long_condition = volume_spike and (curr_close > ema_50_level)
+            short_condition = volume_spike and (curr_close < ema_50_level)
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_VolumeSpike_4hEMA50_Trend_SessionFilter_v1"
+timeframe = "1h"
 leverage = 1.0
