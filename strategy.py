@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_HTFTrend_VolumeSpike_v1
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
 - Trend filter: price > 1d EMA34 = bullish, price < 1d EMA34 = bearish.
 - In bullish 1d trend: buy breakouts above R1, sell breakdowns below S1.
 - In bearish 1d trend: sell breakdowns below S1, buy breakouts above R1 (continuation logic).
 - Volume confirmation: require volume > 2.0x 20-period average to avoid false breakouts.
-- Position size: 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+- Position size: 0.25. Target: 50-150 total trades over 4 years = 12-37/year.
 - Works in both bull and bear: 1d trend filter captures major moves, volume filter reduces noise.
 """
 
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter
+    # Get 1d data for HTF trend filter and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -34,7 +34,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 1d data for Camarilla pivot levels (using previous day's OHLC)
+    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
     prev_close = np.roll(df_1d['close'].values, 1)
     prev_high = np.roll(df_1d['high'].values, 1)
     prev_low = np.roll(df_1d['low'].values, 1)
@@ -49,7 +49,7 @@ def generate_signals(prices):
     r1 = pivot + (range_ * 1.1 / 12)
     s1 = pivot - (range_ * 1.1 / 12)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_HTFTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
