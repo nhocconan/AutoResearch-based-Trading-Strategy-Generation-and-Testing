@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Williams Alligator with 1d EMA50 Trend Filter and Volume Spike Confirmation
-Hypothesis: Williams Alligator (jaw/teeth/lips) identifies trending vs ranging markets. 
-In trending markets (Alligator awake), we trade breakouts in the direction of the 1d EMA50 trend.
-In ranging markets (Alligator sleeping), we fade moves at extremes. Volume spike (>2.0x 20-bar vol MA) confirms momentum.
+1d Williams %R with 1w EMA50 Trend Filter and Volume Spike Confirmation
+Hypothesis: Williams %R identifies overbought/oversold conditions. In trending markets (price above/below 1w EMA50),
+we take mean-reversion entries at extremes. Volume spike (>2.0x 20-bar vol MA) confirms momentum.
 Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets by adapting to regime.
-Target: 20-40 trades/year to avoid fee drag while capturing strong moves.
+Target: 15-25 trades/year to avoid fee drag while capturing strong reversals.
 """
 
 import numpy as np
@@ -22,46 +21,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 51:  # Need 50 for EMA + 1 for shift
+    # Get 1w data for EMA50 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 51:  # Need 50 for EMA + 1 for shift
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'])
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = pd.Series(df_1w['close'])
+    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Williams Alligator on 4h data
-    # Jaw: 13-period SMMA shifted 8 bars
-    # Teeth: 8-period SMMA shifted 5 bars  
-    # Lips: 5-period SMMA shifted 3 bars
-    def smma(src, length):
-        """Smoothed Moving Average"""
-        result = np.full_like(src, np.nan, dtype=float)
-        if len(src) < length:
-            return result
-        # First value is SMA
-        result[length-1] = np.mean(src[:length])
-        # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CLOSE) / length
-        for i in range(length, len(src)):
-            result[i] = (result[i-1] * (length-1) + src[i]) / length
-        return result
+    # Williams %R on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # We'll use 14-period lookback
+    lookback = 14
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(lookback-1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    williams_r = np.full(n, np.nan)
+    for i in range(lookback-1, n):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = ((highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])) * -100
+        else:
+            williams_r[i] = -50  # neutral when range is zero
     
-    # Shift the lines (Jaw: 8, Teeth: 5, Lips: 3)
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    # Set shifted values to NaN for invalid positions
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
-    
-    # Calculate 20-period volume MA for volume spike confirmation (4h)
+    # Calculate 20-period volume MA for volume spike confirmation (1d)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -69,15 +55,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Alligator, EMA50, and volume MA
-    start_idx = max(51, 20)  # 51 for EMA50 (50 + 1 for shift), 20 for volume MA
+    # Start index: need enough for Williams %R, EMA50, and volume MA
+    start_idx = max(lookback, 51, 20)  # lookback for W%R, 51 for EMA50, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(lips_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or 
-            np.isnan(jaw_shifted[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,53 +72,44 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_50_val = ema_50_1d_aligned[i]
-        lips_val = lips_shifted[i]
-        teeth_val = teeth_shifted[i]
-        jaw_val = jaw_shifted[i]
+        ema_50_val = ema_50_1w_aligned[i]
+        wr = williams_r[i]
         vol_ma = vol_ma_20[i]
         
-        # Alligator conditions
-        alligator_awake = (lips_val > teeth_val > jaw_val) or (lips_val < teeth_val < jaw_val)
-        alligator_sleeping = not alligator_awake
-        
-        # Trend filter: price above/below 1d EMA50
+        # Trend filter: price above/below 1w EMA50
         price_above_ema = curr_close > ema_50_val
         price_below_ema = curr_close < ema_50_val
         
         # Volume confirmation: current volume > 2.0 * 20-period average
         volume_confirm = curr_volume > 2.0 * vol_ma
         
+        # Williams %R conditions: oversold (< -80) or overbought (> -20)
+        oversold = wr < -80
+        overbought = wr > -20
+        
         if position == 0:
-            if alligator_awake:
-                # Trending market: trade in direction of 1d EMA50
-                # Long: price above EMA50 + lips above teeth (bullish alignment) + volume confirmation
-                long_signal = price_above_ema and (lips_val > teeth_val) and volume_confirm
-                # Short: price below EMA50 + lips below teeth (bearish alignment) + volume confirmation
-                short_signal = price_below_ema and (lips_val < teeth_val) and volume_confirm
-            else:
-                # Ranging market: fade extremes
-                # Long: price near lips (support) + volume confirmation
-                # Short: price near teeth/jaw (resistance) + volume confirmation
-                long_signal = (curr_close <= lips_val * 1.005) and volume_confirm  # near lips
-                short_signal = (curr_close >= jaw_val * 0.995) and volume_confirm   # near jaw
-            
-            if long_signal:
-                signals[i] = 0.25
-                position = 1
-            elif short_signal:
-                signals[i] = -0.25
-                position = -1
+            if price_above_ema:
+                # Uptrend: look for oversold conditions to go long
+                long_signal = oversold and volume_confirm
+                if long_signal:
+                    signals[i] = 0.25
+                    position = 1
+            elif price_below_ema:
+                # Downtrend: look for overbought conditions to go short
+                short_signal = overbought and volume_confirm
+                if short_signal:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: Alligator sleeping OR price crosses below teeth
-            if alligator_sleeping or (curr_close < teeth_val):
+            # Exit long: Williams %R returns to neutral (> -50) or volume dries up
+            if wr > -50 or not volume_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator sleeping OR price crosses above teeth
-            if alligator_sleeping or (curr_close > teeth_val):
+            # Exit short: Williams %R returns to neutral (< -50) or volume dries up
+            if wr < -50 or not volume_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -142,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Williams_Alligator_1dEMA50_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Williams_%R_1wEMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
