@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3/L3 Breakout + 1w EMA50 Trend + Volume Spike
-Hypothesis: Camarilla H3/L3 levels represent stronger intraday support/resistance than R1/S1.
+1d Camarilla H3/L3 Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: On daily timeframe, Camarilla H3/L3 levels represent stronger intraday support/resistance than R1/S1.
 Breakouts above H3 or below L3 with volume confirmation and weekly EMA50 trend filter capture
 strong institutional moves. Weekly trend filter ensures alignment with higher timeframe momentum,
 working in both bull/bear markets by only taking breakouts in direction of weekly trend.
-Target: 20-50 trades/year (75-200 over 4 years).
+Target: 7-25 trades/year (30-100 over 4 years).
 """
 
 import numpy as np
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3_L3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_H3_L3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
