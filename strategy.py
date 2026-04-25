@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_Dyn_v1
-Hypothesis: 4h Camarilla R3/S3 breakouts with 1d EMA34 trend filter and dynamic volume confirmation.
-Primary timeframe 4h targets 20-30 trades/year (80-120 total over 4 years) to minimize fee drag.
-1d EMA34 provides responsive trend alignment that works in both bull and bear markets.
-Dynamic volume confirmation (>1.5x ATR-scaled volume) confirms breakout momentum.
+6h_Camarilla_R3S3_Breakout_1dTrend_1wPivotDir_v1
+Hypothesis: 6h Camarilla R3/S3 breakouts with 1d EMA50 trend filter and 1-week pivot direction confirmation.
+Primary timeframe 6h targets 12-25 trades/year (50-100 total over 4 years) to minimize fee drag.
+1d EMA50 provides responsive trend alignment that works in both bull and bear markets.
+1-week pivot direction (based on prior week's close vs open) adds institutional bias filter.
 Designed for BTC/ETH with discrete sizing (0.25) to manage drawdown and avoid overtrading.
 """
 
@@ -31,9 +31,9 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate EMA34 on 1d close for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate EMA50 on 1d close for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Calculate ATR(14) on 1d for dynamic volume threshold
     tr_1d = np.maximum(high_1d[1:] - low_1d[1:], np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1])))
@@ -49,6 +49,18 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
+    # Get 1w data for pivot direction filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    open_1w = df_1w['open'].values
+    close_1w = df_1w['close'].values
+    
+    # 1-week pivot direction: 1 = bullish (weekly close > open), -1 = bearish (weekly close < open)
+    pivot_dir_1w = np.where(close_1w > open_1w, 1, -1)
+    pivot_dir_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_dir_1w, additional_delay_bars=1)
+    
     # Calculate dynamic volume threshold: 1.5x ATR-scaled volume
     vol_atr_ratio = volume / (atr14_1d_aligned * close + 1e-10)  # Avoid division by zero
     vol_threshold = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values * 1.5
@@ -56,26 +68,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA34, ATR, volume threshold
+    # Start index: need warmup for EMA50, ATR, volume threshold
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+            np.isnan(vol_threshold[i]) or
+            np.isnan(pivot_dir_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         if position == 0:
             # Dynamic volume confirmation: current volume > threshold * average volume
-            vol_confirm = volume[i] > vol_threshold[i] * pd.Series(volume).rolling(window=20, min_periods=1).mean().iloc[i]
+            vol_avg = pd.Series(volume).rolling(window=20, min_periods=1).mean().iloc[i]
+            vol_confirm = volume[i] > vol_threshold[i] * vol_avg
             
-            # Long: price breaks above Camarilla R3 in uptrend (price > 1d EMA34) with volume confirmation
-            # Short: price breaks below Camarilla S3 in downtrend (price < 1d EMA34) with volume confirmation
-            long_signal = (close[i] > camarilla_r3_aligned[i]) and (close[i] > ema34_1d_aligned[i]) and vol_confirm
-            short_signal = (close[i] < camarilla_s3_aligned[i]) and (close[i] < ema34_1d_aligned[i]) and vol_confirm
+            # Long: price breaks above Camarilla R3 in uptrend (price > 1d EMA50) with volume confirmation and bullish weekly pivot
+            # Short: price breaks below Camarilla S3 in downtrend (price < 1d EMA50) with volume confirmation and bearish weekly pivot
+            long_signal = (close[i] > camarilla_r3_aligned[i]) and (close[i] > ema50_1d_aligned[i]) and vol_confirm and (pivot_dir_1w_aligned[i] == 1)
+            short_signal = (close[i] < camarilla_s3_aligned[i]) and (close[i] < ema50_1d_aligned[i]) and vol_confirm and (pivot_dir_1w_aligned[i] == -1)
             
             if long_signal:
                 signals[i] = 0.25
@@ -88,22 +102,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price moves back below 1d EMA34 (trend reversal)
-            exit_signal = close[i] < ema34_1d_aligned[i]
+            # Exit when price moves back below 1d EMA50 (trend reversal)
+            exit_signal = close[i] < ema50_1d_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price moves back above 1d EMA34 (trend reversal)
-            exit_signal = close[i] > ema34_1d_aligned[i]
+            # Exit when price moves back above 1d EMA50 (trend reversal)
+            exit_signal = close[i] > ema50_1d_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_Dyn_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_1wPivotDir_v1"
+timeframe = "6h"
 leverage = 1.0
