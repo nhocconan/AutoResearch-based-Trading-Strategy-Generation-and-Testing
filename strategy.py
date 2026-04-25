@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_RSI_HTF_Trend_Filter_v1
-Hypothesis: On 1h timeframe, take mean-reversion entries when RSI(14) is extreme (<30 for long, >70 for short) only when aligned with 4h and 1d trend (EMA50). Trade during UTC 08-20 session to avoid low-volume periods. Uses discrete sizing (0.20) to target 15-35 trades/year. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+1h_VolumeSpike_RSI_HTFTrend_v1
+Hypothesis: On 1h timeframe, take mean-reversion entries when RSI(14) is extreme (<30 for long, >70 for short) only when aligned with 4h and 1d trend (price above/below EMA50) and confirmed by volume spike (vol_ratio > 2.0). Trade during UTC 08-20 session. Uses discrete sizing (0.20) and requires both HTF timeframes to agree on trend direction. Target: 15-35 trades/year by requiring tight confluence of RSI extreme, HTF trend alignment, and volume spike.
 """
 
 import numpy as np
@@ -64,20 +64,21 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Determine 4h and 1d trend
+        # Get aligned close prices for HTF trend comparison
         close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)[i]
         close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)[i]
         if np.isnan(close_4h_aligned) or np.isnan(close_1d_aligned):
             signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
             
+        # Determine 4h and 1d trend (bullish = price above EMA50)
         htf_4h_bullish = close_4h_aligned > ema_50_4h_aligned[i]
         htf_1d_bullish = close_1d_aligned > ema_50_1d_aligned[i]
         htf_bullish = htf_4h_bullish and htf_1d_bullish  # Both timeframes bullish
         htf_bearish = (not htf_4h_bullish) and (not htf_1d_bullish)  # Both timeframes bearish
         
-        # Volume confirmation: need significant spike
-        volume_confirmed = vol_ratio[i] > 1.8
+        # Volume confirmation: need significant spike (vol_ratio > 2.0)
+        volume_confirmed = vol_ratio[i] > 2.0
         
         if position == 0:
             # Long setup: RSI < 30 (oversold) + HTF bullish trend + volume confirmation
@@ -111,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI_HTF_Trend_Filter_v1"
+name = "1h_VolumeSpike_RSI_HTFTrend_v1"
 timeframe = "1h"
 leverage = 1.0
