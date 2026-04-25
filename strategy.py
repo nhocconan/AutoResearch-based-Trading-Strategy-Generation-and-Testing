@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h Camarilla Pivot Breakout with 4h EMA34 Trend Filter and 1d Volume Spike
-Hypothesis: Camarilla R1/S1 breakouts on 1h with daily volume spike and 4h EMA34 trend alignment capture swing moves in both bull/bear markets. Uses discrete position sizing (0.20) and session filter (08-20 UTC) to target 60-150 total trades over 4 years, minimizing fee drag while maintaining edge across regimes.
+6h Williams %R + 1d EMA50 Trend + Volume Spike
+Hypothesis: Williams %R(14) extremes combined with 1d EMA50 trend filter and volume confirmation captures mean-reversion swings in both bull/bear markets. Williams %R < -80 for long, > -20 for short with trend alignment reduces false signals in choppy regimes. Discrete sizing (0.25) targets ~75-150 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -22,35 +22,32 @@ def generate_signals(prices):
     tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (daily timeframe)
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
-    # 4h EMA34 trend filter (MTF) - loaded ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    ema_34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # 1d EMA50 trend filter (MTF) - loaded ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1h Camarilla pivot levels (R1/S1 for breakout)
-    camarilla_r1 = close + (high - low) * 1.1 / 12
-    camarilla_s1 = close - (high - low) * 1.1 / 12
+    # Williams %R(14) on 6h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Session filter: 08-20 UTC (pre-compute hours array)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     # Start index: need enough for all indicators
-    start_idx = max(20, 34)
+    start_idx = max(14, 50) + 5
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_14[i]) or
-            not in_session[i]):
+        # Skip if any data not ready
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
@@ -58,22 +55,19 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         vol_spike = volume_spike[i]
-        
-        # Breakout conditions: price breaks Camarilla R1/S1 levels
-        breakout_long = curr_close > camarilla_r1[i]
-        breakout_short = curr_close < camarilla_s1[i]
+        wr = williams_r[i]
         
         if position == 0:
-            # Look for entry signals - require: R1/S1 breakout + volume spike + 4h EMA34 trend alignment
-            long_entry = breakout_long and vol_spike and (curr_close > ema_34_4h_aligned[i])
-            short_entry = breakout_short and vol_spike and (curr_close < ema_34_4h_aligned[i])
+            # Look for entry signals - require: Williams %R extreme + volume spike + 1d EMA50 trend alignment
+            long_entry = wr < -80 and vol_spike and (curr_close > ema_50_1d_aligned[i])
+            short_entry = wr > -20 and vol_spike and (curr_close < ema_50_1d_aligned[i])
             
             if long_entry:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
             elif short_entry:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
             else:
@@ -87,7 +81,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short position management: ATR trailing stop
             lowest_since_entry = min(lowest_since_entry, curr_low)
@@ -97,10 +91,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA34_Trend_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_WilliamsR_1dEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
