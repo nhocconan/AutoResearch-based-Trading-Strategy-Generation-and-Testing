@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with daily EMA50 trend filter and volume spike confirmation.
-Long when price breaks above R1 in uptrend (close > daily EMA50) with volume spike (>2.0x 20-bar average).
-Short when price breaks below S1 in downtrend (close < daily EMA50) with volume spike.
-Exit when price re-enters H3-L3 range or trend reverses.
-Designed for 12-37 trades/year on 12h timeframe with tight entry conditions to minimize fee drag.
-Works in bull markets via trend-following breakouts and in bear markets via counter-trend fades on extreme volume spikes.
+4h_KAMA_Trend_Donchian20_Exit_VolumeRegime
+Hypothesis: 4h KAMA trend direction + Donchian(20) breakout entry with volume regime filter.
+Long when KAMA trending up and price breaks above Donchian upper band with moderate volume confirmation.
+Short when KAMA trending down and price breaks below Donchian lower band with moderate volume confirmation.
+Exit when price crosses KAMA (trend reversal) or Donchian opposite band.
+Uses volume regime: avoids low-volume chop, requires volume > 1.2x 50-bar average but < 4x to avoid spikes.
+Designed for 20-40 trades/year on 4h with clear trend-following logic and controlled frequency.
+Works in bull markets via trend continuation and in bear markets via defined trend exits.
 """
 
 import numpy as np
@@ -23,40 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation (HTF)
+    # KAMA calculation (ER=10, fast=2, slow=30)
+    def kama(close, er_period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=er_period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.full_like(close, np.nan, dtype=float)
+        kama[er_period] = close[er_period]
+        for i in range(er_period + 1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
+    
+    # Get daily data for trend confirmation (optional HTF filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for previous day
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    r1 = prev_close + range_hl * 1.1 / 12
-    s1 = prev_close - range_hl * 1.1 / 12
-    h3 = prev_close + range_hl * 1.1 / 4
-    l3 = prev_close - range_hl * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    
-    # Get daily data for trend filter (EMA50)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
+    # KAMA trend (primary timeframe)
+    kama_vals = kama(close, er_period=10, fast=2, slow=30)
+    kama_trend_up = kama_vals > np.roll(kama_vals, 1)
+    kama_trend_down = kama_vals < np.roll(kama_vals, 1)
+    
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume regime filter: avoid chop, require moderate volume
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    vol_regime = (volume > 1.2 * vol_ma_50) & (volume < 4.0 * vol_ma_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,26 +66,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama_vals[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_50[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_50_1d_aligned[i]
-        
         if position == 0:
             # Regime-based entry logic
-            if close[i] > ema_trend:  # Uptrend regime (daily)
-                # Long: break above R1 with volume spike
-                long_signal = (close[i] > r1_aligned[i]) and vol_spike[i]
-                # Short: break below S1 only if extreme volume spike (counter-trend fade)
-                short_signal = (close[i] < s1_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
-            else:  # Downtrend regime (daily)
-                # Short: break below S1 with volume spike
-                short_signal = (close[i] < s1_aligned[i]) and vol_spike[i]
-                # Long: break above R1 only if extreme volume spike (counter-trend fade)
-                long_signal = (close[i] > r1_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
+            if ema_50_1d_aligned[i] > 0:  # Daily trend filter (always true after warmup)
+                # Long: KAMA trending up + break above Donchian high + volume regime
+                long_signal = kama_trend_up[i] and (close[i] > donchian_high[i]) and vol_regime[i]
+                # Short: KAMA trending down + break below Donchian low + volume regime
+                short_signal = kama_trend_down[i] and (close[i] < donchian_low[i]) and vol_regime[i]
+            else:
+                long_signal = False
+                short_signal = False
             
             if long_signal:
                 signals[i] = 0.25
@@ -98,22 +94,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: re-enter H3-L3 range or trend reversal
-            exit_signal = (close[i] < h3_aligned[i] and close[i] > l3_aligned[i]) or (close[i] < ema_trend * 0.99)
+            # Exit: KAMA trend reversal OR price crosses Donchian low
+            exit_signal = (not kama_trend_up[i]) or (close[i] < donchian_low[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: re-enter H3-L3 range or trend reversal
-            exit_signal = (close[i] > l3_aligned[i] and close[i] < h3_aligned[i]) or (close[i] > ema_trend * 1.01)
+            # Exit: KAMA trend reversal OR price crosses Donchian high
+            exit_signal = (not kama_trend_down[i]) or (close[i] > donchian_high[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_KAMA_Trend_Donchian20_Exit_VolumeRegime"
+timeframe = "4h"
 leverage = 1.0
