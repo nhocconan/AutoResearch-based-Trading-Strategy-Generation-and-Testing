@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_FundingRate_MeanReversion_ZScore_20
-Hypothesis: BTC/ETH exhibit strong mean-reversion in funding rates. Extreme positive funding (longs paying shorts) precedes price drops; extreme negative funding precedes rallies. Uses 20-day z-score of funding rate to identify entries. Works in bull markets via mean-reversion shorts during euphoria and longs during fear; works in bear markets via contrarian entries at funding extremes. Primary timeframe 1d, HTF 1w for trend filter (only trade in direction of weekly trend). Discrete sizing 0.25 to minimize fees. Target: 15-25 trades/year.
+6h_ElderRay_BullBearPower_1dTrendFilter
+Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1d EMA trend filter. Long when Bull Power > 0 and price above 1d EMA50, short when Bear Power < 0 and price below 1d EMA50. Uses discrete sizing (0.25) to minimize fees. Designed for 12-30 trades/year, works in bull markets via trend-following longs and in bear markets via trend-following shorts when aligned with higher timeframe trend.
 """
 
 import numpy as np
@@ -13,46 +13,46 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load funding rate data (assumed available in data/processed/funding/)
-    # For this example, we simulate funding rate proxy using price-based momentum
-    # In practice, replace with: pd.read_parquet(f"data/processed/funding/{symbol}.parquet")
     close = prices['close'].values
-    returns = np.diff(np.log(close), prepend=0)
-    # Proxy: funding rate ~= recent returns (simplified for illustration)
-    funding_proxy = pd.Series(returns).rolling(window=8, min_periods=8).mean().values  # 8h approx
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate 20-day z-score of funding rate
-    funding_mean = pd.Series(funding_proxy).rolling(window=20, min_periods=20).mean().values
-    funding_std = pd.Series(funding_proxy).rolling(window=20, min_periods=20).std().values
-    funding_zscore = (funding_proxy - funding_mean) / (funding_std + 1e-8)
-    
-    # Get 1w trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for HTF EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    weekly_ema = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    close_1d = df_1d['close'].values
+    
+    # Calculate EMA50 on 1d
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate Elder Ray components on 6h
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Start index: need warmup for calculations
     start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(funding_zscore[i]) or np.isnan(weekly_ema_aligned[i]):
+        # Skip if data not ready
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        price = close[i]
-        weekly_trend_up = price > weekly_ema_aligned[i]
-        weekly_trend_down = price < weekly_ema_aligned[i]
-        
         if position == 0:
-            # Long: extremely negative funding (oversold) + weekly uptrend
-            long_signal = (funding_zscore[i] < -2.0) and weekly_trend_up
-            # Short: extremely positive funding (overbought) + weekly downtrend
-            short_signal = (funding_zscore[i] > 2.0) and weekly_trend_down
+            # Long: Bull Power > 0 and price above 1d EMA50
+            long_signal = (bull_power[i] > 0) and (close[i] > ema_50_aligned[i])
+            # Short: Bear Power < 0 and price below 1d EMA50
+            short_signal = (bear_power[i] < 0) and (close[i] < ema_50_aligned[i])
             
             if long_signal:
                 signals[i] = 0.25
@@ -63,22 +63,24 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long: hold until funding normalizes or trend breaks
+            # Long: hold position
             signals[i] = 0.25
-            exit_signal = (funding_zscore[i] > -0.5) or (price < weekly_ema_aligned[i])
+            # Exit when Bull Power <= 0 (momentum weakness)
+            exit_signal = bull_power[i] <= 0
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Short: hold until funding normalizes or trend breaks
+            # Short: hold position
             signals[i] = -0.25
-            exit_signal = (funding_zscore[i] < 0.5) or (price > weekly_ema_aligned[i])
+            # Exit when Bear Power >= 0 (momentum weakness)
+            exit_signal = bear_power[i] >= 0
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_FundingRate_MeanReversion_ZScore_20"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrendFilter"
+timeframe = "6h"
 leverage = 1.0
