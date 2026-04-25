@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Volume-Weighted RSI + 1w EMA50 Trend + Volume Spike
-Hypothesis: Volume-weighted RSI (VW-RSI) reduces false signals by weighting price moves with volume.
-1w EMA50 provides strong trend filter to avoid counter-trend whipsaws in both bull/bear markets.
-Volume spike confirms institutional participation. Discrete sizing (0.25) minimizes fee churn.
-Target: 12-37 trades/year on 6h timeframe.
+12h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+Hypothesis: Donchian breakouts capture momentum; 1d EMA34 filters trend to avoid counter-trend whipsaws; volume spike confirms participation; chop filter avoids ranging markets. Works in bull/bear via trend filter and volatility-based position sizing. Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -21,14 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for stoploss and volatility filter
     if len(close) >= 14:
@@ -40,21 +37,15 @@ def generate_signals(prices):
     else:
         atr = np.full(n, 0.0)
     
-    # Calculate Volume-Weighted RSI(14) on 6h
-    # VW-RSI = 100 - (100 / (1 + RS)), where RS = avg_gain_volume / avg_loss_volume
+    # Calculate Choppiness Index (14) for regime filter
     if len(close) >= 14:
-        delta = pd.Series(close).diff()
-        gain = delta.where(delta > 0, 0)
-        loss = (-delta).where(delta < 0, 0)
-        # Volume-weighted gain/loss
-        vol_gain = gain * volume
-        vol_loss = loss * volume
-        avg_vol_gain = pd.Series(vol_gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-        avg_vol_loss = pd.Series(vol_loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-        rs = avg_vol_gain / (avg_vol_loss + 1e-10)
-        vw_rsi = 100 - (100 / (1 + rs))
+        chop_sum = tr.rolling(window=14, min_periods=14).sum()
+        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+        chop = 100 * np.log10(chop_sum / (highest_high - lowest_low)) / np.log10(14)
+        chop_values = chop.values
     else:
-        vw_rsi = np.full(n, 50.0)
+        chop_values = np.full(n, 50.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,9 +56,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vw_rsi[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(chop_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,11 +68,19 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_50 = ema_50_aligned[i]
-        rsi_val = vw_rsi[i]
+        ema_34 = ema_34_aligned[i]
         atr_val = atr[i]
+        chop_val = chop_values[i]
         
-        # Volume spike: current volume > 2.0 * 50-period average (stricter for 6h)
+        # Donchian channels (20-period)
+        if i >= 20:
+            donchian_high = np.max(high[i-19:i+1])
+            donchian_low = np.min(low[i-19:i+1])
+        else:
+            donchian_high = np.max(high[:i+1])
+            donchian_low = np.min(low[:i+1])
+        
+        # Volume spike: current volume > 2.0 * 50-period average
         if i >= 50:
             vol_ma_50 = np.mean(volume[i-49:i+1])
         else:
@@ -89,14 +88,18 @@ def generate_signals(prices):
         volume_spike = curr_volume > 2.0 * vol_ma_50
         
         # Trend filter
-        uptrend = curr_close > ema_50
-        downtrend = curr_close < ema_50
+        uptrend = curr_close > ema_34
+        downtrend = curr_close < ema_34
+        
+        # Chop filter: avoid ranging markets (chop > 61.8) and extreme trending (chop < 38.2 sometimes fails)
+        # We'll use chop < 61.8 to avoid strong ranging, but allow trending markets
+        not_choppy = chop_val < 61.8
         
         if position == 0:
-            # Long: VW-RSI < 30 (oversold) AND volume spike AND uptrend
-            long_condition = (rsi_val < 30) and volume_spike and uptrend
-            # Short: VW-RSI > 70 (overbought) AND volume spike AND downtrend
-            short_condition = (rsi_val > 70) and volume_spike and downtrend
+            # Long: price breaks above Donchian high AND volume spike AND uptrend AND not choppy
+            long_condition = (curr_high > donchian_high) and volume_spike and uptrend and not_choppy
+            # Short: price breaks below Donchian low AND volume spike AND downtrend AND not choppy
+            short_condition = (curr_low < donchian_low) and volume_spike and downtrend and not_choppy
             
             if long_condition:
                 signals[i] = 0.25
@@ -107,15 +110,19 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.5*ATR below entry) or trend reversal or VW-RSI > 50 (exit overextended)
-            if curr_close <= entry_price - 2.5 * atr_val or not uptrend or rsi_val > 50:
+            # Exit long: stoploss (2.5*ATR below entry) or trend reversal or Donchian breakout in opposite direction
+            if (curr_close <= entry_price - 2.5 * atr_val or 
+                not uptrend or 
+                curr_low < donchian_low):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.5*ATR above entry) or trend reversal or VW-RSI < 50 (exit overextended)
-            if curr_close >= entry_price + 2.5 * atr_val or not downtrend or rsi_val < 50:
+            # Exit short: stoploss (2.5*ATR above entry) or trend reversal or Donchian breakout in opposite direction
+            if (curr_close >= entry_price + 2.5 * atr_val or 
+                not downtrend or 
+                curr_high > donchian_high):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VolumeWeightedRSI_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
