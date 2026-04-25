@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Volume-Weighted RSI Mean Reversion + 1d ATR Regime Filter
-Hypothesis: In ranging markets, extreme RSI values revert to mean. Volume-weighted RSI reduces false signals.
-ATR regime filter ensures we only trade when volatility is elevated enough for meaningful moves.
-Works in both bull and bear markets by fading momentum exhaustion spikes.
-Target: 20-40 trades/year (80-160 over 4 years) to minimize fee drag.
+1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: Daily Donchian breakouts capture medium-term momentum. Weekly EMA50 provides institutional trend bias:
+long only when price above weekly EMA50, short only when below. Volume spike confirms participation.
+Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+1d timeframe targets 7-25 trades/year (30-100 over 4 years).
 """
 
 import numpy as np
@@ -16,90 +16,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d ATR(14) for regime filter
-    tr1 = pd.Series(df_1d['high']) - pd.Series(df_1d['low'])
-    tr2 = abs(pd.Series(df_1d['high']) - pd.Series(df_1d['close']).shift(1))
-    tr3 = abs(pd.Series(df_1d['low']) - pd.Series(df_1d['close']).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 1w EMA50
+    ema_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume-weighted RSI(14) on 4h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    # Donchian channel (20-period) on 1d
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume-weighted gain/loss
-    vol_ratio = volume / pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    vol_gain = gain * vol_ratio
-    vol_loss = loss * vol_ratio
-    
-    avg_gain = pd.Series(vol_gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(vol_loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    vw_rsi = 100 - (100 / (1 + rs))
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 14, 14)  # volume MA, VW RSI, ATR
+    start_idx = max(20, 20, 50)  # Donchian, volume MA, EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(vw_rsi[i]) or np.isnan(avg_gain[i]) or np.isnan(avg_loss[i]) or 
-            np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when 1d ATR is above its 50-period median (elevated volatility)
-        if i >= 50:
-            atr_median = np.nanmedian(atr_1d_aligned[max(0, i-50):i+1])
-            high_vol_regime = atr_1d_aligned[i] > atr_median
-        else:
-            high_vol_regime = False
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        vol_spike = volume_spike[i]
+        
+        # Trend filter: price relative to 1w EMA50
+        bullish_bias = curr_close > ema_1w_aligned[i]
+        bearish_bias = curr_close < ema_1w_aligned[i]
         
         if position == 0:
-            # Look for entry signals in high volatility regime only
-            if high_vol_regime:
-                # Long: VW RSI < 25 (oversold) with volume confirmation
-                long_entry = (vw_rsi[i] < 25) and (volume[i] > np.nanmedian(volume[max(0, i-20):i+1]))
-                # Short: VW RSI > 75 (overbought) with volume confirmation
-                short_entry = (vw_rsi[i] > 75) and (volume[i] > np.nanmedian(volume[max(0, i-20):i+1]))
-                
-                if long_entry:
-                    signals[i] = 0.25
-                    position = 1
-                elif short_entry:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Look for entry signals
+            # Long: price breaks above Donchian high AND bullish bias AND volume spike
+            long_entry = (curr_high > donchian_high[i]) and bullish_bias and vol_spike
+            # Short: price breaks below Donchian low AND bearish bias AND volume spike
+            short_entry = (curr_low < donchian_low[i]) and bearish_bias and vol_spike
+            
+            if long_entry:
+                signals[i] = 0.25
+                position = 1
+            elif short_entry:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: VW RSI > 50 (mean reversion) OR VW RSI > 65 (early exit)
-            if vw_rsi[i] > 50:
+            # Exit: price falls below Donchian low (breakdown) OR loss of bullish bias
+            if (curr_low < donchian_low[i]) or (curr_close < ema_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: VW RSI < 50 (mean reversion) OR VW RSI < 35 (early exit)
-            if vw_rsi[i] < 50:
+            # Exit: price rises above Donchian high (breakout) OR loss of bearish bias
+            if (curr_high > donchian_high[i]) or (curr_close > ema_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolumeWeightedRSI_MeanReversion_1dATR_Regime"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
