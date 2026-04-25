@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout with Volume Spike and ADX Trend Filter v2
-Hypothesis: Donchian channel breakouts capture strong momentum moves. 
-Volume confirmation ensures participation, while ADX > 25 filters for trending markets.
-This combination works in both bull and bear markets by catching breakouts in the direction 
-of the trend. Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 20-50 trades/year on 4h.
-Enhanced version with proper warmup and reduced false signals.
+1d Camarilla H3/L3 Breakout with Weekly EMA34 Trend Filter and Volume Spike
+Hypothesis: Camarilla pivot levels (H3/L3) act as strong intraday support/resistance.
+Breakouts above H3 or below L3 with weekly trend alignment (EMA34) and volume confirmation
+capture sustained moves. Works in bull/bear markets by trading breakouts in weekly trend direction.
+Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 15-25 trades/year on 1d.
 """
 
 import numpy as np
@@ -22,41 +21,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) - using shifted values to avoid look-ahead
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    # Calculate Camarilla levels for 1d (based on previous day)
+    # H3 = close + 1.1 * (high - low) / 2
+    # L3 = close - 1.1 * (high - low) / 2
+    prev_close = pd.Series(close).shift(1).values
+    prev_high = pd.Series(high).shift(1).values
+    prev_low = pd.Series(low).shift(1).values
     
-    # Volume confirmation: current volume > 1.5 * 20-period average (reduced from 2.0 to increase signals slightly)
+    rang = prev_high - prev_low
+    H3 = prev_close + (1.1 * rang / 2)
+    L3 = prev_close - (1.1 * rang / 2)
+    
+    # Volume confirmation: current volume > 1.8 * 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 1.8)
     
-    # ADX calculation for trend filter (14-period)
-    plus_dm = pd.Series(high).diff()
-    minus_dm = pd.Series(low).diff().mul(-1)
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    
-    tr1 = pd.Series(high).sub(pd.Series(low))
-    tr2 = pd.Series(high).sub(pd.Series(close).shift(1)).abs()
-    tr3 = pd.Series(low).sub(pd.Series(close).shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Weekly EMA34 for trend filter (loaded ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for calculations + warmup
-    start_idx = max(lookback, 20) + 14 + 5  # Donchian + ADX warmup + buffer
+    # Start index: need enough for calculations
+    start_idx = max(20, 34) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]) or np.isnan(adx[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -65,14 +59,15 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         vol_spike = volume_spike[i]
-        trend_filter = adx[i] > 25  # ADX > 25 indicates trending market
+        weekly_trend_up = curr_close > ema_34_1w_aligned[i]
+        weekly_trend_down = curr_close < ema_34_1w_aligned[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above upper Donchian AND volume spike AND trending market
-            long_entry = (curr_close > upper[i]) and vol_spike and trend_filter
-            # Short: price breaks below lower Donchian AND volume spike AND trending market
-            short_entry = (curr_close < lower[i]) and vol_spike and trend_filter
+            # Long: price breaks above H3 AND volume spike AND weekly uptrend
+            long_entry = (curr_close > H3[i]) and vol_spike and weekly_trend_up
+            # Short: price breaks below L3 AND volume spike AND weekly downtrend
+            short_entry = (curr_close < L3[i]) and vol_spike and weekly_trend_down
             
             if long_entry:
                 signals[i] = 0.25
@@ -84,16 +79,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below lower Donchian (breakdown) OR loss of momentum (ADX < 20)
-            if (curr_close < lower[i]) or (adx[i] < 20):
+            # Exit: price falls below L3 (breakdown) OR weekly trend turns down
+            if (curr_close < L3[i]) or (not weekly_trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above upper Donchian (breakout) OR loss of momentum (ADX < 20)
-            if (curr_close > upper[i]) or (adx[i] < 20):
+            # Exit: price rises above H3 (breakout) OR weekly trend turns up
+            if (curr_close > H3[i]) or (not weekly_trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ADXTrend_v2"
-timeframe = "4h"
+name = "1d_Camarilla_H3L3_Breakout_1wEMA34_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
