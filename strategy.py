@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_PivotRange_Reversion_1dVolSpike_ATRFilter
-Hypothesis: Trade reversals from 1d Camarilla H3/L3 levels on 6h timeframe with volume spike and ATR filter.
-In ranging markets (BTC/ETH 2025+), price tends to revert from extreme daily levels.
-Volume spike confirms institutional interest at these levels.
-ATR filter avoids whipsaws in low volatility.
-Discrete sizing 0.25 balances profit and fee drag. Target: 12-25 trades/year (~50-100 over 4 years).
-Works in bull/bear: mean reversion works in ranging markets, volatility filter adapts to conditions.
+12h_KAMA_Trend_Regime_Volume
+Hypothesis: 12h KAMA trend with choppiness regime filter and volume confirmation.
+KAMA adapts to market noise, reducing whipsaw in choppy regimes. 
+Choppiness Index > 61.8 = range (mean reversion), < 38.2 = trending (trend follow).
+Volume > 1.5x 20-bar MA confirms breakout strength.
+Works in bull/bear: regime filter adapts strategy to market conditions.
+Target: 15-25 trades/year (~60-100 over 4 years) to minimize fee drag.
+Discrete sizing 0.25 balances profit and fees.
 """
 
 import numpy as np
@@ -23,63 +24,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and volume filter
+    # Get 1d data for HTF filters
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_1d = tr.rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 1d bar's OHLC
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
-    prev_close_1d = df_1d['close'].shift(1).values
+    # Calculate 12h KAMA (adaptive trend)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # will fix below
     
-    camarilla_range = prev_high_1d - prev_low_1d
-    h3 = prev_close_1d + 1.1 * camarilla_range / 6   # H3 level
-    l3 = prev_close_1d - 1.1 * camarilla_range / 6   # L3 level
+    # Proper ER calculation
+    er = np.zeros(n)
+    for i in range(10, n):
+        change_val = np.abs(close[i] - close[i-10])
+        volatility_val = np.sum(np.abs(np.diff(close[i-10:i+1])))
+        if volatility_val > 0:
+            er[i] = change_val / volatility_val
+        else:
+            er[i] = 1.0
     
-    # Align Camarilla levels to 6h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Volume confirmation: current 1d volume > 2.0x 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_spike = volume_1d > (2.0 * vol_ma_20_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate Choppiness Index (14-period)
+    chop = np.zeros(n)
+    atr_14 = np.zeros(n)
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], np.abs(high[i] - close[i-1]), np.abs(low[i] - close[i-1]))
+    
+    for i in range(14, n):
+        atr_14[i] = np.mean(tr[i-13:i+1])
+        hh = np.max(high[i-13:i+1])
+        ll = np.min(low[i-13:i+1])
+        if atr_14[i] > 0:
+            chop[i] = 100 * np.log10(atr_14[i] * 14 / (hh - ll)) / np.log10(14)
+        else:
+            chop[i] = 50  # neutral
+    
+    # Align HTF indicators
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)  # KAMA is 12h but we use 1d for alignment safety
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for 1d ATR (14) and volume MA (20)
-    start_idx = max(14, 20)
+    # Start index: need warmup for KAMA (30), chop (14), volume MA (20)
+    start_idx = max(30, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price below L3 AND volume spike AND ATR > 0 (avoid dead markets)
-            long_setup = (close[i] < l3_aligned[i]) and \
-                         volume_spike_aligned[i] and \
-                         (atr_14_1d_aligned[i] > 0)
-            # Short: price above H3 AND volume spike AND ATR > 0
-            short_setup = (close[i] > h3_aligned[i]) and \
-                          volume_spike_aligned[i] and \
-                          (atr_14_1d_aligned[i] > 0)
+            # Determine regime: chop > 61.8 = range (mean revert), chop < 38.2 = trending (trend follow)
+            if chop_aligned[i] < 38.2:  # Trending regime
+                # Long: price > KAMA AND 1d trend bullish AND volume confirm
+                long_setup = (close[i] > kama_aligned[i]) and \
+                             (close[i] > ema_34_1d_aligned[i]) and \
+                             volume_confirm[i]
+                # Short: price < KAMA AND 1d trend bearish AND volume confirm
+                short_setup = (close[i] < kama_aligned[i]) and \
+                              (close[i] < ema_34_1d_aligned[i]) and \
+                              volume_confirm[i]
+            else:  # Range regime (chop >= 38.2)
+                # Long: price < KAMA (mean reversion to upside) AND volume confirm
+                long_setup = (close[i] < kama_aligned[i]) and volume_confirm[i]
+                # Short: price > KAMA (mean reversion to downside) AND volume confirm
+                short_setup = (close[i] > kama_aligned[i]) and volume_confirm[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -92,22 +127,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price crosses above L3 (mean reversion) OR volume spike ends
-            if (close[i] > l3_aligned[i]) or \
-               (~volume_spike_aligned[i]):
+            # Exit: regime change to range OR price crosses KAMA in wrong direction
+            if chop_aligned[i] >= 38.2 or close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price crosses below H3 (mean reversion) OR volume spike ends
-            if (close[i] < h3_aligned[i]) or \
-               (~volume_spike_aligned[i]):
+            # Exit: regime change to range OR price crosses KAMA in wrong direction
+            if chop_aligned[i] >= 38.2 or close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_PivotRange_Reversion_1dVolSpike_ATRFilter"
-timeframe = "6h"
+name = "12h_KAMA_Trend_Regime_Volume"
+timeframe = "12h"
 leverage = 1.0
