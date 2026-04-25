@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: On 12h timeframe, Camarilla pivot levels (R1/S1) from the previous day capture institutional interest.
-Break above R1 with volume spike and 1d uptrend (close > EMA34) signals long; break below S1 with volume spike and 
-1d downtrend (close < EMA34) signals short. Uses discrete position sizing (0.25) to limit trades (~12-37/year) and 
+4h_Camarilla_R1S1_Breakout_12hEMA50_Trend_VolumeSpike
+Hypothesis: On 4h timeframe, Camarilla pivot levels (R1/S1) from the previous day capture institutional interest.
+Break above R1 with volume spike and 12h uptrend (close > EMA50) signals long; break below S1 with volume spike and 
+12h downtrend (close < EMA50) signals short. Uses discrete position sizing (0.25) to limit trades (~20-50/year) and 
 minimize fee drag. Designed for BTC/ETH to work in both bull and bear markets by trading breakouts with trend and 
 volume confirmation, avoiding overtrading through tight entry conditions.
 """
@@ -22,15 +22,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter (loaded ONCE)
-    df_1d = get_htf_data(prices, '1d')
+    # 12h data for trend filter (loaded ONCE)
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d EMA34 for trend filter (loaded ONCE)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h EMA50 for trend filter (loaded ONCE)
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Previous day's Camarilla levels (R1, S1)
     # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    close_1d = df_12h['close'].values  # Use 12h close as proxy for daily? Actually need 1d data
+    # Correction: Need actual 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -39,7 +42,7 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # 12h volume spike: current volume > 2.0 * 20-period volume MA
+    # 4h volume spike: current volume > 2.0 * 20-period volume MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_ma_20)
     
@@ -51,7 +54,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
@@ -60,10 +63,10 @@ def generate_signals(prices):
         curr_close = close[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 with volume spike and 1d uptrend
-            long_breakout = (curr_close > camarilla_r1_aligned[i]) and vol_spike[i] and (curr_close > ema_34_1d_aligned[i])
-            # Short: price breaks below Camarilla S1 with volume spike and 1d downtrend
-            short_breakout = (curr_close < camarilla_s1_aligned[i]) and vol_spike[i] and (curr_close < ema_34_1d_aligned[i])
+            # Long: price breaks above Camarilla R1 with volume spike and 12h uptrend
+            long_breakout = (curr_close > camarilla_r1_aligned[i]) and vol_spike[i] and (curr_close > ema_50_12h_aligned[i])
+            # Short: price breaks below Camarilla S1 with volume spike and 12h downtrend
+            short_breakout = (curr_close < camarilla_s1_aligned[i]) and vol_spike[i] and (curr_close < ema_50_12h_aligned[i])
             
             if long_breakout:
                 signals[i] = 0.25
@@ -77,19 +80,19 @@ def generate_signals(prices):
             # Long: hold position
             signals[i] = 0.25
             # Exit: price breaks below Camarilla S1 OR trend turns down
-            if (curr_close < camarilla_s1_aligned[i]) or (curr_close < ema_34_1d_aligned[i]):
+            if (curr_close < camarilla_s1_aligned[i]) or (curr_close < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
             # Exit: price breaks above Camarilla R1 OR trend turns up
-            if (curr_close > camarilla_r1_aligned[i]) or (curr_close > ema_34_1d_aligned[i]):
+            if (curr_close > camarilla_r1_aligned[i]) or (curr_close > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_12hEMA50_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
