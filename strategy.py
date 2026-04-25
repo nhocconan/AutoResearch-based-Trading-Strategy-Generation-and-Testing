@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter (price > 1d EMA50 for long, < 1d EMA50 for short) and volume confirmation (>2.0x 20-bar mean volume). Uses HTF 1d for trend alignment to capture daily momentum while reducing whipsaw. Volume confirmation ensures breakouts have conviction. Discrete position sizing (0.25) minimizes fee churn. Designed for 12-25 trades/year per symbol, effective in both bull (breakouts with volume) and bear (trend-following via shorts) markets.
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (price > 1d EMA50 for long, < 1d EMA50 for short) and volume confirmation (>2.0x 24-bar mean volume). Uses HTF 1d for trend alignment to capture longer-term momentum while reducing whipsaw. Volume confirmation ensures breakouts have conviction. Discrete position sizing (0.25) minimizes fee churn. Designed for 12-37 trades/year per symbol, effective in both bull (breakouts with volume) and bear (trend-following via shorts) markets.
 """
 
 import numpy as np
@@ -30,20 +30,20 @@ def generate_signals(prices):
     # Calculate EMA(50) on 1d for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align EMA50 to 6h timeframe
+    # Align EMA50 to 12h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Camarilla levels from previous 1d bar (HLC of prior bar)
     camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)  # R3 = C + 1.1*(H-L)
     camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)  # S3 = C - 1.1*(H-L)
     
-    # Align Camarilla levels to 6h timeframe (use previous bar's levels)
+    # Align Camarilla levels to 12h timeframe (use previous bar's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current volume > 2.0x 20-bar mean volume
-    vol_mean_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_mean_20 * 2.0)
+    # Volume confirmation: current volume > 2.0x 24-bar mean volume (24*12h = 12d)
+    vol_mean_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > (vol_mean_24 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,7 +56,7 @@ def generate_signals(prices):
         if (np.isnan(ema_50_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(vol_mean_20[i])):
+            np.isnan(vol_mean_24[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
