@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA50_VolumeConfirm_v1
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA50 trend filter and volume spike confirmation.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirm_v3
+Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA50 trend filter and volume confirmation.
 - In trending markets (price > 1d EMA50): buy breakouts above R1, sell breakdowns below S1.
-- In ranging markets (price near 1d EMA50): fade extremes at R1/S1 with mean reversion.
-- Volume confirmation: require volume > 1.8x 20-period average to reduce false signals.
-- Position size: 0.25. Target: 75-200 total trades over 4 years = 19-50/year.
+- Volume confirmation: require volume > 1.5x 30-period average to reduce false signals.
+- Position size: 0.25. Target: 50-150 total trades over 4 years = 12-37/year.
+- Uses 12h primary timeframe to minimize fee drag while capturing multi-day trends.
 - Works in both bull and bear: trend filter adapts to market regime, volume filters noise.
-- Tighter volume threshold (1.8x vs 1.5x) and longer EMA (50 vs 34) to reduce trade frequency and improve Sharpe.
 """
 
 import numpy as np
@@ -51,21 +50,21 @@ def generate_signals(prices):
     r3 = pivot + (range_ * 1.1 / 4)
     s3 = pivot - (range_ * 1.1 / 4)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume spike confirmation: volume > 1.8x 20-period average (tighter than 1.5x)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    # Volume spike confirmation: volume > 1.5x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.5 * vol_ma_30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and volume MA (20)
+    # Start index: need warmup for EMA50 (50) and volume MA (30)
     start_idx = 50
     
     for i in range(start_idx, n):
@@ -76,7 +75,7 @@ def generate_signals(prices):
             np.isnan(r3_aligned[i]) or
             np.isnan(s3_aligned[i]) or
             np.isnan(pivot_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -86,8 +85,8 @@ def generate_signals(prices):
         
         # Determine if we are in trending or ranging market based on distance from EMA
         ema_distance = abs(close[i] - ema_50_1d_aligned[i]) / ema_50_1d_aligned[i]
-        trending_market = ema_distance > 0.025  # Slightly wider band (2.5%) to reduce whipsaws
-        ranging_market = ema_distance <= 0.025
+        trending_market = ema_distance > 0.025  # >2.5% away from EMA = trending
+        ranging_market = ema_distance <= 0.025   # <=2.5% away from EMA = ranging
         
         if position == 0:
             if trending_market:
@@ -138,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirm_v3"
+timeframe = "12h"
 leverage = 1.0
