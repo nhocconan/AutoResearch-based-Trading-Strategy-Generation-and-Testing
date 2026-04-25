@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_WeeklyATR_Breakout_v1
-Hypothesis: Trade 6h Donchian(20) breakouts confirmed by weekly ATR expansion and volume spike.
-Only long when price breaks above Donchian(20) high AND weekly ATR(14) > 1.2 * weekly ATR(50) AND volume > 2.0 * ATR6h.
-Only short when price breaks below Donchian(20) low AND same weekly ATR expansion condition AND volume > 2.0 * ATR6h.
-Weekly ATR expansion identifies periods of institutional participation, filtering low-volume false breakouts.
-Works in both bull and bear markets by trading breakouts with momentum confirmation.
+12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v2
+Hypothesis: Trade 12h Camarilla R1/S1 breakouts in the direction of the daily EMA34 trend, with volume confirmation.
+Only long when price breaks above Camarilla R1 AND daily close > daily EMA34 AND volume > 1.5 * ATR12h.
+Only short when price breaks below Camarilla S1 AND daily close < daily EMA34 AND volume > 1.5 * ATR12h.
+Uses discrete sizing 0.25 to limit fee drag. Target: 12-30 trades/year.
+Daily EMA34 trend filter provides structural edge in both bull and bear markets by aligning with intermediate-term institutional trend.
 """
 
 import numpy as np
@@ -22,31 +22,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR expansion filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:  # need enough for ATR(50)
+    # Get daily data for Camarilla pivot levels and EMA34 trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly ATR(14) and ATR(50) for expansion filter
-    tr1_w = np.maximum(df_1w['high'][1:] - df_1w['low'][1:], np.abs(df_1w['high'][1:] - df_1w['close'][:-1]))
-    tr2_w = np.maximum(np.abs(df_1w['low'][1:] - df_1w['close'][:-1]), tr1_w)
-    tr_w = np.concatenate([[np.inf], tr2_w])
-    atr14_w = pd.Series(tr_w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr50_w = pd.Series(tr_w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily OHLC for Camarilla levels (R1/S1)
+    o_1d = df_1d['open'].values
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
     
-    # Align weekly ATR values to 6h timeframe
-    atr14_w_aligned = align_htf_to_ltf(prices, df_1w, atr14_w)
-    atr50_w_aligned = align_htf_to_ltf(prices, df_1w, atr50_w)
+    # Camarilla R1 = C + (H-L)*1.1/12
+    # Camarilla S1 = C - (H-L)*1.1/12
+    camarilla_r1_1d = c_1d + (h_1d - l_1d) * 1.1 / 12
+    camarilla_s1_1d = c_1d - (h_1d - l_1d) * 1.1 / 12
     
-    # Weekly ATR expansion: ATR(14) > 1.2 * ATR(50)
-    weekly_atr_expansion = atr14_w_aligned > (1.2 * atr50_w_aligned)
+    # Align daily Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    # Calculate Donchian(20) on 6h data
-    lookback = 20
-    highest = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(c_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR for volume confirmation (using 6h data)
+    # Calculate ATR for volume confirmation (using 12h data)
     tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
     tr2 = np.maximum(np.abs(low[1:] - close[:-1]), tr1)
     tr = np.concatenate([[np.inf], tr2])
@@ -55,29 +55,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for Donchian(20), ATR(14), and weekly ATR
-    start_idx = max(lookback, 14, 50)
+    # Start index: need warmup for EMA34 and ATR
+    start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest[i]) or np.isnan(lowest[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr14_w_aligned[i]) or 
-            np.isnan(atr50_w_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0 * ATR (stronger filter)
-        volume_confirm = volume[i] > (2.0 * atr[i])
+        # Volume confirmation: current volume > 1.5 * ATR
+        volume_confirm = volume[i] > 1.5 * atr[i]
         
-        # Weekly ATR expansion filter
-        atr_expand = weekly_atr_expansion[i]
+        # Determine daily trend from EMA34
+        # Bullish trend: daily close > EMA34
+        # Bearish trend: daily close < EMA34
+        daily_close_aligned = align_htf_to_ltf(prices, df_1d, c_1d)[i]
+        if np.isnan(daily_close_aligned):
+            signals[i] = 0.0
+            continue
+            
+        if daily_close_aligned > ema_34_aligned[i]:
+            daily_trend = 'bullish'  # only allow longs
+        elif daily_close_aligned < ema_34_aligned[i]:
+            daily_trend = 'bearish'  # only allow shorts
+        else:
+            daily_trend = 'neutral'  # no trades in neutral zone
         
         if position == 0:
-            # Long setup: price breaks above Donchian high AND volume confirm AND ATR expansion
-            long_setup = (close[i] > highest[i]) and volume_confirm and atr_expand
+            # Long setup: price breaks above Camarilla R1 AND volume confirm AND bullish daily trend
+            long_setup = (close[i] > camarilla_r1_aligned[i]) and volume_confirm and (daily_trend == 'bullish')
             
-            # Short setup: price breaks below Donchian low AND volume confirm AND ATR expansion
-            short_setup = (close[i] < lowest[i]) and volume_confirm and atr_expand
+            # Short setup: price breaks below Camarilla S1 AND volume confirm AND bearish daily trend
+            short_setup = (close[i] < camarilla_s1_aligned[i]) and volume_confirm and (daily_trend == 'bearish')
             
             if long_setup:
                 signals[i] = 0.25
@@ -90,20 +101,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price breaks below Donchian low OR ATR expansion ends
-            if (close[i] < lowest[i]) or (not atr_expand):
+            # Exit: price breaks below Camarilla S1 OR daily trend turns bearish
+            if (close[i] < camarilla_s1_aligned[i]) or (daily_trend == 'bearish'):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price breaks above Donchian high OR ATR expansion ends
-            if (close[i] > highest[i]) or (not atr_expand):
+            # Exit: price breaks above Camarilla R1 OR daily trend turns bullish
+            if (close[i] > camarilla_r1_aligned[i]) or (daily_trend == 'bullish'):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Donchian20_WeeklyATR_Breakout_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
