@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_Dyn_v2
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and dynamic volume spike confirmation.
-- In trending markets (price > 1d EMA34): buy breakouts above R1, sell breakdowns below S1.
-- In ranging markets (price near 1d EMA34): fade extremes at R1/S1 with mean reversion.
-- Volume confirmation: require volume > 1.5x 20-period average to avoid false breakouts.
+4h_Camarilla_R1_S1_Breakout_1dEMA50_VolumeConfirm_v1
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA50 trend filter and volume spike confirmation.
+- In trending markets (price > 1d EMA50): buy breakouts above R1, sell breakdowns below S1.
+- In ranging markets (price near 1d EMA50): fade extremes at R1/S1 with mean reversion.
+- Volume confirmation: require volume > 1.8x 20-period average to reduce false signals.
 - Position size: 0.25. Target: 75-200 total trades over 4 years = 19-50/year.
 - Works in both bull and bear: trend filter adapts to market regime, volume filters noise.
+- Tighter volume threshold (1.8x vs 1.5x) and longer EMA (50 vs 34) to reduce trade frequency and improve Sharpe.
 """
 
 import numpy as np
@@ -25,13 +26,13 @@ def generate_signals(prices):
     
     # Get 1d data for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for HTF trend filter
+    # Calculate 1d EMA50 for HTF trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate daily Camarilla pivot levels (using previous day's OHLC)
     prev_close = np.roll(close_1d, 1)
@@ -57,19 +58,19 @@ def generate_signals(prices):
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume spike confirmation: volume > 1.5x 20-period average
+    # Volume spike confirmation: volume > 1.8x 20-period average (tighter than 1.5x)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA34 (34) and volume MA (20)
-    start_idx = 34
+    # Start index: need warmup for EMA50 (50) and volume MA (20)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
             np.isnan(r3_aligned[i]) or
@@ -79,14 +80,14 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend (bullish = price above 1d EMA34)
-        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
+        # Determine 1d HTF trend (bullish = price above 1d EMA50)
+        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
         
         # Determine if we are in trending or ranging market based on distance from EMA
-        ema_distance = abs(close[i] - ema_34_1d_aligned[i]) / ema_34_1d_aligned[i]
-        trending_market = ema_distance > 0.02  # >2% away from EMA = trending
-        ranging_market = ema_distance <= 0.02   # <=2% away from EMA = ranging
+        ema_distance = abs(close[i] - ema_50_1d_aligned[i]) / ema_50_1d_aligned[i]
+        trending_market = ema_distance > 0.025  # Slightly wider band (2.5%) to reduce whipsaws
+        ranging_market = ema_distance <= 0.025
         
         if position == 0:
             if trending_market:
@@ -137,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_Dyn_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
