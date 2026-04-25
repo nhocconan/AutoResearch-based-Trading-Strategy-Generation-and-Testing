@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v5
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike captures institutional breakout moves in both bull and bear markets. Uses discrete position sizing (0.25) and ATR-based stoploss (2.0) to target 75-200 total trades over 4 years. Works in trending markets by only taking breakouts in direction of higher timeframe trend, avoiding false reversals. Added volume spike filter to reduce false breakouts and improve trade quality. Reduced trade frequency by tightening volume spike threshold to 2.5x and adding minimum holding period of 3 bars to avoid whipsaw.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v6
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike captures institutional breakout moves in both bull and bear markets. Uses discrete position sizing (0.25) and ATR-based stoploss (2.0) to target 75-200 total trades over 4 years. Works in trending markets by only taking breakouts in direction of higher timeframe trend, avoiding false reversals. Added volume spike filter to reduce false breakouts and improve trade quality. Reduced trade frequency by tightening volume spike threshold to 3.0x and adding minimum holding period of 4 bars to avoid whipsaw.
 """
 
 import numpy as np
@@ -67,9 +67,9 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
     
-    # Volume filter: volume > 2.5x 20-period average (tighter filter for quality)
+    # Volume filter: volume > 3.0x 20-period average (tighter filter for quality)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.5 * vol_ma_20)
+    vol_spike = volume > (3.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -130,10 +130,10 @@ def generate_signals(prices):
             signals[i] = 0.25
             bars_since_entry += 1
             # Exit conditions:
-            # 1. Minimum holding period of 3 bars to avoid whipsaw
+            # 1. Minimum holding period of 4 bars to avoid whipsaw
             # 2. Price closes below S1 (opposite Camarilla level)
             # 3. ATR-based stoploss: 2.0 * ATR below entry
-            if bars_since_entry >= 3:
+            if bars_since_entry >= 4:
                 exit_signal = close_4h_val < s1_val
                 stop_signal = close_4h_val < (entry_price - 2.0 * atr_val)
                 if exit_signal or stop_signal:
@@ -145,10 +145,10 @@ def generate_signals(prices):
             signals[i] = -0.25
             bars_since_entry += 1
             # Exit conditions:
-            # 1. Minimum holding period of 3 bars to avoid whipsaw
+            # 1. Minimum holding period of 4 bars to avoid whipsaw
             # 2. Price closes above R1 (opposite Camarilla level)
             # 3. ATR-based stoploss: 2.0 * ATR above entry
-            if bars_since_entry >= 3:
+            if bars_since_entry >= 4:
                 exit_signal = close_4h_val > r1_val
                 stop_signal = close_4h_val > (entry_price + 2.0 * atr_val)
                 if exit_signal or stop_signal:
@@ -158,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v5"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v6"
 timeframe = "4h"
 leverage = 1.0
