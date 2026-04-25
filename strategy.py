@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Confirmation
-Hypothesis: Daily weekly pivot (based on prior week's H/L/C) determines institutional bias.
-6h Donchian breakout in direction of weekly pivot with volume confirmation captures
-trend continuation while avoiding counter-trend whipsaws. Works in bull/bear by
-adapting pivot bias: long when price above weekly pivot, short when below.
-Uses discrete sizing (0.25) and volume threshold (1.8x) to target ~80-120 trades over 4 years.
+12h Williams Alligator + 1d EMA34 Trend + Volume Spike
+Hypothesis: Williams Alligator (jaw/teeth/lips) identifies trend absence/presence on 12h.
+When Alligator is "sleeping" (intertwined) = range, "awakening" (diverged) = trend.
+Enter long when lips > teeth > jaw AND price > 1d EMA34 with volume spike.
+Enter short when lips < teeth < jaw AND price < 1d EMA34 with volume spike.
+Uses discrete sizing (0.25) and volume threshold (2.0x) to target 50-150 trades over 4 years.
+Works in bull/bear by requiring trend alignment with higher timeframe EMA.
 """
 
 import numpy as np
@@ -22,33 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate weekly pivot from prior week's OHLC (using 5-day approximation)
-    # Weekly high = max of prior 5 daily highs
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values
-    # Weekly low = min of prior 5 daily lows
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
-    # Weekly close = prior Friday's close (approximated as 5th prior daily close)
-    weekly_close = pd.Series(df_1d['close']).shift(5).values
+    # Calculate 1d EMA34
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Weekly pivot point: (H + L + C) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Williams Alligator on 12h (SMAs of median price)
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2.0
     
-    # Align daily data to 6h timeframe
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Jaw: 13-period SMMA, shifted 8 bars
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMMA, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMMA, shifted 3 bars
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # 6h Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # 6h volume average for confirmation
+    # Volume confirmation: 20-period volume average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for dynamic stop (optional trailing stop via signal=0)
+    # ATR for stoploss (optional trailing via signal=0)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -60,13 +58,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for weekly pivot (5d) + Donchian (20) + VolMA (20) + ATR (14)
-    start_idx = max(50, 20, 20)
+    # Start index: need enough for Alligator (13+8=21) + EMA34 (34) + VolMA (20) + ATR (14)
+    start_idx = max(50, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(weekly_pivot_6h[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,15 +74,15 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        pivot_level = weekly_pivot_6h[i]
+        ema_trend = ema_34_1d_aligned[i]
         atr_value = atr[i]
         
-        # Volume spike: current volume > 1.8 * 20-period average
-        volume_spike = curr_volume > 1.8 * vol_ma_20[i]
+        # Volume spike: current volume > 2.0 * 20-period average
+        volume_spike = curr_volume > 2.0 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        bullish_breakout = curr_close > donchian_high[i]  # Break above upper band
-        bearish_breakout = curr_close < donchian_low[i]   # Break below lower band
+        # Alligator conditions
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]  # Lips > Teeth > Jaw
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]  # Lips < Teeth < Jaw
         
         # Update tracking variables for trailing stop logic
         if position == 1:
@@ -92,7 +90,7 @@ def generate_signals(prices):
         elif position == -1:
             lowest_since_entry = min(lowest_since_entry, curr_low)
         
-        # Exit conditions: trailing stop or reverse breakout
+        # Exit conditions: trailing stop or Alligator sleep (reversal)
         if position != 0:
             exit_signal = False
             
@@ -100,16 +98,16 @@ def generate_signals(prices):
                 # Trailing stop: exit if price drops 2.5*ATR from highest since entry
                 if curr_close < highest_since_entry - 2.5 * atr_value:
                     exit_signal = True
-                # Reverse breakout or pivot rejection
-                elif curr_close < donchian_low[i] or curr_close < pivot_level:
+                # Alligator sleeping or trend reversal
+                elif not bullish_alignment or curr_close < ema_trend:
                     exit_signal = True
                     
             elif position == -1:
                 # Trailing stop: exit if price rises 2.5*ATR from lowest since entry
                 if curr_close > lowest_since_entry + 2.5 * atr_value:
                     exit_signal = True
-                # Reverse breakout or pivot rejection
-                elif curr_close > donchian_high[i] or curr_close > pivot_level:
+                # Alligator sleeping or trend reversal
+                elif not bearish_alignment or curr_close > ema_trend:
                     exit_signal = True
             
             if exit_signal:
@@ -119,12 +117,12 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # Entry conditions: Donchian breakout + pivot alignment + volume
+        # Entry conditions: Alligator alignment + EMA trend + volume
         if position == 0:
-            # Long: break above Donchian high AND price above weekly pivot
-            long_condition = bullish_breakout and (curr_close > pivot_level) and volume_spike
-            # Short: break below Donchian low AND price below weekly pivot
-            short_condition = bearish_breakout and (curr_close < pivot_level) and volume_spike
+            # Long: bullish alignment AND price above EMA34 AND volume spike
+            long_condition = bullish_alignment and (curr_close > ema_trend) and volume_spike
+            # Short: bearish alignment AND price below EMA34 AND volume spike
+            short_condition = bearish_alignment and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -143,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dWeeklyPivot_Direction_Volume_v1"
-timeframe = "6h"
+name = "12h_Williams_Alligator_1dEMA34_Trend_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
