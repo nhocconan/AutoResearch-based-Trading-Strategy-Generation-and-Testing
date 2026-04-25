@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike_V2
-Hypothesis: On 4h timeframe, Camarilla H4/L4 breakouts with 1d ATR-based trend filter and volume spike.
-Uses H4/L4 levels (wider than H3/L3) for fewer, higher-quality breakouts. Volume spike confirms institutional participation.
-1d ATR trend filter ensures trades align with strong daily momentum (price > EMA + 0.5*ATR for long, < EMA - 0.5*ATR for short).
-This filters out weak breakouts in choppy markets while capturing strong trending moves. Target: 20-50 trades/year.
-Optimized for lower trade count to avoid fee drag while maintaining edge in both bull and bear markets.
+6h_WeeklyPivot_Confluence_Breakout_1dTrend_VolumeConfirm
+Hypothesis: On 6h timeframe, weekly Camarilla pivot breakouts (R4/S4) combined with 1d EMA trend filter and volume confirmation.
+Weekly pivots capture major support/resistance from prior week, reducing false breakouts. 1d EMA ensures alignment with intermediate trend.
+Volume spike confirms institutional participation. Target: 12-30 trades/year (50-150 over 4 years).
+Designed to work in both bull (breakout continuation) and bear (fade at extreme levels) markets via confluence filtering.
 """
 
 import numpy as np
@@ -18,19 +17,9 @@ def calculate_ema(series, period):
         return np.full_like(series, np.nan)
     return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range with min_periods"""
-    if len(high) < period:
-        return np.full_like(high, np.nan)
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff()
-    tr3 = pd.Series(close).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -38,44 +27,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA34 and ATR14 trend filter (loaded ONCE)
+    # 1d data for EMA trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA34 trend filter
     ema_34_1d = calculate_ema(df_1d['close'].values, 34)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ATR14 for trend strength filter
-    atr_14_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # 1w data for weekly Camarilla pivots (R4/S4 levels)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d data for Camarilla pivots (H4/L4 levels - wider bands for fewer trades)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Weekly Camarilla calculation: based on prior week's OHLC
+    prev_week_close = df_1w['close'].shift(1).values
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
     
-    camarilla_range = 1.1 * (prev_high - prev_low)
-    h4 = prev_close + camarilla_range * 0.50  # H4 level (widest)
-    l4 = prev_close - camarilla_range * 0.50  # L4 level (widest)
+    weekly_range = 1.1 * (prev_week_high - prev_week_low)
+    r4 = prev_week_close + weekly_range * 0.50  # Weekly R4 (strongest resistance)
+    s4 = prev_week_close - weekly_range * 0.50  # Weekly S4 (strongest support)
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Align weekly pivots to 6h timeframe (completed weekly bar)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Volume spike: current volume > 2.0 * 30-period average (stricter for fewer trades)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume spike: current volume > 2.0 * 20-period average (moderate threshold)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA (34) + ATR (14) + volume MA (30)
-    start_idx = max(34, 14, 30)
+    # Start index: need enough for EMA (34) + volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -85,13 +73,13 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla H4/L4 breakout + volume spike + 1d ATR trend alignment
-            long_breakout = curr_high > h4_aligned[i]
-            short_breakout = curr_low < l4_aligned[i]
+            # Look for entry signals - require: Weekly R4/S4 breakout + volume spike + 1d EMA trend alignment
+            long_breakout = curr_high > r4_aligned[i]
+            short_breakout = curr_low < s4_aligned[i]
             
-            # Trend filter: price must be beyond EMA by 0.5*ATR to confirm strong momentum
-            long_trend = curr_close > (ema_34_1d_aligned[i] + 0.5 * atr_14_1d_aligned[i])
-            short_trend = curr_close < (ema_34_1d_aligned[i] - 0.5 * atr_14_1d_aligned[i])
+            # Trend filter: price must be on correct side of 1d EMA
+            long_trend = curr_close > ema_34_1d_aligned[i]
+            short_trend = curr_close < ema_34_1d_aligned[i]
             
             long_entry = (long_breakout and volume_spike[i] and long_trend)
             short_entry = (short_breakout and volume_spike[i] and short_trend)
@@ -105,15 +93,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below H4 (failed breakout) or trend weakens
-            if curr_close < h4_aligned[i] or curr_close < (ema_34_1d_aligned[i] + 0.5 * atr_14_1d_aligned[i]):
+            # Long position: exit when price closes below weekly R4 (failed breakout) or trend reverses
+            if curr_close < r4_aligned[i] or curr_close < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price closes above L4 (failed breakout) or trend weakens
-            if curr_close > l4_aligned[i] or curr_close > (ema_34_1d_aligned[i] - 0.5 * atr_14_1d_aligned[i]):
+            # Short position: exit when price closes above weekly S4 (failed breakout) or trend reverses
+            if curr_close > s4_aligned[i] or curr_close > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike_V2"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Confluence_Breakout_1dTrend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
