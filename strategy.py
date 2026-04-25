@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_Regime_Tight
-Hypothesis: Tighten entry conditions from overtrading variants by adding volume spike multiplier (3.0x) and stricter chop filter (<50) to reduce trades to target range (75-200/4y). Uses 4h Camarilla H3/L3 breakouts with 1d EMA34 trend filter, volume confirmation, and choppiness regime. Designed for 15-35 trades/year on BTC/ETH with controlled risk and fees.
+1d_Camarilla_R1S1_Breakout_1wEMA34_Trend_VolumeSpike_Regime
+Hypothesis: Daily Camarilla R1/S1 breakout with weekly EMA34 trend filter, volume spike confirmation, and choppiness regime filter.
+Uses weekly trend for higher timeframe bias to reduce whipsaw, daily for precise entries. Choppiness filter avoids ranging markets.
+Designed for 7-25 trades/year on BTC/ETH with controlled risk and low fee drag.
 """
 
 import numpy as np
@@ -22,29 +24,31 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1d data for EMA34 trend filter and Camarilla pivots (loaded ONCE)
-    df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w data for EMA34 trend filter (loaded ONCE)
+    df_1w = get_htf_data(prices, '1w')
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
+    # 1d data for Camarilla pivots (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_range = prev_high - prev_low
     
-    # Camarilla H3 and L3 levels
-    H3 = prev_close + 1.1 * prev_range * 0.5  # H3 = C + 1.1*(HL/2)
-    L3 = prev_close - 1.1 * prev_range * 0.5  # L3 = C - 1.1*(HL/2)
+    # Camarilla R1 and S1 levels
+    R1 = prev_close + 1.1 * prev_range * (1.0/12)  # R1 = C + 1.1*(HL/12)
+    S1 = prev_close - 1.1 * prev_range * (1.0/12)  # S1 = C - 1.1*(HL/12)
     
-    # Align 1d levels to 4h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align 1d pivot levels to 1d timeframe (same)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume spike: current volume > 3.0 * 20-period average (tighter)
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 3.0)
+    volume_spike = volume > (vol_ma * 2.0)
     
-    # Choppiness regime filter: CHOP < 50 = trending (only trade in strong trends)
+    # Choppiness regime filter: CHOP > 61.8 = ranging (avoid breakouts)
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -60,15 +64,16 @@ def generate_signals(prices):
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
     # Choppiness Index: 100 * log10(sum_tr / (highest_high - lowest_low)) / log10(14)
+    # Avoid division by zero
     hl_range = highest_high - lowest_low
     chop = np.where(hl_range > 0, 100 * np.log10(sum_tr / hl_range) / np.log10(14), 50)
-    chop_filter = chop < 50  # Only trade when strongly trending (CHOP < 50)
+    chop_filter = chop < 61.8  # Only trade when NOT choppy (trending)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA34 (34) and 1d indicators
+    # Start index: need enough for 1w EMA34 (34) and 1d indicators
     start_idx = 34
     
     for i in range(start_idx, n):
@@ -78,8 +83,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -87,16 +92,16 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: price relative to 1w EMA34
+        uptrend = curr_close > ema_34_1w_aligned[i]
+        downtrend = curr_close < ema_34_1w_aligned[i]
         
         if position == 0:
             # Look for entry signals with volume spike, trend alignment, and chop filter
-            # Long breakout: price breaks above H3 with uptrend, volume spike, and trending regime
-            long_breakout = (curr_close > H3_aligned[i]) and uptrend and volume_spike[i] and chop_filter[i]
-            # Short breakout: price breaks below L3 with downtrend, volume spike, and trending regime
-            short_breakout = (curr_close < L3_aligned[i]) and downtrend and volume_spike[i] and chop_filter[i]
+            # Long breakout: price breaks above R1 with uptrend, volume spike, and trending regime
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_spike[i] and chop_filter[i]
+            # Short breakout: price breaks below S1 with downtrend, volume spike, and trending regime
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_spike[i] and chop_filter[i]
             
             if long_breakout:
                 signals[i] = 0.25
@@ -120,15 +125,15 @@ def generate_signals(prices):
             if curr_close < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks below L3 (mean reversion) or trend changes or chop increases
-            elif curr_close < L3_aligned[i] or not uptrend or not chop_filter[i]:
+            # Exit if price breaks below S1 (mean reversion) or trend changes or chop increases
+            elif curr_close < S1_aligned[i] or not uptrend or not chop_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Calculate 4h ATR (same as above)
+            # Calculate 1d ATR (same as above)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -138,8 +143,8 @@ def generate_signals(prices):
             if curr_close > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks above H3 (mean reversion) or trend changes or chop increases
-            elif curr_close > H3_aligned[i] or not downtrend or not chop_filter[i]:
+            # Exit if price breaks above R1 (mean reversion) or trend changes or chop increases
+            elif curr_close > R1_aligned[i] or not downtrend or not chop_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -147,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_Regime_Tight"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wEMA34_Trend_VolumeSpike_Regime"
+timeframe = "1d"
 leverage = 1.0
