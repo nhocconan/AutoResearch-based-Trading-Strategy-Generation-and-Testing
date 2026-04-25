@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dADXTrend_VolumeConfirm
-Hypothesis: Camarilla R3/S3 breakouts on 6h with 1d ADX(14)>25 trend filter and volume confirmation (2.0x 24-bar avg). 
-Only trade breakouts aligned with strong 1d trend to avoid whipsaws. Volume confirms institutional participation.
-Designed for 6h timeframe targeting 15-25 trades/year. Works in bull/bear by following 1d ADX trend.
+12h_Camarilla_R1_S1_Breakout_1dADXTrend_VolumeConfirm
+Hypothesis: Camarilla R1/S1 breakouts on 12h with 1d ADX(14)>25 trend filter and volume confirmation (1.8x 48-bar avg). 
+Only trade breakouts aligned with strong 1d trend to avoid whipsaws in ranging markets. Volume confirms institutional participation.
+Designed for 12h timeframe targeting 12-30 trades/year. Works in bull/bear by following 1d ADX trend.
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter (ADX) and Camarilla levels
+    # Get 1d data for HTF trend filter (ADX)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -58,52 +58,38 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilder_smooth(dx, 14)
     
-    # Align ADX, +DI, -DI to 6h timeframe (1-day lagged for completed bar)
+    # Align ADX, +DI, -DI to 12h timeframe (1-day lagged for completed bar)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx, additional_delay_bars=1)
     plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di, additional_delay_bars=1)
     minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di, additional_delay_bars=1)
     
-    # Calculate Camarilla pivot levels on 1d data (based on previous day)
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We use previous day's OHLC to calculate today's levels
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
+    # Calculate Camarilla levels on 1d data (based on previous day's OHLC)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1 = close_1d + camarilla_range
+    s1 = close_1d - camarilla_range
     
-    # Avoid using first bar (no previous day)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1, additional_delay_bars=1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1, additional_delay_bars=1)
     
-    range_1d = prev_high - prev_low
-    camarilla_r3 = prev_close + (range_1d * 1.1 / 4)
-    camarilla_s3 = prev_close - (range_1d * 1.1 / 4)
-    camarilla_r4 = prev_close + (range_1d * 1.1 / 2)
-    camarilla_s4 = prev_close - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 6h timeframe (1-day lagged for completed bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3, additional_delay_bars=1)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3, additional_delay_bars=1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4, additional_delay_bars=1)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4, additional_delay_bars=1)
-    
-    # Volume confirmation: 2.0x 24-bar average volume (48h = 2 days on 6h)
-    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    # Volume confirmation: 1.8x 48-bar average volume (48*12h = 24 days on 12h)
+    volume_ma = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    volume_spike = volume > (1.8 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for ADX and Camarilla (need previous day)
-    start_idx = max(50, 1)  # 50 for ADX warmup
+    # Start index: need warmup for ADX and volume
+    start_idx = max(50, 48)  # 50 for ADX warmup, 48 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i])):
+            np.isnan(plus_di_aligned[i]) or
+            np.isnan(minus_di_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -113,10 +99,9 @@ def generate_signals(prices):
         trend_bearish = strong_trend and (minus_di_aligned[i] > plus_di_aligned[i])
         
         if position == 0:
-            # Look for breakout signals at R3/S3 with volume confirmation and strong trend alignment
-            # Only trade breakouts that continue the trend (break above R3 in uptrend, below S3 in downtrend)
-            long_signal = (close[i] > r3_aligned[i]) and volume_spike[i] and trend_bullish
-            short_signal = (close[i] < s3_aligned[i]) and volume_spike[i] and trend_bearish
+            # Look for breakout signals with volume confirmation and strong trend alignment
+            long_signal = (close[i] > r1_aligned[i]) and volume_spike[i] and trend_bullish
+            short_signal = (close[i] < s1_aligned[i]) and volume_spike[i] and trend_bearish
             
             if long_signal:
                 signals[i] = 0.25
@@ -129,22 +114,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price breaks below S3 or trend weakens (ADX < 20)
-            exit_signal = (close[i] < s3_aligned[i]) or (adx_aligned[i] < 20)
+            # Exit when price breaks below S1 or trend weakens (ADX < 20)
+            exit_signal = (close[i] < s1_aligned[i]) or (adx_aligned[i] < 20)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price breaks above R3 or trend weakens (ADX < 20)
-            exit_signal = (close[i] > r3_aligned[i]) or (adx_aligned[i] < 20)
+            # Exit when price breaks above R1 or trend weakens (ADX < 20)
+            exit_signal = (close[i] > r1_aligned[i]) or (adx_aligned[i] < 20)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dADXTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dADXTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
