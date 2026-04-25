@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Williams Alligator + 1d EMA34 Trend + Volume Spike
-Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend phases on 6h.
-When Lips cross above Teeth/Jaw with 1d EMA34 uptrend and volume confirmation,
-it captures strong bullish momentum. Reverse for bearish. Works in bull/bear
-by following 1d trend while using Alligator for precise entry/exit.
-Target: 50-150 total trades over 4 years (12-37/year).
+4h Camarilla R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Camarilla pivot levels (R3/S3) from 1d act as strong support/resistance on 4h.
+Breakout through these levels with 1d EMA34 trend alignment and volume confirmation
+captures institutional flow while avoiding overtrading. Uses tighter volume threshold (2.0x)
+and discrete position sizing (0.30) to target 75-200 total trades over 4 years.
+Works in bull/bear by following 1d trend while using Camarilla levels for precise entry/exit.
 """
 
 import numpy as np
@@ -22,35 +22,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator on 6h: SMAs with specific offsets
-    # Jaw: 13-period SMA, shifted 8 bars
-    # Teeth: 8-period SMA, shifted 5 bars
-    # Lips: 5-period SMA, shifted 3 bars
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
-    
-    # 1d EMA34 for trend filter
+    # Calculate Camarilla levels from previous day (1d)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
     
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Align daily data to 4h timeframe
+    prev_high_4h = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_4h = align_htf_to_ltf(prices, df_1d, prev_low)
+    prev_close_4h = align_htf_to_ltf(prices, df_1d, prev_close)
+    
+    # Calculate Camarilla levels: R3/S3
+    rng = prev_high_4h - prev_low_4h
+    r3 = prev_close_4h + rng * 1.1 / 4.0
+    s3 = prev_close_4h - rng * 1.1 / 4.0
+    
+    # 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6h volume average for confirmation
+    # 4h volume average for confirmation (tighter threshold)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Alligator (max shift 8) + EMA34 + VolMA20
-    start_idx = max(20, 34)  # covers shifts and indicators
+    # Start index: need enough for Camarilla (1d) + EMA34 + VolMA20
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -61,43 +69,42 @@ def generate_signals(prices):
         curr_volume = volume[i]
         ema_34_level = ema_34_1d_aligned[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
+        # Volume spike: current volume > 2.0 * 20-period average (tighter)
         volume_spike = curr_volume > 2.0 * vol_ma_20[i]
         
-        # Alligator conditions: Lips > Teeth > Jaw = bullish alignment
-        # Lips < Teeth < Jaw = bearish alignment
-        bullish_alligator = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alligator = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Breakout conditions
+        bullish_breakout = curr_close > r3[i]  # Break above R3
+        bearish_breakout = curr_close < s3[i]  # Break below S3
         
-        # Exit conditions: Alligator loses alignment or trend change
+        # Exit conditions: reverse breakout or trend change
         if position != 0:
-            if position == 1 and (not bullish_alligator or curr_close < ema_34_level):
+            if position == 1 and (curr_close < s3[i] or curr_close < ema_34_level):
                 signals[i] = 0.0
                 position = 0
                 continue
-            elif position == -1 and (not bearish_alligator or curr_close > ema_34_level):
+            elif position == -1 and (curr_close > r3[i] or curr_close > ema_34_level):
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Entry conditions: Alligator alignment + trend + volume
+        # Entry conditions: Breakout + trend + volume
         if position == 0:
-            long_condition = bullish_alligator and (curr_close > ema_34_level) and volume_spike
-            short_condition = bearish_alligator and (curr_close < ema_34_level) and volume_spike
+            long_condition = bullish_breakout and (curr_close > ema_34_level) and volume_spike
+            short_condition = bearish_breakout and (curr_close < ema_34_level) and volume_spike
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.30
     
     return signals
 
-name = "6h_Williams_Alligator_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
