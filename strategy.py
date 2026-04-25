@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and choppiness regime filter.
-Long when price breaks above Camarilla R1 in 1d uptrend (close > 1d EMA50) and market is not choppy (Chop < 61.8).
-Short when price breaks below Camarilla S1 in 1d downtrend (close < 1d EMA50) and market is not choppy (Chop < 61.8).
-Exit via ATR-based trailing stop (2.0*ATR from extreme) or re-entry into Camarilla H3/L3 range.
-Designed for ~20-40 trades/year by requiring strong breakouts, trend alignment, and low-chop regime.
-Works in bull/bear markets via 1d EMA50 filter; avoids whipsaws via chop regime filter and volume confirmation.
+12h_Donchian20_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+Long when price breaks above 20-period Donchian high in 1d uptrend (close > 1d EMA50) with volume > 2.0x 20-bar average.
+Short when price breaks below 20-period Donchian low in 1d downtrend (close < 1d EMA50) with volume > 2.0x 20-bar average.
+Exit via ATR-based trailing stop (2.5*ATR from extreme) or re-entry into Donchian(10) range.
+Designed for ~12-37 trades/year by requiring strong breakouts, trend alignment, and volume confirmation.
+Works in bull/bear markets via 1d EMA50 filter; avoids whipsaws via volume confirmation and tight stops.
 """
 
 import numpy as np
@@ -23,36 +23,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels (HTF)
+    # Get 1d data for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
     # Calculate 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate Camarilla levels from previous day
-    # Previous day's OHLC (align to current 4h bars with 1-bar delay for completed day)
-    prev_close = align_htf_to_ltf(prices, df_1d, df_1d['close'].values, additional_delay_bars=1)
-    prev_high = align_htf_to_ltf(prices, df_1d, df_1d['high'].values, additional_delay_bars=1)
-    prev_low = align_htf_to_ltf(prices, df_1d, df_1d['low'].values, additional_delay_bars=1)
-    prev_open = align_htf_to_ltf(prices, df_1d, df_1d['open'].values, additional_delay_bars=1)
-    
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # H3 = C + (H-L)*1.1/2, L3 = C - (H-L)*1.1/2
-    camarilla_range = prev_high - prev_low
-    R1 = prev_close + camarilla_range * 1.1 / 12
-    S1 = prev_close - camarilla_range * 1.1 / 12
-    R3 = prev_close + camarilla_range * 1.1 / 4
-    S3 = prev_close - camarilla_range * 1.1 / 4
-    H3 = prev_close + camarilla_range * 1.1 / 2
-    L3 = prev_close - camarilla_range * 1.1 / 2
     
     # ATR for trailing stop (14-period)
     atr_period = 14
@@ -63,90 +43,88 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # first period
     atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Choppiness Index regime filter (14-period)
-    chop_period = 14
-    # True Range (same as ATR calculation)
-    tr_chop = tr  # reuse TR from above
-    # Sum of True Range over chop_period
-    atr_sum = pd.Series(tr_chop).rolling(window=chop_period, min_periods=chop_period).sum().values
-    # Highest high and lowest low over chop_period
-    hh = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
-    ll = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
-    # Chop = 100 * log10(atr_sum / (hh - ll)) / log10(chop_period)
-    # Avoid division by zero
-    hh_ll = hh - ll
-    hh_ll = np.where(hh_ll == 0, 1e-10, hh_ll)  # small epsilon to prevent div by zero
-    chop = 100 * np.log10(atr_sum / hh_ll) / np.log10(chop_period)
-    # Market is not choppy when Chop < 61.8 (trending regime)
-    not_choppy = chop < 61.8
+    # Volume regime: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_regime = volume > (2.0 * vol_ma_20)
+    
+    # Donchian channels (20-period for entry, 10-period for exit)
+    donchian_len = 20
+    donchian_exit_len = 10
+    
+    # 20-period Donchian high/low
+    highest_20 = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
+    lowest_20 = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
+    
+    # 10-period Donchian high/low for exit
+    highest_10 = pd.Series(high).rolling(window=donchian_exit_len, min_periods=donchian_exit_len).max().values
+    lowest_10 = pd.Series(low).rolling(window=donchian_exit_len, min_periods=donchian_exit_len).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_high = 0.0   # highest close since long entry
-    short_low = 0.0   # lowest close since short entry
+    long_high = 0.0   # highest high since long entry
+    short_low = 0.0   # lowest low since short entry
     
     # Start index: need warmup for calculations
-    start_idx = max(100, atr_period, chop_period)
+    start_idx = max(100, atr_period, donchian_len, donchian_exit_len)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(atr[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         ema_trend = ema_50_1d_aligned[i]
-        is_not_choppy = not_choppy[i]
         
         if position == 0:
-            # Only trade in trending regimes (1d EMA50 filter) and non-choppy market
-            if ema_trend > 0 and is_not_choppy:  # 1d uptrend regime and not choppy
-                # Long: break above Camarilla R1
-                long_signal = close[i] > R1[i]
-            elif ema_trend < 0 and is_not_choppy:  # 1d downtrend regime and not choppy
-                # Short: break below Camarilla S1
-                short_signal = close[i] < S1[i]
-            else:
-                long_signal = False
-                short_signal = False
+            # Only trade in trending regimes (1d EMA50 filter)
+            if close[i] > ema_trend:  # 1d uptrend regime
+                # Long: break above 20-period Donchian high with volume spike
+                long_signal = (close[i] > highest_20[i]) and vol_regime[i]
+            else:  # 1d downtrend regime
+                # Short: break below 20-period Donchian low with volume spike
+                short_signal = (close[i] < lowest_20[i]) and vol_regime[i]
             
-            if long_signal:
+            if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
                 position = 1
-                long_high = close[i]
-            elif short_signal:
+                long_high = high[i]
+            elif 'short_signal' in locals() and short_signal:
                 signals[i] = -0.25
                 position = -1
-                short_low = close[i]
+                short_low = low[i]
             else:
                 signals[i] = 0.0
+                # Clear signal variables for next iteration
+                if 'long_signal' in locals(): del long_signal
+                if 'short_signal' in locals(): del short_signal
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Update highest close
-            if close[i] > long_high:
-                long_high = close[i]
-            # Exit conditions: ATR trailing stop OR re-enter Camarilla H3/L3 range
-            atr_stop = long_high - 2.0 * atr[i]
-            range_exit = (close[i] < H3[i] and close[i] > L3[i])
+            # Update highest high
+            if high[i] > long_high:
+                long_high = high[i]
+            # Exit conditions: ATR trailing stop OR re-enter Donchian(10) range
+            atr_stop = long_high - 2.5 * atr[i]
+            range_exit = (close[i] < highest_10[i] and close[i] > lowest_10[i])
             if close[i] <= atr_stop or range_exit:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Update lowest close
-            if close[i] < short_low:
-                short_low = close[i]
-            # Exit conditions: ATR trailing stop OR re-enter Camarilla H3/L3 range
-            atr_stop = short_low + 2.0 * atr[i]
-            range_exit = (close[i] > L3[i] and close[i] < H3[i])
+            # Update lowest low
+            if low[i] < short_low:
+                short_low = low[i]
+            # Exit conditions: ATR trailing stop OR re-enter Donchian(10) range
+            atr_stop = short_low + 2.5 * atr[i]
+            range_exit = (close[i] > lowest_10[i] and close[i] < highest_10[i])
             if close[i] >= atr_stop or range_exit:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
