@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1h Camarilla H3/L3 Breakout + Volume Spike + ATR Filter (1h primary)
-Hypothesis: Camarilla H3/L3 levels from 4h/1d represent strong intraday support/resistance where breakouts indicate institutional participation.
-Volume confirms real money involvement, ATR filter ensures sufficient momentum. Uses 4h/1d for signal direction, 1h only for entry timing.
-Session filter (08-20 UTC) reduces noise trades. Target: 15-37 trades/year on 1h.
+6h Williams Fractal Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+Hypothesis: Williams fractals identify swing points where price reverses; breakouts from recent fractal highs/lows with volume confirmation and EMA trend filter capture momentum moves. Chop filter avoids whipsaws in sideways markets. Works in bull/bear via breakout logic and trend filter.
+Target: 12-37 trades/year on 6h.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,103 +19,109 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for HTF direction and Camarilla pivots
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    # Load 1d data ONCE before loop for HTF trend filter
+    # Load 1d data ONCE before loop for HTF indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla pivots from previous 4h bar (H3/L3 for breakout)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Camarilla levels: H3 = close + (high-low)*1.1/2, L3 = close - (high-low)*1.1/2
-    camarilla_h3_4h = close_4h + (high_4h - low_4h) * 1.1 / 2
-    camarilla_l3_4h = close_4h - (high_4h - low_4h) * 1.1 / 2
-    
-    # Align Camarilla levels to 1h timeframe (use previous 4h bar's levels)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3_4h)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3_4h)
-    
-    # 1d EMA34 for trend filter (only need completed 1d candle)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # EMA34 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (1h)
+    # Williams fractals on 1d high/low (needs 2 extra bars for confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
+    
+    # 6h Donchian channels for breakout levels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # ATR filter: ensure sufficient volatility (1h ATR)
-    tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
+    # Chop filter: avoid sideways markets
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    atr_filter = atr_14 > (atr_ma * 0.8)  # Trade when volatility is above 80% of its 50-period MA
-    
-    # Session filter: 08-20 UTC (reduce noise trades)
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    session_filter = (hours >= 8) & (hours <= 20)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_14.sum() / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop_ma = pd.Series(chop).rolling(window=14, min_periods=14).mean().values
+    chop_filter = chop < chop_ma  # Low chop = trending (good for breakouts)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for all indicators
-    start_idx = max(20, 20, 14, 50, 34) + 1
+    start_idx = max(34+2, 20, 20, 14, 14) + 1
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_filter[i]) or
-            not session_filter[i]):
+        # Skip if any data not ready
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]) or np.isnan(chop_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         vol_spike = volume_spike[i]
-        atr_ok = atr_filter[i]
-        above_ema = curr_close > ema_34_aligned[i]  # Uptrend filter
-        below_ema = curr_close < ema_34_aligned[i]  # Downtrend filter
+        ch_filter = chop_filter[i]
+        ema_trend = ema_34_aligned[i]
         
-        # Camarilla breakout conditions (using previous bar's levels to avoid look-ahead)
-        breakout_long = curr_close > camarilla_h3_aligned[i-1]  # Break above previous 4h's H3
-        breakout_short = curr_close < camarilla_l3_aligned[i-1]  # Break below previous 4h's L3
+        # Donchian breakout conditions
+        breakout_long = curr_high > highest_high[i-1]  # Break above recent high
+        breakout_short = curr_low < lowest_low[i-1]   # Break below recent low
+        
+        # Fractal conditions: bullish fractal = support, bearish = resistance
+        bull_fractal = bullish_fractal_aligned[i-1]  # Recent bullish fractal (support)
+        bear_fractal = bearish_fractal_aligned[i-1]  # Recent bearish fractal (resistance)
         
         if position == 0:
-            # Look for entry signals - require: Camarilla breakout + volume + ATR filter + session + trend
-            long_entry = breakout_long and vol_spike and atr_ok and above_ema
-            short_entry = breakout_short and vol_spike and atr_ok and below_ema
+            # Look for entry signals - require: breakout + volume + trend + chop filter
+            long_entry = breakout_long and vol_spike and (curr_close > ema_trend) and ch_filter
+            short_entry = breakout_short and vol_spike and (curr_close < ema_trend) and ch_filter
             
             if long_entry:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_entry:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price retouches Camarilla L3 level
-            if curr_close < camarilla_l3_aligned[i]:
+            # Exit: price retouches recent low or bearish fractal level
+            if curr_low <= lowest_low[i] or curr_close <= bear_fractal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price retouches Camarilla H3 level
-            if curr_close > camarilla_h3_aligned[i]:
+            # Exit: price retouches recent high or bullish fractal level
+            if curr_high >= highest_high[i] or curr_close >= bull_fractal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_Breakout_VolumeSpike_ATRFilter_Session"
-timeframe = "1h"
+name = "6h_WilliamsFractal_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
+timeframe = "6h"
 leverage = 1.0
