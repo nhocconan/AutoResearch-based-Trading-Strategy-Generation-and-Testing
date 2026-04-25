@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Daily Donchian breakouts capture institutional momentum. 
-Breakouts in direction of weekly EMA50 trend with volume confirmation work in both bull and bear markets.
-Weekly EMA50 provides smooth trend filter less prone to whipsaw than daily EMAs.
-ATR-based stoploss manages risk. Targeting 7-25 trades/year (30-100 total over 4 years).
-Uses discrete position sizing (0.25) to minimize fee churn. Volume spike ensures participation.
+6h Donchian(20) breakout + 1d Williams %R filter + volume confirmation
+Hypothesis: Donchian breakouts capture strong momentum. Williams %R on daily chart filters for overextended conditions - 
+we only take breakouts when daily Williams %R is not in extreme overbought/oversold territory (> -20 for longs, < -80 for shorts).
+This avoids buying tops and selling bottoms. Volume confirmation ensures breakout validity. Works in both bull and bear markets
+by capturing momentum shifts while avoiding counter-trend entries at extremes.
 """
 
 import numpy as np
@@ -22,56 +21,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Williams %R (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    weekly_close = df_1w['close'].values
-    ema_50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Williams %R(14) on daily chart
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Calculate ATR(14) for stoploss using vectorized calculation
-    if len(close) >= 14:
-        tr1 = np.abs(np.diff(close, prepend=close[0]))
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr2[0] = np.abs(high[0] - close[0])
-        tr3[0] = np.abs(low[0] - close[0])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = np.zeros(n)
-        atr[:13] = np.nan
-        for i in range(13, n):
-            atr[i] = np.mean(tr[i-13:i+1])
-    else:
-        atr = np.full(n, np.nan)
+    williams_r = np.full(len(daily_close), np.nan)
+    for i in range(13, len(daily_close)):
+        highest_high = np.max(daily_high[i-13:i+1])
+        lowest_low = np.min(daily_low[i-13:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = ((highest_high - daily_close[i]) / (highest_high - lowest_low)) * -100
+        else:
+            williams_r[i] = -50  # neutral when range is zero
     
-    # Calculate 20-period volume MA for volume spike detection using vectorized approach
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Calculate Donchian(20) channels on daily data
+    # Calculate Donchian channels (20-period) on 6h chart
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
+    for i in range(19, n):
         donchian_high[i] = np.max(high[i-19:i+1])
         donchian_low[i] = np.min(low[i-19:i+1])
+    
+    # Calculate 20-period volume MA for volume spike detection
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA50_1w, ATR, Donchian, and volume MA to propagate
-    start_idx = max(50, 14, 20)
+    # Start index: need enough for Donchian, Williams %R, and volume MA to propagate
+    start_idx = max(19, 13, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(donchian_high[i]) or 
+        if (np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or 
+            np.isnan(williams_r_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -82,20 +77,19 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema50_1w = ema_50_1w_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        atr_val = atr[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        williams_r_val = williams_r_aligned[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
-        volume_spike = curr_volume > 2.0 * vol_ma
+        # Volume spike: current volume > 1.5 * 20-period average
+        volume_spike = curr_volume > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above upper Donchian AND uptrend (close > weekly EMA50) AND volume spike
-            long_condition = (curr_close > upper) and (curr_close > ema50_1w) and volume_spike
-            # Short: price breaks below lower Donchian AND downtrend (close < weekly EMA50) AND volume spike
-            short_condition = (curr_close < lower) and (curr_close < ema50_1w) and volume_spike
+            # Long: price breaks above Donchian high AND Williams %R not overbought (> -20) AND volume spike
+            long_condition = (curr_close > donch_high) and (williams_r_val > -20) and volume_spike
+            # Short: price breaks below Donchian low AND Williams %R not oversold (< -80) AND volume spike
+            short_condition = (curr_close < donch_low) and (williams_r_val < -80) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -106,15 +100,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or price breaks below lower Donchian (reversal signal)
-            if curr_close <= entry_price - 2.0 * atr_val or curr_close < lower:
+            # Exit long: price breaks below Donchian low (reversal signal)
+            if curr_close < donch_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or price breaks above upper Donchian (reversal signal)
-            if curr_close >= entry_price + 2.0 * atr_val or curr_close > upper:
+            # Exit short: price breaks above Donchian high (reversal signal)
+            if curr_close > donch_high:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_1dWilliamsR_Filter_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
