@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime
-Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter, volume confirmation, and choppiness regime filter.
-Targets 12-37 trades/year by requiring: 1) price breaks daily R1/S1 levels (key intraday support/resistance),
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime_Redux
+Hypothesis: 4-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter, volume confirmation, and choppiness regime filter.
+Targets 20-50 trades/year by requiring: 1) price breaks daily R1/S1 levels (intraday support/resistance),
 2) aligned with 1d EMA34 trend, 3) volume > 1.5x 20-period average, 4) choppiness index < 61.8 (trending market).
-Uses 12h timeframe to minimize fee drag while capturing significant moves. R1/S1 levels provide
+Uses 4h timeframe to balance trade frequency and capture significant moves. R1/S1 levels provide
 higher signal quality than H3/L3 for lower timeframe strategies. Regime filter avoids whipsaws in ranging markets.
-Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
+Key improvements: reduced volume threshold to 1.3x average, added minimum holding period of 3 bars to reduce churn.
 """
 
 import numpy as np
@@ -42,13 +42,13 @@ def generate_signals(prices):
     R1 = prev_close + 1.1 * prev_range * (1.0/4.0)
     S1 = prev_close - 1.1 * prev_range * (1.0/4.0)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 1.3 * 20-period average (reduced from 1.5x to reduce churn)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.5)
+    volume_confirm = volume > (vol_ma * 1.3)
     
     # Choppiness regime filter: CHOP < 61.8 = trending market (use 1d data)
     # Calculate True Range and ATR(14) for 1d
@@ -70,6 +70,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     # Start index: need enough for 1d EMA34 (34) and previous day data (1) + chop calculation (14+14)
     start_idx = 34 + 14 + 14 + 1  # Conservative warmup
@@ -78,12 +79,14 @@ def generate_signals(prices):
         # Skip if not in trading session
         if not in_session[i]:
             signals[i] = 0.0
+            bars_since_entry = 0 if position == 0 else bars_since_entry + 1
             continue
         
         # Skip if any data not ready
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_aligned[i])):
-            signals[i] = 0.0
+            signals[i] = 0.0 if position == 0 else signals[i-1]
+            bars_since_entry = 0 if position == 0 else bars_since_entry + 1
             continue
         
         curr_close = close[i]
@@ -105,31 +108,46 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
+                bars_since_entry = 0
             elif short_breakout:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
+                bars_since_entry = 0
         elif position == 1:
             # Long position: exit conditions
-            # Exit if price breaks below S1 (mean reversion) or trend changes or regime changes to ranging
-            if curr_close < S1_aligned[i] or not uptrend or not trending_regime[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
+            bars_since_entry += 1
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = 0.25
+            else:
+                # Exit if price breaks below S1 (mean reversion) or trend changes or regime changes to ranging
+                if curr_close < S1_aligned[i] or not uptrend or not trending_regime[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Exit if price breaks above R1 (mean reversion) or trend changes or regime changes to ranging
-            if curr_close > R1_aligned[i] or not downtrend or not trending_regime[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
+            bars_since_entry += 1
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = -0.25
+            else:
+                # Exit if price breaks above R1 (mean reversion) or trend changes or regime changes to ranging
+                if curr_close > R1_aligned[i] or not downtrend or not trending_regime[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime_Redux"
+timeframe = "4h"
 leverage = 1.0
