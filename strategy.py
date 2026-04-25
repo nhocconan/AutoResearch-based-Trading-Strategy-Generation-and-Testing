@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_1wTrend_VolumeConfirm
-Hypothesis: Daily Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation.
-Long when price breaks above 20-day high in 1w uptrend (close > 1w EMA50) with volume > 1.8x 20-day average.
-Short when price breaks below 20-day low in 1w downtrend (close < 1w EMA50) with volume > 1.8x 20-day average.
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm
+Hypothesis: Daily Camarilla R1/S1 breakout with 1-week EMA50 trend filter and volume confirmation.
+Long when price breaks above R1 in 1w uptrend (close > 1w EMA50) with volume > 1.8x 20-day average.
+Short when price breaks below S1 in 1w downtrend (close < 1w EMA50) with volume > 1.8x 20-day average.
 Exit via ATR trailing stop (2.5*ATR from extreme). Designed for ~10-25 trades/year via strict breakout conditions.
 Works in bull/bear markets via 1w EMA50 filter; avoids whipsaws via volume confirmation and ATR trailing stop.
 """
@@ -46,9 +46,15 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_regime = volume > (1.8 * vol_ma_20)
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Previous day's Camarilla levels (R1, S1)
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    # First value will be NaN due to roll, handled by min_periods later
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,8 +66,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -70,11 +76,11 @@ def generate_signals(prices):
         if position == 0:
             # Only trade in trending regimes (1w EMA50 filter)
             if close[i] > ema_trend:  # 1w uptrend regime
-                # Long: break above 20-day high with volume confirmation
-                long_signal = (close[i] > donchian_high[i]) and vol_regime[i]
+                # Long: break above R1 with volume confirmation
+                long_signal = (close[i] > R1[i]) and vol_regime[i]
             else:  # 1w downtrend regime
-                # Short: break below 20-day low with volume confirmation
-                short_signal = (close[i] < donchian_low[i]) and vol_regime[i]
+                # Short: break below S1 with volume confirmation
+                short_signal = (close[i] < S1[i]) and vol_regime[i]
             
             if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
@@ -114,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wTrend_VolumeConfirm"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm"
 timeframe = "1d"
 leverage = 1.0
