@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop
-Hypothesis: Daily timeframe strategy using weekly EMA50 trend filter, Camarilla H3/L3 breakouts, volume confirmation, and ATR stoploss.
-Designed for lower trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag and improve test generalization.
-Works in both bull and bear markets by combining trend alignment with breakout momentum and volatility-based exits.
+12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop
+Hypothesis: 12h timeframe with Camarilla H3/L3 breakouts, filtered by 1d EMA34 trend and volume spikes (>2.0x 20-bar average).
+ATR-based stoploss (3.0x ATR) and minimum 2-bar holding period reduce whipsaw.
+Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag and improve generalization.
+Works in bull markets via breakout continuation and in bear markets via failed breakout reversals.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,31 +21,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Load daily data ONCE for Camarilla levels (prior day OHLC)
+    # 1d data for EMA34 trend filter and Camarilla calculation (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
+    
+    # 1d EMA34 trend filter (loaded ONCE)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Prior 1d bar OHLC for Camarilla calculation
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Camarilla H3 and L3 levels from prior daily bar
+    # Camarilla levels: H3, L3 (strong breakout levels)
     camarilla_range = prev_high - prev_low
     h3 = prev_close + camarilla_range * 1.1 / 4
     l3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to daily timeframe (completed daily bar)
+    # Align Camarilla levels to 12h timeframe (completed 1d bar)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Volume spike: current volume > 2.0 * 20-day average
+    # Volume spike: current volume > 2.0 * 20-period average (balanced threshold)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # ATR for stoploss calculation (using daily true range)
+    # ATR for stoploss calculation
     tr0 = np.abs(high - low)
     tr1 = np.abs(high[1:] - close[:-1])
     tr2 = np.abs(low[1:] - close[:-1])
@@ -56,14 +58,14 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    # Start index: need enough for weekly EMA (50), daily data shift (1), volume MA (20), ATR (14)
-    start_idx = max(50, 1, 20, 14)
+    # Start index: need enough for 1d EMA (34), volume MA (20), ATR (14)
+    start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         bars_since_entry += 1
         
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(h3_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
             np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -74,13 +76,13 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + weekly EMA50 trend alignment
+            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment
             long_breakout = curr_high > h3_aligned[i]
             short_breakout = curr_low < l3_aligned[i]
             
-            # Trend filter: price must be on correct side of weekly EMA50
-            long_trend = curr_close > ema_50_1w_aligned[i]
-            short_trend = curr_close < ema_50_1w_aligned[i]
+            # Trend filter: price must be on correct side of 1d EMA34
+            long_trend = curr_close > ema_34_1d_aligned[i]
+            short_trend = curr_close < ema_34_1d_aligned[i]
             
             long_entry = (long_breakout and volume_spike[i] and long_trend)
             short_entry = (short_breakout and volume_spike[i] and short_trend)
@@ -99,26 +101,26 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: minimum holding period + exit conditions
-            if bars_since_entry < 3:  # Minimum 3 days holding period
+            if bars_since_entry < 2:  # Minimum 2 bars (24h) holding period
                 signals[i] = 0.25
             else:
                 # Exit when price closes below Camarilla H3 (failed breakout) 
                 # or trend reverses or ATR stoploss hit
-                atr_stop = entry_price - 2.5 * atr[i]
-                if curr_close < h3_aligned[i] or curr_close < ema_50_1w_aligned[i] or curr_close < atr_stop:
+                atr_stop = entry_price - 3.0 * atr[i]
+                if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i] or curr_close < atr_stop:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
         elif position == -1:
             # Short position: minimum holding period + exit conditions
-            if bars_since_entry < 3:  # Minimum 3 days holding period
+            if bars_since_entry < 2:  # Minimum 2 bars (24h) holding period
                 signals[i] = -0.25
             else:
                 # Exit when price closes above Camarilla L3 (failed breakout) 
                 # or trend reverses or ATR stoploss hit
-                atr_stop = entry_price + 2.5 * atr[i]
-                if curr_close > l3_aligned[i] or curr_close > ema_50_1w_aligned[i] or curr_close > atr_stop:
+                atr_stop = entry_price + 3.0 * atr[i]
+                if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i] or curr_close > atr_stop:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -126,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop"
-timeframe = "1d"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
