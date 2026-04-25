@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Donchian breakouts capture strong momentum, filtered by 1d EMA34 trend
+1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: Daily Donchian breakouts capture strong momentum, filtered by weekly EMA50 trend
 to avoid counter-trend whipsaws. Volume spike confirms institutional participation.
-Works in bull/bear by adapting to 1d EMA34 direction: long when price above EMA34,
-short when below. Discrete sizing (0.25) targets ~80-120 trades over 4 years.
+Works in bull/bear by adapting to 1w EMA50 direction: long when price above EMA50,
+short when below. Discrete sizing (0.25) targets ~30-80 trades over 4 years.
 """
 
 import numpy as np
@@ -21,20 +21,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA34 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for EMA50 trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA50
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 4h Donchian channel (20-period)
+    # 1d Donchian channel (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # 4h volume average for confirmation
+    # 1d volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for dynamic stop (optional trailing stop via signal=0)
@@ -49,12 +49,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for EMA34 (34d) + Donchian (20) + VolMA (20) + ATR (14)
-    start_idx = max(34, 20, 20)
+    # Start index: need enough for EMA50 (50w) + Donchian (20d) + VolMA (20d) + ATR (14)
+    start_idx = max(50*7, 20, 20, 14)  # Approximate weeks to days conversion
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(donchian_high[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,11 +65,11 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_aligned[i]
+        ema_trend = ema_50_aligned[i]
         atr_value = atr[i]
         
-        # Volume spike: current volume > 1.8 * 20-period average
-        volume_spike = curr_volume > 1.8 * vol_ma_20[i]
+        # Volume spike: current volume > 2.0 * 20-period average
+        volume_spike = curr_volume > 2.0 * vol_ma_20[i]
         
         # Donchian breakout conditions
         bullish_breakout = curr_close > donchian_high[i]  # Break above upper band
@@ -110,9 +110,9 @@ def generate_signals(prices):
         
         # Entry conditions: Donchian breakout + trend alignment + volume
         if position == 0:
-            # Long: break above Donchian high AND price above 1d EMA34
+            # Long: break above Donchian high AND price above 1w EMA50
             long_condition = bullish_breakout and (curr_close > ema_trend) and volume_spike
-            # Short: break below Donchian low AND price below 1d EMA34
+            # Short: break below Donchian low AND price below 1w EMA50
             short_condition = bearish_breakout and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
@@ -132,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
