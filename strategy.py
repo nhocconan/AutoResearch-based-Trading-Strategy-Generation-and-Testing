@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-6h Camarilla H3/L3 Breakout with Weekly Pivot Direction Filter
-Hypothesis: Camarilla H3/L3 breakouts on 6h timeframe, when aligned with the weekly
-pivot trend (price above/below weekly pivot), capture institutional momentum with
-reduced false signals. The weekly pivot acts as a higher-timeframe bias filter,
-improving performance in both bull and bear markets by ensuring trades align
-with the dominant weekly trend. Volume confirmation is added to validate breakout
-strength. Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years)
-by requiring confluence of Camarilla breakout, weekly pivot trend, and volume spike.
+12h Williams Alligator + Volume Spike + Chop Regime Filter
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength.
+In strong trends (Lips above Teeth above Jaw for long, reverse for short), price pulls back to
+Teeth (8-period SMA) offer high-probability entries. Volume spike confirms momentum,
+Chop regime filter avoids whipsaws in ranging markets. Designed for 12h timeframe
+to target 12-37 trades/year by requiring Alligator alignment, volume confirmation,
+and trending regime (Chop < 38.2). Works in bull/bear via trend-following logic.
 """
 
 import numpy as np
@@ -24,52 +23,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points (standard: P = (H+L+C)/3)
-    # Using previous completed weekly bar
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
-    weekly_pivot = (h_1w + l_1w + c_1w) / 3.0
-    
-    # Align weekly pivot to 6h (no extra delay as based on completed weekly bar)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # Load 1d data for Camarilla pivot calculation (more responsive than 12h)
+    # Load 1d data ONCE before loop for Williams Alligator and Chop regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels on 1d: based on previous 1d bar's H, L, C
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Williams Alligator on 1d: Jaw (13-period SMA, shifted 8), Teeth (8-period SMA, shifted 5), Lips (5-period SMA, shifted 3)
+    # Using close prices
+    close_1d = df_1d['close'].values
+    jaw_1d = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_1d = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_1d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    camarilla_h3 = c_1d + 1.1 * (h_1d - l_1d) / 2
-    camarilla_l3 = c_1d - 1.1 * (h_1d - l_1d) / 2
+    # Align Alligator lines to 12h
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
-    # Align Camarilla levels to 6h
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Chop regime on 1d: Chop = 100 * log10(sum(ATR(1),14) / (log10(14) * (max(high,14) - min(low,14))))
+    # Simplified: Chop > 61.8 = ranging, Chop < 38.2 = trending
+    # We'll use a proxy: BB Width percentile (lower = trending)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bb_mid = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    bb_width = (bb_mid + 2 * bb_std - (bb_mid - 2 * bb_std)) / bb_mid  # (upper - lower) / mid
+    bb_width_percentile = bb_width.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    # Chop regime: trending when BB Width percentile < 40 (lower volatility = trending after expansion)
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    trending_regime = chop_regime_aligned < 40  # BB width in lower 40% = trending regime
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average (moderate for fewer trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 20)  # weekly pivot needs 1 bar, volume MA 20
+    start_idx = max(20, 13)  # BB width, Alligator
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(chop_regime_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -77,17 +77,18 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         vol_spike = volume_spike[i]
+        is_trending = trending_regime[i]
         
-        # Trend filter: price relative to weekly pivot
-        bullish_bias = curr_close > weekly_pivot_aligned[i]
-        bearish_bias = curr_close < weekly_pivot_aligned[i]
+        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+        bullish_alignment = (lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i])
+        bearish_alignment = (lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i])
         
         if position == 0:
-            # Look for entry signals - require ALL conditions: Camarilla breakout + weekly trend + volume
-            # Long: price breaks above Camarilla H3 AND bullish bias AND volume spike
-            long_entry = (curr_high > camarilla_h3_aligned[i]) and bullish_bias and vol_spike
-            # Short: price breaks below Camarilla L3 AND bearish bias AND volume spike
-            short_entry = (curr_low < camarilla_l3_aligned[i]) and bearish_bias and vol_spike
+            # Look for entry signals - require ALL conditions: Alligator alignment + volume spike + trending regime
+            # Long: bullish alignment AND price pulls back to Teeth (or slightly below) AND volume spike AND trending
+            long_entry = bullish_alignment and (curr_low <= teeth_1d_aligned[i] * 1.002) and vol_spike and is_trending
+            # Short: bearish alignment AND price pulls back to Teeth (or slightly above) AND volume spike AND trending
+            short_entry = bearish_alignment and (curr_high >= teeth_1d_aligned[i] * 0.998) and vol_spike and is_trending
             
             if long_entry:
                 signals[i] = 0.25
@@ -99,16 +100,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below Camarilla L3 (mean reversion) OR loss of bullish bias (below weekly pivot)
-            if (curr_low < camarilla_l3_aligned[i]) or (curr_close < weekly_pivot_aligned[i]):
+            # Exit: price closes below Jaw (trend reversal) OR loss of bullish alignment
+            if (curr_close < jaw_1d_aligned[i]) or not bullish_alignment:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above Camarilla H3 (mean reversion) OR loss of bearish bias (above weekly pivot)
-            if (curr_high > camarilla_h3_aligned[i]) or (curr_close > weekly_pivot_aligned[i]):
+            # Exit: price closes above Jaw (trend reversal) OR loss of bearish alignment
+            if (curr_close > jaw_1d_aligned[i]) or not bearish_alignment:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3L3_Breakout_WeeklyPivot_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Williams_Alligator_VolumeSpike_TrendingRegime"
+timeframe = "12h"
 leverage = 1.0
