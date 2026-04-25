@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1wTrendFilter_VolumeConfirm
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) combined with 1-week EMA34 trend filter and volume confirmation captures institutional buying/selling pressure while avoiding counter-trend trades. Works in bull markets (buy on Bull Power > 0 + uptrend) and bear markets (sell on Bear Power > 0 + downtrend). Target: 12-30 trades/year (50-120 over 4 years) to minimize fee drag. Uses discrete position sizing (0.0, ±0.25) to reduce churn.
+12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpi
+Hypothesis: On 12h timeframe, Camarilla H3/L3 breakouts with volume spike confirmation and 1d EMA34 trend filter capture institutional order flow. 12h reduces trade frequency vs 4h to minimize fee drag while still allowing 50-150 trades over 4 years. Works in bull markets via breakouts and bear markets via mean reversion at H3/L3 levels. Uses discrete position sizing (0.25) to control drawdown and minimize fee churn.
 """
 
 import numpy as np
@@ -24,72 +24,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
+    # 1d data for Camarilla pivots and EMA34 trend filter (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w EMA34 trend filter
-    ema_34_1w = calculate_ema(df_1w['close'].values, 34)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d EMA34 trend filter
+    ema_34_1d = calculate_ema(df_1d['close'].values, 34)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6h EMA13 for Elder Ray calculation
-    ema_13 = calculate_ema(close, 13)
+    # 1d Camarilla levels (based on previous day's OHLC)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Buying pressure
-    bear_power = ema_13 - low   # Selling pressure
+    # Calculate Camarilla levels: H3, L3
+    camarilla_range = 1.1 * (prev_high - prev_low)
+    h3 = prev_close + camarilla_range * 0.275
+    l3 = prev_close - camarilla_range * 0.275
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Align Camarilla levels to 12h timeframe (already completed 1d bar)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Start index: need enough for EMA13 (13) + volume MA (20) + 1w EMA34 (34)
-    start_idx = max(13, 20, 34)
+    # Start index: need enough for EMA (34) + volume MA (20) + Camarilla (2)
+    start_idx = max(34, 20, 2)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_13[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
-        curr_volume_confirm = volume_confirm[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals - require: Elder Ray signal + 1w trend alignment + volume confirmation
-            long_entry = (curr_bull_power > 0) and (curr_close > ema_34_1w_aligned[i]) and curr_volume_confirm
-            short_entry = (curr_bear_power > 0) and (curr_close < ema_34_1w_aligned[i]) and curr_volume_confirm
+            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment
+            long_breakout = curr_high > h3_aligned[i]
+            short_breakout = curr_low < l3_aligned[i]
+            
+            long_entry = long_breakout and volume_spike[i] and (curr_close > ema_34_1d_aligned[i])
+            short_entry = short_breakout and volume_spike[i] and (curr_close < ema_34_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when Bull Power turns negative OR trend turns bearish
-            if curr_bull_power <= 0 or curr_close < ema_34_1w_aligned[i]:
+            # Long position: exit when price closes below H3 (failed breakout) or trend turns bearish
+            if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when Bear Power turns negative OR trend turns bullish
-            if curr_bear_power <= 0 or curr_close > ema_34_1w_aligned[i]:
+            # Short position: exit when price closes above L3 (failed breakout) or trend turns bullish
+            if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1wTrendFilter_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpi"
+timeframe = "12h"
 leverage = 1.0
