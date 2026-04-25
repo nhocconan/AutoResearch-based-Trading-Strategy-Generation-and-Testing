@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike_Regime_v2
-Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
-Uses chop regime filter to avoid whipsaws in ranging markets. Targets 15-25 trades/year per symbol
-to minimize fee drag while capturing strong breakouts in both bull and bear markets via multi-timeframe alignment.
+4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike
+Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation. Uses HTF 12h for trend alignment to reduce whipsaw in sideways markets. Targets 20-30 trades/year per symbol by requiring strong volume spike (>2.5x 20-bar volume mean) and clear trend (price >1.0% above/below EMA50). Designed to work in both bull (breakouts with volume) and bear (trend-following shorts) markets via disciplined entry/exit.
 """
 
 import numpy as np
@@ -20,81 +18,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for HTF trend filter and Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate EMA50 on 12h close for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels from previous 12h bar (HLC of prior bar)
+    camarilla_r3 = close_12h + 1.1 * (high_12h - low_12h)  # R3 = C + 1.1*(H-L)
+    camarilla_s3 = close_12h - 1.1 * (high_12h - low_12h)  # S3 = C - 1.1*(H-L)
     
-    # Calculate EMA50 on 1w close for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align Camarilla levels to 12h timeframe (use previous bar's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
     
-    # Calculate ATR(14) on 1d for dynamic volume threshold
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
-    
-    # Calculate Camarilla levels from previous 1d bar (HLC of prior bar)
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)  # R3 = C + 1.1*(H-L)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)  # S3 = C - 1.1*(H-L)
-    
-    # Align Camarilla levels to 1d timeframe (use previous bar's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate Bollinger Band Width (20,2) on 1d for chop regime filter
-    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20_1d + 2 * std20_1d
-    lower_bb = sma20_1d - 2 * std20_1d
-    bb_width = (upper_bb - lower_bb) / sma20_1d
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
-    
-    # Calculate dynamic volume threshold: 2.0x ATR-scaled volume mean
-    vol_atr_ratio = volume / (atr14_1d_aligned * close + 1e-10)  # Avoid division by zero
-    vol_threshold = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values * 2.0
+    # Volume confirmation: current volume > 2.5x 20-bar mean volume
+    vol_mean_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_mean_20 * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50, ATR, BB width, volume threshold
+    # Start index: need warmup for EMA50 and volume mean
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or 
+        if (np.isnan(ema50_12h_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(bb_width_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+            np.isnan(vol_mean_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Chop regime filter: avoid trading in high chop (range) markets
-        # BB width < 0.05 indicates low volatility/chop, > 0.15 indicates trending
-        chop_filter = bb_width_aligned[i] > 0.05
-        
         if position == 0:
-            # Dynamic volume confirmation: current volume > threshold * average volume
-            vol_avg = pd.Series(volume).rolling(window=20, min_periods=1).mean().iloc[i]
-            vol_confirm = volume[i] > vol_threshold[i] * vol_avg
-            
-            # Long: price breaks above Camarilla R3 in uptrend (price > 1w EMA50) with volume confirmation and not choppy
-            # Short: price breaks below Camarilla S3 in downtrend (price < 1w EMA50) with volume confirmation and not choppy
-            long_signal = (close[i] > camarilla_r3_aligned[i]) and (close[i] > ema50_1w_aligned[i]) and vol_confirm and chop_filter
-            short_signal = (close[i] < camarilla_s3_aligned[i]) and (close[i] < ema50_1w_aligned[i]) and vol_confirm and chop_filter
+            # Long: price breaks above Camarilla R3 in uptrend (price > 12h EMA50 + 1.0%) with volume confirmation
+            # Short: price breaks below Camarilla S3 in downtrend (price < 12h EMA50 - 1.0%) with volume confirmation
+            long_signal = (close[i] > camarilla_r3_aligned[i]) and (close[i] > ema50_12h_aligned[i] * 1.010) and vol_confirm[i]
+            short_signal = (close[i] < camarilla_s3_aligned[i]) and (close[i] < ema50_12h_aligned[i] * 0.990) and vol_confirm[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -107,22 +75,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price moves back below 1w EMA50 (trend reversal) or Camarilla S3 (mean reversion)
-            exit_signal = close[i] < ema50_1w_aligned[i] or close[i] < camarilla_s3_aligned[i]
+            # Exit when price moves back below 12h EMA50 (trend reversal)
+            exit_signal = close[i] < ema50_12h_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price moves back above 1w EMA50 (trend reversal) or Camarilla R3 (mean reversion)
-            exit_signal = close[i] > ema50_1w_aligned[i] or close[i] > camarilla_r3_aligned[i]
+            # Exit when price moves back above 12h EMA50 (trend reversal)
+            exit_signal = close[i] > ema50_12h_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike_Regime_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
