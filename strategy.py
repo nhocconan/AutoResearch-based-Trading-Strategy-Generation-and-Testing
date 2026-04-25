@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-1d Williams Fractal Breakout + 1w EMA50 Trend + Volume Spike
-Hypothesis: Williams fractals on 1d identify significant swing highs/lows that act as
-strong support/resistance. Breakouts beyond these levels with volume confirmation
-and 1w EMA50 trend filter capture institutional flow with fewer false signals.
-Works in bull/bear via trend filter. Target: 7-25 trades/year on 1d.
+6h Elder Ray Power + 1d EMA34 Trend + Volume Spike
+Hypothesis: Elder Ray Bull Power (high-EMA13) and Bear Power (low-EMA13) measure buying/selling pressure.
+In strong trends (1d EMA34), extreme power readings with volume spike indicate exhaustion and reversal.
+Works in bull/bear via trend filter: long when bear power extreme + uptrend, short when bull power extreme + downtrend.
+Target: 12-37 trades/year on 6h.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,66 +21,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams fractals and 1w data for EMA50 trend
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 50 or len(df_1w) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Williams fractals on 1d (need 2 extra bars for confirmation)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Align with 2 extra delay bars for fractal confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate ATR(14) for stoploss
-    if len(close) >= 14:
-        tr1 = pd.Series(high).diff().abs()
-        tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
-        tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA13 for Elder Ray (on 6h data)
+    if len(close) >= 13:
+        ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     else:
-        atr = np.full(n, 0.0)
+        ema_13 = np.full(n, np.nan)
+    
+    # Calculate Elder Ray components
+    bull_power = high - ema_13  # Buying pressure
+    bear_power = low - ema_13   # Selling pressure
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start index: need enough for data to propagate
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
-        bearish = bearish_fractal_aligned[i]
-        bullish = bullish_fractal_aligned[i]
-        ema_50 = ema_50_1w_aligned[i]
-        atr_val = atr[i]
+        ema_34 = ema_34_1d_aligned[i]
+        bp = bull_power[i]
+        br = bear_power[i]
         
         # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
@@ -90,14 +72,16 @@ def generate_signals(prices):
         volume_spike = curr_volume > 2.0 * vol_ma_20
         
         # Trend filter
-        uptrend = curr_close > ema_50
-        downtrend = curr_close < ema_50
+        uptrend = curr_close > ema_34
+        downtrend = curr_close < ema_34
         
         if position == 0:
-            # Long: price breaks above bullish fractal AND volume spike AND uptrend
-            long_condition = (curr_high > bullish) and volume_spike and uptrend
-            # Short: price breaks below bearish fractal AND volume spike AND downtrend
-            short_condition = (curr_low < bearish) and volume_spike and downtrend
+            # Long: extreme bear power (selling exhaustion) AND volume spike AND uptrend
+            # Bear power is negative; more negative = stronger selling
+            long_condition = (br < -np.std(br[max(0, i-50):i+1]) * 1.5) and volume_spike and uptrend
+            # Short: extreme bull power (buying exhaustion) AND volume spike AND downtrend
+            # Bull power is positive; more positive = stronger buying
+            short_condition = (bp > np.std(bp[max(0, i-50):i+1]) * 1.5) and volume_spike and downtrend
             
             if long_condition:
                 signals[i] = 0.25
@@ -108,15 +92,19 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.5*ATR below entry) or trend reversal
-            if curr_close <= entry_price - 2.5 * atr_val or not uptrend:
+            # Exit long: stoploss or trend reversal or power normalization
+            if (curr_close <= entry_price - 2.0 * np.std(close[max(0, i-20):i+1]) or 
+                not uptrend or 
+                br > -np.std(br[max(0, i-20):i+1]) * 0.5):  # selling pressure normalized
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.5*ATR above entry) or trend reversal
-            if curr_close >= entry_price + 2.5 * atr_val or not downtrend:
+            # Exit short: stoploss or trend reversal or power normalization
+            if (curr_close >= entry_price + 2.0 * np.std(close[max(0, i-20):i+1]) or 
+                not downtrend or 
+                bp < np.std(bp[max(0, i-20):i+1]) * 0.5):  # buying pressure normalized
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsFractal_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_Power_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
