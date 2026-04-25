@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout + 12h EMA34 trend + volume spike
-Hypothesis: Donchian channel breakouts capture momentum. 12h EMA34 provides trend filter to avoid counter-trend trades. Volume confirmation ensures breakout strength. Works in bull/bear via trend filter and discrete sizing (0.25). Targets 75-200 trades over 4 years on 4h.
+1d Williams Fractal Breakout + 1w EMA50 Trend + Volume Spike + Chop Filter
+Hypothesis: Williams fractals identify key swing points on 1d. Breakouts above/below recent fractals with 1w EMA50 trend filter and volume confirmation capture momentum. Chop regime filter avoids whipsaws in ranging markets. Designed for BTC/ETH with discrete sizing (0.25) to control drawdown. Targets 30-100 trades over 4 years on 1d.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,35 +18,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 4h Donchian(20) breakout levels
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().shift(1).values
+    # Williams Fractals on 1d (need extra delay for confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1w['high'].values,  # Using 1w data for fractals to reduce noise
+        df_1w['low'].values,
+    )
+    # Fractals need 2 extra 1w bars for confirmation (center bar + 2 right bars)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1w, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1w, bullish_fractal, additional_delay_bars=2
+    )
+    
+    # 1d Donchian-like levels from recent fractals (lookback 10 periods)
+    lookback = 10
+    # Recent bullish fractal resistance (highest bullish fractal low)
+    bullish_fractal_series = pd.Series(bullish_fractal_aligned)
+    resistance = bullish_fractal_series.rolling(window=lookback, min_periods=1).max().values
+    # Recent bearish fractal support (lowest bearish fractal high)
+    bearish_fractal_series = pd.Series(bearish_fractal_aligned)
+    support = bearish_fractal_series.rolling(window=lookback, min_periods=1).min().values
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
     
+    # Chop regime filter: avoid trading in high chop (>61.8)
+    # Using 1d ATR ratio (ATR(14)/ATR(50)) as chop proxy
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(abs(high - pd.Series(close).shift(1)))
+    tr3 = pd.Series(abs(low - pd.Series(close).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50 = tr.ewm(span=50, adjust=False, min_periods=50).mean().values
+    chop_ratio = atr_14 / (atr_50 + 1e-10)
+    chop_filter = chop_ratio < 0.618  # Low chop = trending
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian(20) and EMA34 warmup
-    start_idx = max(donchian_window, 34) + 1
+    # Start index: need enough for warmup
+    start_idx = max(50, lookback, 20) + 2
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(resistance[i]) or 
+            np.isnan(support[i]) or np.isnan(vol_ma[i]) or np.isnan(chop_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -54,17 +82,18 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         vol_spike = volume_spike[i]
+        low_chop = chop_filter[i]
         
-        # Trend filter: price relative to 12h EMA34
-        bullish_bias = curr_close > ema_12h_aligned[i]
-        bearish_bias = curr_close < ema_12h_aligned[i]
+        # Trend filter: price relative to 1w EMA50
+        bullish_bias = curr_close > ema_1w_aligned[i]
+        bearish_bias = curr_close < ema_1w_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require: Donchian breakout + trend + volume
-            # Long: price breaks above Donchian high AND bullish bias AND volume spike
-            long_entry = (curr_high > donchian_high[i]) and bullish_bias and vol_spike
-            # Short: price breaks below Donchian low AND bearish bias AND volume spike
-            short_entry = (curr_low < donchian_low[i]) and bearish_bias and vol_spike
+            # Look for entry signals - require: Fractal breakout + trend + volume + low chop
+            # Long: price breaks above resistance AND bullish bias AND volume spike AND low chop
+            long_entry = (curr_high > resistance[i]) and bullish_bias and vol_spike and low_chop
+            # Short: price breaks below support AND bearish bias AND volume spike AND low chop
+            short_entry = (curr_low < support[i]) and bearish_bias and vol_spike and low_chop
             
             if long_entry:
                 signals[i] = 0.25
@@ -76,16 +105,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below Donchian low (breakdown) OR loss of bullish bias
-            if (curr_low < donchian_low[i]) or (curr_close < ema_12h_aligned[i]):
+            # Exit: price falls below support (breakdown) OR loss of bullish bias OR high chop
+            if (curr_low < support[i]) or (curr_close < ema_1w_aligned[i]) or (not low_chop):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above Donchian high (breakout) OR loss of bearish bias
-            if (curr_high > donchian_high[i]) or (curr_close > ema_12h_aligned[i]):
+            # Exit: price rises above resistance (breakout) OR loss of bearish bias OR high chop
+            if (curr_high > resistance[i]) or (curr_close > ema_1w_aligned[i]) or (not low_chop):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_WilliamsFractal_Breakout_1wEMA50_Trend_VolumeSpike_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
