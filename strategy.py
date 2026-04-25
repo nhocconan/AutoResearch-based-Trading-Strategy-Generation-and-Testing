@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12-hour Camarilla R1/S1 breakout with daily EMA34 trend filter and volume spike confirmation.
-Targets 12-37 trades/year by requiring: 1) price breaks daily R1/S1 levels (strong daily breakout),
-2) aligned with daily EMA34 trend, 3) volume > 1.8x 20-period average. This strategy focuses on
-12h timeframe to minimize fee drag while capturing significant moves in both bull and bear markets.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3
+Hypothesis: 4-hour Camarilla R1/S1 breakout with daily EMA34 trend filter and volume spike confirmation.
+Reduced volume threshold and added minimum holding period to limit trades to 20-50/year.
+Targets 19-50 trades/year by requiring: 1) price breaks daily R1/S1 levels (strong daily breakout),
+2) aligned with daily EMA34 trend, 3) volume > 1.5x 20-period average, 4) minimum 4-bar holding period.
+Focus on BTC/ETH with discrete position sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
@@ -40,17 +41,18 @@ def generate_signals(prices):
     R1 = prev_close + 1.1 * prev_range * (1.0/12.0)
     S1 = prev_close - 1.1 * prev_range * (1.0/12.0)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average (reduced from 1.8)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.8)
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     # Start index: need enough for 1d EMA34 (34) and previous day data (1)
     start_idx = 35
@@ -59,12 +61,14 @@ def generate_signals(prices):
         # Skip if not in trading session
         if not in_session[i]:
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
         # Skip if any data not ready
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
             np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
         curr_close = close[i]
@@ -86,31 +90,46 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
+                bars_since_entry = 0
             elif short_breakout:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
+                bars_since_entry = 0
         elif position == 1:
             # Long position: exit conditions
-            # Exit if price breaks below S1 (mean reversion) or trend changes
-            if curr_close < S1_aligned[i] or not uptrend:
-                signals[i] = 0.0
-                position = 0
-            else:
+            bars_since_entry += 1
+            # Minimum 4-bar holding period
+            if bars_since_entry < 4:
                 signals[i] = 0.25
+            else:
+                # Exit if price breaks below S1 (mean reversion) or trend changes
+                if curr_close < S1_aligned[i] or not uptrend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Exit if price breaks above R1 (mean reversion) or trend changes
-            if curr_close > R1_aligned[i] or not downtrend:
-                signals[i] = 0.0
-                position = 0
-            else:
+            bars_since_entry += 1
+            # Minimum 4-bar holding period
+            if bars_since_entry < 4:
                 signals[i] = -0.25
+            else:
+                # Exit if price breaks above R1 (mean reversion) or trend changes
+                if curr_close > R1_aligned[i] or not downtrend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
