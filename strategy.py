@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_WeeklyTrend_Confirm
-Hypothesis: Camarilla R1/S1 breakout on 12h with weekly EMA50 trend filter and volume confirmation.
-Long when price breaks above R1 in uptrend (close > weekly EMA50) with volume spike.
-Short when price breaks below S1 in downtrend (close < weekly EMA50) with volume spike.
-Exit when price re-enters Camarilla H3/L3 range or trend reverses. Designed for low trade frequency and robustness in both bull and bear markets.
+4h_Camarilla_R3S3_Breakout_1dTrend_Regime_ADX
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA50 trend filter, ADX regime filter (ADX>25 for trending), and volume confirmation. Designed for low trade frequency (<50/year) and robustness in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,49 +18,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculations (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 26:
+    # Get 4h data for Camarilla calculations (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Camarilla pivot levels (based on previous day's OHLC)
-    # Pivot = (High + Low + Close) / 3
-    pivot = (high_12h + low_12h + close_12h) / 3
-    # Range = High - Low
-    range_12h = high_12h - low_12h
+    # Calculate Camarilla levels for each 4h bar
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R3 = C + (Range * 1.1 / 2)
+    # S3 = C - (Range * 1.1 / 2)
+    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
+    range_4h = high_4h - low_4h
+    r3_4h = close_4h + (range_4h * 1.1 / 2.0)
+    s3_4h = close_4h - (range_4h * 1.1 / 2.0)
     
-    # Resistance levels: R1 = Close + (Range * 1.1/12)
-    r1 = close_12h + (range_12h * 1.1 / 12)
-    # Support levels: S1 = Close - (Range * 1.1/12)
-    s1 = close_12h - (range_12h * 1.1 / 12)
-    # Additional levels for exit: H3 = Close + (Range * 1.1/4), L3 = Close - (Range * 1.1/4)
-    h3 = close_12h + (range_12h * 1.1 / 4)
-    l3 = close_12h - (range_12h * 1.1 / 4)
+    # Align Camarilla levels to 15m timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
     
-    # Align Camarilla levels to original timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
-    
-    # Get weekly data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter (EMA50) and ADX regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA50 for trend direction
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Daily EMA50 for trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Daily ADX for regime filter (trending when ADX > 25)
+    # ADX calculation: +DI, -DI, DX, then ADX = smoothed DX
+    period = 14
+    up_move = np.diff(high_1d)
+    down_move = -np.diff(low_1d)
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # True Range
+    tr1 = np.abs(np.diff(high_1d))
+    tr2 = np.abs(np.diff(low_1d))
+    tr3 = np.abs(np.diff(close_1d))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    atr_1d = np.zeros_like(tr)
+    if len(tr) > 0:
+        atr_1d[0] = tr[0]
+        for i in range(1, len(tr)):
+            atr_1d[i] = (atr_1d[i-1] * (period-1) + tr[i]) / period
+    
+    # Avoid division by zero
+    atr_1d_safe = np.where(atr_1d == 0, 1e-10, atr_1d)
+    
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr_1d_safe
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr_1d_safe
+    
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / np.where((plus_di_1d + minus_di_1d) == 0, 1e-10, (plus_di_1d + minus_di_1d))
+    adx_1d = pd.Series(dx_1d).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
+    vol_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,26 +98,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_50_1w_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
+        adx_val = adx_1d_aligned[i]
         
         if position == 0:
-            # Regime-based entry logic
-            if close[i] > ema_trend:  # Uptrend regime (weekly)
-                # Long: break above R1 with volume spike
-                long_signal = (close[i] > r1_aligned[i]) and vol_spike[i]
-                # Short: break below S1 only if extreme volume spike (counter-trend fade)
-                short_signal = (close[i] < s1_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
-            else:  # Downtrend regime (weekly)
-                # Short: break below S1 with volume spike
-                short_signal = (close[i] < s1_aligned[i]) and vol_spike[i]
-                # Long: break above R1 only if extreme volume spike (counter-trend fade)
-                long_signal = (close[i] > r1_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
+            # Only trade in trending regime (ADX > 25)
+            if adx_val > 25.0:
+                if close[i] > ema_trend:  # Uptrend regime
+                    # Long: break above R3 with volume spike
+                    long_signal = (close[i] > r3_aligned[i]) and vol_spike[i]
+                    # Short: break below S3 only if extreme volume spike (counter-trend fade)
+                    short_signal = (close[i] < s3_aligned[i]) and vol_spike[i] and (volume[i] > (3.0 * vol_ma_20[i]))
+                else:  # Downtrend regime
+                    # Short: break below S3 with volume spike
+                    short_signal = (close[i] < s3_aligned[i]) and vol_spike[i]
+                    # Long: break above R3 only if extreme volume spike (counter-trend fade)
+                    long_signal = (close[i] > r3_aligned[i]) and vol_spike[i] and (volume[i] > (3.0 * vol_ma_20[i]))
+            else:
+                long_signal = False
+                short_signal = False
             
             if long_signal:
                 signals[i] = 0.25
@@ -105,22 +135,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: re-enter H3/L3 range or trend reversal
-            exit_signal = (close[i] < h3_aligned[i]) or (close[i] < ema_trend * 0.99)
+            # Exit conditions: re-enter S3 or trend reversal (ADX drops)
+            exit_signal = (close[i] < s3_aligned[i]) or (adx_val < 20.0)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: re-enter H3/L3 range or trend reversal
-            exit_signal = (close[i] > l3_aligned[i]) or (close[i] > ema_trend * 1.01)
+            # Exit conditions: re-enter R3 or trend reversal (ADX drops)
+            exit_signal = (close[i] > r3_aligned[i]) or (adx_val < 20.0)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_WeeklyTrend_Confirm"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Regime_ADX"
+timeframe = "4h"
 leverage = 1.0
