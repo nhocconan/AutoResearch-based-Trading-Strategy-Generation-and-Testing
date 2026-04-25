@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Williams Alligator Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trendless markets.
-Price breaking above/below Alligator's Lips with Jaw-Teeth-Lips alignment,
-volume spike, and 1d EMA34 trend captures momentum breakouts.
-Works in bull/bear by trading both directions with trend filter.
-Discrete sizing (0.0, ±0.30) targets 25-40 trades/year on 4h.
+4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + ATR Stop
+Hypothesis: Donchian channel breakouts capture momentum, filtered by 1d EMA trend and volume spikes.
+ATR-based stoploss manages risk. Designed for 4h timeframe to achieve 20-50 trades/year.
+Works in both bull and bear markets by following the 1d trend direction.
 """
 
 import numpy as np
@@ -22,22 +20,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend (call ONCE before loop)
+    # Get 1d data for EMA (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend
+    # Calculate EMA34 on 1d close for trend
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator on 4h (primary timeframe)
-    # Jaw: 13-period SMMA smoothed 8 bars ahead
-    # Teeth: 8-period SMMA smoothed 5 bars ahead  
-    # Lips: 5-period SMMA smoothed 3 bars ahead
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().shift(8)
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().shift(5)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().shift(3)
+    # Calculate ATR(14) for stoploss on 4h
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,63 +46,66 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Start index: need enough for Alligator (13+8=21) and EMA
+    # Start index: need enough for Donchian and EMA
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        upper_channel = donchian_high[i]
+        lower_channel = donchian_low[i]
         ema_trend = ema_34_1d_aligned[i]
+        atr_val = atr[i]
         vol_spike = volume_spike[i]
-        
-        # Alligator alignment: Jaw > Teeth > Lips (uptrend) or Jaw < Teeth < Lips (downtrend)
-        alligator_up = jaw_val > teeth_val > lips_val
-        alligator_down = jaw_val < teeth_val < lips_val
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above Lips AND Alligator aligned up AND volume spike AND price > EMA (uptrend)
-            long_entry = (curr_close > lips_val) and alligator_up and vol_spike and (curr_close > ema_trend)
-            # Short: price breaks below Lips AND Alligator aligned down AND volume spike AND price < EMA (downtrend)
-            short_entry = (curr_close < lips_val) and alligator_down and vol_spike and (curr_close < ema_trend)
+            # Long: price breaks above upper Donchian AND volume spike AND price > EMA (uptrend)
+            long_entry = (curr_close > upper_channel) and vol_spike and (curr_close > ema_trend)
+            # Short: price breaks below lower Donchian AND volume spike AND price < EMA (downtrend)
+            short_entry = (curr_close < lower_channel) and vol_spike and (curr_close < ema_trend)
             
             if long_entry:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
             elif short_entry:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below Lips OR Alligator alignment breaks OR price crosses below EMA
-            if (curr_close < lips_val) or not alligator_up or (curr_close < ema_trend):
+            # Stoploss: price closes below entry - 2.0 * ATR
+            if curr_close < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above Lips OR Alligator alignment breaks OR price crosses above EMA
-            if (curr_close > lips_val) or not alligator_down or (curr_close > ema_trend):
+            # Stoploss: price closes above entry + 2.0 * ATR
+            if curr_close > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Williams_Alligator_Breakout_1dEMA34_Trend_VolumeSpike"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
 timeframe = "4h"
 leverage = 1.0
