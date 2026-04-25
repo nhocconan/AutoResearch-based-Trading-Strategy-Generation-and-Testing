@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R1 in 1w uptrend (close > 1w EMA50) with volume > 2.0x 20-bar average.
-Short when price breaks below Camarilla S1 in 1w downtrend (close < 1w EMA50) with volume > 2.0x 20-bar average.
+4h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: 4h Camarilla R3/S3 breakout with 1-week EMA50 trend filter and volume spike confirmation.
+Long when price breaks above Camarilla R3 in 1w uptrend (close > 1w EMA50) with volume > 2.0x 20-bar average.
+Short when price breaks below Camarilla S3 in 1w downtrend (close < 1w EMA50) with volume > 2.0x 20-bar average.
 Exit via ATR-based trailing stop (2.5*ATR from extreme) or re-entry into Camarilla H3/L3 range.
-Designed for ~12-37 trades/year by requiring strong breakouts, 1w trend alignment, and volume confirmation.
+Designed for ~15-30 trades/year by requiring stronger breakouts (R3/S3), higher timeframe trend filter (1w), and volume confirmation.
 Works in bull/bear markets via 1w EMA50 filter; avoids whipsaws via volume confirmation and tight stops.
+Focus on BTC/ETH as primary targets; SOL as secondary validation.
 """
 
 import numpy as np
@@ -34,23 +35,20 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for Camarilla levels (previous day OHLC)
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC (align to current 12h bars)
+    # Previous day's OHLC (align to current 4h bars)
     prev_close = align_htf_to_ltf(prices, df_1d, df_1d['close'].values, additional_delay_bars=1)
     prev_high = align_htf_to_ltf(prices, df_1d, df_1d['high'].values, additional_delay_bars=1)
     prev_low = align_htf_to_ltf(prices, df_1d, df_1d['low'].values, additional_delay_bars=1)
     prev_open = align_htf_to_ltf(prices, df_1d, df_1d['open'].values, additional_delay_bars=1)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
     # H3 = C + (H-L)*1.1/2, L3 = C - (H-L)*1.1/2
     camarilla_range = prev_high - prev_low
-    R1 = prev_close + camarilla_range * 1.1 / 12
-    S1 = prev_close - camarilla_range * 1.1 / 12
     R3 = prev_close + camarilla_range * 1.1 / 4
     S3 = prev_close - camarilla_range * 1.1 / 4
     H3 = prev_close + camarilla_range * 1.1 / 2
@@ -79,7 +77,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
             np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -89,11 +87,11 @@ def generate_signals(prices):
         if position == 0:
             # Only trade in trending regimes (1w EMA50 filter)
             if close[i] > ema_trend:  # 1w uptrend regime
-                # Long: break above Camarilla R1 with volume spike
-                long_signal = (close[i] > R1[i]) and vol_regime[i]
+                # Long: break above Camarilla R3 with volume spike
+                long_signal = (close[i] > R3[i]) and vol_regime[i]
             else:  # 1w downtrend regime
-                # Short: break below Camarilla S1 with volume spike
-                short_signal = (close[i] < S1[i]) and vol_regime[i]
+                # Short: break below Camarilla S3 with volume spike
+                short_signal = (close[i] < S3[i]) and vol_regime[i]
             
             if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
@@ -135,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
