@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike
-Hypothesis: 1d Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R1 in 1w uptrend (close > 1w EMA50) with volume > 2.0x 20-bar average.
-Short when price breaks below Camarilla S1 in 1w downtrend (close < 1w EMA50) with volume > 2.0x 20-bar average.
-Exit via ATR-based trailing stop (2.5*ATR from extreme) or re-entry into Camarilla H3/L3 range.
-Designed for ~10-25 trades/year by requiring strong breakouts, trend alignment, and volume confirmation on daily timeframe.
-Works in bull/bear markets via 1w EMA50 filter; avoids whipsaws via volume confirmation and tight stops.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime_ChopFilter
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter, volume spike, and chop regime filter.
+Long when price breaks above Camarilla R1 in 1d uptrend (close > 1d EMA50) with volume > 2.0x 20-bar average and chop < 61.8.
+Short when price breaks below Camarilla S1 in 1d downtrend (close < 1d EMA50) with volume > 2.0x 20-bar average and chop < 61.8.
+Exit via ATR trailing stop (2.5*ATR) or re-entry into Camarilla H3/L3 range.
+Designed for ~20-30 trades/year by requiring strong breakouts, trend alignment, volume confirmation, and low chop.
+Uses 1d HTF for trend to avoid look-ahead and ensure completed-bar signals.
 """
 
 import numpy as np
@@ -23,24 +23,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate Camarilla levels from previous day
-    # Camarilla uses previous day's OHLC
+    # Get 1d data for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC (align to current 1d bars)
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Get previous day's OHLC for Camarilla levels
     prev_close = align_htf_to_ltf(prices, df_1d, df_1d['close'].values, additional_delay_bars=1)
     prev_high = align_htf_to_ltf(prices, df_1d, df_1d['high'].values, additional_delay_bars=1)
     prev_low = align_htf_to_ltf(prices, df_1d, df_1d['low'].values, additional_delay_bars=1)
@@ -70,31 +64,44 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_regime = volume > (2.0 * vol_ma_20)
     
+    # Choppiness Index regime filter (14-period)
+    chop_period = 14
+    atr_sum = pd.Series(tr).rolling(window=chop_period, min_periods=chop_period).sum().values
+    highest_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
+    lowest_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
+    chop = np.zeros(n)
+    for i in range(n):
+        if highest_high[i] != lowest_low[i] and not np.isnan(atr_sum[i]) and atr_sum[i] > 0:
+            chop[i] = 100 * np.log10(atr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(chop_period)
+        else:
+            chop[i] = 50.0  # neutral when no range
+    chop_regime = chop < 61.8  # trending regime (chop < 61.8)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     long_high = 0.0   # highest close since long entry
     short_low = 0.0   # lowest close since short entry
     
     # Start index: need warmup for calculations
-    start_idx = max(100, atr_period)
+    start_idx = max(100, atr_period, chop_period)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
+            np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_50_1w_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
         
         if position == 0:
-            # Only trade in trending regimes (1w EMA50 filter)
-            if close[i] > ema_trend:  # 1w uptrend regime
-                # Long: break above Camarilla R1 with volume spike
-                long_signal = (close[i] > R1[i]) and vol_regime[i]
-            else:  # 1w downtrend regime
-                # Short: break below Camarilla S1 with volume spike
-                short_signal = (close[i] < S1[i]) and vol_regime[i]
+            # Only trade in trending regimes (1d EMA50 filter + chop < 61.8)
+            if ema_trend > close[i]:  # 1d downtrend (price below EMA50)
+                # Short: break below Camarilla S1 with volume spike and chop filter
+                short_signal = (close[i] < S1[i]) and vol_regime[i] and chop_regime[i]
+            else:  # 1d uptrend (price above EMA50)
+                # Long: break above Camarilla R1 with volume spike and chop filter
+                long_signal = (close[i] > R1[i]) and vol_regime[i] and chop_regime[i]
             
             if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
@@ -136,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
