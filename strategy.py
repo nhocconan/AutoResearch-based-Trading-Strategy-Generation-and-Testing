@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Alligator_JawTeethLips_1wTrend_VolumeConfirm
-Hypothesis: Williams Alligator (Jaw=EMA13(8), Teeth=EMA8(5), Lips=EMA5(3)) on 1d with 1w trend filter (price >/< EMA34 weekly) and volume confirmation (>1.5x 20-bar avg). 
-Enters long when Lips > Teeth > Jaw (bullish alignment) in 1d uptrend with volume spike, short when Lips < Teeth < Jaw (bearish alignment) in 1d downtrend with volume spike. 
-Exits on opposite Alligator alignment or trend reversal. 
-Designed for 1d timeframe with ~10-25 trades/year, works in bull/bear by following 1w trend filter and Alligator alignment.
+6h_Ichimoku_Cloud_Breakout_1dTrend_VolumeConfirm
+Hypothesis: 6h Ichimoku cloud breakout with 1d trend filter (price above/below 1d Kumo) and volume confirmation (>2.0x 20-bar avg). 
+Enters long when price breaks above 6h Kumo cloud in 1d uptrend with volume spike, short when price breaks below 6h Kumo cloud in 1d downtrend with volume spike. 
+Exits when price re-enters the 6h Kumo cloud or 1d trend reverses. 
+Designed for 6h timeframe with ~20-40 trades/year, works in bull/bear by following 1d trend filter and cloud breakout logic.
 """
 
 import numpy as np
@@ -21,58 +21,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d Ichimoku components for trend filter: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (52 displacement)
+    tenkan_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    kijun_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    senkou_span_a_1d = ((tenkan_1d + kijun_1d) / 2).shift(22)  # displaced 26 periods forward, but we use 22 for alignment
+    senkou_span_b_1d = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2).shift(22)
+    # Kumo top/bottom for 1d trend: price > max(Senkou A, Senkou B) = uptrend, price < min = downtrend
+    kumo_top_1d = np.maximum(senkou_span_a_1d.values, senkou_span_b_1d.values)
+    kumo_bottom_1d = np.minimum(senkou_span_a_1d.values, senkou_span_b_1d.values)
+    kumo_top_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_top_1d)
+    kumo_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom_1d)
     
-    # Williams Alligator on 1d timeframe
-    # Jaw: EMA13 of median price, shifted 8 bars
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).ewm(span=13, adjust=False, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # shift 8 bars forward
-    jaw[:8] = np.nan
+    # 6h Ichimoku components for entry signals
+    tenkan_6h = (pd.Series(high).rolling(window=9, min_periods=9).max() + pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
+    kijun_6h = (pd.Series(high).rolling(window=26, min_periods=26).max() + pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    senkou_span_a_6h = ((tenkan_6h + kijun_6h) / 2).shift(22)
+    senkou_span_b_6h = ((pd.Series(high).rolling(window=52, min_periods=52).max() + pd.Series(low).rolling(window=52, min_periods=52).min()) / 2).shift(22)
+    # Kumo top/bottom for 6h: cloud boundaries
+    kumo_top_6h = np.maximum(senkou_span_a_6h.values, senkou_span_b_6h.values)
+    kumo_bottom_6h = np.minimum(senkou_span_a_6h.values, senkou_span_b_6h.values)
     
-    # Teeth: EMA8 of median price, shifted 5 bars
-    teeth = pd.Series(median_price).ewm(span=8, adjust=False, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # shift 5 bars forward
-    teeth[:5] = np.nan
-    
-    # Lips: EMA5 of median price, shifted 3 bars
-    lips = pd.Series(median_price).ewm(span=5, adjust=False, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # shift 3 bars forward
-    lips[:3] = np.nan
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need at least 1 bar of previous data and Alligator warmup
-    start_idx = max(13, 8, 5, 1)
+    # Start index: need enough data for Ichimoku calculations (52 for Senkou B)
+    start_idx = 52
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or 
+        if (np.isnan(kumo_top_1d_aligned[i]) or 
+            np.isnan(kumo_bottom_1d_aligned[i]) or 
+            np.isnan(kumo_top_6h[i]) or 
+            np.isnan(kumo_bottom_6h[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) in 1d uptrend with volume confirmation
-            bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-            long_setup = bullish_alignment and (close[i] > ema_34_1w_aligned[i]) and volume_spike[i]
-            # Short: Lips < Teeth < Jaw (bearish alignment) in 1d downtrend with volume confirmation
-            bearish_alignment = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-            short_setup = bearish_alignment and (close[i] < ema_34_1w_aligned[i]) and volume_spike[i]
+            # Long: price breaks above 6h Kumo top in 1d uptrend (price > 1d Kumo top) with volume confirmation
+            long_setup = (close[i] > kumo_top_6h[i]) and (close[i-1] <= kumo_top_6h[i-1]) and (close[i] > kumo_top_1d_aligned[i]) and volume_spike[i]
+            # Short: price breaks below 6h Kumo bottom in 1d downtrend (price < 1d Kumo bottom) with volume confirmation
+            short_setup = (close[i] < kumo_bottom_6h[i]) and (close[i-1] >= kumo_bottom_6h[i-1]) and (close[i] < kumo_bottom_1d_aligned[i]) and volume_spike[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -85,22 +84,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: bearish Alligator alignment OR trend turns down
-            bearish_alignment = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-            if bearish_alignment or (close[i] < ema_34_1w_aligned[i]):
+            # Exit: price re-enters 6h Kumo cloud OR 1d trend turns down (price < 1d Kumo bottom)
+            if (close[i] < kumo_top_6h[i]) or (close[i] < kumo_bottom_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: bullish Alligator alignment OR trend turns up
-            bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-            if bullish_alignment or (close[i] > ema_34_1w_aligned[i]):
+            # Exit: price re-enters 6h Kumo cloud OR 1d trend turns up (price > 1d Kumo top)
+            if (close[i] > kumo_bottom_6h[i]) or (close[i] > kumo_top_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Alligator_JawTeethLips_1wTrend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Breakout_1dTrend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
