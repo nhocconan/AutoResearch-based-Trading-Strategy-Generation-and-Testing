@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla R3S3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Camarilla R3/S3 levels act as strong support/resistance where price often accelerates on breakout.
-Breaking above R3 with volume and 1d uptrend signals bullish momentum; breaking below S3 with volume and 1d downtrend signals bearish momentum.
-The 1d EMA34 filter ensures trades align with higher timeframe trend, working in both bull/bear markets.
-ATR-based stoploss limits downside during whipsaws. 4h timeframe targets ~25-40 trades/year to minimize fee drag.
+6h Elder Ray Power + 12h SuperTrend + Volume Spike
+Hypothesis: Elder Ray (Bull/Bear Power) measures trend strength relative to EMA13; 
+combined with 12h SuperTrend filter and volume confirmation, it captures strong 
+momentum moves in both bull and bear markets while avoiding whipsaws. 6h timeframe 
+targets ~12-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -21,108 +21,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for SuperTrend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h SuperTrend (ATR=10, mult=3.0)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # ATR calculation for 12h
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate R3 and S3 for each 1d bar
-    rng = high_1d - low_1d
-    r3 = close_1d + 1.1 * rng
-    s3 = close_1d - 1.1 * rng
+    # SuperTrend calculation
+    hl2_12h = (high_12h + low_12h) / 2
+    upper_12h = hl2_12h + 3.0 * atr_12h
+    lower_12h = hl2_12h - 3.0 * atr_12h
     
-    # Align to 4h timeframe (use previous day's levels, so shift by 1)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3, additional_delay_bars=1)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3, additional_delay_bars=1)
+    supertrend_12h = np.full_like(close_12h, np.nan)
+    direction_12h = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
     
-    # Calculate ATR for stoploss (using 4h data)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar has no previous close
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    for i in range(len(close_12h)):
+        if i == 0:
+            supertrend_12h[i] = upper_12h[i]
+            direction_12h[i] = 1
+        else:
+            if supertrend_12h[i-1] == upper_12h[i-1]:
+                supertrend_12h[i] = lower_12h[i] if close_12h[i] > upper_12h[i-1] else upper_12h[i]
+                direction_12h[i] = -1 if supertrend_12h[i] == lower_12h[i] else 1
+            else:
+                supertrend_12h[i] = upper_12h[i] if close_12h[i] < lower_12h[i-1] else lower_12h[i]
+                direction_12h[i] = 1 if supertrend_12h[i] == upper_12h[i] else -1
+    
+    # Align SuperTrend direction to 6h
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
+    
+    # Elder Ray calculation on 6h data (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA34 and ATR warmup
-    start_idx = 34
+    # Start index: need enough for EMA13 and SuperTrend warmup
+    start_idx = max(13, 10)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema13[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(supertrend_dir_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
-        ema_trend = ema_34_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
-        atr_val = atr[i]
-        
-        # Volume spike: current volume > 2.0 * 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_20
+        curr_volume_spike = volume_spike[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
+        supertrend_dir = supertrend_dir_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3 AND above 1d EMA34 (uptrend filter)
-            long_condition = (curr_close > r3_level) and (curr_close > ema_trend) and volume_spike
-            # Short: price breaks below S3 AND below 1d EMA34 (downtrend filter)
-            short_condition = (curr_close < s3_level) and (curr_close < ema_trend) and volume_spike
+            # Long: Bull Power > 0 (strong bullish momentum) AND 12h SuperTrend uptrend AND volume spike
+            long_condition = (curr_bull_power > 0) and (supertrend_dir == 1) and curr_volume_spike
+            # Short: Bear Power < 0 (strong bearish momentum) AND 12h SuperTrend downtrend AND volume spike
+            short_condition = (curr_bear_power < 0) and (supertrend_dir == -1) and curr_volume_spike
             
             if long_condition:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
             elif short_condition:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Check stoploss: 2.0 * ATR below entry
-            if curr_close <= entry_price - 2.0 * atr_val:
-                signals[i] = 0.0
-                position = 0
-            # Exit long: price returns below R3 or trend breaks
-            elif curr_close <= r3_level or curr_close < ema_trend:
+            # Exit long: Bull Power <= 0 (momentum fading) OR 12h SuperTrend turns down
+            if curr_bull_power <= 0 or supertrend_dir == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Check stoploss: 2.0 * ATR above entry
-            if curr_close >= entry_price + 2.0 * atr_val:
-                signals[i] = 0.0
-                position = 0
-            # Exit short: price returns above S3 or trend breaks
-            elif curr_close >= s3_level or curr_close > ema_trend:
+            # Exit short: Bear Power >= 0 (momentum fading) OR 12h SuperTrend turns up
+            if curr_bear_power >= 0 or supertrend_dir == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_ElderRay_Power_12hSuperTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
