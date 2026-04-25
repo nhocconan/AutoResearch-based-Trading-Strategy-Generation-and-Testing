@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout with 1d EMA34 Trend Filter and Volume Spike Confirmation
-Hypothesis: Camarilla H3/L3 levels from daily pivot act as key support/resistance. A break above H3 with
-1d EMA34 uptrend and volume spike (>2x 20-bar vol MA) signals bullish momentum. Break below L3 with
-1d EMA34 downtrend and volume spike signals bearish momentum. Uses discrete position sizing (0.25) to limit fee drag.
-Designed for 12h timeframe to target 50-150 trades over 4 years. Works in bull markets via upside breakouts
-and in bear markets via downside breakdowns.
+4h Camarilla H3/L3 Breakout with 1d EMA34 Trend Filter and Volume Spike Confirmation
+Hypothesis: Camarilla H3/L3 levels act as strong intraday resistance/support derived from prior day's range.
+A break above H3 with 1d EMA34 uptrend and volume spike (>2x 20-bar vol MA) signals bullish momentum.
+Break below L3 with 1d EMA34 downtrend and volume spike signals bearish momentum.
+Uses discrete position sizing (0.25) to limit fee drag. Designed for 4h timeframe to target 75-200 trades over 4 years.
+Works in bull markets via upside breakouts and in bear markets via downside breakdowns.
 """
 
 import numpy as np
@@ -24,7 +24,7 @@ def generate_signals(prices):
     
     # Get 1d data for EMA34 trend and Camarilla levels (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 35:  # Need 34 for EMA + 1 for shift
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -32,20 +32,20 @@ def generate_signals(prices):
     ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous day (using 1d data)
+    # Previous day's high, low, close for Camarilla calculation
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Camarilla levels: H3/L3 = C + (H-L)*1.1/2 and C - (H-L)*1.1/2
+    # Camarilla levels: H3/L3 = C ± (H-L)*1.1/2
     camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (no extra delay - levels known at bar open)
+    # Align Camarilla levels to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate 20-period volume MA for volume spike confirmation (12h)
+    # Calculate 20-period volume MA for volume spike confirmation (4h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -54,7 +54,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for EMA34 calculation, volume MA, and Camarilla alignment
-    start_idx = max(34, 20)  # 34 for EMA34, 20 for volume MA
+    start_idx = max(35, 20)  # 35 for EMA34 (34 + 1 for shift), 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -76,7 +76,7 @@ def generate_signals(prices):
         l3_level = camarilla_l3_aligned[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: current volume > 2.0 * 20-period average (tighter for fewer trades)
+        # Volume confirmation: current volume > 2.0 * 20-period average
         volume_confirm = curr_volume > 2.0 * vol_ma
         
         # Breakout conditions
@@ -116,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
