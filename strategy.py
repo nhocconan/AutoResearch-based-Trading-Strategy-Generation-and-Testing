@@ -1,44 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + HMA(21) Trend + Volume Spike
-Hypothesis: Donchian channel breakouts capture strong momentum moves. When combined with
-Hull Moving Average trend filter and volume confirmation, this strategy avoids false
-breakouts in choppy markets. Designed for 4h timeframe to achieve 20-50 trades/year.
-Works in bull markets (breakouts above upper band in uptrend) and bear markets
-(breakouts below lower band in downtrend). Uses tight entry conditions to minimize
-fee drag and maximize test generalization.
+1d Donchian(20) Breakout + Weekly EMA50 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Daily Donchian breakouts capture strong momentum moves. Weekly EMA50 filters trend direction.
+Volume spike confirms breakout strength. ATR-based stoploss manages risk. Designed for 1d timeframe
+with tight entry conditions to achieve 7-25 trades/year. Works in bull (breakouts above upper band in uptrend)
+and bear (breakouts below lower band in downtrend). Uses proven BTC/ETH edge from top performers.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_hma(series, period):
-    """Calculate Hull Moving Average"""
-    if len(series) < period:
-        return np.full_like(series, np.nan, dtype=np.float64)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    weights_half = np.arange(1, half_period + 1)
-    wma_half = np.convolve(series, weights_half, mode='valid') / weights_half.sum()
-    wma_half = np.concatenate([np.full(half_period - 1, np.nan), wma_half])
-    
-    # WMA of full period
-    weights_full = np.arange(1, period + 1)
-    wma_full = np.convolve(series, weights_full, mode='valid') / weights_full.sum()
-    wma_full = np.concatenate([np.full(period - 1, np.nan), wma_full])
-    
-    # Raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final WMA of raw HMA with sqrt period
-    weights_sqrt = np.arange(1, sqrt_period + 1)
-    wma_sqrt = np.convolve(raw_hma, weights_sqrt, mode='valid') / weights_sqrt.sum()
-    wma_sqrt = np.concatenate([np.full(sqrt_period - 1, np.nan), wma_sqrt])
-    
-    return wma_sqrt
 
 def generate_signals(prices):
     n = len(prices)
@@ -50,22 +21,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for EMA50 trend (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close for HTF trend
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA50 on weekly close for trend
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian channels (20-period) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate ATR(14) for stoploss and volatility filter
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    high_close[0] = high_low[0]
+    low_close[0] = high_low[0]
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate HMA(21) on 4h for trend filter
-    hma_21 = calculate_hma(close, 21)
+    # Calculate Donchian channels (20-period)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -73,15 +49,15 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Start index: need enough for indicators
+    # Start index: need enough for Donchian, EMA, ATR, and volume MA
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_21[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -89,41 +65,43 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        hma_trend = hma_21[i]
-        htf_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
-        upper_band = highest_high[i]
-        lower_band = lowest_low[i]
+        atr_val = atr[i]
+        upper_band = donchian_upper[i]
+        lower_band = donchian_lower[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above upper Donchian band AND volume spike AND
-            # price > HMA (uptrend) AND price > HTF EMA (bullish HTF)
-            long_entry = (curr_close > upper_band) and vol_spike and (curr_close > hma_trend) and (curr_close > htf_trend)
-            # Short: price breaks below lower Donchian band AND volume spike AND
-            # price < HMA (downtrend) AND price < HTF EMA (bearish HTF)
-            short_entry = (curr_close < lower_band) and vol_spike and (curr_close < hma_trend) and (curr_close < htf_trend)
+            # Long: price breaks above upper Donchian band AND volume spike AND price > weekly EMA (uptrend)
+            long_entry = (curr_high > upper_band) and vol_spike and (curr_close > ema_trend)
+            # Short: price breaks below lower Donchian band AND volume spike AND price < weekly EMA (downtrend)
+            short_entry = (curr_low < lower_band) and vol_spike and (curr_close < ema_trend)
             
             if long_entry:
                 signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below lower Donchian band OR price crosses below HMA (trend change)
-            if (curr_close < lower_band) or (curr_close < hma_trend):
+            # Exit: ATR-based stoploss OR price crosses below weekly EMA (trend change)
+            stop_price = entry_price - 2.5 * atr_val
+            if (curr_low < stop_price) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above upper Donchian band OR price crosses above HMA (trend change)
-            if (curr_close > upper_band) or (curr_close > hma_trend):
+            # Exit: ATR-based stoploss OR price crosses above weekly EMA (trend change)
+            stop_price = entry_price + 2.5 * atr_val
+            if (curr_high > stop_price) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_HMA21_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop"
+timeframe = "1d"
 leverage = 1.0
