@@ -1,144 +1,114 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator + Elder Ray + 1d Fractal confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for Williams fractal confirmation (requires 2-bar delay).
-- Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs on median price.
-  Trend up: Lips > Teeth > Jaw. Trend down: Lips < Teeth < Jaw.
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-  Bullish: Bull Power > 0 and rising. Bearish: Bear Power < 0 and falling.
-- Entry: Long when Alligator bullish AND Bull Power > 0 AND bullish 1d fractal.
-         Short when Alligator bearish AND Bear Power < 0 AND bearish 1d fractal.
-- Exit: Opposite Alligator alignment (trend change).
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike filter.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d for EMA34 trend direction and Camarilla pivot levels (H3/L3) from prior day.
+- Camarilla Pivots: H3, L3 levels from prior 1d OHLC for breakout logic.
+- Trend Filter: 1d EMA34 must align with breakout direction (long: close > EMA34, short: close < EMA34).
+- Volume Filter: Current 4h volume > 2.0 * 20-period average 4h volume to confirm strong momentum.
+- Entry: Long when close > H3 AND close > 1d EMA34 AND volume spike.
+         Short when close < L3 AND close < 1d EMA34 AND volume spike.
+- Exit: Opposite Camarilla break (long exits when close < L3, short exits when close > H3).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Designed to catch strong trends with confirmation from multiple time-tested indicators.
-- Works in bull markets (catching uptrends) and bear markets (catching downtrends).
-- Uses 1d fractals for confirmation to avoid false breakouts in choppy markets.
+- Designed to capture strong momentum bursts aligned with daily trend while filtering chop/whipsaws.
+- Works in bull markets (trend continuation) and bear markets (trend continuation down).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need sufficient data for calculations
+    if n < 60:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 12h median price for Alligator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    median_12h = (high_12h + low_12h) / 2.0
-    
-    # Williams Alligator: Jaw(13), Teeth(8), Lips(5) SMAs on median price
-    jaw = pd.Series(median_12h).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(median_12h).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(median_12h).rolling(window=5, min_periods=5).mean().values
-    
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    
-    # Calculate 12h EMA13 for Elder Ray
-    close_12h = df_12h['close'].values
-    ema_13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_13_12h)
-    
-    # Calculate 12h Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_12h - ema_13_12h
-    bear_power = low_12h - ema_13_12h
-    
-    # Align Elder Ray to 12h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
-    
-    # Calculate 1d Williams Fractals (requires 2-bar confirmation delay)
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Align with 2-bar delay for fractal confirmation (needs 2 future 1d bars)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d Camarilla pivots (H3, L3) from prior day OHLC
+    prev_high = df_1d['high'].shift(1).values  # Shifted to avoid look-ahead
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla H3 and L3 levels (using standard Camarilla formula)
+    camarilla_range = prev_high - prev_low
+    h3 = prev_close + camarilla_range * 1.1 / 2
+    l3 = prev_close - camarilla_range * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe (waits for 1d bar close)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    
+    # Calculate 4h volume average for confirmation (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 8, 5)  # Need 13 for Jaw, 8 for Teeth, 5 for Lips
+    start_idx = max(34, 20)  # Need 34 for EMA, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or np.isnan(ema_13_12h_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams Alligator conditions
-        lips_val = lips_aligned[i]
-        teeth_val = teeth_aligned[i]
-        jaw_val = jaw_aligned[i]
+        curr_close = close[i]
+        curr_volume = volume[i]
+        h3_level = h3_aligned[i]
+        l3_level = l3_aligned[i]
+        ema_34_level = ema_34_1d_aligned[i]
         
-        alligator_bullish = lips_val > teeth_val and teeth_val > jaw_val
-        alligator_bearish = lips_val < teeth_val and teeth_val < jaw_val
+        # Volume spike: current volume > 2.0 * 20-period average volume
+        volume_spike = curr_volume > 2.0 * vol_ma_20[i]
         
-        # Elder Ray conditions
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
+        # Camarilla breakout conditions
+        broke_above_h3 = curr_close > h3_level
+        broke_below_l3 = curr_close < l3_level
         
-        # Elder Ray rising/falling (1-bar change)
-        if i > start_idx:
-            bull_power_prev = bull_power_aligned[i-1]
-            bear_power_prev = bear_power_aligned[i-1]
-            bull_power_rising = bull_power_val > bull_power_prev
-            bear_power_falling = bear_power_val < bear_power_prev
-        else:
-            bull_power_rising = False
-            bear_power_falling = False
+        # Trend alignment conditions
+        above_ema = curr_close > ema_34_level
+        below_ema = curr_close < ema_34_level
         
-        # 1d Fractal conditions
-        bullish_fractal_val = bullish_fractal_aligned[i]
-        bearish_fractal_val = bearish_fractal_aligned[i]
+        # Exit conditions: opposite Camarilla break
+        if position != 0:
+            # Exit long: close breaks below L3
+            if position == 1:
+                if curr_close < l3_level:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
+            # Exit short: close breaks above H3
+            elif position == -1:
+                if curr_close > h3_level:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
         
-        # Entry conditions
+        # Entry conditions: Camarilla breakout with trend and volume filters
         if position == 0:
-            # Long: Alligator bullish AND Bull Power > 0 AND rising AND bullish fractal
-            long_condition = (
-                alligator_bullish and 
-                bull_power_val > 0 and 
-                bull_power_rising and 
-                bullish_fractal_val
-            )
+            # Long: break above H3 AND above EMA34 AND volume spike
+            long_condition = broke_above_h3 and above_ema and volume_spike
             
-            # Short: Alligator bearish AND Bear Power < 0 AND falling AND bearish fractal
-            short_condition = (
-                alligator_bearish and 
-                bear_power_val < 0 and 
-                bear_power_falling and 
-                bearish_fractal_val
-            )
+            # Short: break below L3 AND below EMA34 AND volume spike
+            short_condition = broke_below_l3 and below_ema and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -146,23 +116,15 @@ def generate_signals(prices):
             elif short_condition:
                 signals[i] = -0.25
                 position = -1
-        
-        # Exit conditions: Opposite Alligator alignment (trend change)
-        elif position != 0:
-            # Exit long: Alligator turns bearish
-            if position == 1 and alligator_bearish:
-                signals[i] = 0.0
-                position = 0
-            # Exit short: Alligator turns bullish
-            elif position == -1 and alligator_bullish:
-                signals[i] = 0.0
-                position = 0
-            # Otherwise maintain position
-            else:
-                signals[i] = 0.25 if position == 1 else -0.25
+        elif position == 1:
+            # Long position: maintain signal
+            signals[i] = 0.25
+        elif position == -1:
+            # Short position: maintain signal
+            signals[i] = -0.25
     
     return signals
 
-name = "12h_Williams_Alligator_ElderRay_1dFractal_Confirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
