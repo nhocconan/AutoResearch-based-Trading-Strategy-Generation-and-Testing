@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_WeeklyPivot_Breakout_VolumeConfirm
-Hypothesis: 6-hour Donchian(20) breakout with weekly pivot direction filter (price above/below weekly pivot) and volume confirmation (>1.5x 20-period average).
-Long when price breaks above 20-period high in weekly uptrend (price > weekly pivot) with volume confirmation.
-Short when price breaks below 20-period low in weekly downtrend (price < weekly pivot) with volume confirmation.
-Exit via opposite Donchian boundary (10-period) or ATR trailing stop (2.5*ATR from extreme).
-Weekly pivot provides higher timeframe structure to filter breakouts, reducing false signals in choppy markets.
-Volume confirmation ensures breakouts have conviction. Designed for ~50-120 trades over 4 years (12-30/year) via tight Donchian breakout conditions.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirm
+Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-day EMA50 trend filter and volume confirmation (>1.5x 20-period average).
+Long when price breaks above R1 in 1-day uptrend with volume confirmation.
+Short when price breaks below S1 in 1-day downtrend with volume confirmation.
+Exit via ATR trailing stop (1.5*ATR from extreme) or opposite Camarilla level (S1 for long, R1 for short).
+Camarilla levels provide precise intraday support/resistance derived from prior day's range.
+Volume confirmation ensures breakouts have conviction. 1-day trend filter aligns with higher timeframe bias.
+Designed for ~50-120 trades over 4 years (12-30/year) via tight breakout conditions.
 """
 
 import numpy as np
@@ -23,19 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot and trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:  # need at least 5 periods for pivot calculation
+    # Get 1d data for trend filter and Camarilla calculation (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:  # need at least 2 days for Camarilla
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly pivot points (standard: P = (H+L+C)/3)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Align weekly pivot to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate Camarilla levels from prior 1d candle
+    # Camarilla R1 = close + (high - low) * 1.1/12
+    # Camarilla S1 = close - (high - low) * 1.1/12
+    # Using prior 1d candle's OHLC
+    camarilla_range = high_1d - low_1d
+    camarilla_r1 = close_1d + (camarilla_range * 1.1 / 12)
+    camarilla_s1 = close_1d - (camarilla_range * 1.1 / 12)
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # ATR for stoploss (14-period)
     atr_period = 14
@@ -56,26 +68,27 @@ def generate_signals(prices):
     short_extreme = 0.0  # lowest close since short entry
     
     # Start index: need warmup for calculations
-    start_idx = max(100, atr_period, 20)
+    start_idx = max(100, atr_period, 20, 1)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        pivot = pivot_1w_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
         
         if position == 0:
-            # Only trade in weekly trending regimes (price relative to weekly pivot)
-            if close[i] > pivot:  # weekly uptrend regime
-                # Donchian breakout: 20-period high
-                highest_20 = np.max(high[i-19:i+1]) if i >= 19 else np.max(high[:i+1])
-                long_signal = (close[i] > highest_20) and vol_regime[i]
-            else:  # weekly downtrend regime
-                # Donchian breakdown: 20-period low
-                lowest_20 = np.min(low[i-19:i+1]) if i >= 19 else np.min(low[:i+1])
-                short_signal = (close[i] < lowest_20) and vol_regime[i]
+            # Only trade in trending regimes (1d EMA50 filter)
+            if close[i] > ema_trend:  # 1d uptrend regime
+                # Long: break above R1 with volume confirmation
+                long_signal = (close[i] > r1) and vol_regime[i]
+            else:  # 1d downtrend regime
+                # Short: break below S1 with volume confirmation
+                short_signal = (close[i] < s1) and vol_regime[i]
             
             if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
@@ -97,11 +110,10 @@ def generate_signals(prices):
             if close[i] > long_extreme:
                 long_extreme = close[i]
             # Exit conditions: 
-            # 1. ATR trailing stop (2.5*ATR from extreme)
-            atr_stop = long_extreme - 2.5 * atr[i]
-            # 2. Price breaks below 10-period low (opposite Donchian boundary)
-            lowest_10 = np.min(low[i-9:i+1]) if i >= 9 else np.min(low[:i+1])
-            if close[i] <= atr_stop or close[i] < lowest_10:
+            # 1. ATR trailing stop (1.5*ATR from extreme)
+            atr_stop = long_extreme - 1.5 * atr[i]
+            # 2. Price breaks below S1 (opposite Camarilla level)
+            if close[i] <= atr_stop or close[i] < s1:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
@@ -111,16 +123,15 @@ def generate_signals(prices):
             if close[i] < short_extreme:
                 short_extreme = close[i]
             # Exit conditions:
-            # 1. ATR trailing stop (2.5*ATR from extreme)
-            atr_stop = short_extreme + 2.5 * atr[i]
-            # 2. Price breaks above 10-period high (opposite Donchian boundary)
-            highest_10 = np.max(high[i-9:i+1]) if i >= 9 else np.max(high[:i+1])
-            if close[i] >= atr_stop or close[i] > highest_10:
+            # 1. ATR trailing stop (1.5*ATR from extreme)
+            atr_stop = short_extreme + 1.5 * atr[i]
+            # 2. Price breaks above R1 (opposite Camarilla level)
+            if close[i] >= atr_stop or close[i] > r1:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Breakout_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
