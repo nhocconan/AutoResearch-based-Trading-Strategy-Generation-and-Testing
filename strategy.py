@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-- Trend filter: price > 1d EMA34 = bullish, price < 1d EMA34 = bearish.
-- In bullish 1d trend: buy breakouts above R1, sell breakdowns below S1.
-- In bearish 1d trend: sell breakdowns below S1, buy breakouts above R1 (continuation logic).
+4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v2
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 12h EMA50 trend filter and volume confirmation.
+- Trend filter: price > 12h EMA50 = bullish, price < 12h EMA50 = bearish.
+- In bullish 12h trend: buy breakouts above R1, sell breakdowns below S1.
+- In bearish 12h trend: sell breakdowns below S1, buy breakouts above R1 (continuation logic).
 - Volume confirmation: require volume > 2.0x 20-period average to avoid false breakouts.
-- Position size: 0.25. Target: 50-150 total trades over 4 years = 12-37/year.
-- Works in both bull and bear: 1d trend filter captures major moves, volume filter reduces noise.
+- Exit on trend reversal or mean reversion to pivot.
+- Position size: 0.25. Target: 75-200 total trades over 4 years = 19-50/year.
+- Works in both bull and bear: 12h trend filter captures major moves, volume filter reduces noise.
 """
 
 import numpy as np
@@ -24,23 +25,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter and Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for HTF trend filter and Camarilla pivot levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close[0] = df_1d['close'].values[0]
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
+    # Calculate 12h Camarilla pivot levels (using previous 12h bar's OHLC)
+    prev_close = np.roll(df_12h['close'].values, 1)
+    prev_high = np.roll(df_12h['high'].values, 1)
+    prev_low = np.roll(df_12h['low'].values, 1)
+    prev_close[0] = df_12h['close'].values[0]
+    prev_high[0] = df_12h['high'].values[0]
+    prev_low[0] = df_12h['low'].values[0]
     
     pivot = (prev_high + prev_low + prev_close) / 3.0
     range_ = prev_high - prev_low
@@ -49,10 +50,10 @@ def generate_signals(prices):
     r1 = pivot + (range_ * 1.1 / 12)
     s1 = pivot - (range_ * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
     
     # Volume spike confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,12 +62,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA(34), volume MA (20)
-    start_idx = max(34, 20)
+    # Start index: need warmup for EMA(50), volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
             np.isnan(pivot_aligned[i]) or
@@ -74,14 +75,14 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend using EMA34
-        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
+        # Determine 12h HTF trend using EMA50
+        htf_12h_bullish = close[i] > ema_50_12h_aligned[i]
+        htf_12h_bearish = close[i] < ema_50_12h_aligned[i]
         
         if position == 0:
-            # Breakout logic: trade in direction of 1d trend with volume confirmation
-            long_setup = (close[i] > r1_aligned[i]) and htf_1d_bullish and volume_spike[i]
-            short_setup = (close[i] < s1_aligned[i]) and htf_1d_bearish and volume_spike[i]
+            # Breakout logic: trade in direction of 12h trend with volume confirmation
+            long_setup = (close[i] > r1_aligned[i]) and htf_12h_bullish and volume_spike[i]
+            short_setup = (close[i] < s1_aligned[i]) and htf_12h_bearish and volume_spike[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -95,7 +96,7 @@ def generate_signals(prices):
             # Long: hold position
             signals[i] = 0.25
             # Exit on trend reversal or mean reversion to pivot
-            exit_signal = (not htf_1d_bullish) or (close[i] < pivot_aligned[i])
+            exit_signal = (not htf_12h_bullish) or (close[i] < pivot_aligned[i])
             
             if exit_signal:
                 signals[i] = 0.0
@@ -104,7 +105,7 @@ def generate_signals(prices):
             # Short: hold position
             signals[i] = -0.25
             # Exit on trend reversal or mean reversion to pivot
-            exit_signal = htf_1d_bullish or (close[i] > pivot_aligned[i])
+            exit_signal = htf_12h_bullish or (close[i] > pivot_aligned[i])
             
             if exit_signal:
                 signals[i] = 0.0
@@ -112,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
