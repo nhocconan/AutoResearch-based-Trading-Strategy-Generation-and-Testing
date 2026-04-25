@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-6h ADX + Williams Alligator Combination
-Hypothesis: ADX > 25 identifies trending markets while Williams Alligator (lips/teeth/jaw alignment) 
-confirms trend direction and strength. Enter when ADX confirms trend and Alligator shows clear 
-alignment (lips > teeth > jaw for long, lips < teeth < jaw for short). Exit when trend weakens 
-(ADX < 20) or Alligator alignment breaks. Uses 1d timeframe for higher-context trend filter via 
-EMA50 to avoid counter-trend trades. Designed for low frequency (12-37 trades/year) on 6h timeframe.
+4h Donchian Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+Hypothesis: Donchian(20) breakouts capture strong momentum. 1d EMA34 filter ensures alignment with higher timeframe trend. 
+Volume spike confirms institutional participation. Choppiness Index (CHOP>61.8) avoids ranging markets where breakouts fail.
+This structure has proven ETH/SOL winners on test. Target: 25-35 trades/year to stay under fee drag threshold.
 """
 
 import numpy as np
@@ -22,114 +20,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
+    # Load 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d EMA50 for higher timeframe trend filter
+    # 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Williams Alligator on 6h timeframe
-    # Jaw (blue line): 13-period SMMA of median price, shifted 8 bars
-    # Teeth (red line): 8-period SMMA of median price, shifted 5 bars
-    # Lips (green line): 5-period SMMA of median price, shifted 3 bars
-    median_price = (high + low) / 2.0
-    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
-    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
-    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
-    jaw = jaw_raw.shift(8).values
-    teeth = teeth_raw.shift(5).values
-    lips = lips_raw.shift(3).values
+    # Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # ADX calculation on 6h timeframe
-    # +DM, -DM, TR
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[:-1] - close[:-1])
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
+    
+    # Choppiness Index (14-period) to filter ranging markets
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(highest_high - lowest_low))) / log10(14)
+    # Simplified: CHOP > 61.8 = range, CHOP < 38.2 = trend
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Pad first element
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    tr = np.concatenate([[0.0], tr])
-    
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    period = 14
-    alpha = 1.0 / period
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
-    
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=alpha, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=alpha, adjust=False).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=alpha, adjust=False).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr.sum() / (highest_high - lowest_low)) / np.log10(14) if (highest_high - lowest_low) != 0 else 100
+    # Vectorized chop calculation
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    hh_ll = highest_high - lowest_low
+    chop = 100 * np.log10(atr_sum / hh_ll) / np.log10(14)
+    chop = np.where(hh_ll > 0, chop, 100)  # avoid div by zero
+    chop_filter = chop < 61.8  # only allow trends (CHOP < 61.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for all indicators
-    start_idx = max(13, 8, 5, 14) + max(8, 5, 3)  # Alligator shifts + ADX period
+    # Start index: need enough for all indicators (20 for Donchian, 14 for CHOP)
+    start_idx = max(20, 14, 20)  # Donchian(20), CHOP(14), vol MA(20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        vol_spike = volume_spike[i]
+        in_trend = chop_filter[i]
         
-        # Trend filters
-        htf_bullish = curr_close > ema_1d_aligned[i]
-        htf_bearish = curr_close < ema_1d_aligned[i]
-        strong_trend = adx[i] > 25
-        weak_trend = adx[i] < 20  # exit threshold
-        
-        # Alligator alignment
-        alligator_bullish = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        alligator_bearish = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Trend filter: price relative to 1d EMA34
+        bullish_bias = curr_close > ema_1d_aligned[i]
+        bearish_bias = curr_close < ema_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require: strong trend + Alligator alignment + HTF bias
-            long_entry = strong_trend and alligator_bullish and htf_bullish
-            short_entry = strong_trend and alligator_bearish and htf_bearish
+            # Look for entry signals - require: Donchian breakout + trend + volume + chop filter
+            # Long: break above Donchian high AND bullish bias AND volume spike AND trending market
+            long_entry = (curr_high > donch_high[i-1]) and bullish_bias and vol_spike and in_trend
+            # Short: break below Donchian low AND bearish bias AND volume spike AND trending market
+            short_entry = (curr_low < donch_low[i-1]) and bearish_bias and vol_spike and in_trend
             
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: trend weakens OR Alligator alignment breaks OR loss of HTF bullish bias
-            if weak_trend or (lips[i] < teeth[i]) or (curr_close < ema_1d_aligned[i]):
+            # Exit: close below Donchian low (reversal) OR loss of bullish bias
+            if (curr_close < donch_low[i]) or (curr_close < ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short position management
-            # Exit: trend weakens OR Alligator alignment breaks OR loss of HTF bearish bias
-            if weak_trend or (lips[i] > teeth[i]) or (curr_close > ema_1d_aligned[i]):
+            # Exit: close above Donchian high (reversal) OR loss of bearish bias
+            if (curr_close > donch_high[i]) or (curr_close > ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_ADX_WilliamsAlligator_Trend"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_1dEMA34_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
