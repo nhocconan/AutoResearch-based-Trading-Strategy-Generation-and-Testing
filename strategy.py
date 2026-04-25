@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3
-Hypothesis: 12h timeframe strategy using 1d Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation. Targets 12-37 trades/year by requiring: 1) price breaks R1/S1 levels with strong momentum (close > open), 2) aligned with 1d EMA trend, 3) volume > 2.0x 20-period average. Uses 12h primary timeframe to reduce trade frequency and avoid fee drag, with 1d HTF for structure.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_Regime
+Hypothesis: Tight Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume spike confirmation, and choppiness regime filter to avoid overtrading. Targets 20-40 trades/year by requiring: 1) price breaks R1/S1 levels, 2) aligned with 1d EMA34 trend, 3) volume > 2.5x 20-period average, 4) choppy market filter (CHOP < 61.8) to avoid whipsaws in ranging markets. Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -28,7 +28,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d data for Camarilla pivots (using previous day)
+    # Previous day's OHLC for Camarilla calculation
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -38,24 +38,32 @@ def generate_signals(prices):
     R1 = prev_close + 1.1 * prev_range * (1.0/12.0)  # R1 = C + 1.1*(HL/12)
     S1 = prev_close - 1.1 * prev_range * (1.0/12.0)  # S1 = C - 1.1*(HL/12)
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d pivot levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)  # already computed above
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (volume spike)
+    # Volume confirmation: current volume > 2.5 * 20-period average (stricter spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 2.5)
     
-    # Momentum filter: close > open for long, close < open for short
-    bullish_momentum = close > open_price
-    bearish_momentum = close < open_price
+    # Choppiness regime filter: avoid whipsaw in ranging markets
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
+    tr1 = pd.Series(high).diff().abs()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).diff().abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.rolling(window=14, min_periods=14).sum()
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr_14 / np.log10(highest_high - lowest_low)) / np.log10(14)
+    chop_values = chop.values
+    chop_regime = chop_values < 61.8  # Trending market (not choppy/ranging)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA34 (34) and 1d pivots (2 for shift)
+    # Start index: need enough for 1d EMA34 (34) and 1d pivots (2)
     start_idx = 34
     
     for i in range(start_idx, n):
@@ -66,7 +74,7 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1d_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_values[i])):
             signals[i] = 0.0
             continue
         
@@ -79,11 +87,11 @@ def generate_signals(prices):
         downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals with volume confirmation, trend alignment, and momentum
-            # Long breakout: price breaks above R1 with uptrend, volume confirmation, and bullish momentum
-            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i] and bullish_momentum[i]
-            # Short breakout: price breaks below S1 with downtrend, volume confirmation, and bearish momentum
-            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i] and bearish_momentum[i]
+            # Look for entry signals with volume confirmation, trend alignment, and regime filter
+            # Long breakout: price breaks above R1 with uptrend, volume confirmation, and trending regime
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i] and chop_regime[i]
+            # Short breakout: price breaks below S1 with downtrend, volume confirmation, and trending regime
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i] and chop_regime[i]
             
             if long_breakout:
                 signals[i] = 0.25
@@ -97,7 +105,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Calculate 12h ATR for stoploss (using typical range)
+            # Calculate 4h ATR for stoploss
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -115,7 +123,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Calculate 12h ATR (same as above)
+            # Calculate 4h ATR (same as above)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -134,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
