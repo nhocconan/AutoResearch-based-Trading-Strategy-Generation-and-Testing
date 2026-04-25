@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot R1S1 Breakout with Daily EMA34 Trend and Volume Spike
-Hypothesis: Weekly pivot R1/S1 levels act as significant support/resistance on 6h charts. 
+12h Weekly Pivot R1S1 Breakout with Daily EMA34 Trend and Volume Spike
+Hypothesis: Weekly pivot R1/S1 levels act as significant support/resistance on 12h charts. 
 Breakouts above R1 or below S1 with volume confirmation and aligned daily EMA34 trend 
 capture continuation moves in both bull/bear markets. The daily EMA34 filter ensures 
 we trade with higher timeframe momentum, reducing false breakouts. Volume spike 
 confirms institutional participation. Designed for low trade frequency (12-37/year) 
-to minimize fee drag on 6h timeframe.
+to minimize fee drag on 12h timeframe.
 """
 
 import numpy as np
@@ -50,7 +50,7 @@ def generate_signals(prices):
     weekly_r1 = w_close + (w_high - w_low) * 1.1 / 12
     weekly_s1 = w_close - (w_high - w_low) * 1.1 / 12
     
-    # Align Weekly Camarilla levels to 6h timeframe
+    # Align Weekly Camarilla levels to 12h timeframe
     weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
@@ -116,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
