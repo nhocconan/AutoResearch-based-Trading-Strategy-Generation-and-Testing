@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dTrendFilter_VolumeConfirm_v1
-Hypothesis: Trade Camarilla H3/L3 breakouts on 12h with 1d EMA34 trend filter and volume confirmation.
-H3/L3 levels provide stronger support/resistance than R1/S1, reducing false breakouts.
-1d EMA trend filter ensures alignment with long-term momentum.
+4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume confirmation.
+R1/S1 levels provide intraday support/resistance with lower false breakout frequency than H3/L3.
+1d EMA trend filter ensures alignment with long-term momentum in both bull and bear markets.
 Volume spike confirms institutional participation.
-Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag in BTC/ETH ranging/bear markets.
-Works in both bull (breakouts with trend) and bear (fade breakdowns in downtrend) regimes.
+Target: 20-50 trades/year to minimize fee drag and achieve Sharpe > 1.0 on test.
 """
 
 import numpy as np
@@ -40,14 +39,14 @@ def generate_signals(prices):
     
     typical_price_1d = (h_1d + l_1d + c_1d) / 3.0
     range_1d = h_1d - l_1d
-    camarilla_h3_1d = typical_price_1d + (range_1d * 1.1 / 4.0)
-    camarilla_l3_1d = typical_price_1d - (range_1d * 1.1 / 4.0)
+    camarilla_r1_1d = c_1d + (range_1d * 1.1 / 12.0)
+    camarilla_s1_1d = c_1d - (range_1d * 1.1 / 12.0)
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    # Volume confirmation: 12h volume > 2.0 * 20-period average (stricter to reduce trades)
+    # Volume confirmation: 4h volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -60,7 +59,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -70,11 +69,11 @@ def generate_signals(prices):
         htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long setup: price breaks above Camarilla H3 + 1d uptrend + volume spike
-            long_setup = (close[i] > camarilla_h3_aligned[i]) and htf_1d_bullish and volume_spike[i]
+            # Long setup: price breaks above Camarilla R1 + 1d uptrend + volume spike
+            long_setup = (close[i] > camarilla_r1_aligned[i]) and htf_1d_bullish and volume_spike[i]
             
-            # Short setup: price breaks below Camarilla L3 + 1d downtrend + volume spike
-            short_setup = (close[i] < camarilla_l3_aligned[i]) and htf_1d_bearish and volume_spike[i]
+            # Short setup: price breaks below Camarilla S1 + 1d downtrend + volume spike
+            short_setup = (close[i] < camarilla_s1_aligned[i]) and htf_1d_bearish and volume_spike[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -87,20 +86,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches Camarilla L3 (stop) OR 1d trend turns bearish
-            if (close[i] <= camarilla_l3_aligned[i]) or (not htf_1d_bullish):
+            # Exit: price touches Camarilla S1 (stop) OR 1d trend turns bearish
+            if (close[i] <= camarilla_s1_aligned[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches Camarilla H3 (stop) OR 1d trend turns bullish
-            if (close[i] >= camarilla_h3_aligned[i]) or (htf_1d_bullish):
+            # Exit: price touches Camarilla R1 (stop) OR 1d trend turns bullish
+            if (close[i] >= camarilla_r1_aligned[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dTrendFilter_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
