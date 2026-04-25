@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + Volume Confirmation + 1d ADX Trend Filter
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures buying/selling pressure relative to trend. 
-Combined with volume confirmation and 1d ADX > 25 for strong trends, this captures institutional momentum moves in both bull and bear markets. 
-Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 12-30 trades/year on 6h.
+12h Camarilla H3/L3 Breakout with Volume Spike and 1w EMA50 Trend Filter
+Hypothesis: Camarilla H3/L3 levels from weekly pivot act as key support/resistance on 12h chart. 
+Breakouts with volume confirmation indicate institutional participation. The 1w EMA50 trend filter 
+ensures trades align with the weekly trend, reducing false breakouts in choppy markets and improving 
+performance in both bull and bear regimes. Discrete sizing (0.0, ±0.25) minimizes fee churn. 
+Target: 12-37 trades/year on 12h.
 """
 
 import numpy as np
@@ -20,100 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX for trend strength
-    # ADX requires +DM, -DM, TR
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    # Get 1d data for Camarilla pivot calculation (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # +DM and -DM
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # first value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Calculate Camarilla pivots from previous 1d OHLC
+    # H3 = close + 1.0*(high-low), L3 = close - 1.0*(high-low)
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    rang = prev_high - prev_low
+    H3 = prev_close + 1.0 * rang
+    L3 = prev_close - 1.0 * rang
     
-    period = 14
-    tr_smooth = wilders_smoothing(tr, period)
-    plus_dm_smooth = wilders_smoothing(plus_dm, period)
-    minus_dm_smooth = wilders_smoothing(minus_dm, period)
+    # Align Camarilla levels to 12h (use previous day's levels for current day's trading)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, period)
-    adx_1d = adx
-    
-    # Align 1d ADX to 6h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA13, volume MA, and ADX
-    start_idx = max(100, 20, 14+14)  # ensure all indicators ready
+    # Start index: need enough for volume MA and EMA
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_volume = volume[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
-        adx_val = adx_1d_aligned[i]
+        H3_level = H3_aligned[i]
+        L3_level = L3_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: Bull Power > 0 (buying pressure) AND volume spike AND ADX > 25 (strong trend)
-            long_entry = (curr_bull_power > 0) and vol_spike and (adx_val > 25)
-            # Short: Bear Power > 0 (selling pressure) AND volume spike AND ADX > 25 (strong trend)
-            short_entry = (curr_bear_power > 0) and vol_spike and (adx_val > 25)
+            # Long: price breaks above H3 AND volume spike AND price > 1w EMA50 (uptrend)
+            long_entry = (curr_close > H3_level) and vol_spike and (curr_close > ema_trend)
+            # Short: price breaks below L3 AND volume spike AND price < 1w EMA50 (downtrend)
+            short_entry = (curr_close < L3_level) and vol_spike and (curr_close < ema_trend)
             
             if long_entry:
                 signals[i] = 0.25
@@ -125,16 +92,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Bull Power <= 0 (loss of buying pressure) OR ADX < 20 (trend weakening)
-            if (curr_bull_power <= 0) or (adx_val < 20):
+            # Exit: price crosses below L3 (reversal) OR price < 1w EMA50 (trend change)
+            if (curr_close < L3_level) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: Bear Power <= 0 (loss of selling pressure) OR ADX < 20 (trend weakening)
-            if (curr_bear_power <= 0) or (adx_val < 20):
+            # Exit: price crosses above H3 (reversal) OR price > 1w EMA50 (trend change)
+            if (curr_close > H3_level) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -142,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_VolumeConfirm_1dADX25_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_VolumeSpike_1wEMA50_Trend"
+timeframe = "12h"
 leverage = 1.0
