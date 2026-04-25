@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v2
 Hypothesis: Daily Camarilla R1/S1 breakouts with weekly EMA50 trend filter and volume spike confirmation.
 Uses 1d primary timeframe to target 20-50 trades/year (75-200 total over 4 years) to minimize fee drag.
 Weekly EMA50 provides strong trend alignment that works in both bull and bear markets by filtering counter-trend breakouts.
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v2"
 timeframe = "1d"
 leverage = 1.0
