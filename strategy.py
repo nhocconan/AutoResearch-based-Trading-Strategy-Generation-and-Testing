@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts from the previous 1d bar with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) captures institutional breakouts with controlled trade frequency. The 4h timeframe balances noise reduction and trade frequency (target 20-50/year). Trend alignment ensures directional bias, volume confirms participation, and discrete sizing (0.30) minimizes fee churn. Works in bull markets via long breakouts and bear markets via short breakouts. Uses 1d HTF for Camarilla levels and trend to avoid look-ahead.
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts from the previous 1d bar with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) captures institutional breakouts with controlled trade frequency. The 4h timeframe balances noise reduction and trade frequency (target 19-50/year). Trend alignment ensures directional bias, volume confirms participation, and discrete sizing (0.30) minimizes fee churn. Works in bull markets via long breakouts and bear markets via short breakouts. Uses 1d HTF for Camarilla levels and trend to avoid look-ahead.
 """
 
 import numpy as np
