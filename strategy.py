@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Elder Power + Weekly Pivot Direction + Volume Spike
-Hypothesis: Elder Ray Bull/Bear Power from daily chart confirms institutional buying/selling pressure,
-combined with weekly Camarilla pivot direction for structural bias and volume spike for momentum.
-Works in both bull and bear markets by focusing on power imbalance rather than pure trend.
-Target: 50-150 total trades over 4 years (12-37/year). Discrete sizing: 0.25.
+12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+Hypothesis: Camarilla H3/L3 levels from daily chart breakouts with volume confirmation,
+1d EMA34 trend filter for medium-term trend alignment, and chop regime filter (CHOP<38.2)
+capture sustained momentum while minimizing whipsaws. Designed for 12h timeframe to target
+12-37 trades/year. Uses discrete sizing (0.25) to control fees. Works in both bull and bear
+markets by only taking breakouts in direction of 1d EMA34 trend and in trending regimes.
 """
 
 import numpy as np
@@ -21,33 +22,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray Power (call ONCE before loop)
+    # Get 1d data for Camarilla pivots and EMA34 (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Elder Ray Bull Power = High - EMA13(close)
-    # Bear Power = Low - EMA13(close)
+    # Calculate Camarilla pivot levels (H3, L3) from 1d OHLC
+    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
-    ema13 = pd.Series(daily_close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = df_1d['high'].values - ema13
-    bear_power = df_1d['low'].values - ema13
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    camarilla_h3 = daily_close + 1.1 * (daily_high - daily_low) / 4
+    camarilla_l3 = daily_close - 1.1 * (daily_high - daily_low) / 4
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Get 1w data for Camarilla pivot direction (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly Camarilla H3/L3 for directional bias
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    camarilla_h3_weekly = weekly_close + 1.1 * (weekly_high - weekly_low) / 4
-    camarilla_l3_weekly = weekly_close - 1.1 * (weekly_high - weekly_low) / 4
-    camarilla_h3_weekly_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3_weekly)
-    camarilla_l3_weekly_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3_weekly)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for stoploss
     if len(close) >= 14:
@@ -65,20 +57,31 @@ def generate_signals(prices):
         start_idx = max(0, i - 19)
         vol_ma_20[i] = np.mean(volume[start_idx:i+1])
     
+    # Calculate Choppiness Index (CHOP) for regime filter
+    # CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    if len(close) >= 14:
+        atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum()
+        hh = pd.Series(high).rolling(window=14, min_periods=14).max()
+        ll = pd.Series(low).rolling(window=14, min_periods=14).min()
+        chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
+        chop_values = chop.values
+    else:
+        chop_values = np.full(n, 50.0)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA13, ATR, and volume MA to propagate
-    start_idx = max(13, 14)
+    # Start index: need enough for EMA34_1d, ATR, and volume MA to propagate
+    start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
-            np.isnan(camarilla_h3_weekly_aligned[i]) or 
-            np.isnan(camarilla_l3_weekly_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(chop_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,21 +91,23 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
-        h3_weekly = camarilla_h3_weekly_aligned[i]
-        l3_weekly = camarilla_l3_weekly_aligned[i]
+        ema34_1d = ema_34_1d_aligned[i]
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
+        chop = chop_values[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
+        # Volume spike: current volume > 2.0 * 20-period average (standard threshold)
         volume_spike = curr_volume > 2.0 * vol_ma
+        # Chop filter: only trade when trending (CHOP < 38.2)
+        trending_regime = chop < 38.2
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) AND price above weekly H3 AND volume spike
-            long_condition = (bull_power_val > 0) and (curr_close > h3_weekly) and volume_spike
-            # Short: Bear Power < 0 (selling pressure) AND price below weekly L3 AND volume spike
-            short_condition = (bear_power_val < 0) and (curr_close < l3_weekly) and volume_spike
+            # Long: price breaks above H3 AND uptrend (price > 1d EMA34) AND volume spike AND trending regime
+            long_condition = (curr_close > h3) and (curr_close > ema34_1d) and volume_spike and trending_regime
+            # Short: price breaks below L3 AND downtrend (price < 1d EMA34) AND volume spike AND trending regime
+            short_condition = (curr_close < l3) and (curr_close < ema34_1d) and volume_spike and trending_regime
             
             if long_condition:
                 signals[i] = 0.25
@@ -113,15 +118,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or Bull Power turns negative
-            if curr_close <= entry_price - 2.0 * atr_val or bull_power_val <= 0:
+            # Exit long: stoploss (2.0*ATR below entry) or price breaks below L3 (reversal signal)
+            if curr_close <= entry_price - 2.0 * atr_val or curr_close < l3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or Bear Power turns positive
-            if curr_close >= entry_price + 2.0 * atr_val or bear_power_val >= 0:
+            # Exit short: stoploss (2.0*ATR above entry) or price breaks above H3 (reversal signal)
+            if curr_close >= entry_price + 2.0 * atr_val or curr_close > h3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderPower_WeeklyPivotDirection_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
