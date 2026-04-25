@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_1wPivotDir
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter (price > 1d close + 0.5*ATR for long, < 1d close - 0.5*ATR for short) and 1w pivot direction filter (only long when price > weekly pivot, only short when price < weekly pivot). Uses HTF 1d for trend alignment and HTF 1w for pivot direction. Volume confirmation requires >2.0x 20-bar mean volume. Targets 12-30 trades/year per symbol by requiring strong confluence of trend, pivot direction, and volume spike. Designed to work in both bull (breakouts with volume and trend alignment) and bear (trend-following shorts with pivot alignment) markets via disciplined entry/exit.
+12h_Camarilla_R1S1_Breakout_1wTrend_VolumeFilter
+Hypothesis: 12h Camarilla R1/S1 breakout with 1w trend filter (price > 1w close + 0.5*ATR for long, < 1w close - 0.5*ATR for short) and volume confirmation (>1.8x 20-bar mean volume). Targets 12-37 trades/year by requiring strong trend alignment and volume spike. Designed to work in bull markets (breakouts with volume in uptrend) and bear markets (trend-following shorts in downtrend) via disciplined entry/exit. Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -18,56 +18,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate ATR(14) on 1d for trend filter
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - pd.Series(close_1d).shift(1)))
-    tr3 = pd.Series(np.abs(low_1d - pd.Series(close_1d).shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Trend filter: 1d close ± 0.5*ATR
-    trend_long = close_1d + 0.5 * atr_1d
-    trend_short = close_1d - 0.5 * atr_1d
-    
-    # Align trend levels to 6h timeframe
-    trend_long_aligned = align_htf_to_ltf(prices, df_1d, trend_long)
-    trend_short_aligned = align_htf_to_ltf(prices, df_1d, trend_short)
-    
-    # Get 1w data for pivot direction
+    # Get 1w data for HTF trend filter and ATR
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
+    close_1w = df_1w['close'].values
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot point (standard: (H+L+C)/3)
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Calculate ATR(14) on 1w for trend filter
+    tr1 = pd.Series(high_1w - low_1w)
+    tr2 = pd.Series(np.abs(high_1w - pd.Series(close_1w).shift(1)))
+    tr3 = pd.Series(np.abs(low_1w - pd.Series(close_1w).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Trend filter: 1w close ± 0.5*ATR
+    trend_long = close_1w + 0.5 * atr_1w
+    trend_short = close_1w - 0.5 * atr_1w
     
-    # Calculate Camarilla levels from previous 1d bar (HLC of prior bar)
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)  # R3 = C + 1.1*(H-L)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)  # S3 = C - 1.1*(H-L)
+    # Align trend levels to 12h timeframe
+    trend_long_aligned = align_htf_to_ltf(prices, df_1w, trend_long)
+    trend_short_aligned = align_htf_to_ltf(prices, df_1w, trend_short)
     
-    # Align Camarilla levels to 1d timeframe (use previous bar's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate Camarilla levels from previous 1w bar (HLC of prior bar)
+    camarilla_r1 = close_1w + 1.1 * (high_1w - low_1w)  # R1 = C + 1.1*(H-L)
+    camarilla_s1 = close_1w - 1.1 * (high_1w - low_1w)  # S1 = C - 1.1*(H-L)
     
-    # Volume confirmation: current volume > 2.0x 20-bar mean volume
+    # Align Camarilla levels to 12h timeframe (use previous bar's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    
+    # Volume confirmation: current volume > 1.8x 20-bar mean volume
     vol_mean_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_mean_20 * 2.0)
+    vol_confirm = volume > (vol_mean_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,26 +64,17 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(trend_long_aligned[i]) or 
             np.isnan(trend_short_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_mean_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 in uptrend (price > 1d close + 0.5*ATR) 
-            # AND price > weekly pivot (bullish bias from 1w pivot) with volume confirmation
-            # Short: price breaks below Camarilla S3 in downtrend (price < 1d close - 0.5*ATR) 
-            # AND price < weekly pivot (bearish bias from 1w pivot) with volume confirmation
-            long_signal = (close[i] > camarilla_r3_aligned[i]) and \
-                         (close[i] > trend_long_aligned[i]) and \
-                         (close[i] > weekly_pivot_aligned[i]) and \
-                         vol_confirm[i]
-            short_signal = (close[i] < camarilla_s3_aligned[i]) and \
-                          (close[i] < trend_short_aligned[i]) and \
-                          (close[i] < weekly_pivot_aligned[i]) and \
-                          vol_confirm[i]
+            # Long: price breaks above Camarilla R1 in uptrend (price > 1w close + 0.5*ATR) with volume confirmation
+            # Short: price breaks below Camarilla S1 in downtrend (price < 1w close - 0.5*ATR) with volume confirmation
+            long_signal = (close[i] > camarilla_r1_aligned[i]) and (close[i] > trend_long_aligned[i]) and vol_confirm[i]
+            short_signal = (close[i] < camarilla_s1_aligned[i]) and (close[i] < trend_short_aligned[i]) and vol_confirm[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -111,7 +87,7 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price moves back below 1d close - 0.5*ATR (trend reversal)
+            # Exit when price moves back below 1w close - 0.5*ATR (trend reversal)
             exit_signal = close[i] < trend_short_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
@@ -119,7 +95,7 @@ def generate_signals(prices):
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price moves back above 1d close + 0.5*ATR (trend reversal)
+            # Exit when price moves back above 1w close + 0.5*ATR (trend reversal)
             exit_signal = close[i] > trend_long_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
@@ -127,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_1wPivotDir"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
