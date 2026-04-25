@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3
-Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level with 1d uptrend (price > EMA34) and volume spike (>2.5x avg); enter short when price breaks below S1 level with 1d downtrend (price < EMA34) and volume spike. Exit on opposite Camarilla level touch or trend reversal. Uses discrete sizing (0.25) to minimize fee churn. Tighter volume threshold (>2.5x) reduces overtrading vs v2, targeting 20-40 trades/year. Works in bull/bear via 1d trend filter.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v4
+Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level with 1d uptrend (price > EMA34) and volume spike (>3.0x avg); enter short when price breaks below S1 level with 1d downtrend (price < EMA34) and volume spike. Exit on opposite Camarilla level touch or trend reversal. Uses discrete sizing (0.25) to minimize fee churn. Tighter volume threshold (>3.0x) reduces overtrading vs v3, targeting 20-40 trades/year. Works in bull/bear via 1d trend filter.
 """
 
 import numpy as np
@@ -66,8 +66,8 @@ def generate_signals(prices):
         htf_1d_bullish = df_1d_close_aligned[i] > ema_34_1d_aligned[i]
         htf_1d_bearish = df_1d_close_aligned[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation: need significant spike (vol_ratio > 2.5)
-        volume_confirmed = vol_ratio[i] > 2.5
+        # Volume confirmation: need significant spike (vol_ratio > 3.0)
+        volume_confirmed = vol_ratio[i] > 3.0
         
         if position == 0:
             # Long setup: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v4"
 timeframe = "4h"
 leverage = 1.0
