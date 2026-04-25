@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_Regime
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike confirmation,
-and choppiness regime filter. Uses 1d for trend direction to reduce whipsaw and overtrading,
-while 4h provides precise entry timing. Choppiness filter avoids ranging markets where
-breakouts fail. Target: 20-50 trades/year on BTC/ETH with controlled risk.
+12h_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike
+Hypothesis: 12h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike confirmation.
+Uses weekly trend to reduce whipsaw in bear markets while 12h provides precise entry timing.
+Volume spike confirms institutional interest. Designed for 12-30 trades/year on BTC/ETH with controlled risk.
+Works in both bull (trend following) and bear (mean reversion at extremes) markets.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,12 +25,13 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1d data for EMA34 trend filter (loaded ONCE)
-    df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w data for EMA50 trend filter (loaded ONCE)
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # 1d data for Camarilla pivots (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -40,7 +41,7 @@ def generate_signals(prices):
     H3 = prev_close + 1.1 * prev_range * 0.5  # H3 = C + 1.1*(HL/2)
     L3 = prev_close - 1.1 * prev_range * 0.5  # L3 = C - 1.1*(HL/2)
     
-    # Align 1d pivot levels to 4h timeframe
+    # Align 1d pivot levels to 12h timeframe
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
@@ -48,34 +49,12 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # Choppiness regime filter: CHOP > 61.8 = ranging (avoid breakouts)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of True Range over 14 periods
-    sum_tr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum_tr / (highest_high - lowest_low)) / log10(14)
-    # Avoid division by zero
-    hl_range = highest_high - lowest_low
-    chop = np.where(hl_range > 0, 100 * np.log10(sum_tr / hl_range) / np.log10(14), 50)
-    chop_aligned = chop  # already at 4h timeframe
-    chop_filter = chop_aligned < 61.8  # Only trade when NOT choppy (trending)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA34 (34) and 1d indicators
-    start_idx = 34
+    # Start index: need enough for 1w EMA50 (50) and 1d indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -85,7 +64,7 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -93,16 +72,16 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: price relative to 1w EMA50
+        uptrend = curr_close > ema_50_1w_aligned[i]
+        downtrend = curr_close < ema_50_1w_aligned[i]
         
         if position == 0:
-            # Look for entry signals with volume spike, trend alignment, and chop filter
-            # Long breakout: price breaks above H3 with uptrend, volume spike, and trending regime
-            long_breakout = (curr_close > H3_aligned[i]) and uptrend and volume_spike[i] and chop_filter[i]
-            # Short breakout: price breaks below L3 with downtrend, volume spike, and trending regime
-            short_breakout = (curr_close < L3_aligned[i]) and downtrend and volume_spike[i] and chop_filter[i]
+            # Look for entry signals with volume spike and trend alignment
+            # Long breakout: price breaks above H3 with uptrend and volume spike
+            long_breakout = (curr_close > H3_aligned[i]) and uptrend and volume_spike[i]
+            # Short breakout: price breaks below L3 with downtrend and volume spike
+            short_breakout = (curr_close < L3_aligned[i]) and downtrend and volume_spike[i]
             
             if long_breakout:
                 signals[i] = 0.25
@@ -116,36 +95,43 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Calculate 4h ATR
-            tr1 = high[1:] - low[1:]
-            tr2 = np.abs(high[1:] - close[:-1])
-            tr3 = np.abs(low[1:] - close[:-1])
-            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+            # Stoploss: 2.5 * ATR below entry (using 12h ATR approximation)
+            # Simple ATR approximation for 12h: using 4-period TR
+            if i >= 4:
+                tr1 = high[i-3:i+1] - low[i-3:i+1]
+                tr2 = np.abs(high[i-3:i+1] - close[i-4:i])
+                tr3 = np.abs(low[i-3:i+1] - close[i-4:i])
+                tr = np.maximum(tr1, np.maximum(tr2, tr3))
+                atr_approx = np.mean(tr)
+            else:
+                atr_approx = 0.0
             
-            if curr_close < entry_price - 2.0 * atr[i]:
+            if curr_close < entry_price - 2.5 * atr_approx:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks below L3 (mean reversion) or trend changes or chop increases
-            elif curr_close < L3_aligned[i] or not uptrend or not chop_filter[i]:
+            # Exit if price breaks below L3 (mean reversion) or trend changes
+            elif curr_close < L3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Calculate 4h ATR (same as above)
-            tr1 = high[1:] - low[1:]
-            tr2 = np.abs(high[1:] - close[:-1])
-            tr3 = np.abs(low[1:] - close[:-1])
-            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+            # Stoploss: 2.5 * ATR above entry
+            if i >= 4:
+                tr1 = high[i-3:i+1] - low[i-3:i+1]
+                tr2 = np.abs(high[i-3:i+1] - close[i-4:i])
+                tr3 = np.abs(low[i-3:i+1] - close[i-4:i])
+                tr = np.maximum(tr1, np.maximum(tr2, tr3))
+                atr_approx = np.mean(tr)
+            else:
+                atr_approx = 0.0
             
-            if curr_close > entry_price + 2.0 * atr[i]:
+            if curr_close > entry_price + 2.5 * atr_approx:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks above H3 (mean reversion) or trend changes or chop increases
-            elif curr_close > H3_aligned[i] or not downtrend or not chop_filter[i]:
+            # Exit if price breaks above H3 (mean reversion) or trend changes
+            elif curr_close > H3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -153,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_Regime"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
