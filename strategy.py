@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + 12h Weekly Pivot Direction + Volume Spike
-Hypothesis: Donchian breakouts capture momentum, while 12h weekly pivot direction (based on prior week's close) filters for institutional bias. Volume spike confirms participation. Works in bull/bear via pivot direction (long bias when price above weekly pivot, short bias when below). Targets 12-37 trades/year on 6h to minimize fee drag.
+4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Donchian channel breakouts capture strong momentum moves. Combined with 1d EMA34 trend filter and volume confirmation, this strategy avoids false breakouts. ATR-based stoploss manages risk. Works in bull/bear markets via trend filter - only takes longs in uptrend, shorts in downtrend. Targets 25-35 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
@@ -18,100 +18,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for weekly pivot calculation (using prior week's close)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:  # Need at least ~10 bars for weekly lookback
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot points on 12h: PP = (Prior Week High + Low + Close) / 3
-    # We'll use prior 5-day week approximation (5 * 12h = 60h ~ 2.5 days, adjust)
-    # Simpler: use prior week's close as bias (if close > prior week close -> bullish bias)
-    week_close = df_12h['close'].values
-    # Shift by 1 to get prior week's close (each 12h bar = half day, so 14 bars ~ 1 week)
-    prior_week_close = np.roll(week_close, 14)  # Approximate 1 week shift (14 * 12h = 168h = 1 week)
-    prior_week_close[:14] = np.nan  # First 14 bars invalid
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Pivot direction: 1 if current close > prior week close (bullish bias), -1 if < (bearish bias)
-    pivot_bias = np.where(week_close > prior_week_close, 1, -1)
-    pivot_bias = np.where(np.isnan(prior_week_close), 0, pivot_bias)
-    pivot_bias_aligned = align_htf_to_ltf(prices, df_12h, pivot_bias)
-    
-    # Donchian(20) on 6h
+    # Calculate Donchian channels (20-period) on primary timeframe
     lookback = 20
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        window_high = high[i-lookback+1:i+1]
-        window_low = low[i-lookback+1:i+1]
-        highest_high[i] = np.max(window_high)
-        lowest_low[i] = np.min(window_low)
     
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    # For first 19 bars, use cumulative mean
-    for i in range(19):
-        vol_ma_20[i] = np.mean(volume[:i+1])
-    volume_spike = volume > 2.0 * vol_ma_20
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # Calculate ATR(14) for stoploss
+    atr_period = 14
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = np.full(n, np.nan)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start after Donchian warmup
-    start_idx = lookback - 1
+    # Start index: need enough for indicators to warm up
+    start_idx = max(lookback, atr_period, 34) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or 
-            np.isnan(pivot_bias_aligned[i])):
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
-        donchian_high = highest_high[i]
-        donchian_low = lowest_low[i]
-        bias = pivot_bias_aligned[i]
-        vol_spike = volume_spike[i]
+        ema_trend = ema_34_aligned[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        curr_atr = atr[i]
+        
+        # Volume spike: current volume > 1.5 * 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-19:i+1])
+        else:
+            vol_ma_20 = np.mean(volume[:i+1])
+        volume_spike = curr_volume > 1.5 * vol_ma_20
         
         if position == 0:
-            # Long: price breaks above Donchian high AND bullish bias AND volume spike
-            long_condition = (curr_close > donchian_high) and (bias > 0) and vol_spike
-            # Short: price breaks below Donchian low AND bearish bias AND volume spike
-            short_condition = (curr_close < donchian_low) and (bias < 0) and vol_spike
+            # Long: price breaks above upper Donchian channel AND above 1d EMA34 (uptrend filter) AND volume spike
+            long_condition = (curr_close > upper_channel) and (curr_close > ema_trend) and volume_spike
+            # Short: price breaks below lower Donchian channel AND below 1d EMA34 (downtrend filter) AND volume spike
+            short_condition = (curr_close < lower_channel) and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: price returns below Donchian low or bias flips bearish
-            if curr_close <= donchian_low or bias < 0:
+            # Exit conditions: stoploss or trend reversal
+            stoploss_level = entry_price - 2.5 * curr_atr
+            if curr_close <= stoploss_level or curr_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price returns above Donchian high or bias flips bullish
-            if curr_close >= donchian_high or bias > 0:
+            # Exit conditions: stoploss or trend reversal
+            stoploss_level = entry_price + 2.5 * curr_atr
+            if curr_close >= stoploss_level or curr_close > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_Donchian20_Breakout_12hWeeklyPivotDirection_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
