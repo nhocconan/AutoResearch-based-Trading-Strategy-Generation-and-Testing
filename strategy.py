@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Camarilla R1/S1 Breakout with 12h EMA34 Trend and Volume Spike
-Hypothesis: Camarilla pivot levels (R1/S1) act as significant intraday support/resistance.
-Breakouts above R1 or below S1 with 12h EMA34 trend alignment and volume confirmation
-capture strong momentum moves. Works in bull/bear via trend filter and uses discrete sizing (0.25)
-to limit fee drag (~75-150 trades over 4 years).
+1h EMA Crossover with 4h Supertrend Trend Filter and Volume Confirmation
+Hypothesis: In strong trends identified by 4h Supertrend, 1h EMA(9/21) crossovers with volume confirmation capture momentum moves. Works in bull/bear via trend filter. Discrete sizing (0.20) limits fee drag (~60-120 trades over 4 years). Session filter (08-20 UTC) reduces noise.
 """
 
 import numpy as np
@@ -21,50 +18,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 4h data for Supertrend trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 4h ATR(10) for Supertrend
+    tr1_4h = df_4h['high'].values[1:] - df_4h['low'].values[1:]
+    tr2_4h = np.abs(df_4h['high'].values[1:] - df_4h['close'].values[:-1])
+    tr3_4h = np.abs(df_4h['low'].values[1:] - df_4h['close'].values[:-1])
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
+    atr_4h = pd.Series(tr_4h).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Get 1d data for Camarilla pivot levels (R1, S1)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate 4h Supertrend
+    hl2_4h = (df_4h['high'].values + df_4h['low'].values) / 2
+    upper_4h = hl2_4h + 3.0 * atr_4h
+    lower_4h = hl2_4h - 3.0 * atr_4h
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    # We use the previous completed 1d bar to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    supertrend_4h = np.full_like(hl2_4h, np.nan, dtype=float)
+    direction_4h = np.full_like(hl2_4h, np.nan, dtype=float)  # 1 for uptrend, -1 for downtrend
     
-    # Align Camarilla levels to 4h timeframe (no additional delay needed for pivot levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    for i in range(1, len(hl2_4h)):
+        if np.isnan(supertrend_4h[i-1]):
+            supertrend_4h[i] = lower_4h[i]
+            direction_4h[i] = 1
+        else:
+            if close_4h := df_4h['close'].values[i] <= supertrend_4h[i-1]:
+                upper_4h[i] = min(upper_4h[i], upper_4h[i-1])
+            else:
+                upper_4h[i] = max(upper_4h[i], upper_4h[i-1])
+                
+            if close_4h >= supertrend_4h[i-1]:
+                lower_4h[i] = max(lower_4h[i], lower_4h[i-1])
+            else:
+                lower_4h[i] = min(lower_4h[i], lower_4h[i-1])
+            
+            if direction_4h[i-1] == -1 and close_4h > upper_4h[i]:
+                direction_4h[i] = 1
+                supertrend_4h[i] = lower_4h[i]
+            elif direction_4h[i-1] == 1 and close_4h < lower_4h[i]:
+                direction_4h[i] = -1
+                supertrend_4h[i] = upper_4h[i]
+            else:
+                direction_4h[i] = direction_4h[i-1]
+                supertrend_4h[i] = supertrend_4h[i-1] if direction_4h[i] == 1 else upper_4h[i]
     
-    # Calculate ATR for volatility filter (using 20 periods)
+    # Align Supertrend direction to 1h
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, direction_4h)
+    
+    # Calculate 1h EMA(9) and EMA(21)
+    close_s = pd.Series(close)
+    ema_9 = close_s.ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Calculate 1h ATR(14) for stop loss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Start index: need enough for ATR (20) and EMA34 (34) and Camarilla (2)
-    start_idx = max(20, 34, 2)
+    # Start index: need enough for EMA21 (21) and ATR (14)
+    start_idx = max(21, 14)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i])):
+        # Skip if any data not ready or outside session
+        if (np.isnan(ema_9[i]) or np.isnan(ema_21[i]) or np.isnan(atr[i]) or 
+            np.isnan(supertrend_dir_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,60 +103,79 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_aligned[i]
+        ema_fast = ema_9[i]
+        ema_slow = ema_21[i]
         atr_value = atr[i]
-        r1_level = camarilla_r1_aligned[i]
-        s1_level = camarilla_s1_aligned[i]
+        trend = supertrend_dir_aligned[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
+        # Volume spike: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-19:i+1])
         else:
             vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_20
+        volume_spike = curr_volume > 1.5 * vol_ma_20
         
-        # Breakout conditions: price breaks above R1 or below S1
-        bullish_breakout = curr_close > r1_level
-        bearish_breakout = curr_close < s1_level
+        # EMA crossover signals
+        bullish_cross = ema_fast > ema_slow
+        bearish_cross = ema_fast < ema_slow
         
-        # Exit conditions: reverse breakout or trend rejection
+        # Update tracking variables for trailing stop logic
+        if position == 1:
+            highest_since_entry = max(highest_since_entry, curr_high)
+        elif position == -1:
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+        
+        # Exit conditions: trailing stop or reverse signal
         if position != 0:
             exit_signal = False
             
             if position == 1:
-                # Exit on bearish breakout below S1 or trend rejection
-                if bearish_breakout or curr_close < ema_trend:
+                # Trailing stop: exit if price drops 2.5*ATR from highest since entry
+                if curr_close < highest_since_entry - 2.5 * atr_value:
                     exit_signal = True
+                # Reverse crossover or trend change
+                elif bearish_cross or trend == -1:
+                    exit_signal = True
+                    
             elif position == -1:
-                # Exit on bullish breakout above R1 or trend rejection
-                if bullish_breakout or curr_close > ema_trend:
+                # Trailing stop: exit if price rises 2.5*ATR from lowest since entry
+                if curr_close > lowest_since_entry + 2.5 * atr_value:
+                    exit_signal = True
+                # Reverse crossover or trend change
+                elif bullish_cross or trend == 1:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
                 continue
         
-        # Entry conditions: Camarilla breakout + trend alignment + volume
+        # Entry conditions: EMA crossover + trend alignment + volume + session
         if position == 0:
-            # Long: break above R1 AND price above 12h EMA34
-            long_condition = bullish_breakout and (curr_close > ema_trend) and volume_spike
-            # Short: break below S1 AND price below 12h EMA34
-            short_condition = bearish_breakout and (curr_close < ema_trend) and volume_spike
+            # Long: bullish crossover AND uptrend AND volume spike
+            long_condition = bullish_cross and (trend == 1) and volume_spike
+            # Short: bearish crossover AND downtrend AND volume spike
+            short_condition = bearish_cross and (trend == -1) and volume_spike
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
         elif position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_EMACrossover_4hSupertrend_Volume_Session_v1"
+timeframe = "1h"
 leverage = 1.0
