@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike v3
-Hypothesis: Camarilla H3/L3 levels from 1d act as strong intraday support/resistance on 4h.
-Breakout through these levels with 1d EMA34 trend alignment (more stable than 12h) and volume confirmation
-captures institutional flow while avoiding overtrading. Uses discrete position sizing (0.25) and volume threshold (2.5x)
-to target 75-200 total trades over 4 hours. Works in bull/bear by following 1d trend while using Camarilla levels
+6h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Camarilla H3/L3 levels from 1d act as strong support/resistance on 6h.
+Breakout through these levels with 1d EMA34 trend alignment and volume confirmation
+captures institutional flow while avoiding overtrading. Uses discrete position sizing (0.25) and volume threshold (2.0x)
+to target 50-150 total trades over 4 years (12-37/year). Works in bull/bear by following 1d trend while using Camarilla levels
 for precise entry/exit. Added ATR-based trailing stop to reduce drawdown and improve Sharpe.
 """
 
@@ -32,15 +32,15 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Align daily data to 4h timeframe
-    prev_high_4h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_4h = align_htf_to_ltf(prices, df_1d, prev_low)
-    prev_close_4h = align_htf_to_ltf(prices, df_1d, prev_close)
+    # Align daily data to 6h timeframe
+    prev_high_6h = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_6h = align_htf_to_ltf(prices, df_1d, prev_low)
+    prev_close_6h = align_htf_to_ltf(prices, df_1d, prev_close)
     
     # Calculate Camarilla levels: H3/L3
-    rng = prev_high_4h - prev_low_4h
-    h3 = prev_close_4h + rng * 1.1 / 6.0
-    l3 = prev_close_4h - rng * 1.1 / 6.0
+    rng = prev_high_6h - prev_low_6h
+    h3 = prev_close_6h + rng * 1.1 / 6.0
+    l3 = prev_close_6h - rng * 1.1 / 6.0
     
     # 1d EMA34 for trend filter (more stable than 12h)
     close_1d = df_1d['close'].values
@@ -54,7 +54,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # 4h volume average for confirmation
+    # 6h volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -82,8 +82,8 @@ def generate_signals(prices):
         ema_34_level = ema_34_1d_aligned[i]
         atr_value = atr[i]
         
-        # Volume spike: current volume > 2.5 * 20-period average
-        volume_spike = curr_volume > 2.5 * vol_ma_20[i]
+        # Volume spike: current volume > 2.0 * 20-period average (reduced from 2.5x for more trades)
+        volume_spike = curr_volume > 2.0 * vol_ma_20[i]
         
         # Breakout conditions
         bullish_breakout = curr_close > h3[i]  # Break above H3
@@ -147,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v3"
-timeframe = "4h"
+name = "6h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
