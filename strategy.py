@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeConfirm_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 1h with 4h EMA50 trend filter and volume confirmation. In bullish 4h trend, buy breakouts above R1; in bearish 4h trend, sell breakdowns below S1. Uses volume spike (1.5x 20-bar avg) to confirm institutional interest. Designed for 1h timeframe with tight entries (<40/year) to minimize fee drag while capturing strong directional moves in both bull and bear markets.
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeConfirm_v2
+Hypothesis: Trade Camarilla R1/S1 breakouts on 1h with 4h EMA50 trend filter and volume confirmation. Uses stricter volume spike (2.0x 20-bar avg) and session filter (08-20 UTC) to reduce overtrading. Designed for 1h timeframe with target 15-25 trades/year to minimize fee drag while capturing strong directional moves.
 """
 
 import numpy as np
@@ -34,8 +34,6 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate Camarilla levels using previous day's OHLC
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -47,9 +45,13 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume confirmation: 1.5x 20-bar average volume
+    # Volume confirmation: 2.0x 20-bar average volume (stricter than before)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    volume_spike = volume > (2.0 * volume_ma)
+    
+    # Session filter: 08-20 UTC (pre-session to post-session)
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,10 +60,11 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if data not ready
+        # Skip if data not ready or outside session
         if (np.isnan(ema_50_4h_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i])):
+            np.isnan(camarilla_s1_aligned[i]) or
+            not session_filter[i]):
             signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
@@ -108,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeConfirm_v1"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeConfirm_v2"
 timeframe = "1h"
 leverage = 1.0
