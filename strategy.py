@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_WeeklyPivot_Direction_VolumeConfirmation
-Hypothesis: 6h Donchian(20) breakout in direction of weekly pivot (price > weekly pivot = long bias, < weekly pivot = short bias) with volume confirmation (>1.5x 20-bar average). Weekly pivot provides structural bias from higher timeframe, Donchian captures breakouts, volume filters false breakouts. Designed for ~12-37 trades/year by requiring strong breakouts, HTF bias alignment, and volume confirmation. Works in bull/bear markets via weekly pivot filter; avoids whipsaws via volume confirmation.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Long when price breaks above Camarilla R1 in 1d uptrend (close > 1d EMA34) with volume > 2.5x 20-bar average.
+Short when price breaks below Camarilla S1 in 1d downtrend (close < 1d EMA34) with volume > 2.5x 20-bar average.
+Exit via ATR trailing stop (2.0*ATR from extreme). Designed for ~12-30 trades/year by requiring strong breakouts,
+trend alignment, and volume confirmation. Works in bull/bear markets via 1d EMA34 filter; avoids whipsaws via volume
+confirmation and ATR stop. Target timeframe: 12h.
 """
 
 import numpy as np
@@ -18,74 +23,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly OHLC for pivot calculation (previous completed week)
-    weekly_high = align_htf_to_ltf(prices, df_1w, df_1w['high'].values, additional_delay_bars=1)
-    weekly_low = align_htf_to_ltf(prices, df_1w, df_1w['low'].values, additional_delay_bars=1)
-    weekly_close = align_htf_to_ltf(prices, df_1w, df_1w['close'].values, additional_delay_bars=1)
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    close_1d = df_1d['close'].values
     
-    # Donchian(20) channels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: >1.5x 20-bar average
+    # Get previous day's OHLC for Camarilla levels (1d HTF, aligned with 1 extra delay for completed bar)
+    prev_close = align_htf_to_ltf(prices, df_1d, df_1d['close'].values, additional_delay_bars=1)
+    prev_high = align_htf_to_ltf(prices, df_1d, df_1d['high'].values, additional_delay_bars=1)
+    prev_low = align_htf_to_ltf(prices, df_1d, df_1d['low'].values, additional_delay_bars=1)
+    prev_open = align_htf_to_ltf(prices, df_1d, df_1d['open'].values, additional_delay_bars=1)
+    
+    # Camarilla levels from previous day's OHLC
+    camarilla_range = prev_high - prev_low
+    R1 = prev_close + camarilla_range * 1.1 / 12
+    S1 = prev_close - camarilla_range * 1.1 / 12
+    H3 = prev_close + camarilla_range * 1.1 / 2
+    L3 = prev_close - camarilla_range * 1.1 / 2
+    
+    # ATR for trailing stop (14-period)
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Volume regime: volume > 2.5x 20-period average (stricter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma_20)
+    vol_regime = volume > (2.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_high = 0.0   # highest close since long entry
+    short_low = 0.0   # lowest close since short entry
     
     # Start index: need warmup for calculations
-    start_idx = max(100, lookback)
+    start_idx = max(100, atr_period)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(weekly_pivot[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
+            np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        ema_trend = ema_34_1d_aligned[i]
+        
         if position == 0:
-            # Determine bias from weekly pivot
-            bullish_bias = close[i] > weekly_pivot[i]
-            bearish_bias = close[i] < weekly_pivot[i]
+            # Only trade in trending regimes (1d EMA34 filter)
+            if close[i] > ema_trend:  # 1d uptrend regime
+                # Long: break above Camarilla R1 with volume spike
+                long_signal = (close[i] > R1[i]) and vol_regime[i]
+            else:  # 1d downtrend regime
+                # Short: break below Camarilla S1 with volume spike
+                short_signal = (close[i] < S1[i]) and vol_regime[i]
             
-            # Long: Donchian breakout above resistance with bullish bias and volume
-            long_signal = (close[i] > highest_high[i]) and bullish_bias and vol_confirm[i]
-            # Short: Donchian breakdown below support with bearish bias and volume
-            short_signal = (close[i] < lowest_low[i]) and bearish_bias and vol_confirm[i]
-            
-            if long_signal:
+            if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
                 position = 1
-            elif short_signal:
+                long_high = close[i]
+            elif 'short_signal' in locals() and short_signal:
                 signals[i] = -0.25
                 position = -1
+                short_low = close[i]
             else:
                 signals[i] = 0.0
+                # Clear signal variables for next iteration
+                if 'long_signal' in locals(): del long_signal
+                if 'short_signal' in locals(): del short_signal
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price re-enters Donchian channel or opposite weekly bias
-            if close[i] <= highest_high[i] or close[i] >= weekly_pivot[i]:
+            # Update highest close
+            if close[i] > long_high:
+                long_high = close[i]
+            # Exit conditions: ATR trailing stop OR re-enter Camarilla H3/L3 range
+            atr_stop = long_high - 2.0 * atr[i]
+            range_exit = (close[i] < H3[i] and close[i] > L3[i])
+            if close[i] <= atr_stop or range_exit:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price re-enters Donchian channel or opposite weekly bias
-            if close[i] >= lowest_low[i] or close[i] <= weekly_pivot[i]:
+            # Update lowest close
+            if close[i] < short_low:
+                short_low = close[i]
+            # Exit conditions: ATR trailing stop OR re-enter Camarilla H3/L3 range
+            atr_stop = short_low + 2.0 * atr[i]
+            range_exit = (close[i] > L3[i] and close[i] < H3[i])
+            if close[i] >= atr_stop or range_exit:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Direction_VolumeConfirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
