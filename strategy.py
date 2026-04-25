@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume Spike + ATR Trend Filter
-Hypothesis: Donchian channel breakouts capture strong momentum. Volume spike confirms institutional participation.
-ATR trend filter ensures we only trade in the direction of medium-term trend, avoiding counter-trend whipsaws.
-Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 25-40 trades/year on 4h.
-Works in bull markets via breakouts and in bear markets via trend filter (avoids false breakouts in ranging/choppy markets).
+1d KAMA Direction + RSI(2) + Chop Filter
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) adapts to market noise, reducing whipsaws in choppy markets. Combined with short-term RSI for mean reversion entries and a chop regime filter to avoid trending markets, this strategy aims to capture reversals in range-bound conditions while avoiding false signals during strong trends. Works in both bull and bear markets by focusing on mean reversion in ranging regimes.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,87 +18,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR trend filter (call ONCE before loop)
+    # Get 1d data for HTF indicators (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate ATR(14) on 1d for trend filter
-    tr_1d = np.maximum(
-        df_1d['high'].values - df_1d['low'].values,
+    # Get 1w data for regime filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate KAMA(10,2,30) on 1d close
+    close_1d = df_1d['close'].values
+    direction = np.abs(close_1d - np.roll(close_1d, 10))
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0) if len(close_1d) > 1 else 0
+    er = np.where(volatility != 0, direction / volatility, 0)
+    er[0] = 0  # first value has no prior
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # Calculate RSI(2) on 1d close
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=2, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).rolling(window=2, min_periods=2).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0:2] = 50  # neutral for insufficient data
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Calculate Choppiness Index(14) on 1w for regime filter
+    hl_range_1w = df_1w['high'].values - df_1w['low'].values
+    atr_1w = []
+    tr_1w = np.maximum(
+        hl_range_1w,
         np.maximum(
-            np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1)),
-            np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
+            np.abs(df_1w['high'].values - np.roll(df_1w['close'].values, 1)),
+            np.abs(df_1w['low'].values - np.roll(df_1w['close'].values, 1))
         )
     )
-    tr_1d[0] = df_1d['high'].values[0] - df_1d['low'].values[0]
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Calculate Donchian channels (20) on 4h
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate volume spike: current volume > 2.0 * 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    tr_1w[0] = hl_range_1w[0]
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
+    sum_tr_14 = atr_1w
+    max_h_14 = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
+    min_l_14 = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_tr_14 / (max_h_14 - min_l_14)) / np.log10(14)
+    chop = np.where((max_h_14 - min_l_14) != 0, chop, 50)
+    chop[0:13] = 50  # neutral for insufficient data
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian, volume MA, and ATR
-    start_idx = 100
+    # Start index: need enough for all indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume = volume[i]
-        upper_channel = highest_20[i]
-        lower_channel = lowest_20[i]
-        atr_val = atr_14_1d_aligned[i]
-        vol_spike = volume_spike[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
+        chop_val = chop_aligned[i]
         
-        # ATR-based trend filter: use EMA crossover with ATR-adjusted bands
-        ema_fast = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
-        ema_slow = pd.Series(close).ewm(span=30, adjust=False, min_periods=30).mean().values
-        trend_up = ema_fast[i] > ema_slow[i]
-        trend_down = ema_fast[i] < ema_slow[i]
+        # Regime filter: only trade when choppy (CHOP > 61.8)
+        in_choppy_regime = chop_val > 61.8
         
         if position == 0:
-            # Look for entry signals
-            # Long: price breaks above upper Donchian channel AND volume spike AND uptrend
-            long_entry = (curr_close > upper_channel) and vol_spike and trend_up
-            # Short: price breaks below lower Donchian channel AND volume spike AND downtrend
-            short_entry = (curr_close < lower_channel) and vol_spike and trend_down
-            
-            if long_entry:
-                signals[i] = 0.25
-                position = 1
-            elif short_entry:
-                signals[i] = -0.25
-                position = -1
+            # Look for entry signals in choppy regime
+            if in_choppy_regime:
+                # Long: price below KAMA AND RSI oversold (< 20)
+                long_entry = (curr_close < kama_val) and (rsi_val < 20)
+                # Short: price above KAMA AND RSI overbought (> 80)
+                short_entry = (curr_close > kama_val) and (rsi_val > 80)
+                
+                if long_entry:
+                    signals[i] = 0.25
+                    position = 1
+                elif short_entry:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                signals[i] = 0.0  # avoid trending markets
         elif position == 1:
             # Long position management
-            # Exit: price crosses below lower Donchian channel OR trend turns down
-            if (curr_close < lower_channel) or (not trend_up):
+            # Exit: price crosses above KAMA OR RSI overbought (> 70) OR regime changes to trending
+            if (curr_close > kama_val) or (rsi_val > 70) or (chop_val <= 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above upper Donchian channel OR trend turns up
-            if (curr_close > upper_channel) or (trend_up):
+            # Exit: price crosses below KAMA OR RSI oversold (< 30) OR regime changes to trending
+            if (curr_close < kama_val) or (rsi_val < 30) or (chop_val <= 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ATRTrend"
-timeframe = "4h"
+name = "1d_KAMA_RSI2_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
