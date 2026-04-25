@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike_v2
-Hypothesis: Trade 4h Camarilla R3/S3 breakouts aligned with daily EMA34 trend and volume spike (>1.8*ATR14).
-Tighter volume threshold and minimum holding period (4 bars) to reduce overtrading vs prior variants.
+4h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike_v3
+Hypothesis: Trade 4h Camarilla R3/S3 breakouts aligned with daily EMA34 trend and volume spike (>2.0*ATR14).
+Tighter volume threshold (2.0 vs 1.8) and minimum holding period (6 bars) to reduce overtrading vs prior variants.
 Only trade in direction of daily trend to avoid whipsaws. Uses discrete sizing 0.25 to limit fee drag.
-Target: 15-40 trades/year to avoid fee drag while maintaining edge. Works in bull/bear via daily trend filter.
+Target: 10-25 trades/year to avoid fee drag while maintaining edge. Works in bull/bear via daily trend filter.
 """
 
 import numpy as np
@@ -37,7 +37,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.inf], tr2])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate previous day's Camarilla levels (R3, S3, R4, S4, PP)
+    # Calculate previous day's Camarilla levels (R3, S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -46,14 +46,10 @@ def generate_signals(prices):
     camarilla_range = high_1d - low_1d
     camarilla_r3 = camarilla_pp + camarilla_range * 1.1 / 4
     camarilla_s3 = camarilla_pp - camarilla_range * 1.1 / 4
-    camarilla_r4 = camarilla_pp + camarilla_range * 1.1 / 2
-    camarilla_s4 = camarilla_pp - camarilla_range * 1.1 / 2
     
     # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     
     signals = np.zeros(n)
@@ -71,8 +67,8 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
         
-        # Volume confirmation: current volume > 1.8 * ATR (tighter to reduce trades)
-        volume_confirm = volume[i] > 1.8 * atr[i]
+        # Volume confirmation: current volume > 2.0 * ATR (tighter to reduce trades)
+        volume_confirm = volume[i] > 2.0 * atr[i]
         
         # Determine daily trend from EMA34
         daily_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)[i]
@@ -106,8 +102,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             bars_since_entry += 1
-            # Minimum holding period: 4 bars (~16 hours for 4h)
-            if bars_since_entry < 4:
+            # Minimum holding period: 6 bars (~24 hours for 4h)
+            if bars_since_entry < 6:
                 signals[i] = 0.25
             else:
                 # Long: hold position
@@ -119,8 +115,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
         elif position == -1:
             bars_since_entry += 1
-            # Minimum holding period: 4 bars (~16 hours for 4h)
-            if bars_since_entry < 4:
+            # Minimum holding period: 6 bars (~24 hours for 4h)
+            if bars_since_entry < 6:
                 signals[i] = -0.25
             else:
                 # Short: hold position
@@ -133,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike_v2"
+name = "4h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
