@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Volume Spike + Chop Regime Filter
-Hypothesis: Donchian(20) breakouts capture strong moves in both bull and bear markets.
-Volume spike (>2x 20-period MA) confirms institutional participation.
-Choppiness Index > 61.8 defines ranging markets where we avoid breakout trades to reduce false signals.
-Designed for BTC/ETH with 75-200 total trades over 4 years to balance opportunity and fee drag.
+1d Donchian(20) breakout + 1w EMA50 trend filter + volume spike confirmation
+Hypothesis: Daily Donchian breakouts capture intermediate-term trends in BTC/ETH.
+1w EMA50 filter ensures we only trade in the direction of the weekly trend,
+reducing whipsaw during ranging or countertrend periods.
+Volume spike confirmation adds conviction to breakouts.
+Designed for 1d timeframe with 7-25 trades/year (30-100 total over 4 years)
+to minimize fee drag while capturing strong trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,59 +23,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Chop Regime filter (call ONCE before loop)
+    # Get 1d data for Donchian channels and EMA50 (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:  # Need 50 for EMA50 + enough for Donchian
         return np.zeros(n)
     
-    # Calculate Chop Regime on 1d
+    # Calculate 20-period Donchian channels on 1d
     high_1d = pd.Series(df_1d['high'])
     low_1d = pd.Series(df_1d['low'])
+    donchian_high_20 = high_1d.rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = low_1d.rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d EMA50 for trend filter
     close_1d = pd.Series(df_1d['close'])
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = abs(high_1d - close_1d.shift(1))
-    tr3 = abs(low_1d - close_1d.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Get 1w data for weekly EMA50 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 50:
+        close_1w = pd.Series(df_1w['close'])
+        ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+        ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    else:
+        ema_50_1w_aligned = np.full(n, np.nan)
     
-    # ATR(14)
-    atr_14 = tr.rolling(window=14, min_periods=14).mean()
+    # Align 1d indicators to 1d timeframe (no shift needed as we're already on 1d)
+    donchian_high_20_aligned = donchian_high_20  # Already on 1d
+    donchian_low_20_aligned = donchian_low_20    # Already on 1d
+    ema_50_1d_aligned = ema_50_1d                # Already on 1d
     
-    # Highest High and Lowest Low over 14 periods
-    hh_14 = high_1d.rolling(window=14, min_periods=14).max()
-    ll_14 = low_1d.rolling(window=14, min_periods=14).min()
-    
-    # Chop = 100 * log10(sum(atr14) / (hh14 - ll14)) / log10(14)
-    sum_atr = atr_14.rolling(window=14, min_periods=14).sum()
-    chop = 100 * np.log10(sum_atr / (hh_14 - ll_14)) / np.log10(14)
-    chop_values = chop.values
-    
-    # Align Chop to 4h timeframe
-    chop_4h = align_htf_to_ltf(prices, df_1d, chop_values)
-    
-    # Calculate 20-period volume MA for volume spike confirmation (4h)
+    # Calculate 20-period volume MA for volume spike confirmation (1d)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Calculate Donchian(20) channels (4h)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian, volume MA, and Chop
-    start_idx = max(20, 20)  # 20 for Donchian/volume MA
+    # Start index: need enough for Donchian, EMA50, and volume MA
+    start_idx = max(50, 20)  # 50 for EMA50, 20 for Donchian/volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(chop_4h[i])):
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,46 +77,52 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
+        donchian_high = donchian_high_20_aligned[i]
+        donchian_low = donchian_low_20_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
         vol_ma = vol_ma_20[i]
-        chop_val = chop_4h[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
         
         # Volume confirmation: current volume > 2.0 * 20-period average
         volume_confirm = curr_volume > 2.0 * vol_ma
         
-        # Chop regime: > 61.8 = ranging (avoid breakouts), < 38.2 = trending
-        chop_ranging = chop_val > 61.8
-        
         if position == 0:
-            if chop_ranging:
-                # Market ranging: avoid breakout trades
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Trending market: look for Donchian breakouts with volume
-                long_signal = (curr_close > upper) and volume_confirm
-                short_signal = (curr_close < lower) and volume_confirm
-                
+            # Look for breakouts in direction of weekly trend
+            weekly_uptrend = curr_close > ema_50_1w_val
+            weekly_downtrend = curr_close < ema_50_1w_val
+            
+            if weekly_uptrend:
+                # Uptrend: look for long breakouts above Donchian high
+                long_signal = (curr_close > donchian_high) and volume_confirm
                 if long_signal:
                     signals[i] = 0.25
                     position = 1
-                elif short_signal:
+                else:
+                    signals[i] = 0.0
+                    position = 0
+            elif weekly_downtrend:
+                # Downtrend: look for short breakouts below Donchian low
+                short_signal = (curr_close < donchian_low) and volume_confirm
+                if short_signal:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
                     position = 0
+            else:
+                # Price near weekly EMA50: stay flat to avoid whipsaw
+                signals[i] = 0.0
+                position = 0
         elif position == 1:
-            # Exit long: price closes below Donchian low OR chop becomes ranging
-            if curr_close < lower or chop_ranging:
+            # Exit long: price closes below 1d EMA50 OR Donchian low breaks
+            if curr_close < ema_50_1d_val or curr_low < donchian_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Donchian high OR chop becomes ranging
-            if curr_close > upper or chop_ranging:
+            # Exit short: price closes above 1d EMA50 OR Donchian high breaks
+            if curr_close > ema_50_1d_val or curr_high > donchian_high:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_VolumeSpike_ChopRegime"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
