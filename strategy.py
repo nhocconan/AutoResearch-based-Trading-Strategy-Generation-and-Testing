@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v2
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation captures institutional breakout moves in both bull and bear markets. Uses discrete position sizing (0.25) and ATR-based stoploss (2.0) to target 75-200 total trades over 4 years. Works in trending markets by only taking breakouts in direction of higher timeframe trend, avoiding false reversals.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike captures institutional breakout moves in both bull and bear markets. Uses discrete position sizing (0.25) and ATR-based stoploss (2.0) to target 75-200 total trades over 4 years. Works in trending markets by only taking breakouts in direction of higher timeframe trend, avoiding false reversals.
 """
 
 import numpy as np
@@ -23,8 +23,6 @@ def generate_signals(prices):
     if len(df_1d) < 34:  # need for EMA34
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # 1d EMA34 for trend filter
@@ -32,6 +30,9 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # 1d ATR for stoploss calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
     tr2 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, tr2)
@@ -146,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
