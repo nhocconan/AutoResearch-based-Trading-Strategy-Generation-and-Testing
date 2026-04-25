@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike_v3
-Hypothesis: Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Designed for 20-35 trades/year (80-140 over 4 years) to minimize fee drag.
+4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeConfirm
+Hypothesis: Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+Designed for 20-30 trades/year (80-120 over 4 years) to minimize fee drag.
 Uses tight entry conditions: breakout + volume spike + 1d EMA34 trend alignment.
 Works in bull markets via breakout continuation and bear markets via trend following.
 ATR-based stoploss for risk management.
@@ -30,12 +30,12 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # 1d data for Camarilla calculation (loaded ONCE)
-    # Already loaded above as df_1d
+    df_1d_camarilla = get_htf_data(prices, '1d')
     
     # Prior 1d bar OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d_camarilla['close'].shift(1).values
+    prev_high = df_1d_camarilla['high'].shift(1).values
+    prev_low = df_1d_camarilla['low'].shift(1).values
     
     # Camarilla levels: H3, L3 (standard breakout levels)
     camarilla_range = prev_high - prev_low
@@ -43,8 +43,8 @@ def generate_signals(prices):
     l3 = prev_close - camarilla_range * 1.1 / 4
     
     # Align Camarilla levels to 4h timeframe (completed 1d bar)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h3_aligned = align_htf_to_ltf(prices, df_1d_camarilla, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d_camarilla, l3)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike_v3"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
