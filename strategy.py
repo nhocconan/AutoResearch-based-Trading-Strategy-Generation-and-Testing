@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeRegime_v2
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter, volume spike (>2.0x 20-bar avg), and chop regime filter (CHOP < 50) captures strong institutional moves while avoiding choppy markets. Uses ATR(14) stoploss (2.5) and discrete sizing (0.25). Tightened entry conditions: require both price > EMA34 for longs and price < EMA34 for shorts, plus volume confirmation and low chop regime. Targets 20-30 trades/year by requiring strict confluence of price level, daily trend, volume, and low-chop regime. Designed to work in both bull and bear markets via trend filter and regime avoidance.
+4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop
+Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) captures strong institutional moves. Uses ATR(14) stoploss (2.5) and discrete sizing (0.25). Designed to work in both bull and bear markets via trend filter and strict entry conditions to limit trades (~25/year) and avoid fee drag.
 """
 
 import numpy as np
@@ -68,25 +68,12 @@ def generate_signals(prices):
     # Volume average (20-period) for volume spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index regime filter on 1d (CHOP < 50 = strong trending regime)
-    n_chop = 14
-    tr_1d = []
-    for i in range(1, len(high_1d)):
-        tr = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
-        tr_1d.append(tr)
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    
-    atr_sum = pd.Series(tr_1d).rolling(window=n_chop, min_periods=n_chop).sum().values
-    max_minus_min = pd.Series(high_1d - low_1d).rolling(window=n_chop, min_periods=n_chop).max().values
-    chop_raw = 100 * np.log10(atr_sum / (n_chop * max_minus_min)) / np.log10(n_chop)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start index: need warmup for calculations
-    start_idx = max(50, 34, 20, 14, 14)  # EMA34, vol MA, ATR, Chop
+    start_idx = max(50, 34, 20, 14)  # EMA34, vol MA, ATR
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -94,8 +81,7 @@ def generate_signals(prices):
             np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
             np.isnan(atr_4h_aligned[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(chop_aligned[i])):
+            np.isnan(vol_ma[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -115,20 +101,13 @@ def generate_signals(prices):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        chop_val = chop_aligned[i]
-        
-        # Regime filter: only trade in strong trending markets (CHOP < 50)
-        in_strong_trend = chop_val < 50
-        
-        # Volume spike condition: current volume > 2.0x 20-period average
-        volume_spike = vol_val > 2.0 * vol_ma_val
         
         if position == 0:
             # Look for entry signals: Camarilla breakout with trend and volume
             # Long: price breaks above R1 with uptrend (close > EMA34) and volume spike
-            long_signal = (high_val > r1_val) and (close_val > ema_val) and volume_spike and in_strong_trend
+            long_signal = (high_val > r1_val) and (close_val > ema_val) and (vol_val > 2.0 * vol_ma_val)
             # Short: price breaks below S1 with downtrend (close < EMA34) and volume spike
-            short_signal = (low_val < s1_val) and (close_val < ema_val) and volume_spike and in_strong_trend
+            short_signal = (low_val < s1_val) and (close_val < ema_val) and (vol_val > 2.0 * vol_ma_val)
             
             if long_signal:
                 signals[i] = 0.25
@@ -171,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeRegime_v2"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop"
 timeframe = "4h"
 leverage = 1.0
