@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: Camarilla H3/L3 levels represent stronger support/resistance than R1/S1.
-Breakouts above H3 or below L3 with volume spike and 1d EMA34 trend alignment capture
-institutional moves. Designed for 75-200 trades over 4 years on 4h timeframe.
+6h_Ichimoku_Cloud_Breakout_1dEMA50_Trend_VolumeSpike
+Hypothesis: Ichimoku cloud acts as dynamic support/resistance. Breakouts above/below cloud with volume spike and 1d EMA50 trend alignment capture strong moves. Works in bull/bear via 1d EMA50 trend filter (only trade in trend direction). Designed for 50-150 trades over 4 years on 6h timeframe.
 """
 
 import numpy as np
@@ -16,33 +14,33 @@ def calculate_ema(series, period):
         return np.full_like(series, np.nan)
     return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for the period"""
-    # Camarilla equations
-    pivot = (high + low + close) / 3
-    range_hl = high - low
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components"""
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Resistance levels
-    r1 = close + (range_hl * 1.1 / 12)
-    r2 = close + (range_hl * 1.1 / 6)
-    r3 = close + (range_hl * 1.1 / 4)
-    r4 = close + (range_hl * 1.1 / 2)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Support levels
-    s1 = close - (range_hl * 1.1 / 12)
-    s2 = close - (range_hl * 1.1 / 6)
-    s3 = close - (range_hl * 1.1 / 4)
-    s4 = close - (range_hl * 1.1 / 2)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # H3 and L3 are the same as R3 and S3 in Camarilla
-    h3 = r3
-    l3 = s3
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    return r1, r2, r3, r4, s1, s2, s3, s4, h3, l3
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for signals)
+    
+    return tenkan, kijun, senkou_a, senkou_b
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -50,46 +48,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA34 trend filter (loaded ONCE)
+    # 1d data for EMA50 trend filter and Ichimoku (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA34 trend filter
-    ema_34_1d = calculate_ema(df_1d['close'].values, 34)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d EMA50 trend filter
+    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla levels from 1d data (for 4h breakout signals)
-    # We use 1d high/low/close to calculate Camarilla levels for the current 4h bar
-    r1, r2, r3, r4, s1, s2, s3, s4, h3, l3 = calculate_camarilla(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
+    # Ichimoku from 1d data
+    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(
+        df_1d['high'].values,
+        df_1d['low'].values,
         df_1d['close'].values
     )
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA (34) + volume MA (20)
-    start_idx = max(34, 20) + 5
+    # Start index: need enough for Ichimoku (52) + EMA (50) + volume MA (20)
+    start_idx = max(52, 50, 20) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or np.isnan(senkou_a_aligned[i]) or 
+            np.isnan(senkou_b_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         
+        # Ichimoku cloud: Senkou A and Senkou B form the cloud
+        # Cloud top = max(Senkou A, Senkou B), Cloud bottom = min(Senkou A, Senkou B)
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        
         if position == 0:
-            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment
-            long_entry = (curr_close > h3_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close > ema_34_1d_aligned[i])
-            short_entry = (curr_close < l3_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close < ema_34_1d_aligned[i])
+            # Look for entry signals - require: Cloud breakout + volume spike + 1d EMA50 trend alignment
+            # Long: price breaks above cloud top in uptrend
+            long_entry = (curr_close > cloud_top) and vol_ma[i] > 0 and volume_spike[i] and (curr_close > ema_50_1d_aligned[i])
+            # Short: price breaks below cloud bottom in downtrend
+            short_entry = (curr_close < cloud_bottom) and vol_ma[i] > 0 and volume_spike[i] and (curr_close < ema_50_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
@@ -100,15 +107,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below H3 or trend turns bearish
-            if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i]:
+            # Long position: exit when price closes below cloud bottom or trend turns bearish
+            if curr_close < cloud_bottom or curr_close < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price closes above L3 or trend turns bullish
-            if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i]:
+            # Short position: exit when price closes above cloud top or trend turns bullish
+            if curr_close > cloud_top or curr_close > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout_1dEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
