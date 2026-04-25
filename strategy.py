@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 6-hour Camarilla R3/S3 breakout with daily EMA34 trend filter and volume spike confirmation.
-Targets 12-37 trades/year by requiring: 1) price breaks daily R3/S3 levels (stronger daily breakout),
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 12-hour Camarilla R1/S1 breakout with daily EMA34 trend filter and volume spike confirmation.
+Targets 12-37 trades/year by requiring: 1) price breaks daily R1/S1 levels (strong daily breakout),
 2) aligned with daily EMA34 trend, 3) volume > 1.8x 20-period average. This strategy focuses on
-6h timeframe to balance trade frequency and fee drag while capturing significant moves in both bull and bear markets.
+12h timeframe to minimize fee drag while capturing significant moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -36,13 +36,13 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_range = prev_high - prev_low
     
-    # Camarilla R3 and S3 levels (R3 = C + 1.1*(HL/4), S3 = C - 1.1*(HL/4))
-    R3 = prev_close + 1.1 * prev_range * (1.0/4.0)
-    S3 = prev_close - 1.1 * prev_range * (1.0/4.0)
+    # Camarilla R1 and S1 levels (R1 = C + 1.1*(HL/12), S1 = C - 1.1*(HL/12))
+    R1 = prev_close + 1.1 * prev_range * (1.0/12.0)
+    S1 = prev_close - 1.1 * prev_range * (1.0/12.0)
     
-    # Align 1d levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align 1d levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume confirmation: current volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,7 +62,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i]) or
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
             np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -77,10 +77,10 @@ def generate_signals(prices):
         
         if position == 0:
             # Look for entry signals with volume confirmation, trend alignment
-            # Long breakout: price breaks above R3 with uptrend and volume confirmation
-            long_breakout = (curr_close > R3_aligned[i]) and uptrend and volume_confirm[i]
-            # Short breakout: price breaks below S3 with downtrend and volume confirmation
-            short_breakout = (curr_close < S3_aligned[i]) and downtrend and volume_confirm[i]
+            # Long breakout: price breaks above R1 with uptrend and volume confirmation
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i]
+            # Short breakout: price breaks below S1 with downtrend and volume confirmation
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i]
             
             if long_breakout:
                 signals[i] = 0.25
@@ -94,16 +94,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Exit if price breaks below S3 (mean reversion) or trend changes
-            if curr_close < S3_aligned[i] or not uptrend:
+            # Exit if price breaks below S1 (mean reversion) or trend changes
+            if curr_close < S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Exit if price breaks above R3 (mean reversion) or trend changes
-            if curr_close > R3_aligned[i] or not downtrend:
+            # Exit if price breaks above R1 (mean reversion) or trend changes
+            if curr_close > R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
