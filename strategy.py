@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_Regime
-Hypothesis: Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume confirmation (>2.0x 20-bar MA), and choppiness regime filter (CHOP > 50 = range). 
-Only trade breakouts in non-choppy markets (CHOP <= 50) to avoid false breakouts in ranging conditions. 
-Discrete sizing 0.25 balances profit and fee drag. Works in bull/bear: trend filter adapts to market direction, 
-volume confirms breakout validity, and regime filter reduces whipsaws. Target 20-40 trades/year.
+1d_WilliamsVIXFix_MeanReversion_BearRegime
+Hypothesis: In bear markets (2025+), BTC/ETH exhibit mean-reverting spikes. Williams VIX Fix identifies volatility spikes (like VIX) that precede reversals. Long when VIX Fix > 80 (extreme fear) and price below 200 EMA (bearish context). Short when VIX Fix < 20 (extreme complacency) and price above 200 EMA. Use 1d timeframe for low trade frequency (<25/year) to minimize fee drag. 1w EMA50 trend filter ensures alignment with higher timeframe direction. Volume spike (>2.0x 20-bar MA) confirms exhaustion. Discrete sizing 0.25 balances risk and return.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,72 +18,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1d data for Williams VIX Fix calculation
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Williams VIX Fix: measures market fear/volatility
+    # Formula: ((Highest Close in Period - Low) / (Highest Close in Period - Lowest Close in Period)) * 100
+    # We use 22-day period (approx 1 month) similar to VIX calculation
+    highest_close_22 = pd.Series(close_1d).rolling(window=22, min_periods=22).max().values
+    lowest_close_22 = pd.Series(close_1d).rolling(window=22, min_periods=22).min().values
     
-    # Calculate Camarilla levels from previous 1d bar's OHLC
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
-    prev_close_1d = df_1d['close'].shift(1).values
+    # Avoid division by zero
+    denominator = highest_close_22 - lowest_close_22
+    denominator = np.where(denominator == 0, 1e-10, denominator)
     
-    camarilla_range = prev_high_1d - prev_low_1d
-    r1 = prev_close_1d + 1.1 * camarilla_range / 12   # R1 level
-    s1 = prev_close_1d - 1.1 * camarilla_range / 12   # S1 level
+    vix_fix = ((highest_close_22 - low_1d) / denominator) * 100
+    vix_fix_aligned = align_htf_to_ltf(prices, df_1d, vix_fix)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_ma_20)
     
-    # Choppiness regime filter (14-period)
-    # CHOP = 100 * log10(sum(ATR) / (log10(n) * (highest_high - lowest_low))) / log10(n)
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.maximum(tr1, np.absolute(low - np.roll(close, 1)))
-    tr = tr2
-    tr[0] = high[0] - low[0]  # first bar TR
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(pd.Series(atr).rolling(window=14, min_periods=14).sum().values / 
-                          (np.log10(14) * (highest_high - lowest_low))) / np.log10(14)
-    # In choppy markets (CHOP > 50), avoid breakout trades
-    regime_filter = chop <= 50  # Only trade when NOT choppy
+    # 200 EMA on 1d for bear/bull context
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for 1d EMA34 (34), volume MA (20), and CHOP (14+13=27)
-    start_idx = max(34, 20, 27)
+    # Start index: need warmup for longest indicator (200 EMA)
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(vix_fix_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND 1d trend bullish (close > EMA34) AND volume confirm AND not choppy
-            long_setup = (close[i] > r1_aligned[i]) and \
-                         (close[i] > ema_34_1d_aligned[i]) and \
-                         volume_confirm[i] and \
-                         regime_filter[i]
-            # Short: price breaks below S1 AND 1d trend bearish (close < EMA34) AND volume confirm AND not choppy
-            short_setup = (close[i] < s1_aligned[i]) and \
-                          (close[i] < ema_34_1d_aligned[i]) and \
-                          volume_confirm[i] and \
-                          regime_filter[i]
+            # Long: Extreme fear (VIX Fix > 80) AND bearish context (price < 200 EMA) AND volume spike
+            long_setup = (vix_fix_aligned[i] > 80) and \
+                         (close[i] < ema_200_1d_aligned[i]) and \
+                         volume_confirm[i]
+            # Short: Extreme complacency (VIX Fix < 20) AND bullish context (price > 200 EMA) AND volume spike
+            short_setup = (vix_fix_aligned[i] < 20) and \
+                          (close[i] > ema_200_1d_aligned[i]) and \
+                          volume_confirm[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -99,24 +87,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price re-enters Camarilla R1/S1 range OR 1d trend turns bearish OR chop increases
-            if ((close[i] < r1_aligned[i] and close[i] > s1_aligned[i]) or 
-                (close[i] < ema_34_1d_aligned[i]) or
-                (not regime_filter[i])):
+            # Exit: VIX Fix normalizes (< 50) OR price reaches 200 EMA (mean reversion complete)
+            if (vix_fix_aligned[i] < 50) or (close[i] >= ema_200_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price re-enters Camarilla R1/S1 range OR 1d trend turns bullish OR chop increases
-            if ((close[i] < r1_aligned[i] and close[i] > s1_aligned[i]) or 
-                (close[i] > ema_34_1d_aligned[i]) or
-                (not regime_filter[i])):
+            # Exit: VIX Fix normalizes (> 50) OR price reaches 200 EMA (mean reversion complete)
+            if (vix_fix_aligned[i] > 50) or (close[i] <= ema_200_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_Regime"
-timeframe = "4h"
+name = "1d_WilliamsVIXFix_MeanReversion_BearRegime"
+timeframe = "1d"
 leverage = 1.0
