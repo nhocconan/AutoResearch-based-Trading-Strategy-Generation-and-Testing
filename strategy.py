@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_1dADXTrend_VolumeConfirm
-Hypothesis: Donchian(20) breakouts on 6h with 1d ADX(14)>25 trend filter and volume confirmation (1.8x 24-bar avg). 
-Only trade breakouts aligned with strong 1d trend to avoid whipsaws in ranging markets. Volume confirms institutional participation.
+6h_Camarilla_R3S3_Breakout_1dADXTrend_VolumeConfirm
+Hypothesis: Camarilla R3/S3 breakouts on 6h with 1d ADX(14)>25 trend filter and volume confirmation (2.0x 24-bar avg). 
+Only trade breakouts aligned with strong 1d trend to avoid whipsaws. Volume confirms institutional participation.
 Designed for 6h timeframe targeting 15-25 trades/year. Works in bull/bear by following 1d ADX trend.
 """
 
@@ -20,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter (ADX) and Donchian levels
+    # Get 1d data for HTF trend filter (ADX) and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -58,46 +58,65 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilder_smooth(dx, 14)
     
-    # Align ADX to 6h timeframe (1-day lagged for completed bar)
+    # Align ADX, +DI, -DI to 6h timeframe (1-day lagged for completed bar)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx, additional_delay_bars=1)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di, additional_delay_bars=1)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di, additional_delay_bars=1)
     
-    # Calculate Donchian(20) levels on 6h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels on 1d data (based on previous day)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We use previous day's OHLC to calculate today's levels
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
     
-    # Volume confirmation: 1.8x 24-bar average volume (48h = 2 days on 6h)
+    # Avoid using first bar (no previous day)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    
+    range_1d = prev_high - prev_low
+    camarilla_r3 = prev_close + (range_1d * 1.1 / 4)
+    camarilla_s3 = prev_close - (range_1d * 1.1 / 4)
+    camarilla_r4 = prev_close + (range_1d * 1.1 / 2)
+    camarilla_s4 = prev_close - (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 6h timeframe (1-day lagged for completed bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3, additional_delay_bars=1)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3, additional_delay_bars=1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4, additional_delay_bars=1)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4, additional_delay_bars=1)
+    
+    # Volume confirmation: 2.0x 24-bar average volume (48h = 2 days on 6h)
     volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.8 * volume_ma)
+    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for Donchian(20) and ADX
-    start_idx = max(20, 50)  # 50 for ADX warmup
+    # Start index: need warmup for ADX and Camarilla (need previous day)
+    start_idx = max(50, 1)  # 50 for ADX warmup
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or
+            np.isnan(s4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Determine 1d HTF trend: ADX > 25 indicates strong trend
         strong_trend = adx_aligned[i] > 25
-        trend_bullish = strong_trend and (plus_di_aligned[i] > minus_di_aligned[i]) if 'plus_di_aligned' in locals() else False
-        trend_bearish = strong_trend and (minus_di_aligned[i] > plus_di_aligned[i]) if 'minus_di_aligned' in locals() else False
-        
-        # Need to align +DI and -DI as well
-        plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di, additional_delay_bars=1)
-        minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di, additional_delay_bars=1)
         trend_bullish = strong_trend and (plus_di_aligned[i] > minus_di_aligned[i])
         trend_bearish = strong_trend and (minus_di_aligned[i] > plus_di_aligned[i])
         
         if position == 0:
-            # Look for breakout signals with volume confirmation and strong trend alignment
-            long_signal = (close[i] > highest_high[i]) and volume_spike[i] and trend_bullish
-            short_signal = (close[i] < lowest_low[i]) and volume_spike[i] and trend_bearish
+            # Look for breakout signals at R3/S3 with volume confirmation and strong trend alignment
+            # Only trade breakouts that continue the trend (break above R3 in uptrend, below S3 in downtrend)
+            long_signal = (close[i] > r3_aligned[i]) and volume_spike[i] and trend_bullish
+            short_signal = (close[i] < s3_aligned[i]) and volume_spike[i] and trend_bearish
             
             if long_signal:
                 signals[i] = 0.25
@@ -110,22 +129,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price breaks below lowest low or trend weakens (ADX < 20)
-            exit_signal = (close[i] < lowest_low[i]) or (adx_aligned[i] < 20)
+            # Exit when price breaks below S3 or trend weakens (ADX < 20)
+            exit_signal = (close[i] < s3_aligned[i]) or (adx_aligned[i] < 20)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price breaks above highest high or trend weakens (ADX < 20)
-            exit_signal = (close[i] > highest_high[i]) or (adx_aligned[i] < 20)
+            # Exit when price breaks above R3 or trend weakens (ADX < 20)
+            exit_signal = (close[i] > r3_aligned[i]) or (adx_aligned[i] < 20)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dADXTrend_VolumeConfirm"
+name = "6h_Camarilla_R3S3_Breakout_1dADXTrend_VolumeConfirm"
 timeframe = "6h"
 leverage = 1.0
