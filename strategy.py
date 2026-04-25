@@ -1,97 +1,110 @@
 #!/usr/bin/env python3
 """
-4h TRIX + Volume Spike + Choppiness Regime Filter
-Hypothesis: TRIX (Triple Exponential Average) filters noise and shows smoothed momentum.
-Long when TRIX crosses above zero with volume spike in non-choppy market (CHOP > 61.8 = ranging, < 38.2 = trending).
-Short when TRIX crosses below zero with volume spike in trending market.
-Volume spike confirms institutional participation. Works in both bull and bear markets by following momentum.
-4h timeframe targets 19-50 trades/year (75-200 over 4 years).
+12h Williams Alligator + Volume Spike + Chop Regime Filter
+Hypothesis: Williams Alligator (Jaw=TEETH=LIPS SMMA) identifies trend absence (all lines intertwined = chop) 
+vs trend presence (lines diverged = trend). In chop (Alligator sleeping), fade extremes via Donchian breakout failure.
+In trend (Alligator awakened), trade breakouts in direction of alignment. Volume spike confirms participation.
+12h timeframe targets 12-37 trades/year (50-150 over 4 years). Works in bull/bear via regime adaptation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(arr, period):
+    """Smoothed Moving Average (SMMA) aka Wilder's MA"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan, dtype=float)
+    res = np.full_like(arr, np.nan, dtype=float)
+    res[period-1] = np.mean(arr[:period])
+    for i in range(period, len(arr)):
+        res[i] = (res[i-1] * (period-1) + arr[i]) / period
+    return res
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate TRIX(12,9,9) - triple smoothed EMA of ROC
-    # TRIX = EMA(EMA(EMA(ROC, 12), 9), 9)
-    roc = pd.Series(close).pct_change(periods=1)  # 1-period ROC
-    ema1 = roc.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
-    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
-    trix = ema3.values * 100  # scale for readability
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMMA of median price
+    median_price = (high + low) / 2
+    jaw = smma(median_price, 13)  # SMMA(13,8)
+    teeth = smma(median_price, 8)  # SMMA(8,5)
+    lips = smma(median_price, 5)   # SMMA(5,3)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Chop regime: Alligator sleeping (lines intertwined)
+    # Measure: max distance between lines as % of ATR
+    atr_raw = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
+    atr = align_htf_to_ltf(prices, df_1d, atr_raw)  # 1d ATR aligned to 12h
+    jaw_teeth = np.abs(jaw - teeth)
+    teeth_lips = np.abs(teeth - lips)
+    lips_jaw = np.abs(lips - jaw)
+    max_jaw_spread = np.maximum(jaw_teeth, np.maximum(teeth_lips, lips_jaw))
+    chop_filter = max_jaw_spread < (0.5 * atr)  # Alligator sleeping = chop
+    
+    # Donchian channels (20-period) for breakouts
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
-    
-    # Choppiness Index (CHOP) - 14 period
-    # CHOP = 100 * log10(sum(ATR, 14) / (max(high,14) - min(low,14))) / log10(14)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    range_hl = max_high - min_low
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    
-    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
-    
-    # Regime filters
-    chop_choppy = chop > 61.8   # ranging market (mean revert)
-    chop_trending = chop < 38.2  # trending market (trend follow)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 14, 12+9+9)  # volume MA, CHOP, TRIX
+    start_idx = max(20, 13, 34)  # Donchian, Alligator, 1d EMA34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        curr_trix = trix[i]
-        curr_trix_signal = trix_signal[i]
-        prev_trix = trix[i-1]
-        prev_trix_signal = trix_signal[i-1]
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         vol_spike = volume_spike[i]
-        curr_chop = chop[i]
-        
-        # TRIX cross signals
-        trix_cross_up = (prev_trix <= prev_trix_signal) and (curr_trix > curr_trix_signal)
-        trix_cross_down = (prev_trix >= prev_trix_signal) and (curr_trix < curr_trix_signal)
+        is_chop = chop_filter[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: TRIX crosses above signal AND volume spike AND trending market (not choppy)
-            long_entry = trix_cross_up and vol_spike and chop_trending
-            # Short: TRIX crosses below signal AND volume spike AND trending market (not choppy)
-            short_entry = trix_cross_down and vol_spike and chop_trending
+            if is_chop:
+                # In chop: fade Donchian breakouts (mean reversion)
+                # Long: price rejects lower Donchian (closes above low after touching/under)
+                # Short: price rejects upper Donchian (closes below high after touching/over)
+                long_entry = (curr_low <= donchian_low[i]) and (curr_close > donchian_low[i]) and vol_spike
+                short_entry = (curr_high >= donchian_high[i]) and (curr_close < donchian_high[i]) and vol_spike
+            else:
+                # In trend: trade Donchian breakouts in direction of Alligator alignment
+                # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+                lips_above_teeth = lips[i] > teeth[i]
+                teeth_above_jaw = teeth[i] > jaw[i]
+                uptrend_align = lips_above_teeth and teeth_above_jaw
+                
+                lips_below_teeth = lips[i] < teeth[i]
+                teeth_below_jaw = teeth[i] < jaw[i]
+                downtrend_align = lips_below_teeth and teeth_below_jaw
+                
+                # Long: price breaks above upper Donchian in uptrend alignment
+                long_entry = (curr_high > donchian_high[i]) and uptrend_align and vol_spike
+                # Short: price breaks below lower Donchian in downtrend alignment
+                short_entry = (curr_low < donchian_low[i]) and downtrend_align and vol_spike
             
             if long_entry:
                 signals[i] = 0.25
@@ -103,16 +116,24 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: TRIX crosses below signal OR market becomes choppy (range)
-            if trix_cross_down or chop_choppy:
+            # Exit: Alligator turns against trend OR price retouches opposite Donchian
+            lips_below_teeth = lips[i] < teeth[i]
+            teeth_below_jaw = teeth[i] < jaw[i]
+            trend_against = lips_below_teeth and teeth_below_jaw  # Alligator turning down
+            
+            if trend_against or (curr_low <= donchian_low[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: TRIX crosses above signal OR market becomes choppy (range)
-            if trix_cross_up or chop_choppy:
+            # Exit: Alligator turns against trend OR price retouches opposite Donchian
+            lips_above_teeth = lips[i] > teeth[i]
+            teeth_above_jaw = teeth[i] > jaw[i]
+            trend_against = lips_above_teeth and teeth_above_jaw  # Alligator turning up
+            
+            if trend_against or (curr_high >= donchian_high[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_ChoppinessRegime"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_VolumeSpike_ChopRegime"
+timeframe = "12h"
 leverage = 1.0
