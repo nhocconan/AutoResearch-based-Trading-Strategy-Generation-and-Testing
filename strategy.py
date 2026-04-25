@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above R1 with 1d uptrend and volume spike.
-Short when price breaks below S1 with 1d downtrend and volume spike.
-Camarilla pivots provide strong support/resistance levels that work in both bull and bear markets.
-Volume confirmation reduces false signals. Target: 12-37 trades/year on 12h timeframe.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume spike confirmation, and choppiness regime filter.
+Long when price breaks above R1 with 1d uptrend, volume spike, and choppy market (mean reversion favorable).
+Short when price breaks below S1 with 1d downtrend, volume spike, and choppy market.
+Choppiness filter avoids trending markets where false breakouts occur, improving performance in bear markets like 2025.
+Target: 20-40 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -32,7 +32,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
+    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -44,26 +44,41 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
+    # Choppiness Index: CHOP > 61.8 = ranging market (good for mean reversion/breakout)
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(n) / (max(high)-min(low)))
+    # Simplified: use rolling max/min and true range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr14 * 14 / np.log10(14) / (max_high_14 - min_low_14 + 1e-10))
+    chop_filter = chop > 61.8  # ranging market
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for 1d Camarilla, 1d EMA34, and volume MA
-    start_idx = max(1, 34, 20)  # Camarilla needs 1d data, EMA34 needs 34, vol MA needs 20
+    # Start index: need warmup for 1d Camarilla, 1d EMA34, volume MA, and chop
+    start_idx = max(1, 34, 20, 14)  # Camarilla needs 1d data, EMA34 needs 34, vol MA needs 20, chop needs 14
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + 1d uptrend + volume spike
-            long_setup = (close[i] > camarilla_r1_aligned[i]) and (close[i] > ema_34_1d_aligned[i]) and volume_spike[i]
-            # Short: price breaks below S1 + 1d downtrend + volume spike
-            short_setup = (close[i] < camarilla_s1_aligned[i]) and (close[i] < ema_34_1d_aligned[i]) and volume_spike[i]
+            # Long: price breaks above R1 + 1d uptrend + volume spike + choppy market
+            long_setup = (close[i] > camarilla_r1_aligned[i]) and (close[i] > ema_34_1d_aligned[i]) and volume_spike[i] and chop_filter[i]
+            # Short: price breaks below S1 + 1d downtrend + volume spike + choppy market
+            short_setup = (close[i] < camarilla_s1_aligned[i]) and (close[i] < ema_34_1d_aligned[i]) and volume_spike[i] and chop_filter[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -90,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
