@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
-Hypothesis: Camarilla pivot levels (R1/S1) from 1d act as key support/resistance. A break of these levels with volume spike and alignment with 1d EMA34 trend captures strong momentum moves. Works in bull markets (breakouts continuation) and bear markets (breakdown continuation). Uses discrete position sizing (0.25) to limit fee drag and drawdown. Target: 12-37 trades/year per symbol.
+4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v2
+Hypothesis: Camarilla pivot levels (R1/S1) from 1d act as key support/resistance. A break of these levels with volume spike and alignment with 1d EMA34 trend captures strong momentum moves. ATR-based stoploss limits drawdown. Works in bull markets (breakouts continuation) and bear markets (breakdown continuation). Uses discrete position sizing (0.25) to limit fee drag and drawdown. Target: 20-50 trades/year per symbol. Reduced volume spike threshold from 2.0x to 1.5x to increase trade frequency while maintaining edge.
 """
 
 import numpy as np
@@ -43,31 +43,43 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to LTF (12h)
+    # Align HTF indicators to LTF (4h)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h volume spike: current volume > 2.0 * 20-period volume MA
+    # 4h volume spike: current volume > 1.5 * 20-period volume MA (reduced from 2.0x to increase trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
+    vol_spike = volume > (1.5 * vol_ma_20)
+    
+    # 4h ATR for dynamic stoploss
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # first bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start index: need volume MA (20) + aligned HTF arrays
-    start_idx = max(20, 0)
+    # Start index: need volume MA (20) + ATR (14) + aligned HTF arrays
+    start_idx = max(20, 14, 0)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_volume = volume[i]
+        curr_atr = atr[i]
         
         if position == 0:
             # Long: price breaks above R1 with volume spike and 1d uptrend
@@ -88,20 +100,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: price breaks below S1 OR trend turns down
-            if (curr_close < s1_1d_aligned[i]) or (curr_close < ema_34_1d_aligned[i]):
+            # Exit conditions: price breaks below S1 OR trend turns down OR ATR stoploss hit
+            if (curr_close < s1_1d_aligned[i]) or (curr_close < ema_34_1d_aligned[i]) or (curr_close < entry_price - 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: price breaks above R1 OR trend turns up
-            if (curr_close > r1_1d_aligned[i]) or (curr_close > ema_34_1d_aligned[i]):
+            # Exit conditions: price breaks above R1 OR trend turns up OR ATR stoploss hit
+            if (curr_close > r1_1d_aligned[i]) or (curr_close > ema_34_1d_aligned[i]) or (curr_close > entry_price + 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
