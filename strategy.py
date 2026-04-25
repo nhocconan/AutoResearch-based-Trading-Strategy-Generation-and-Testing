@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike filter.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike filter.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1d for EMA34 trend direction and Camarilla pivot levels (H3/L3).
 - Camarilla Pivots: H3, L3 levels from prior 1d OHLC for breakout logic.
 - Trend Filter: 1d EMA34 must align with breakout direction (long: close > EMA34, short: close < EMA34).
-- Volume Filter: Current 12h volume > 2.0 * 20-period average 12h volume to confirm strong momentum.
+- Volume Filter: Current 4h volume > 2.0 * 20-period average 4h volume to confirm strong momentum.
 - Entry: Long when close > H3 AND close > 1d EMA34 AND volume spike.
          Short when close < L3 AND close < 1d EMA34 AND volume spike.
 - Exit: Opposite Camarilla break (long exits when close < L3, short exits when close > H3).
@@ -44,7 +44,7 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 2
     l3 = prev_close - camarilla_range * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (waits for 1d bar close)
+    # Align Camarilla levels to 4h timeframe (waits for 1d bar close)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
@@ -53,7 +53,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h volume average for confirmation (20-period)
+    # Calculate 4h volume average for confirmation (20-period)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
