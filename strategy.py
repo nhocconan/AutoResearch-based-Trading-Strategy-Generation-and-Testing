@@ -1,103 +1,105 @@
 #!/usr/bin/env python3
 """
-12h Williams Fractal Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Williams fractals identify key swing points where price often reverses or accelerates.
-Breakouts above recent bearish fractals or below bullish fractals capture momentum with confluence.
-1d EMA34 provides institutional trend bias: long only when price above EMA34, short only when below.
-Volume spike confirms participation. Works in bull markets (buy breakouts in uptrend) and bear markets
-(sell breakdowns in downtrend). 12h timeframe targets 12-37 trades/year (50-150 over 4 years).
+4h Volume-Weighted RSI Mean Reversion + 1d ATR Regime Filter
+Hypothesis: In ranging markets, extreme RSI values revert to mean. Volume-weighted RSI reduces false signals.
+ATR regime filter ensures we only trade when volatility is elevated enough for meaningful moves.
+Works in both bull and bear markets by fading momentum exhaustion spikes.
+Target: 20-40 trades/year (80-160 over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1d EMA34
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1d ATR(14) for regime filter
+    tr1 = pd.Series(df_1d['high']) - pd.Series(df_1d['low'])
+    tr2 = abs(pd.Series(df_1d['high']) - pd.Series(df_1d['close']).shift(1))
+    tr3 = abs(pd.Series(df_1d['low']) - pd.Series(df_1d['close']).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Williams Fractals on 1d (need 2 extra bars for confirmation)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    # Volume-weighted RSI(14) on 4h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Volume-weighted gain/loss
+    vol_ratio = volume / pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    vol_gain = gain * vol_ratio
+    vol_loss = loss * vol_ratio
+    
+    avg_gain = pd.Series(vol_gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(vol_loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    vw_rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 34 + 2)  # volume MA, EMA + fractal delay
+    start_idx = max(20, 14, 14)  # volume MA, VW RSI, ATR
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(vw_rsi[i]) or np.isnan(avg_gain[i]) or np.isnan(avg_loss[i]) or 
+            np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        vol_spike = volume_spike[i]
-        
-        # Trend filter: price relative to 1d EMA34
-        bullish_bias = curr_close > ema_1d_aligned[i]
-        bearish_bias = curr_close < ema_1d_aligned[i]
+        # Regime filter: only trade when 1d ATR is above its 50-period median (elevated volatility)
+        if i >= 50:
+            atr_median = np.nanmedian(atr_1d_aligned[max(0, i-50):i+1])
+            high_vol_regime = atr_1d_aligned[i] > atr_median
+        else:
+            high_vol_regime = False
         
         if position == 0:
-            # Look for entry signals
-            # Long: price breaks above bearish fractal AND bullish bias AND volume spike
-            long_entry = (curr_high > bearish_fractal_aligned[i]) and bullish_bias and vol_spike
-            # Short: price breaks below bullish fractal AND bearish bias AND volume spike
-            short_entry = (curr_low < bullish_fractal_aligned[i]) and bearish_bias and vol_spike
-            
-            if long_entry:
-                signals[i] = 0.25
-                position = 1
-            elif short_entry:
-                signals[i] = -0.25
-                position = -1
+            # Look for entry signals in high volatility regime only
+            if high_vol_regime:
+                # Long: VW RSI < 25 (oversold) with volume confirmation
+                long_entry = (vw_rsi[i] < 25) and (volume[i] > np.nanmedian(volume[max(0, i-20):i+1]))
+                # Short: VW RSI > 75 (overbought) with volume confirmation
+                short_entry = (vw_rsi[i] > 75) and (volume[i] > np.nanmedian(volume[max(0, i-20):i+1]))
+                
+                if long_entry:
+                    signals[i] = 0.25
+                    position = 1
+                elif short_entry:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below bullish fractal (support) OR loss of bullish bias
-            if (curr_low < bullish_fractal_aligned[i]) or (curr_close < ema_1d_aligned[i]):
+            # Exit: VW RSI > 50 (mean reversion) OR VW RSI > 65 (early exit)
+            if vw_rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above bearish fractal (resistance) OR loss of bearish bias
-            if (curr_high > bearish_fractal_aligned[i]) or (curr_close > ema_1d_aligned[i]):
+            # Exit: VW RSI < 50 (mean reversion) OR VW RSI < 35 (early exit)
+            if vw_rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsFractal_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_VolumeWeightedRSI_MeanReversion_1dATR_Regime"
+timeframe = "4h"
 leverage = 1.0
