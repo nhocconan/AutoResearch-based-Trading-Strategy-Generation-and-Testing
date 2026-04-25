@@ -1,113 +1,107 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w for EMA50 trend direction and Donchian channel levels (from prior week).
-- Donchian Channel: Upper = 20-period high, Lower = 20-period low from prior 1w OHLC.
-- Trend Filter: 1w EMA50 must align with breakout direction (long: close > EMA50, short: close < EMA50).
-- Volume Filter: Current 1d volume > 1.5 * 20-period average 1d volume to confirm strong momentum.
-- Entry: Long when close > Upper AND close > 1w EMA50 AND volume spike.
-         Short when close < Lower AND close < 1w EMA50 AND volume spike.
-- Exit: Opposite Donchian break (long exits when close < Lower, short exits when close > Upper).
+Hypothesis: 6h Elder Ray Bull/Bear Power with 1d Williams Fractal regime filter.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for Williams Fractal regime identification (bullish/bearish market structure).
+- Elder Ray: Bull Power = High - EMA13(close), Bear Power = Low - EMA13(close).
+- Regime Filter: Bullish when 1d bullish fractal confirmed (additional_delay_bars=2), bearish when 1d bearish fractal confirmed.
+- Entry Logic: In bullish regime: long when Bull Power > 0 and rising (2-bar momentum).
+               In bearish regime: short when Bear Power < 0 and falling (2-bar momentum).
+- Exit: Opposite Elder Ray signal (long exits when Bull Power <= 0, short exits when Bear Power >= 0).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Designed to capture strong momentum bursts aligned with weekly trend while filtering chop/whipsaws.
-- Works in bull markets (trend continuation) and bear markets (trend continuation down).
+- Works in bull markets (captures strength via Bull Power) and bear markets (captures weakness via Bear Power).
+- Williams Fractal ensures we only trade in the correct structural regime, reducing whipsaws.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need sufficient data for calculations
+    if n < 50:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Calculate 1d EMA13 for Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Calculate 1w Donchian channels (20-period) from prior week OHLC
-    # Use shift(1) to avoid look-ahead: only use completed weekly bars
-    high_1w = df_1w['high'].shift(1).values
-    low_1w = df_1w['low'].shift(1).values
-    
-    # Donchian Upper/Lower: 20-period high/low of prior weekly data
-    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 1d timeframe (waits for 1w bar close)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
-    
-    # Calculate 1d volume average for confirmation (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d Williams Fractals for regime identification
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Add 2-bar delay for fractal confirmation (needs 2 future 1d bars to confirm)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 50 for EMA, 20 for Donchian and volume MA
+    start_idx = 13  # Need 13 for EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        curr_high = high[i]
+        curr_low = low[i]
         curr_close = close[i]
-        curr_volume = volume[i]
-        upper_level = donchian_upper_aligned[i]
-        lower_level = donchian_lower_aligned[i]
-        ema_50_level = ema_50_1w_aligned[i]
+        ema_13_level = ema_13_1d_aligned[i]
+        bullish_regime = bullish_fractal_aligned[i] == 1
+        bearish_regime = bearish_fractal_aligned[i] == 1
         
-        # Volume spike: current volume > 1.5 * 20-period average volume
-        volume_spike = curr_volume > 1.5 * vol_ma_20[i]
+        # Elder Ray calculations
+        bull_power = curr_high - ema_13_level
+        bear_power = curr_low - ema_13_level
         
-        # Donchian breakout conditions
-        broke_above_upper = curr_close > upper_level
-        broke_below_lower = curr_close < lower_level
+        # Momentum: 2-bar change in power
+        if i >= 2:
+            prev_bull_power = high[i-2] - ema_13_1d_aligned[i-2]
+            prev_bear_power = low[i-2] - ema_13_1d_aligned[i-2]
+            bull_power_momentum = bull_power - prev_bull_power
+            bear_power_momentum = bear_power - prev_bear_power
+        else:
+            bull_power_momentum = 0
+            bear_power_momentum = 0
         
-        # Trend alignment conditions
-        above_ema = curr_close > ema_50_level
-        below_ema = curr_close < ema_50_level
-        
-        # Exit conditions: opposite Donchian break
+        # Exit conditions: opposite Elder Ray signal
         if position != 0:
-            # Exit long: close breaks below lower band
+            # Exit long: Bull Power <= 0 (loss of buying pressure)
             if position == 1:
-                if curr_close < lower_level:
+                if bull_power <= 0:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: close breaks above upper band
+            # Exit short: Bear Power >= 0 (loss of selling pressure)
             elif position == -1:
-                if curr_close > upper_level:
+                if bear_power >= 0:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with trend and volume filters
+        # Entry conditions: Elder Ray with momentum in correct regime
         if position == 0:
-            # Long: break above upper AND above EMA50 AND volume spike
-            long_condition = broke_above_upper and above_ema and volume_spike
+            # Long: Bullish regime AND Bull Power > 0 AND rising momentum
+            long_condition = bullish_regime and (bull_power > 0) and (bull_power_momentum > 0)
             
-            # Short: break below lower AND below EMA50 AND volume spike
-            short_condition = broke_below_lower and below_ema and volume_spike
+            # Short: Bearish regime AND Bear Power < 0 AND falling momentum
+            short_condition = bearish_regime and (bear_power < 0) and (bear_power_momentum < 0)
             
             if long_condition:
                 signals[i] = 0.25
@@ -124,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dWilliamsFractal_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
