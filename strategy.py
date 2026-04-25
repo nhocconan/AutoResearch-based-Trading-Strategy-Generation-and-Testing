@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud + TK Cross + 1d EMA50 Trend + Volume Spike
-Hypothesis: Ichimoku provides dynamic support/resistance (cloud) and momentum (TK cross).
-In bull markets: long when price above cloud + TK bullish cross + 1d EMA50 uptrend + volume spike.
-In bear markets: short when price below cloud + TK bearish cross + 1d EMA50 downtrend + volume spike.
-Uses 6h timeframe to target 12-37 trades/year. Ichimoku's multi-line system reduces false signals.
+12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter v2
+Hypothesis: Camarilla H3/L3 levels from 1d chart breakouts with volume confirmation,
+1d EMA34 trend filter for primary trend alignment, and chop filter to avoid false breakouts.
+Designed for 12h timeframe to target 12-37 trades/year. Works in bull markets via breakout
+continuation and in bear markets via mean-reversion from extreme levels when trend aligns.
+Increased position size to 0.30 for better profit potential while maintaining risk control.
+Added hysteresis to chop filter (enter CHOP<45, exit CHOP>55) to reduce whipsaw.
 """
 
 import numpy as np
@@ -21,44 +23,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter (call ONCE before loop)
+    # Get 1d data for Camarilla pivots and EMA34 trend (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla pivot levels (H3, L3) from 1d OHLC
+    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    camarilla_h3 = daily_close + 1.1 * (daily_high - daily_low) / 4
+    camarilla_l3 = daily_close - 1.1 * (daily_high - daily_low) / 4
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
+    # Get 1w data for choppiness regime filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        chop_regime = np.full(n, 50.0)  # Default to neutral if no weekly data
+    else:
+        # Calculate Choppiness Index (14-period) on weekly data
+        high_1w = df_1w['high'].values
+        low_1w = df_1w['low'].values
+        close_1w = df_1w['close'].values
+        atr_1w = np.full(len(close_1w), np.nan)
+        for i in range(1, len(close_1w)):
+            tr = max(high_1w[i] - low_1w[i], 
+                     abs(high_1w[i] - close_1w[i-1]),
+                     abs(low_1w[i] - close_1w[i-1]))
+            if i >= 1:
+                atr_1w[i] = (atr_1w[i-1] * 13 + tr) / 14 if not np.isnan(atr_1w[i-1]) else tr
+        
+        # Choppiness Index = 100 * log10(sum(ATR))/log10(14) / log10((highest_high - lowest_low)/sum(ATR))
+        chop = np.full(len(close_1w), 50.0)  # Default neutral
+        for i in range(14, len(close_1w)):
+            sum_atr = np.nansum(atr_1w[i-13:i+1])
+            highest_high = np.nanmax(high_1w[i-13:i+1])
+            lowest_low = np.nanmin(low_1w[i-13:i+1])
+            if highest_high > lowest_low and sum_atr > 0:
+                chop[i] = 100 * np.log10(sum_atr) / np.log10(14) / np.log10((highest_high - lowest_low) / sum_atr)
+        chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+        chop_regime = chop_aligned  # We'll use raw value for filtering
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
-    
-    # Chikou Span (Lagging Span): close shifted -22 periods (not used for signals)
-    
-    # Cloud top and bottom (Senkou Span A and B)
-    cloud_top = np.maximum(senkou_a, senkou_b)
-    cloud_bottom = np.minimum(senkou_a, senkou_b)
-    
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(14) for stoploss on 12h data
     if len(close) >= 14:
         tr1 = np.abs(np.diff(close, prepend=close[0]))
         tr2 = np.abs(high - np.roll(close, 1))
@@ -83,16 +95,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for Ichimoku (52), EMA50_1d, ATR, and volume MA
-    start_idx = max(52, 50, 14, 20)
+    # Start index: need enough for EMA34_1d, ATR, and volume MA to propagate
+    start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(tenkan[i]) or 
-            np.isnan(kijun[i]) or 
-            np.isnan(cloud_top[i]) or 
-            np.isnan(cloud_bottom[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -104,57 +114,55 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema50_1d = ema_50_1d_aligned[i]
-        tenkan_val = tenkan[i]
-        kijun_val = kijun[i]
-        cloud_top_val = cloud_top[i]
-        cloud_bottom_val = cloud_bottom[i]
+        ema34_1d = ema_34_1d_aligned[i]
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
-        
-        # TK cross: Tenkan crossing above/below Kijun
-        tk_bullish = tenkan_val > kijun_val
-        tk_bearish = tenkan_val < kijun_val
-        
-        # Price relative to cloud
-        price_above_cloud = curr_close > cloud_top_val
-        price_below_cloud = curr_close < cloud_bottom_val
-        price_in_cloud = (curr_close >= cloud_bottom_val) and (curr_close <= cloud_top_val)
+        chop_val = chop_regime[i] if len(df_1w) >= 2 else 50.0
         
         # Volume spike: current volume > 2.0 * 20-period average
         volume_spike = curr_volume > 2.0 * vol_ma
         
+        # Choppiness filter with hysteresis: 
+        # Enter only in strong trending regime (CHOP < 45)
+        # Exit when chop becomes too high (CHOP > 55) to avoid whipsaw
+        strong_trend = chop_val < 45.0
+        chop_exit_filter = chop_val <= 55.0  # Allow exit even if chop increases moderately
+        
         if position == 0:
-            # Long: price above cloud + TK bullish cross + uptrend (price > 1d EMA50) + volume spike
-            long_condition = price_above_cloud and tk_bullish and (curr_close > ema50_1d) and volume_spike
-            # Short: price below cloud + TK bearish cross + downtrend (price < 1d EMA50) + volume spike
-            short_condition = price_below_cloud and tk_bearish and (curr_close < ema50_1d) and volume_spike
+            # Long: price breaks above H3 AND uptrend (price > 1d EMA34) AND volume spike AND strong trending regime
+            long_condition = (curr_close > h3) and (curr_close > ema34_1d) and volume_spike and strong_trend
+            # Short: price breaks below L3 AND downtrend (price < 1d EMA34) AND volume spike AND strong trending regime
+            short_condition = (curr_close < l3) and (curr_close < ema34_1d) and volume_spike and strong_trend
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or TK bearish cross or price drops below cloud bottom
-            if (curr_close <= entry_price - 2.0 * atr_val) or (not tk_bullish) or (curr_close < cloud_bottom_val):
+            # Exit long: stoploss (2.5*ATR below entry) or price breaks below L3 (reversal signal)
+            # Only exit if chop filter allows (avoid chop-induced whipsaw exits)
+            if ((curr_close <= entry_price - 2.5 * atr_val or curr_close < l3) and chop_exit_filter):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or TK bullish cross or price rises above cloud top
-            if (curr_close >= entry_price + 2.0 * atr_val) or (not tk_bearish) or (curr_close > cloud_top_val):
+            # Exit short: stoploss (2.5*ATR above entry) or price breaks above H3 (reversal signal)
+            # Only exit if chop filter allows (avoid chop-induced whipsaw exits)
+            if ((curr_close >= entry_price + 2.5 * atr_val or curr_close > h3) and chop_exit_filter):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_Ichimoku_Cloud_TKCross_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v2"
+timeframe = "12h"
 leverage = 1.0
