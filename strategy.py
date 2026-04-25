@@ -1,102 +1,137 @@
 #!/usr/bin/env python3
 """
-1h Volume Spike + 4h RSI(14) Extreme + 1d EMA50 Trend Filter
-Hypothesis: On 1h timeframe, volume spikes combined with 4h RSI extremes (oversold/overbought) 
-provide high-probability mean-reversion entries when aligned with the 1d EMA50 trend. 
-The strategy uses the 4h RSI for signal direction (avoiding 1h noise) and 1h only for precise 
-entry timing via volume spikes. Daily EMA50 filter ensures we trade with the higher timeframe 
-trend, working in both bull (trend continuation on pullbacks) and bear (mean reversion in 
-range-bound markets) conditions. Target: 15-30 trades/year (60-120 over 4 years) to minimize 
-fee drag on this difficult timeframe. Uses discrete position sizing of 0.20 to control 
-drawdown and reduce signal churn.
+12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike with ATR Trailing Stop
+Hypothesis: Camarilla H3/L3 levels on 12h timeframe provide stronger support/resistance 
+than lower timeframes, reducing false breakouts. Combined with daily EMA34 trend filter 
+and volume confirmation, this strategy targets 50-150 trades over 4 years (12-37/year) 
+to minimize fee drag. Works in bull markets (trend continuation) and bear markets 
+(mean reversion to pivot levels) by using ATR-based trailing stop for risk control.
+Primary timeframe: 12h, HTF: 1d for EMA34 trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(series, period):
-    """Calculate Relative Strength Index"""
+def calculate_ema(series, period):
+    """Calculate Exponential Moving Average"""
     if len(series) < period:
         return np.full_like(series, np.nan)
-    delta = pd.Series(series).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+    return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_ = prices['open'].values
     
-    # 4h data for RSI (loaded ONCE)
-    df_4h = get_htf_data(prices, '4h')
-    rsi_4h = calculate_rsi(df_4h['close'].values, 14)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    
-    # 1d data for EMA50 trend (loaded ONCE)
+    # Daily data for EMA34 trend (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1h volume spike: current volume > 2.5 * 20-period average
+    # Daily EMA34 trend filter
+    ema_34_1d = calculate_ema(df_1d['close'].values, 34)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 12h data for Camarilla pivots (using previous bar)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    prev_range = prev_high - prev_low
+    camarilla_h3 = prev_close + 1.1 * prev_range / 4
+    camarilla_l3 = prev_close - 1.1 * prev_range / 4
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
-    # Session filter: 08-20 UTC (pre-compute hours for efficiency)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # ATR for trailing stop (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
-    # Start index: need enough for all indicators
-    start_idx = max(50, 20) + 5
+    # Start index: need enough for EMA and volume MA
+    start_idx = max(34, 20, 14) + 5
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any data not ready
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Mean reversion conditions: RSI extreme + volume spike
-        rsi_oversold = rsi_4h_aligned[i] < 30
-        rsi_overbought = rsi_4h_aligned[i] > 70
+        # Breakout conditions
+        breakout_long = curr_close > camarilla_h3[i]
+        breakout_short = curr_close < camarilla_l3[i]
         
-        # Trend alignment: price relative to daily EMA50
-        above_ema = curr_close > ema_50_1d_aligned[i]
-        below_ema = curr_close < ema_50_1d_aligned[i]
-        
-        # Entry logic: fade extremes with volume confirmation
-        long_entry = rsi_oversold and vol_spike and below_ema
-        short_entry = rsi_overbought and vol_spike and above_ema
-        
-        if long_entry:
-            signals[i] = 0.20
-        elif short_entry:
-            signals[i] = -0.20
-        else:
-            signals[i] = 0.0
+        if position == 0:
+            # Look for entry signals - require: Camarilla breakout + volume spike + daily EMA34 trend alignment
+            long_entry = breakout_long and vol_spike and (curr_close > ema_34_1d_aligned[i])
+            short_entry = breakout_short and vol_spike and (curr_close < ema_34_1d_aligned[i])
+            
+            if long_entry:
+                signals[i] = 0.25
+                position = 1
+                entry_price = curr_close
+                highest_high_since_entry = curr_high
+                lowest_low_since_entry = curr_low
+            elif short_entry:
+                signals[i] = -0.25
+                position = -1
+                entry_price = curr_close
+                highest_high_since_entry = curr_high
+                lowest_low_since_entry = curr_low
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Long position: update highest high and check exit conditions
+            highest_high_since_entry = max(highest_high_since_entry, curr_high)
+            lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
+            
+            # Exit conditions: retrace to L3, trend change, or ATR trailing stop
+            trailing_stop = highest_high_since_entry - 2.5 * atr[i]
+            if curr_close < camarilla_l3[i] or curr_close < ema_34_1d_aligned[i] or curr_close < trailing_stop:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Short position: update lowest low and check exit conditions
+            highest_high_since_entry = max(highest_high_since_entry, curr_high)
+            lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
+            
+            # Exit conditions: retrace to H3, trend change, or ATR trailing stop
+            trailing_stop = lowest_low_since_entry + 2.5 * atr[i]
+            if curr_close > camarilla_h3[i] or curr_close > ema_34_1d_aligned[i] or curr_close > trailing_stop:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_VolumeSpike_RSI4hExtreme_EMA50dTrend"
-timeframe = "1h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
+timeframe = "12h"
 leverage = 1.0
