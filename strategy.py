@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: 12h Donchian channel breakouts capture medium-term momentum. 
-Confirmed by 1d EMA34 trend filter and volume spike (>2x 20-period average) 
-to avoid false breakouts. Works in bull markets (breakouts above upper band) 
-and bear markets (breakdowns below lower band). Designed for 12h timeframe 
-with target 50-150 total trades over 4 years to minimize fee drag.
+1d KAMA Direction + RSI(14) + Chop Filter
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) identifies the dominant trend 
+on daily timeframe. RSI(14) filters for momentum strength (avoid overbought/oversold 
+chops). Choppiness Index (CHOP) regime filter ensures we only trade in trending 
+markets (CHOP < 38.2) and avoid range-bound conditions. Designed for 1d timeframe 
+with 30-100 total trades over 4 years (7-25/year) to minimize fee drag while 
+capturing sustained moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -22,84 +23,121 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA34 trend filter (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need at least 34 days for EMA34
+    # Get weekly data for higher timeframe trend (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:  # Need sufficient weekly data
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = pd.Series(df_1d['close'])
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d KAMA (adaptive trend)
+    close_s = pd.Series(close)
+    # Efficiency Ratio: |net change| / sum of absolute changes over 10 periods
+    change = abs(close_s.diff(10))
+    volatility = close_s.diff().abs().rolling(10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants: fastest EMA(2), slowest EMA(30)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    # Initialize KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close_s.iloc[9]  # seed with first close
+    for i in range(10, n):
+        if not np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_period = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(donchian_period - 1, n):
-        upper[i] = np.max(high[i-donchian_period+1:i+1])
-        lower[i] = np.min(low[i-donchian_period+1:i+1])
+    # Align KAMA to 1d (no additional delay needed for EMA-like indicator)
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)  # Using 1w as HTF for stability
     
-    # Calculate 20-period volume MA for volume spike confirmation (12h)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Calculate 1d RSI(14)
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Calculate 1d Choppiness Index (CHOP) - 14 period
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Set first TR to high-low (no previous close)
+    tr[0] = tr1[0]
+    # Sum of TR over 14 periods
+    atr_sum = np.full(n, np.nan)
+    for i in range(13, n):
+        atr_sum[i] = np.sum(tr[i-13:i+1])
+    # Highest high and lowest low over 14 periods
+    hh = np.full(n, np.nan)
+    ll = np.full(n, np.nan)
+    for i in range(13, n):
+        hh[i] = np.max(high[i-13:i+1])
+        ll[i] = np.min(low[i-13:i+1])
+    # CHOP = 100 * log10( sum(TR) / (HH - LL) ) / log10(14)
+    chop = np.full(n, np.nan)
+    for i in range(13, n):
+        if hh[i] > ll[i]:  # avoid division by zero
+            chop[i] = 100 * np.log10(atr_sum[i] / (hh[i] - ll[i])) / np.log10(14)
+        else:
+            chop[i] = 100  # max choppy when range is zero
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian, EMA34, and volume MA
-    start_idx = max(donchian_period - 1, 34, 20)
+    # Start index: need enough for KAMA seed, RSI, and CHOP
+    start_idx = max(20, 14, 13)  # KAMA needs 10, RSI 14, CHOP 14
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
-        upper_band = upper[i]
-        lower_band = lower[i]
-        ema_34_val = ema_34_1d_aligned[i]
-        vol_ma = vol_ma_20[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_values[i]
+        chop_val = chop[i]
         
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_val
-        downtrend = curr_close < ema_34_val
+        # Trend filter: price relative to KAMA
+        uptrend = curr_close > kama_val
+        downtrend = curr_close < kama_val
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > 2.0 * vol_ma
+        # Momentum filter: RSI not extreme (avoid choppy reversals)
+        rsi_ok = (rsi_val > 30) and (rsi_val < 70)
+        
+        # Regime filter: only trade in trending markets (CHOP < 38.2)
+        trending_regime = chop_val < 38.2
         
         if position == 0:
-            # Look for breakout signals
-            # Long: price breaks above upper Donchian band with volume confirmation in uptrend
-            long_breakout = (curr_close > upper_band) and volume_confirm and uptrend
-            # Short: price breaks below lower Donchian band with volume confirmation in downtrend
-            short_breakout = (curr_close < lower_band) and volume_confirm and downtrend
+            # Enter long: price above KAMA + good momentum + trending regime
+            long_entry = uptrend and rsi_ok and trending_regime
+            # Enter short: price below KAMA + good momentum + trending regime
+            short_entry = downtrend and rsi_ok and trending_regime
             
-            if long_breakout:
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            elif short_breakout:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
                 position = 0
         elif position == 1:
-            # Exit long: price closes below lower Donchian band OR EMA34 trend turns down
-            if curr_close < lower_band or curr_close < ema_34_val:
+            # Exit long: price crosses below KAMA OR regime turns choppy
+            if curr_close < kama_val or chop_val >= 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above upper Donchian band OR EMA34 trend turns up
-            if curr_close > upper_band or curr_close > ema_34_val:
+            # Exit short: price crosses above KAMA OR regime turns choppy
+            if curr_close > kama_val or chop_val >= 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "1d_KAMA_Direction_RSI_Chop_Filter"
+timeframe = "1d"
 leverage = 1.0
