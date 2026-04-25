@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime_Rebalance
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend, volume confirmation, and choppiness regime filter.
-Optimized for trade frequency: target 20-50 trades/year via tighter volume (2.0x avg) and regime (CHOP < 50).
-Uses discrete sizing (0.25) and explicit stoploss via signal=0 when trend/regime fails or opposite level touched.
-Designed to work in bull (trend-following breaks) and bear (mean-reversion bounces off S1/R1 in range).
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime_Tightened
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume confirmation, and choppiness regime filter.
+This version tightens entry conditions by requiring volume > 2.0x average (vs 1.5x) and CHOP < 50 (stronger trending filter).
+Target: 20-50 trades/year to avoid fee drag. Works in bull/bear by following 1d trend with mean-reversion exits at opposite Camarilla level.
 """
 
 import numpy as np
@@ -57,6 +56,7 @@ def generate_signals(prices):
     atr_14 = tr.rolling(window=14, min_periods=14).mean().values
     
     # Calculate Choppiness Index: CHOP = 100 * log10(sum(ATR14)/ (n * ATR)) / log10(n)
+    # where n = 14 periods
     sum_atr14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
     chop = 100 * (np.log10(sum_atr14 / (14 * atr_14 + 1e-10)) / np.log10(14))
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop.values)
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime_Rebalance"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime_Tightened"
 timeframe = "4h"
 leverage = 1.0
