@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Weekly Donchian Breakout + 1d Volume Spike + ADX Trend Filter
-Hypothesis: Weekly Donchian channels (20-period) capture major support/resistance. Breakouts above weekly high or below weekly low with 1d volume confirmation and ADX>25 trend filter capture strong momentum moves. Works in bull (breakout long) and bear (breakdown short). Volume spike ensures institutional participation. Target: 12-30 trades/year on 6h.
+12h Camarilla R1S1 Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: Camarilla pivot levels (R1/S1) on 1d act as key support/resistance. 
+Breakout above R1 or below S1 with volume confirmation and 1w EMA50 trend filter 
+captures momentum moves in both bull and bear markets. Weekly EMA50 provides 
+stronger trend filter than daily, reducing false breakouts. Volume spike ensures 
+institutional participation. Target: 12-37 trades/year on 12h (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -18,75 +22,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Rolling max/min for Donchian
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Align to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    
-    # Get 1d data for volume and ADX
+    # Get 1d data for Camarilla pivots (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 20-period volume MA on 1d
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Calculate ADX(14) on 1d
+    # Calculate Camarilla pivot levels on 1d (R1, S1)
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
+    camarilla_r1 = close_1d_arr + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d_arr - 1.1 * (high_1d - low_1d) / 12
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first value
+    # Get 1w data for EMA50 trend (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    # Calculate EMA50 on 1w
+    close_1w = pd.Series(df_1w['close'])
+    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    
-    # ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation threshold
-    vol_confirm_threshold = 2.0  # volume > 2x 20-period MA
+    # Calculate 20-period volume MA for volume confirmation
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for weekly Donchian, 1d indicators
-    start_idx = max(20, 20, 14)  # weekly Donchian(20), 1d vol MA(20), 1d ADX(14)
+    # Start index: need enough for EMA50, volume MA
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -94,23 +69,20 @@ def generate_signals(prices):
         
         curr_close = close[i]
         curr_volume = volume[i]
-        donchian_high_val = donchian_high_aligned[i]
-        donchian_low_val = donchian_low_aligned[i]
-        vol_ma_20 = vol_ma_20_1d_aligned[i]
-        adx_val = adx_aligned[i]
+        ema_50_val = ema_50_1w_aligned[i]
+        vol_ma = vol_ma_20[i]
+        r1_level = camarilla_r1_aligned[i]
+        s1_level = camarilla_s1_aligned[i]
         
         # Volume confirmation: current volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > vol_confirm_threshold * vol_ma_20
-        
-        # ADX trend filter: ADX > 25 indicates strong trend
-        trend_filter = adx_val > 25
+        volume_confirm = curr_volume > 2.0 * vol_ma
         
         if position == 0:
             # Look for entry signals
-            # Long: price > weekly Donchian high, volume confirmation, trend filter
-            long_entry = (curr_close > donchian_high_val) and volume_confirm and trend_filter
-            # Short: price < weekly Donchian low, volume confirmation, trend filter
-            short_entry = (curr_close < donchian_low_val) and volume_confirm and trend_filter
+            # Long: price > R1, above 1w EMA50, volume confirmation
+            long_entry = (curr_close > r1_level) and (curr_close > ema_50_val) and volume_confirm
+            # Short: price < S1, below 1w EMA50, volume confirmation
+            short_entry = (curr_close < s1_level) and (curr_close < ema_50_val) and volume_confirm
             
             if long_entry:
                 signals[i] = 0.25
@@ -122,16 +94,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below weekly Donchian low (mean reversion) OR ADX < 20 (trend weakening)
-            if curr_close < donchian_low_val or adx_val < 20:
+            # Exit: price crosses below 1w EMA50 OR price breaks below S1 (stop and reverse)
+            if curr_close < ema_50_val or curr_close < s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above weekly Donchian high OR ADX < 20 (trend weakening)
-            if curr_close > donchian_high_val or adx_val < 20:
+            # Exit: price crosses above 1w EMA50 OR price breaks above R1 (stop and reverse)
+            if curr_close > ema_50_val or curr_close > r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyDonchian_Breakout_1dVolumeSpike_ADXTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
