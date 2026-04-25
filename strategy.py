@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1
-Hypothesis: Trade daily Camarilla R1/S1 breakouts with weekly trend filter and volume confirmation. 
-In bull markets: buy when price breaks above daily Camarilla R1 and price > weekly EMA50. 
-In bear markets: sell when price breaks below daily Camarilla S1 and price < weekly EMA50. 
-Requires volume > 1.3x 20-day average for confirmation. 
+12h_Camarilla_R1S1_Breakout_1dTrend_RegimeFilter_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h timeframe with 1-day EMA34 trend filter, volume confirmation, and choppiness regime filter. 
+In trending markets (CHOP < 38.2): buy when price breaks above Camarilla R1 and price > daily EMA34; sell when price breaks below Camarilla S1 and price < daily EMA34. 
+In ranging markets (CHOP >= 38.2): fade the breakout - sell when price breaks above R1 and price > daily EMA34; buy when price breaks below S1 and price < daily EMA34. 
+Requires volume > 1.3x 20-period average for confirmation. 
 Exit on opposite Camarilla level touch or trend reversal. 
-Position size: 0.25 to limit drawdown. 
-Target: 30-100 total trades over 4 years = 7-25/year. Works in both bull and bear regimes.
+Position size: 0.25 to limit drawdown and reduce fee churn. 
+Target: 50-150 total trades over 4 years = 12-37/year. 
+Uses 12h primary timeframe with 1d HTF for multi-timeframe alignment.
 """
 
 import numpy as np
@@ -24,31 +25,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need sufficient data for EMA
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50 for HTF trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get 1d data for Camarilla levels and volume
+    # Get 1d data for HTF indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient data for volume average
+    if len(df_1d) < 30:  # Need sufficient data for indicators
         return np.zeros(n)
     
-    # Calculate 20-day average volume for confirmation
+    # Calculate daily EMA34 for HTF trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 20-period average volume for confirmation
     volume_1d = df_1d['volume'].values
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate Camarilla levels for each 1d bar
+    # Calculate daily choppiness index for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Sum of True Range over 14 periods
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Choppiness Index: CHOP = 100 * log10(sumTR14 / (ATR14 * 14)) / log10(14)
+    chop_raw = 100 * np.log10(sum_tr_14 / (atr_14 * 14)) / np.log10(14)
+    chop_1d = chop_raw
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Calculate Camarilla levels (R1, S1) for each 1d bar
     hl_range_1d = high_1d - low_1d
     r1_1d = close_1d + (1.1 * hl_range_1d / 12)  # R1 = close + 1.1*(high-low)/12
     s1_1d = close_1d - (1.1 * hl_range_1d / 12)  # S1 = close - 1.1*(high-low)/12
@@ -60,32 +75,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for weekly EMA50 (50 weeks * ~7 = 350 days)
-    # But we use aligned arrays, so start after 1d warmup
-    start_idx = 20
+    # Start index: need warmup for EMA34 (34), volume MA (20), and chop (14)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20_aligned[i]) or
             np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+            np.isnan(s1_aligned[i]) or
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend (bullish = price above weekly EMA50)
-        htf_1w_bullish = close[i] > ema_50_1w_aligned[i]
-        htf_1w_bearish = close[i] < ema_50_1w_aligned[i]
+        # Determine 1d HTF trend (bullish = price above daily EMA34)
+        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x 20-day average
+        # Volume confirmation: current volume > 1.3x 20-period average
         volume_confirm = volume[i] > 1.3 * vol_ma_20_aligned[i]
         
+        # Regime filter: CHOP < 38.2 = trending, CHOP >= 38.2 = ranging
+        is_trending = chop_1d_aligned[i] < 38.2
+        is_ranging = chop_1d_aligned[i] >= 38.2
+        
         if position == 0:
-            # Long setup: price breaks above Camarilla R1 + 1w uptrend + volume confirmation
-            long_setup = (close[i] > r1_aligned[i]) and htf_1w_bullish and volume_confirm
-            
-            # Short setup: price breaks below Camarilla S1 + 1w downtrend + volume confirmation
-            short_setup = (close[i] < s1_aligned[i]) and htf_1w_bearish and volume_confirm
+            if is_trending:
+                # Trending market: follow the breakout
+                # Long setup: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
+                long_setup = (close[i] > r1_aligned[i]) and htf_1d_bullish and volume_confirm
+                
+                # Short setup: price breaks below Camarilla S1 + 1d downtrend + volume confirmation
+                short_setup = (close[i] < s1_aligned[i]) and htf_1d_bearish and volume_confirm
+            else:
+                # Ranging market: fade the breakout (mean reversion)
+                # Short setup: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
+                short_setup = (close[i] > r1_aligned[i]) and htf_1d_bullish and volume_confirm
+                
+                # Long setup: price breaks below Camarilla S1 + 1d downtrend + volume confirmation
+                long_setup = (close[i] < s1_aligned[i]) and htf_1d_bearish and volume_confirm
             
             if long_setup:
                 signals[i] = 0.25
@@ -98,20 +126,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches Camarilla S1 (stop) OR 1w trend turns bearish
-            if (close[i] <= s1_aligned[i]) or (not htf_1w_bullish):
+            # Exit: price touches Camarilla S1 (stop) OR 1d trend turns bearish
+            if (close[i] <= s1_aligned[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches Camarilla R1 (stop) OR 1w trend turns bullish
-            if (close[i] >= r1_aligned[i]) or (htf_1w_bullish):
+            # Exit: price touches Camarilla R1 (stop) OR 1d trend turns bullish
+            if (close[i] >= r1_aligned[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_RegimeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
