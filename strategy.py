@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dEMA34_Filter_v3
-Hypothesis: Trade 1h Camarilla R1/S1 breakouts in direction of 4h EMA50 trend with 1d EMA34 filter and volume spike during UTC 08-20 session. Reduced trade frequency via stricter volume confirmation (vol_ratio > 2.5) and requiring both 4h and 1d trend alignment. Target: 15-35 trades/year to avoid fee drag.
+1h_Camarilla_R1S1_Breakout_4hTrend_1dTrendFilter_v1
+Hypothesis: Trade 1h Camarilla R1/S1 breakouts aligned with 4h and 1d trend (EMA50/EMA34) during UTC 08-20 session. Uses strict volume confirmation (vol_ratio > 2.0) and discrete position sizing (0.20) to target 15-35 trades/year. Designed to work in bull/bear via trend filtering and session timing to avoid chop.
 """
 
 import numpy as np
@@ -92,8 +92,8 @@ def generate_signals(prices):
         htf_4h_bullish = close_4h_aligned > ema_50_4h_aligned[i]
         htf_1d_bullish = close_1d_aligned > ema_34_1d_aligned[i]
         
-        # Volume confirmation: need significant spike (stricter threshold)
-        volume_confirmed = vol_ratio[i] > 2.5
+        # Volume confirmation: need significant spike
+        volume_confirmed = vol_ratio[i] > 2.0
         
         if position == 0:
             # Long setup: price breaks above R1 + 4h bullish trend + 1d bullish trend + volume
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dEMA34_Filter_v3"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dTrendFilter_v1"
 timeframe = "1h"
 leverage = 1.0
