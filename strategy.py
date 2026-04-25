@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_12hTrend_Filter
-Hypothesis: Elder Ray Bull/Bear Power on 6h with 12h EMA34 trend filter.
-Bull Power = High - EMA13, Bear Power = Low - EMA13.
-Enter long when Bull Power > 0 and 12h trend up (close > EMA34).
-Enter short when Bear Power < 0 and 12h trend down (close < EMA34).
-Exit when power reverses sign or trend fails.
-Uses discrete sizing (0.25) for low trade frequency (~15-25/year) to work in both bull and bear markets.
-Elder Ray measures price strength relative to EMA, filtering weak moves in chop.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA50 trend filter and volume spike confirmation.
+Only trade breakouts in direction of daily trend with above-average volume to avoid false breakouts in chop.
+Uses discrete position sizing (0.25) for low trade frequency (~20-30/year) to minimize fee drag.
+Works in both bull and bear markets by aligning with higher timeframe trend and requiring volume confirmation.
 """
 
 import numpy as np
@@ -22,46 +19,66 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 12h close for trend filter
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h, additional_delay_bars=1)
+    # Calculate EMA50 on 1d close for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate EMA13 on 6h for Elder Ray
-    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Align HTF EMA50 to 4h timeframe (standard 1-bar delay for EMA)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d, additional_delay_bars=1)
     
-    # Elder Ray components
-    bull_power = high - ema13_6h  # High - EMA13
-    bear_power = low - ema13_6h   # Low - EMA13
+    # Calculate 20-period volume average for volume spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C, H, L are from previous completed 1d bar
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = np.nan  # first bar has no previous
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    
+    camarilla_range = (prev_high_1d - prev_low_1d) * 1.1 / 12
+    r1_1d = prev_close_1d + camarilla_range
+    s1_1d = prev_close_1d - camarilla_range
+    
+    # Align Camarilla levels to 4h timeframe (standard 1-bar delay for HTF)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d, additional_delay_bars=1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d, additional_delay_bars=1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA13 (13) and EMA34 (34)
-    start_idx = 34
+    # Start index: need warmup for EMA50 (50) and volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_12h_aligned[i]) or 
-            np.isnan(ema13_6h[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i])):
+        if (np.isnan(ema50_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        # Volume spike condition: current volume > 1.5 * 20-period average
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 0:
-            # Look for entry signals with trend filter
-            # Long: Bull Power > 0 and 12h trend up (close > EMA34)
-            # Short: Bear Power < 0 and 12h trend down (close < EMA34)
-            long_signal = (bull_power[i] > 0) and (close[i] > ema34_12h_aligned[i])
-            short_signal = (bear_power[i] < 0) and (close[i] < ema34_12h_aligned[i])
+            # Look for Camarilla breakout signals with trend filter and volume confirmation
+            # Long: price breaks above R1 in uptrend (close > EMA50) with volume spike
+            # Short: price breaks below S1 in downtrend (close < EMA50) with volume spike
+            long_signal = (close[i] > r1_aligned[i]) and (close[i] > ema50_aligned[i]) and volume_spike
+            short_signal = (close[i] < s1_aligned[i]) and (close[i] < ema50_aligned[i]) and volume_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -74,22 +91,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when Bull Power <= 0 (weakening strength) OR trend fails
-            exit_signal = (bull_power[i] <= 0) or (close[i] < ema34_12h_aligned[i])
+            # Exit when price moves back below EMA50 (trend reversal)
+            exit_signal = close[i] < ema50_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when Bear Power >= 0 (weakening strength) OR trend fails
-            exit_signal = (bear_power[i] >= 0) or (close[i] > ema34_12h_aligned[i])
+            # Exit when price moves back above EMA50 (trend reversal)
+            exit_signal = close[i] > ema50_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_12hTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
