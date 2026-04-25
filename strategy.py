@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_12hEMA34_Trend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 12h EMA34 trend filter and volume spike (2.0x 20-bar avg). 
-Only trade breakouts aligned with 12h EMA trend to avoid whipsaws. Volume confirms institutional participation.
-Designed for 4h timeframe targeting 20-40 trades/year. Works in bull/bear by following 12h EMA trend.
+6h_Camarilla_R3S3_Breakout_1dVolumeTrend_Confirm
+Hypothesis: Camarilla R3/S3 breakouts on 6h with 1d volume trend confirmation (volume > 1.5x 20-bar MA) and price >/< 20-bar SMA for trend filter. 
+Designed for 6h timeframe targeting 20-30 trades/year. Works in bull/bear by following price trend via SMA.
 """
 
 import numpy as np
@@ -20,66 +19,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter (EMA34)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data for HTF volume trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate EMA(34) on 12h close
-    close_12h = df_12h['close'].values
-    ema_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align EMA to 4h timeframe (1-bar lagged for completed bar)
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34, additional_delay_bars=1)
+    # Calculate 1d volume trend: volume > 1.5x 20-bar MA
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_trend_1d = volume_1d > (1.5 * volume_ma_1d)
+    volume_trend_aligned = align_htf_to_ltf(prices, df_1d, volume_trend_1d, additional_delay_bars=1)
     
     # Calculate Camarilla levels from previous 1d bar
-    # Need 1d data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    # But we need the previous completed 1d bar's OHLC
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    prev_range_1d = prev_high_1d - prev_low_1d
     
-    # Previous 1d OHLC for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    r3_1d = prev_close_1d + 1.1 * prev_range_1d
+    s3_1d = prev_close_1d - 1.1 * prev_range_1d
     
-    # Calculate Camarilla R1 and S1 levels
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + 1.1 * camarilla_range / 12
-    s1 = close_1d - 1.1 * camarilla_range / 12
+    # Align Camarilla levels to 6h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d, additional_delay_bars=1)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d, additional_delay_bars=1)
     
-    # Align Camarilla levels to 4h timeframe (1-bar lagged for completed bar)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1, additional_delay_bars=1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1, additional_delay_bars=1)
-    
-    # Volume confirmation: 2.0x 20-bar average volume
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    # Calculate 20-bar SMA on 6h for trend filter
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA and volume
-    start_idx = max(34, 20)
+    # Start index: need warmup for SMA and Camarilla
+    start_idx = max(20, 30)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
+            np.isnan(sma_20[i]) or
+            np.isnan(volume_trend_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 12h HTF trend: price above/below EMA34
-        trend_bullish = close[i] > ema_34_aligned[i]
-        trend_bearish = close[i] < ema_34_aligned[i]
-        
         if position == 0:
-            # Look for breakout signals with volume confirmation and trend alignment
-            long_signal = (close[i] > r1_aligned[i]) and volume_spike[i] and trend_bullish
-            short_signal = (close[i] < s1_aligned[i]) and volume_spike[i] and trend_bearish
+            # Look for breakout signals with volume trend and price trend alignment
+            long_signal = (close[i] > r3_aligned[i]) and volume_trend_aligned[i] and (close[i] > sma_20[i])
+            short_signal = (close[i] < s3_aligned[i]) and volume_trend_aligned[i] and (close[i] < sma_20[i])
             
             if long_signal:
                 signals[i] = 0.25
@@ -92,22 +79,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price breaks below S1 or trend reverses (price < EMA)
-            exit_signal = (close[i] < s1_aligned[i]) or (close[i] < ema_34_aligned[i])
+            # Exit when price breaks below S3 or volume trend fails
+            exit_signal = (close[i] < s3_aligned[i]) or (~volume_trend_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price breaks above R1 or trend reverses (price > EMA)
-            exit_signal = (close[i] > r1_aligned[i]) or (close[i] > ema_34_aligned[i])
+            # Exit when price breaks above R3 or volume trend fails
+            exit_signal = (close[i] > r3_aligned[i]) or (~volume_trend_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dVolumeTrend_Confirm"
+timeframe = "6h"
 leverage = 1.0
