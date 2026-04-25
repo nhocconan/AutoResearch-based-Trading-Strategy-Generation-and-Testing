@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3L3 Breakout + 12h EMA34 Trend + Volume Spike + ATR Stop
-Hypothesis: Camarilla H3/L3 levels act as strong intraday support/resistance. Breakout above H3 or below L3 with volume confirmation and 12h EMA34 trend filter captures momentum moves. ATR-based stoploss manages risk. Works in bull (long on H3 break) and bear (short on L3 break). Volume spike ensures participation. Target: 20-50 trades/year on 4h.
+1d Williams %R + 1w EMA50 Trend + Volume Spike + ATR Stop
+Hypothesis: Williams %R identifies overbought/oversold conditions. In a 1w EMA50-defined trend,
+we take mean-reversion entries: long when %R < -80 in uptrend, short when %R > -20 in downtrend.
+Volume spike confirms participation. ATR-based stop manages risk. Works in bull (long in uptrend)
+and bear (short in downtrend). Target: 30-100 trades over 4 years on 1d.
 """
 
 import numpy as np
@@ -18,27 +21,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend and Camarilla pivots (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1w data for EMA50 trend (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 12h
-    close_12h = pd.Series(df_12h['close'])
-    ema_34_12h = close_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate EMA50 on 1w
+    close_1w = pd.Series(df_1w['close'])
+    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla pivot levels on 12h (H3, L3)
-    # Camarilla: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h_arr = df_12h['close'].values
-    camarilla_h3 = close_12h_arr + 1.1 * (high_12h - low_12h) / 2
-    camarilla_l3 = close_12h_arr - 1.1 * (high_12h - low_12h) / 2
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    # Calculate Williams %R(14) on 1d
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, np.nan)
+    for i in range(14, n):
+        hh = highest_high[i]
+        ll = lowest_low[i]
+        if hh != ll:
+            williams_r[i] = (hh - close[i]) / (hh - ll) * -100
+        else:
+            williams_r[i] = -50  # neutral when range is zero
     
-    # Calculate ATR(14) for stoploss on 4h
+    # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -56,13 +62,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA34, ATR, volume MA
-    start_idx = max(34, 14, 20)
+    # Start index: need enough for Williams %R, EMA50, ATR, volume MA
+    start_idx = max(14, 50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,21 +77,24 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_34_val = ema_34_12h_aligned[i]
+        williams_r_val = williams_r[i]
+        ema_50_val = ema_50_1w_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
-        h3_level = camarilla_h3_aligned[i]
-        l3_level = camarilla_l3_aligned[i]
         
         # Volume confirmation: current volume > 2.0 * 20-period average
         volume_confirm = curr_volume > 2.0 * vol_ma
         
+        # Determine trend: price above/below 1w EMA50
+        uptrend = curr_close > ema_50_val
+        downtrend = curr_close < ema_50_val
+        
         if position == 0:
             # Look for entry signals
-            # Long: price > H3, above 12h EMA34, volume confirmation
-            long_entry = (curr_close > h3_level) and (curr_close > ema_34_val) and volume_confirm
-            # Short: price < L3, below 12h EMA34, volume confirmation
-            short_entry = (curr_close < l3_level) and (curr_close < ema_34_val) and volume_confirm
+            # Long: Williams %R < -80 (oversold) in uptrend with volume confirmation
+            long_entry = (williams_r_val < -80) and uptrend and volume_confirm
+            # Short: Williams %R > -20 (overbought) in downtrend with volume confirmation
+            short_entry = (williams_r_val > -20) and downtrend and volume_confirm
             
             if long_entry:
                 signals[i] = 0.25
@@ -102,8 +110,8 @@ def generate_signals(prices):
             # Long position management
             # Stoploss: 2 * ATR below entry
             stop_loss = entry_price - 2.0 * atr_val
-            # Exit: stoploss hit OR price crosses below 12h EMA34
-            if curr_low <= stop_loss or curr_close < ema_34_val:
+            # Exit: stoploss hit OR Williams %R > -50 (exiting oversold) OR trend change
+            if curr_low <= stop_loss or williams_r_val > -50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,8 +120,8 @@ def generate_signals(prices):
             # Short position management
             # Stoploss: 2 * ATR above entry
             stop_loss = entry_price + 2.0 * atr_val
-            # Exit: stoploss hit OR price crosses above 12h EMA34
-            if curr_high >= stop_loss or curr_close > ema_34_val:
+            # Exit: stoploss hit OR Williams %R < -50 (exiting overbought) OR trend change
+            if curr_high >= stop_loss or williams_r_val < -50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_12hEMA34_Trend_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1d_WilliamsR_1wEMA50_Trend_VolumeSpike_ATRStop"
+timeframe = "1d"
 leverage = 1.0
