@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_ChopFilter
-Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter and choppiness regime filter.
-Targets 12-37 trades/year by requiring: 1) price breaks daily R1/S1 levels, 2) aligned with 1d EMA34 trend,
-3) choppiness index > 61.8 (ranging market) for mean-reversion exits or < 38.2 (trending) for trend continuation.
-Uses 12h timeframe to minimize fee drag while capturing significant moves. The chop filter avoids false
-breakouts in choppy markets and improves performance in both bull and bear markets by adapting to regime.
+4h_Camarilla_R1S1_Breakout_12hEMA50_Trend_Filter
+Hypothesis: 4-hour Camarilla R1/S1 breakout with 12-hour EMA50 trend filter. Targets 25-35 trades/year by requiring: 
+1) price breaks daily R1/S1 levels, 2) aligned with 12h EMA50 trend, 3) avoids choppy markets with ADX < 20 filter.
+Uses 4h timeframe to balance trade frequency and capture significant moves. The ADX filter avoids false breakouts 
+in ranging markets and improves performance in both bull and bear markets by only trading in clear trends.
 """
 
 import numpy as np
@@ -25,7 +24,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1d data for Camarilla pivots and EMA34 (loaded ONCE)
+    # 1d data for Camarilla pivots (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
@@ -36,32 +35,49 @@ def generate_signals(prices):
     R1 = prev_close + 1.1 * prev_range * (1.0/4.0)
     S1 = prev_close - 1.1 * prev_range * (1.0/4.0)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h data for EMA50 trend filter and ADX (loaded ONCE)
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d Choppiness Index: CHOP = 100 * log10(sum(ATR(14)) / log10(range)) / log10(14)
-    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
-                       np.maximum(np.abs(df_1d['high'].values - df_1d['close'].shift(1).values),
-                                  np.abs(df_1d['low'].values - df_1d['close'].shift(1).values)))
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    max_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    chop_1d = np.where(range_14 > 0, 100 * np.log10(atr_14_1d * 14 / range_14) / np.log10(14), 50)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # 12h EMA50 trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # 12h ADX for trend strength filter (ADX < 20 = weak trend/ranging, avoid)
+    # Calculate True Range
+    tr_12h = np.maximum(df_12h['high'].values - df_12h['low'].values,
+                        np.maximum(np.abs(df_12h['high'].values - df_12h['close'].shift(1).values),
+                                   np.abs(df_12h['low'].values - df_12h['close'].shift(1).values)))
+    # Calculate +DM and -DM
+    up_move = df_12h['high'].values - np.roll(df_12h['high'].values, 1)
+    down_move = np.roll(df_12h['low'].values, 1) - df_12h['low'].values
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smooth TR, +DM, -DM over 14 periods
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Calculate +DI and -DI
+    plus_di = 100 * plus_dm_smooth / atr_12h
+    minus_di = 100 * minus_dm_smooth / atr_12h
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Replace NaN/inf with 0
+    adx = np.nan_to_num(adx, nan=0.0, posinf=0.0, neginf=0.0)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d previous data (1) + 1d EMA34 (34) + 1d ATR14 (14) + 1d HH/LL (14)
-    start_idx = 34 + 14 + 1  # Conservative warmup
+    # Start index: need enough for 1d previous data (1) + 12h EMA50 (50) + 12h ADX (14+14=28)
+    start_idx = 50 + 28 + 1  # Conservative warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -70,8 +86,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -79,16 +95,17 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: price relative to 12h EMA50 and ADX > 20 (strong trend)
+        uptrend = curr_close > ema_50_12h_aligned[i]
+        downtrend = curr_close < ema_50_12h_aligned[i]
+        strong_trend = adx_aligned[i] > 20
         
         if position == 0:
-            # Look for entry signals with trend alignment
-            # Long breakout: price breaks above R1 with uptrend
-            long_breakout = (curr_close > R1_aligned[i]) and uptrend
-            # Short breakout: price breaks below S1 with downtrend
-            short_breakout = (curr_close < S1_aligned[i]) and downtrend
+            # Look for entry signals with trend alignment and strong trend filter
+            # Long breakout: price breaks above R1 with uptrend and strong trend
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and strong_trend
+            # Short breakout: price breaks below S1 with downtrend and strong trend
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and strong_trend
             
             if long_breakout:
                 signals[i] = 0.25
@@ -101,54 +118,22 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit conditions
-            # Exit if price breaks below S1 (mean reversion) or trend changes to downtrend
-            # In choppy markets (CHOP > 61.8), exit faster at S1
-            # In trending markets (CHOP < 38.2), allow more room
-            chop = chop_1d_aligned[i]
-            if chop > 61.8:  # Ranging market - mean reversion
-                if curr_close < S1_aligned[i] or not uptrend:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif chop < 38.2:  # Trending market - trend continuation
-                if curr_close < S1_aligned[i] * 0.95 or not uptrend:  # Wider stop in trend
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # Transition zone
-                if curr_close < S1_aligned[i] or not uptrend:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long position: exit if price breaks below S1 or trend changes to downtrend
+            if curr_close < S1_aligned[i] or not uptrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
         elif position == -1:
-            # Short position: exit conditions
-            # Exit if price breaks above R1 (mean reversion) or trend changes to uptrend
-            chop = chop_1d_aligned[i]
-            if chop > 61.8:  # Ranging market - mean reversion
-                if curr_close > R1_aligned[i] or not downtrend:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            elif chop < 38.2:  # Trending market - trend continuation
-                if curr_close > R1_aligned[i] * 1.05 or not downtrend:  # Wider stop in trend
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # Transition zone
-                if curr_close > R1_aligned[i] or not downtrend:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short position: exit if price breaks above R1 or trend changes to uptrend
+            if curr_close > R1_aligned[i] or not downtrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_ChopFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_12hEMA50_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
