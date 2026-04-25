@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike
-Hypothesis: 6h Camarilla R4/S4 breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above R4 in 1d uptrend (close > 1d EMA50) with volume > 2.0x 20-period average.
-Short when price breaks below S4 in 1d downtrend (close < 1d EMA50) with volume > 2.0x 20-period average.
-Uses 1d HTF for trend alignment and volume spike for confirmation to avoid false breakouts.
-Designed for ~12-25 trades/year by requiring strong breakouts at extreme Camarilla levels with volume confirmation.
-Works in bull/bear markets via 1d EMA50 filter; avoids whipsaws via volume confirmation.
+12h_Donchian20_Breakout_1wTrend_VolumeSpike
+Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
+Long when price breaks above 20-period high in 1w uptrend (close > 1w EMA50) with volume > 2.0x 20-period average.
+Short when price breaks below 20-period low in 1w downtrend (close < 1w EMA50) with volume > 2.0x 20-period average.
+Exit via ATR-based trailing stop (3*ATR from extreme) or re-entry into Donchian(10) range.
+Designed for ~12-37 trades/year by requiring strong breakouts and volume confirmation.
+Works in bull/bear markets via 1w EMA50 filter; avoids whipsaws via volume confirmation.
 """
 
 import numpy as np
@@ -23,74 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla levels for 6h timeframe using previous day's OHLC
-    # Camarilla: based on previous day's range
-    # R4 = close + 1.5*(high - low)
-    # S4 = close - 1.5*(high - low)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]  # first period
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Calculate Donchian(20) channels for breakout signals
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    camarilla_range = prev_high - prev_low
-    r4 = prev_close + 1.5 * camarilla_range
-    s4 = prev_close - 1.5 * camarilla_range
-    
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Calculate Donchian(10) for exit range (tighter than entry)
+    lookback_exit = 10
+    highest_high_exit = pd.Series(high).rolling(window=lookback_exit, min_periods=lookback_exit).max().values
+    lowest_low_exit = pd.Series(low).rolling(window=lookback_exit, min_periods=lookback_exit).min().values
     
     # Volume regime: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_regime = volume > (2.0 * vol_ma_20)
     
+    # ATR for trailing stop (14-period)
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_high = 0.0   # highest close since long entry
+    short_low = 0.0   # lowest close since short entry
     
     # Start index: need warmup for calculations
-    start_idx = max(100, 50)  # EMA50 needs 50 periods
+    start_idx = max(100, lookback, atr_period)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(highest_high_exit[i]) or 
+            np.isnan(lowest_low_exit[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_50_1d_aligned[i]
-        r4_level = r4_aligned[i]
-        s4_level = s4_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Only trade in trending regimes (1d EMA50 filter)
-            if close[i] > ema_trend:  # 1d uptrend regime
-                # Long: break above R4 with volume spike
-                long_signal = (close[i] > r4_level) and vol_regime[i]
-            else:  # 1d downtrend regime
-                # Short: break below S4 with volume spike
-                short_signal = (close[i] < s4_level) and vol_regime[i]
+            # Only trade in trending regimes (1w EMA50 filter)
+            if close[i] > ema_trend:  # 1w uptrend regime
+                # Long: break above 20-day high with volume spike
+                long_signal = (close[i] > highest_high[i]) and vol_regime[i]
+            else:  # 1w downtrend regime
+                # Short: break below 20-day low with volume spike
+                short_signal = (close[i] < lowest_low[i]) and vol_regime[i]
             
             if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
                 position = 1
+                long_high = close[i]
             elif 'short_signal' in locals() and short_signal:
                 signals[i] = -0.25
                 position = -1
+                short_low = close[i]
             else:
                 signals[i] = 0.0
                 # Clear signal variables for next iteration
@@ -99,20 +101,30 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price re-enters below R4 (breakout failed) or reverses below S4
-            if close[i] < r4_level:
+            # Update highest close
+            if close[i] > long_high:
+                long_high = close[i]
+            # Exit conditions: ATR trailing stop OR re-enter Donchian(10) range
+            atr_stop = long_high - 3.0 * atr[i]
+            range_exit = (close[i] < highest_high_exit[i] and close[i] > lowest_low_exit[i])
+            if close[i] <= atr_stop or range_exit:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price re-enters above S4 (breakout failed) or reverses above R4
-            if close[i] > s4_level:
+            # Update lowest close
+            if close[i] < short_low:
+                short_low = close[i]
+            # Exit conditions: ATR trailing stop OR re-enter Donchian(10) range
+            atr_stop = short_low + 3.0 * atr[i]
+            range_exit = (close[i] > lowest_low_exit[i] and close[i] < highest_high_exit[i])
+            if close[i] >= atr_stop or range_exit:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
