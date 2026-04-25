@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_HTF_Regime_Filter_LongOnly
-Hypothesis: On 1h timeframe, use 4h EMA20 trend and 1d ADX regime filter to take longs only in bullish/low-volatility regimes.
-Avoids bear markets and choppy conditions by requiring: 1) price > 4h EMA20 (uptrend), 2) 1d ADX < 25 (low trend strength = range/accumulation), 3) 1h close > 1h open (bullish candle).
-Designed for low turnover (~15-30 trades/year) by combining tight HTF regime filters with precise 1h entry timing.
-Works in bull via trend continuation, in bear via avoidance (flat), and in range via mean-reversion long bias at support.
+6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Regime
+Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA50 trend filter, volume spike confirmation, and chop regime filter.
+Targets 12-30 trades/year by requiring: 1) price breaks R3/S3 levels (stronger breakout than R1/S1), 2) aligned with 1d EMA50 trend, 3) volume > 2.5x 20-period average, 4) choppy market filter (Chop > 61.8) to avoid whipsaw in ranging markets.
+Designed for low turnover and high edge in both bull/bear markets via trend alignment, institutional volume confirmation, and regime filtering.
 """
 
 import numpy as np
@@ -20,39 +19,58 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 4h data for EMA20 trend filter (loaded ONCE)
-    df_4h = get_htf_data(prices, '4h')
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # 1d data for ADX regime filter (loaded ONCE)
+    # 1d data for EMA50 trend filter and Camarilla pivots (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
-    # Calculate ADX(14) on 1d
-    plus_dm = np.where((df_1d['high'].diff()) > (df_1d['low'].diff().abs()), np.maximum(df_1d['high'].diff(), 0), 0)
-    minus_dm = np.where((df_1d['low'].diff().abs()) > (df_1d['high'].diff()), np.maximum(df_1d['low'].diff().abs(), 0), 0)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # Align ADX to 1h timeframe (low ADX = ranging/accumulation regime)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
+    
+    # Camarilla R3 and S3 levels (stronger breakout levels)
+    R3 = prev_close + 1.1 * prev_range * (3.0/8.0)  # R3 = C + 1.1*(3HL/8)
+    S3 = prev_close - 1.1 * prev_range * (3.0/8.0)  # S3 = C - 1.1*(3HL/8)
+    
+    # Align 1d indicators to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume confirmation: current volume > 2.5 * 20-period average (strict spike)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma * 2.5)
+    
+    # Chop regime filter: avoid trading in strong trends (Chop < 38.2) or choppy markets (Chop > 61.8) - actually we want to avoid strong trends
+    # Chop > 61.8 = ranging market (good for mean reversion, but we're doing breakout)
+    # Chop < 38.2 = trending market (good for breakout)
+    # We want to trade breakouts in trending markets, so Chop < 38.2
+    high_low = pd.Series(high - low).rolling(window=14, min_periods=14).values
+    true_range = np.maximum(
+        high_low,
+        np.maximum(
+            np.abs(high - np.roll(close, 1)),
+            np.abs(low - np.roll(close, 1))
+        )
+    )
+    true_range[0] = high[0] - low[0]  # first value
+    atr_14 = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
+    chop = 100 * np.log10(high_low.sum() / (atr_14 * 14)) / np.log10(10)
+    chop_ma = pd.Series(chop).rolling(window=14, min_periods=14).mean().values
+    chop_filter = chop_ma < 38.2  # trending market good for breakout
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 4h EMA20 (20) and 1d ADX (14+14=28)
+    # Start index: need enough for 1d EMA50 (50) and indicators (14)
     start_idx = 50
     
     for i in range(start_idx, n):
@@ -62,36 +80,75 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_open = open_price[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
-        # Regime filters: 4h uptrend + 1d low ADX (range/accumulation)
-        uptrend_4h = curr_close > ema_20_4h_aligned[i]
-        low_adx_regime = adx_1d_aligned[i] < 25  # ADX < 25 = weak trend = range/accumulation
-        bullish_candle = curr_close > curr_open  # 1h bullish candle
+        # Trend filter: price relative to 1d EMA50
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Enter long only in bullish regime with bullish candle
-            if uptrend_4h and low_adx_regime and bullish_candle:
-                signals[i] = 0.20
+            # Look for entry signals with volume confirmation, trend alignment, and chop filter
+            # Long breakout: price breaks above R3 with uptrend, volume confirmation, and trending market
+            long_breakout = (curr_close > R3_aligned[i]) and uptrend and volume_confirm[i] and chop_filter[i]
+            # Short breakout: price breaks below S3 with downtrend, volume confirmation, and trending market
+            short_breakout = (curr_close < S3_aligned[i]) and downtrend and volume_confirm[i] and chop_filter[i]
+            
+            if long_breakout:
+                signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
+            elif short_breakout:
+                signals[i] = -0.25
+                position = -1
                 entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when regime deteriorates or trend breaks
-            if not uptrend_4h or adx_1d_aligned[i] >= 30:  # ADX >= 30 = strong trend (could be bear)
+            # Long position: exit conditions
+            # Stoploss: 2.5 * ATR below entry (using 6h ATR)
+            tr1 = high[1:] - low[1:]
+            tr2 = np.abs(high[1:] - close[:-1])
+            tr3 = np.abs(low[1:] - close[:-1])
+            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+            
+            if curr_close < entry_price - 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price breaks below S3 (mean reversion) or trend changes or chop increases (range developing)
+            elif curr_close < S3_aligned[i] or not uptrend or chop_ma[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
+        elif position == -1:
+            # Short position: exit conditions
+            # Calculate 6h ATR (same as above)
+            tr1 = high[1:] - low[1:]
+            tr2 = np.abs(high[1:] - close[:-1])
+            tr3 = np.abs(low[1:] - close[:-1])
+            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+            
+            if curr_close > entry_price + 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price breaks above R3 (mean reversion) or trend changes or chop increases (range developing)
+            elif curr_close > R3_aligned[i] or not downtrend or chop_ma[i] > 61.8:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_HTF_Regime_Filter_LongOnly"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Regime"
+timeframe = "6h"
 leverage = 1.0
