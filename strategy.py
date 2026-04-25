@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Channel_Breakout_WeeklyTrend_VolumeConfirm
-Hypothesis: 1d price breaks above/below Keltner Channel (EMA20 ± 2*ATR10) with weekly EMA50 trend filter and volume confirmation (>1.5x 20-day avg).
-Long when price > upper KC + weekly EMA50 uptrend + volume spike.
-Short when price < lower KC + weekly EMA50 downtrend + volume spike.
-Exit on opposite KC touch or trend reversal.
-Uses discrete sizing (0.25) to limit drawdown in 2022 crash while capturing trends.
-Targets 7-25 trades/year (30-100 total over 4 years) to minimize fee drag.
-Works in bull via trend-following breakouts, in bear via mean reversion at channel extremes.
+6h_Ichimoku_Kumo_Twist_1dTrend_Filter
+Hypothesis: 6h Ichimoku TK cross with Kumo twist (Senkou A/B cross) from 1d as trend filter.
+Long when Tenkan > Kijun and price above Kumo with bullish Kumo twist (Senkou A > Senkou B) from 1d.
+Short when Tenkan < Kijun and price below Kumo with bearish Kumo twist (Senkou A < Senkou B) from 1d.
+Exit on opposite TK cross or Kumo trend reversal.
+Uses discrete sizing (0.25) to minimize fee churn. Target: 12-30 trades/year.
+Ichimoku works in bull via trend-following crosses, in bear via mean reversion at Kumo edges.
 """
 
 import numpy as np
@@ -22,43 +21,71 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Keltner Channel calculations (primary timeframe)
+    # Get 6h data for Ichimoku calculations (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 52:
+        return np.zeros(n)
+    
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    
+    # Calculate Ichimoku components for 6h
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
+    tenkan_6h = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
+    kijun_6h = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a_6h = (tenkan_6h + kijun_6h) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
+    senkou_b_6h = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to original timeframe
+    tenkan_6h_aligned = align_htf_to_ltf(prices, df_6h, tenkan_6h)
+    kijun_6h_aligned = align_htf_to_ltf(prices, df_6h, kijun_6h)
+    senkou_a_6h_aligned = align_htf_to_ltf(prices, df_6h, senkou_a_6h)
+    senkou_b_6h_aligned = align_htf_to_ltf(prices, df_6h, senkou_b_6h)
+    
+    # Get 1d data for Kumo twist (Senkou A/B cross) as trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate EMA20 and ATR10 for 1d
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr_1d = np.maximum(np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1))), np.abs(low_1d - np.roll(close_1d, 1)))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # first bar
-    atr_10_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate Ichimoku components for 1d (same as 6h but daily)
+    period9_high_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_1d = (period9_high_1d + period9_low_1d) / 2
     
-    # Keltner Channel: EMA20 ± 2*ATR10
-    upper_kc_1d = ema_20_1d + (2.0 * atr_10_1d)
-    lower_kc_1d = ema_20_1d - (2.0 * atr_10_1d)
+    period26_high_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_1d = (period26_high_1d + period26_low_1d) / 2
     
-    # Align KC levels to original timeframe
-    upper_kc_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_kc_1d)
-    lower_kc_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_kc_1d)
+    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
     
-    # Get weekly data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    period52_high_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b_1d = (period52_high_1d + period52_low_1d) / 2
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Kumo twist: Senkou A > Senkou B = bullish twist, Senkou A < Senkou B = bearish twist
+    kumo_twist_bullish = senkou_a_1d > senkou_b_1d
+    kumo_twist_bearish = senkou_a_1d < senkou_b_1d
     
-    # Volume confirmation: volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma_20)
+    # Align Kumo twist to original timeframe
+    kumo_twist_bullish_aligned = align_htf_to_ltf(prices, df_1d, kumo_twist_bullish.astype(float))
+    kumo_twist_bearish_aligned = align_htf_to_ltf(prices, df_1d, kumo_twist_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,16 +95,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_kc_1d_aligned[i]) or np.isnan(lower_kc_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan_6h_aligned[i]) or np.isnan(kijun_6h_aligned[i]) or 
+            np.isnan(senkou_a_6h_aligned[i]) or np.isnan(senkou_b_6h_aligned[i]) or
+            np.isnan(kumo_twist_bullish_aligned[i]) or np.isnan(kumo_twist_bearish_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        # Determine Kumo (cloud) boundaries
+        upper_kumo = np.maximum(senkou_a_6h_aligned[i], senkou_b_6h_aligned[i])
+        lower_kumo = np.minimum(senkou_a_6h_aligned[i], senkou_b_6h_aligned[i])
+        
         if position == 0:
-            # Long: price breaks above upper KC with weekly uptrend and volume spike
-            long_signal = (close[i] > upper_kc_1d_aligned[i]) and (close[i] > ema_50_1w_aligned[i]) and vol_spike[i]
-            # Short: price breaks below lower KC with weekly downtrend and volume spike
-            short_signal = (close[i] < lower_kc_1d_aligned[i]) and (close[i] < ema_50_1w_aligned[i]) and vol_spike[i]
+            # Long: Tenkan > Kijun, price above Kumo, bullish Kumo twist from 1d
+            long_signal = (tenkan_6h_aligned[i] > kijun_6h_aligned[i]) and \
+                          (close[i] > upper_kumo) and \
+                          kumo_twist_bullish_aligned[i]
+            # Short: Tenkan < Kijun, price below Kumo, bearish Kumo twist from 1d
+            short_signal = (tenkan_6h_aligned[i] < kijun_6h_aligned[i]) and \
+                           (close[i] < lower_kumo) and \
+                           kumo_twist_bearish_aligned[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -90,22 +126,26 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: price touches lower KC or weekly trend reverses
-            exit_signal = (close[i] < lower_kc_1d_aligned[i]) or (close[i] < ema_50_1w_aligned[i])
+            # Exit conditions: Tenkan < Kijun or price below Kumo or Kumo twist turns bearish
+            exit_signal = (tenkan_6h_aligned[i] < kijun_6h_aligned[i]) or \
+                          (close[i] < lower_kumo) or \
+                          kumo_twist_bearish_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: price touches upper KC or weekly trend reverses
-            exit_signal = (close[i] > upper_kc_1d_aligned[i]) or (close[i] > ema_50_1w_aligned[i])
+            # Exit conditions: Tenkan > Kijun or price above Kumo or Kumo twist turns bullish
+            exit_signal = (tenkan_6h_aligned[i] > kijun_6h_aligned[i]) or \
+                          (close[i] > upper_kumo) or \
+                          kumo_twist_bullish_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Keltner_Channel_Breakout_WeeklyTrend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
