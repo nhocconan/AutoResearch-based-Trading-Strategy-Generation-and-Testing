@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-1h Session Filter + 4h/1d Trend + Volume Spike (Experiment #86994)
-Hypothesis: In BTC/ETH, 1h breakouts with volume confirmation during liquid 
-sessions (08-20 UTC) aligned with 4h trend and 1d momentum filter capture 
-sustainable moves. Uses discrete sizing (0.20) and tight entry conditions 
-to target 15-37 trades/year. Works in bull/bear via trend filter.
+6h Williams Alligator + 1d EMA34 Trend + Volume Spike
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trending vs ranging markets. 
+In trending markets (Lips above Teeth above Jaw for uptrend, reverse for downtrend), 
+we trade breakouts in the direction of the trend with volume confirmation. 
+The 1d EMA34 filter ensures we only trade in alignment with the daily trend, 
+avoiding counter-trend whipsaws. 6h timeframe targets 12-37 trades/year (50-150 over 4 years).
+Works in bull markets (buy on uptrend Alligator alignment) and bear markets 
+(sell on downtrend Alligator alignment).
 """
 
 import numpy as np
@@ -13,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,34 +24,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    # 4h EMA50 trend filter
-    ema_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d RSI(14) momentum filter
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_values = rsi_1d.fillna(50).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
+    # 1d EMA34
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Williams Alligator on 6h timeframe (using Smoothed Moving Average - SMMA)
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    # Teeth: 8-period SMMA, shifted 5 bars forward  
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    def smma(source, period):
+        """Smoothed Moving Average"""
+        if len(source) < period:
+            return np.full(len(source), np.nan)
+        result = np.full(len(source), np.nan)
+        # First value is simple SMA
+        result[period-1] = np.mean(source[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CLOSE) / period
+        for i in range(period, len(source)):
+            result[i] = (result[i-1] * (period-1) + source[i]) / period
+        return result
+    
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Shift the lines forward (Jaw: +8, Teeth: +5, Lips: +3)
+    jaw_shifted = np.full_like(jaw, np.nan)
+    teeth_shifted = np.full_like(teeth, np.nan)
+    lips_shifted = np.full_like(lips, np.nan)
+    
+    if len(jaw) > 8:
+        jaw_shifted[8:] = jaw[:-8]
+    if len(teeth) > 5:
+        teeth_shifted[5:] = teeth[:-5]
+    if len(lips) > 3:
+        lips_shifted[3:] = lips[:-3]
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,11 +73,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 50)  # volume MA, EMA
+    start_idx = max(20, 13)  # volume MA, Alligator jaw
     
     for i in range(start_idx, n):
-        # Skip if not in session or data not ready
-        if not in_session[i] or np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        # Skip if any data not ready
+        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or 
+            np.isnan(lips_shifted[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,46 +88,48 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Trend and momentum filters
-        bullish_bias = curr_close > ema_4h_aligned[i]
-        bearish_bias = curr_close < ema_4h_aligned[i]
-        bullish_momentum = rsi_1d_aligned[i] > 50
-        bearish_momentum = rsi_1d_aligned[i] < 50
+        # Alligator alignment
+        bullish_alignment = (lips_shifted[i] > teeth_shifted[i]) and (teeth_shifted[i] > jaw_shifted[i])
+        bearish_alignment = (lips_shifted[i] < teeth_shifted[i]) and (teeth_shifted[i] < jaw_shifted[i])
+        
+        # Trend filter: price relative to 1d EMA34
+        bullish_bias = curr_close > ema_1d_aligned[i]
+        bearish_bias = curr_close < ema_1d_aligned[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price makes new high AND bullish bias AND bullish momentum AND volume spike
-            long_entry = (curr_close > np.maximum.accumulate(close[:i])[-1]) and bullish_bias and bullish_momentum and vol_spike
-            # Short: price makes new low AND bearish bias AND bearish momentum AND volume spike
-            short_entry = (curr_close < np.minimum.accumulate(close[:i])[-1]) and bearish_bias and bearish_momentum and vol_spike
+            # Long: bullish Alligator alignment AND bullish bias AND volume spike
+            long_entry = bullish_alignment and bullish_bias and vol_spike
+            # Short: bearish Alligator alignment AND bearish bias AND volume spike
+            short_entry = bearish_alignment and bearish_bias and vol_spike
             
             if long_entry:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_entry:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: loss of bullish bias OR RSI overextended (>70) OR new low (mean reversion)
-            if (curr_close < ema_4h_aligned[i]) or (rsi_1d_aligned[i] > 70) or (curr_close < np.minimum.accumulate(close[:i+1])[-1]):
+            # Exit: Alligator loses bullish alignment OR loss of bullish bias
+            if not bullish_alignment or (curr_close < ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: loss of bearish bias OR RSI oversold (<30) OR new high (mean reversion)
-            if (curr_close > ema_4h_aligned[i]) or (rsi_1d_aligned[i] < 30) or (curr_close > np.maximum.accumulate(close[:i+1])[-1]):
+            # Exit: Alligator loses bearish alignment OR loss of bearish bias
+            if not bearish_alignment or (curr_close > ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_SessionFilter_4hEMA50_1dRSI_VolumeSpike"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
