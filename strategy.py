@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime
-Hypothesis: 4-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter, volume confirmation, and choppiness regime filter.
-Targets 20-50 trades/year by requiring: 1) price breaks daily R1/S1 levels (intraday support/resistance),
-2) aligned with 1d EMA34 trend, 3) volume > 1.5x 20-period average, 4) choppiness index < 61.8 (trending market).
-Uses 4h timeframe to balance trade frequency and capture significant moves. R1/S1 levels provide
-higher signal quality than H3/L3 for lower timeframe strategies. Regime filter avoids whipsaws in ranging markets.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeChop
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar MA), and choppiness regime filter (CHOP<61.8 = trending).
+Designed to work in both bull and bear markets by requiring trend alignment and filtering out ranging conditions via CHOP. Uses discrete position sizing (0.25) to minimize fee churn.
+Target: 20-50 trades/year by combining tight entry conditions (breakout + trend + volume + regime).
 """
 
 import numpy as np
@@ -38,8 +36,8 @@ def generate_signals(prices):
     prev_range = prev_high - prev_low
     
     # Camarilla R1 and S1 levels (R1 = C + 1.1*(HL/4), S1 = C - 1.1*(HL/4))
-    R1 = prev_close + 1.1 * prev_range * (1.0/4.0)
-    S1 = prev_close - 1.1 * prev_range * (1.0/4.0)
+    R1 = prev_close + 1.1 * prev_range * 0.25
+    S1 = prev_close - 1.1 * prev_range * 0.25
     
     # Align 1d levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
@@ -129,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeChop"
 timeframe = "4h"
 leverage = 1.0
