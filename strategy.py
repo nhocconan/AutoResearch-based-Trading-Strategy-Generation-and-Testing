@@ -1,29 +1,20 @@
 #!/usr/bin/env python3
 """
-12h Williams Alligator + Volume Spike + Chop Regime Filter
-Hypothesis: Williams Alligator (Jaw=TEETH=LIPS SMMA) identifies trend absence (all lines intertwined = chop) 
-vs trend presence (lines diverged = trend). In chop (Alligator sleeping), fade extremes via Donchian breakout failure.
-In trend (Alligator awakened), trade breakouts in direction of alignment. Volume spike confirms participation.
-12h timeframe targets 12-37 trades/year (50-150 over 4 years). Works in bull/bear via regime adaptation.
+4h Camarilla R3 S3 Breakout + 12h EMA34 Trend + Volume Spike
+Hypothesis: Camarilla pivot levels (R3, S3) act as strong support/resistance.
+Breakout above R3 or below S3 with volume confirmation indicates institutional
+participation. Trend filter (price > 12h EMA34 for longs, price < 12h EMA34 for shorts)
+ensures trades align with higher timeframe momentum. Works in bull markets (buy breakouts in uptrend)
+and bear markets (sell breakdowns in downtrend). 4h timeframe targets 19-50 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(arr, period):
-    """Smoothed Moving Average (SMMA) aka Wilder's MA"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan, dtype=float)
-    res = np.full_like(arr, np.nan, dtype=float)
-    res[period-1] = np.mean(arr[:period])
-    for i in range(period, len(arr)):
-        res[i] = (res[i-1] * (period-1) + arr[i]) / period
-    return res
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,32 +22,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate 12h EMA34 for trend filter
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Calculate Camarilla pivot levels from previous day
+    # Using 1d data for daily pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    # Previous day's OHLC (shifted by 1 to avoid look-ahead)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Camarilla calculations
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    r3 = pivot + (range_hl * 1.1 / 4)
+    s3 = pivot - (range_hl * 1.1 / 4)
     
-    # Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMMA of median price
-    median_price = (high + low) / 2
-    jaw = smma(median_price, 13)  # SMMA(13,8)
-    teeth = smma(median_price, 8)  # SMMA(8,5)
-    lips = smma(median_price, 5)   # SMMA(5,3)
-    
-    # Chop regime: Alligator sleeping (lines intertwined)
-    # Measure: max distance between lines as % of ATR
-    atr_raw = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
-    atr = align_htf_to_ltf(prices, df_1d, atr_raw)  # 1d ATR aligned to 12h
-    jaw_teeth = np.abs(jaw - teeth)
-    teeth_lips = np.abs(teeth - lips)
-    lips_jaw = np.abs(lips - jaw)
-    max_jaw_spread = np.maximum(jaw_teeth, np.maximum(teeth_lips, lips_jaw))
-    chop_filter = max_jaw_spread < (0.5 * atr)  # Alligator sleeping = chop
-    
-    # Donchian channels (20-period) for breakouts
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,13 +55,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 13, 34)  # Donchian, Alligator, 1d EMA34
+    start_idx = max(20, 34)  # volume MA, 12h EMA34 alignment
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -80,31 +68,17 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         vol_spike = volume_spike[i]
-        is_chop = chop_filter[i]
+        
+        # Trend filter: price relative to 12h EMA34
+        uptrend = curr_close > ema_34_12h_aligned[i]
+        downtrend = curr_close < ema_34_12h_aligned[i]
         
         if position == 0:
             # Look for entry signals
-            if is_chop:
-                # In chop: fade Donchian breakouts (mean reversion)
-                # Long: price rejects lower Donchian (closes above low after touching/under)
-                # Short: price rejects upper Donchian (closes below high after touching/over)
-                long_entry = (curr_low <= donchian_low[i]) and (curr_close > donchian_low[i]) and vol_spike
-                short_entry = (curr_high >= donchian_high[i]) and (curr_close < donchian_high[i]) and vol_spike
-            else:
-                # In trend: trade Donchian breakouts in direction of Alligator alignment
-                # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-                lips_above_teeth = lips[i] > teeth[i]
-                teeth_above_jaw = teeth[i] > jaw[i]
-                uptrend_align = lips_above_teeth and teeth_above_jaw
-                
-                lips_below_teeth = lips[i] < teeth[i]
-                teeth_below_jaw = teeth[i] < jaw[i]
-                downtrend_align = lips_below_teeth and teeth_below_jaw
-                
-                # Long: price breaks above upper Donchian in uptrend alignment
-                long_entry = (curr_high > donchian_high[i]) and uptrend_align and vol_spike
-                # Short: price breaks below lower Donchian in downtrend alignment
-                short_entry = (curr_low < donchian_low[i]) and downtrend_align and vol_spike
+            # Long: price breaks above R3 AND uptrend AND volume spike
+            long_entry = (curr_high > r3_aligned[i]) and uptrend and vol_spike
+            # Short: price breaks below S3 AND downtrend AND volume spike
+            short_entry = (curr_low < s3_aligned[i]) and downtrend and vol_spike
             
             if long_entry:
                 signals[i] = 0.25
@@ -116,24 +90,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Alligator turns against trend OR price retouches opposite Donchian
-            lips_below_teeth = lips[i] < teeth[i]
-            teeth_below_jaw = teeth[i] < jaw[i]
-            trend_against = lips_below_teeth and teeth_below_jaw  # Alligator turning down
-            
-            if trend_against or (curr_low <= donchian_low[i]):
+            # Exit: price closes below R3 (breakout failed) OR loss of uptrend
+            if (curr_close < r3_aligned[i]) or (curr_close < ema_34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: Alligator turns against trend OR price retouches opposite Donchian
-            lips_above_teeth = lips[i] > teeth[i]
-            teeth_above_jaw = teeth[i] > jaw[i]
-            trend_against = lips_above_teeth and teeth_above_jaw  # Alligator turning up
-            
-            if trend_against or (curr_high >= donchian_high[i]):
+            # Exit: price closes above S3 (breakdown failed) OR loss of downtrend
+            if (curr_close > s3_aligned[i]) or (curr_close > ema_34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_VolumeSpike_ChopRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
