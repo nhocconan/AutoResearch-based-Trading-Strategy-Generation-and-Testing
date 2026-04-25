@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h Camarilla H3/L3 Breakout + 12h EMA50 Trend + Volume Spike + Chop Filter
+4h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
 Hypothesis: Camarilla H3/L3 levels from daily chart breakouts with volume confirmation,
-12h EMA50 trend filter for medium-term trend alignment, and chop regime filter (CHOP<38.2) 
+1d EMA34 trend filter for long-term trend alignment, and chop regime filter (CHOP<38.2) 
 to trade only in trending markets. This strategy targets fewer, higher-quality trades 
 by requiring multiple confluence factors. Designed to work in both bull and bear markets 
-by requiring trend alignment and volume confirmation, reducing whipsaws. Target: 12-37 
-trades/year on 6h timeframe to minimize fee drag while capturing sustained momentum.
+by requiring trend alignment and volume confirmation, reducing whipsaws. Target: 19-50 
+trades/year on 4h timeframe to minimize fee drag while capturing sustained momentum.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (call ONCE before loop)
+    # Get 1d data for Camarilla pivots and EMA34 trend (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -38,14 +38,9 @@ def generate_signals(prices):
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Get 12h data for EMA50 trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for stoploss and volatility filter
     if len(close) >= 14:
@@ -78,12 +73,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA50_12h, ATR, and volume MA to propagate
-    start_idx = max(50, 14)
+    # Start index: need enough for EMA34_1d, ATR, and volume MA to propagate
+    start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_h3_aligned[i]) or 
             np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(atr[i]) or 
@@ -97,7 +92,7 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema50_12h = ema_50_12h_aligned[i]
+        ema34_1d = ema_34_1d_aligned[i]
         h3 = camarilla_h3_aligned[i]
         l3 = camarilla_l3_aligned[i]
         atr_val = atr[i]
@@ -110,10 +105,10 @@ def generate_signals(prices):
         trending_regime = chop < 38.2
         
         if position == 0:
-            # Long: price breaks above H3 AND uptrend (price > 12h EMA50) AND volume spike AND trending regime
-            long_condition = (curr_close > h3) and (curr_close > ema50_12h) and volume_spike and trending_regime
-            # Short: price breaks below L3 AND downtrend (price < 12h EMA50) AND volume spike AND trending regime
-            short_condition = (curr_close < l3) and (curr_close < ema50_12h) and volume_spike and trending_regime
+            # Long: price breaks above H3 AND uptrend (price > 1d EMA34) AND volume spike AND trending regime
+            long_condition = (curr_close > h3) and (curr_close > ema34_1d) and volume_spike and trending_regime
+            # Short: price breaks below L3 AND downtrend (price < 1d EMA34) AND volume spike AND trending regime
+            short_condition = (curr_close < l3) and (curr_close < ema34_1d) and volume_spike and trending_regime
             
             if long_condition:
                 signals[i] = 0.25
@@ -140,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3_L3_Breakout_12hEMA50_Trend_VolumeSpike_ChopFilter_v1"
-timeframe = "6h"
+name = "4h_Camarilla_H3_L3_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
