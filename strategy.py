@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1wTrend_VolumeSpike
-Hypothesis: 12-hour Camarilla H3/L3 breakout with 1-week EMA34 trend filter and volume spike confirmation.
-Targets 12-37 trades/year by requiring: 1) price breaks weekly H3/L3 levels (strong breakout),
-2) aligned with 1w EMA34 trend, 3) volume > 2.0x 20-period average. Uses 12h timeframe to minimize
-fee drag while capturing significant moves in both bull and bear markets. Weekly trend filter
-provides robustness against whipsaws in ranging markets.
+1d_Camarilla_H3L3_Breakout_1wTrend_VolumeSpike
+Hypothesis: Daily Camarilla H3/L3 breakout with 1-week EMA34 trend filter and volume spike confirmation.
+Targets 7-25 trades/year by requiring: 1) price breaks daily H3/L3 levels (strong daily breakout),
+2) aligned with 1w EMA34 trend, 3) volume > 2.0x 20-period average. Uses 1d timeframe to minimize
+fee drag while capturing significant moves in both bull and bear markets. H3/L3 levels provide
+better signal quality than R1/S1 for daily strategies, and weekly trend filter reduces whipsaw.
 """
 
 import numpy as np
@@ -22,28 +22,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC) once before loop
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # 1d data for EMA34 trend filter and Camarilla pivots (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1w data for EMA34 trend filter (loaded ONCE)
+    # 1w data for trend filter (loaded ONCE)
     df_1w = get_htf_data(prices, '1w')
     ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # 1w data for Camarilla pivots (loaded ONCE)
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # 1d data for Camarilla pivots (using previous day's OHLC)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     prev_range = prev_high - prev_low
     
     # Camarilla H3 and L3 levels (H3 = C + 1.1*(HL/2), L3 = C - 1.1*(HL/2))
     H3 = prev_close + 1.1 * prev_range * (1.0/2.0)
     L3 = prev_close - 1.1 * prev_range * (1.0/2.0)
     
-    # Align 1w levels to 12h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
+    # Align 1d levels to 1d timeframe (no shift needed as we use previous day's data)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,35 +54,30 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1w EMA34 (34) and previous week data (1)
+    # Start index: need enough for 1d EMA34 (34) and previous day data (1)
     start_idx = 35
     
     for i in range(start_idx, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # Skip if any data not ready
         if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1w_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         
-        # Trend filter: price relative to 1w EMA34
-        uptrend = curr_close > ema_34_1w_aligned[i]
-        downtrend = curr_close < ema_34_1w_aligned[i]
+        # Trend filters: price relative to 1d EMA34 and 1w EMA34
+        uptrend_1d = curr_close > ema_34_1d_aligned[i]
+        downtrend_1d = curr_close < ema_34_1d_aligned[i]
+        uptrend_1w = curr_close > ema_34_1w_aligned[i]
+        downtrend_1w = curr_close < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Look for entry signals with volume confirmation, trend alignment
-            # Long breakout: price breaks above H3 with uptrend and volume confirmation
-            long_breakout = (curr_close > H3_aligned[i]) and uptrend and volume_confirm[i]
-            # Short breakout: price breaks below L3 with downtrend and volume confirmation
-            short_breakout = (curr_close < L3_aligned[i]) and downtrend and volume_confirm[i]
+            # Look for entry signals with volume confirmation and trend alignment
+            # Long breakout: price breaks above H3 with uptrend on both timeframes and volume confirmation
+            long_breakout = (curr_close > H3_aligned[i]) and uptrend_1d and uptrend_1w and volume_confirm[i]
+            # Short breakout: price breaks below L3 with downtrend on both timeframes and volume confirmation
+            short_breakout = (curr_close < L3_aligned[i]) and downtrend_1d and downtrend_1w and volume_confirm[i]
             
             if long_breakout:
                 signals[i] = 0.25
@@ -95,16 +91,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Exit if price breaks below L3 (mean reversion) or trend changes
-            if curr_close < L3_aligned[i] or not uptrend:
+            # Exit if price breaks below L3 (mean reversion) or trend changes on either timeframe
+            if curr_close < L3_aligned[i] or not (uptrend_1d and uptrend_1w):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Exit if price breaks above H3 (mean reversion) or trend changes
-            if curr_close > H3_aligned[i] or not downtrend:
+            # Exit if price breaks above H3 (mean reversion) or trend changes on either timeframe
+            if curr_close > H3_aligned[i] or not (downtrend_1d and downtrend_1w):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Camarilla_H3L3_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
