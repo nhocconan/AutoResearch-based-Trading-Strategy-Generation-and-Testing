@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3/L3 Breakout with 1d EMA34 Trend Filter and Volume Spike
-Hypothesis: Camarilla H3/L3 levels act as strong support/resistance derived from prior 1d price action.
-Breakouts above H3 or below L3, when aligned with 1d EMA34 trend and confirmed by volume spikes,
-capture institutional momentum while avoiding false signals. Designed for 4h timeframe to target
-19-50 trades/year (75-200 over 4 years) by requiring confluence of Camarilla breakout, 1d EMA trend,
-and volume confirmation. Works in bull/bear regimes via trend filter and volume spike requirement.
+6h Camarilla H3/L3 Breakout with Weekly Pivot Direction Filter
+Hypothesis: Camarilla H3/L3 breakouts on 6h timeframe, when aligned with the weekly
+pivot trend (price above/below weekly pivot), capture institutional momentum with
+reduced false signals. The weekly pivot acts as a higher-timeframe bias filter,
+improving performance in both bull and bear markets by ensuring trades align
+with the dominant weekly trend. Volume confirmation is added to validate breakout
+strength. Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+by requiring confluence of Camarilla breakout, weekly pivot trend, and volume spike.
 """
 
 import numpy as np
@@ -22,15 +24,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivot calculation
+    # Load weekly data ONCE before loop for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points (standard: P = (H+L+C)/3)
+    # Using previous completed weekly bar
+    h_1w = df_1w['high'].values
+    l_1w = df_1w['low'].values
+    c_1w = df_1w['close'].values
+    weekly_pivot = (h_1w + l_1w + c_1w) / 3.0
+    
+    # Align weekly pivot to 6h (no extra delay as based on completed weekly bar)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    
+    # Load 1d data for Camarilla pivot calculation (more responsive than 12h)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate Camarilla pivot levels on 1d: based on previous 1d bar's H, L, C
-    # H3 = Close + 1.1*(High - Low)/2
-    # L3 = Close - 1.1*(High - Low)/2
-    # We use the previous completed 1d bar's values
     h_1d = df_1d['high'].values
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
@@ -38,15 +52,11 @@ def generate_signals(prices):
     camarilla_h3 = c_1d + 1.1 * (h_1d - l_1d) / 2
     camarilla_l3 = c_1d - 1.1 * (h_1d - l_1d) / 2
     
-    # Align Camarilla levels to 4h (no extra delay needed as they're based on completed 1d bar)
+    # Align Camarilla levels to 6h
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 1d EMA34 for trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average (stricter for fewer trades)
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -54,12 +64,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 34)  # volume MA, EMA34
+    start_idx = max(20, 20)  # weekly pivot needs 1 bar, volume MA 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -68,12 +78,12 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Trend filter: price relative to 1d EMA34
-        bullish_bias = curr_close > ema_1d_aligned[i]
-        bearish_bias = curr_close < ema_1d_aligned[i]
+        # Trend filter: price relative to weekly pivot
+        bullish_bias = curr_close > weekly_pivot_aligned[i]
+        bearish_bias = curr_close < weekly_pivot_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require ALL conditions: Camarilla breakout + trend + volume
+            # Look for entry signals - require ALL conditions: Camarilla breakout + weekly trend + volume
             # Long: price breaks above Camarilla H3 AND bullish bias AND volume spike
             long_entry = (curr_high > camarilla_h3_aligned[i]) and bullish_bias and vol_spike
             # Short: price breaks below Camarilla L3 AND bearish bias AND volume spike
@@ -89,16 +99,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below Camarilla L3 (mean reversion) OR loss of bullish bias
-            if (curr_low < camarilla_l3_aligned[i]) or (curr_close < ema_1d_aligned[i]):
+            # Exit: price falls below Camarilla L3 (mean reversion) OR loss of bullish bias (below weekly pivot)
+            if (curr_low < camarilla_l3_aligned[i]) or (curr_close < weekly_pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above Camarilla H3 (mean reversion) OR loss of bearish bias
-            if (curr_high > camarilla_h3_aligned[i]) or (curr_close > ema_1d_aligned[i]):
+            # Exit: price rises above Camarilla H3 (mean reversion) OR loss of bearish bias (above weekly pivot)
+            if (curr_high > camarilla_h3_aligned[i]) or (curr_close > weekly_pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_H3L3_Breakout_WeeklyPivot_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
