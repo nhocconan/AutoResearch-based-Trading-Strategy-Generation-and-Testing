@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume Spike + Choppiness Regime Filter
-Hypothesis: Donchian channel breakouts capture strong momentum moves, especially when
-confirmed by volume expansion and occurring in trending (low chop) regimes.
-This strategy targets 20-40 trades per year on 4h timeframe by requiring:
-1. Price breaks above/below 20-period Donchian channel
-2. Volume > 2.0 x 20-period volume MA (volume confirmation)
-3. Choppiness Index < 38.2 (trending regime filter)
-4. Position size 0.25 to limit drawdown and fee churn
-Works in both bull and bear markets: choppiness filter avoids whipsaws in ranging markets,
-while volume confirmation ensures breakouts have conviction. Discrete sizing minimizes fees.
+4h Camarilla R3/S3 Breakout with 1d EMA34 Trend and Volume Spike + Choppiness Filter
+Hypothesis: Camarilla pivot levels (R3/S3) act as stronger support/resistance on 4h chart.
+Breakout above R3 with 1d uptrend (EMA34) and volume spike signals bullish momentum.
+Breakdown below S3 with 1d downtrend and volume spike signals bearish momentum.
+Choppiness filter (CHOP > 61.8) ensures we only trade in ranging markets where mean reversion at pivots works.
+Uses 4h timeframe with 1d HTF for trend filter. Targets 75-200 total trades over 4 years (19-50/year).
+Works in both bull and bear markets: trend filter ensures we only trade with higher timeframe momentum,
+while volume confirmation and chop filter avoid false breakouts. Discrete position sizing (0.25) minimizes fee churn.
 """
 
 import numpy as np
@@ -26,54 +24,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channels on primary timeframe
-    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-19:i+1])
-        donch_low[i] = np.min(low[i-19:i+1])
+    # Get 1d data for EMA34 trend and Camarilla levels (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Calculate 20-period volume MA for confirmation
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Calculate 34-period EMA on 1d close for trend
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
+        span=34, adjust=False, min_periods=34
+    ).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Choppiness Index (14-period) for regime filter
-    # CHOP = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    # CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    tr = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr])  # align with price indices
+    # Calculate 1d Camarilla pivot levels (based on previous 1d candle)
+    df_1d = df_1d.copy()
+    df_1d['pivot'] = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    df_1d['r3'] = df_1d['pivot'] + (df_1d['high'] - df_1d['low']) * 1.1 / 4  # R3 = Pivot + (H-L)*1.1/4
+    df_1d['s3'] = df_1d['pivot'] - (df_1d['high'] - df_1d['low']) * 1.1 / 4  # S3 = Pivot - (H-L)*1.1/4
     
-    atr_14 = np.full(n, np.nan)
-    for i in range(14, n):
-        atr_14[i] = np.mean(tr[i-13:i+1])
+    pivot_1d = df_1d['pivot'].values
+    r3_1d = df_1d['r3'].values
+    s3_1d = df_1d['s3'].values
     
-    max_high_14 = np.full(n, np.nan)
-    min_low_14 = np.full(n, np.nan)
-    for i in range(14, n):
-        max_high_14[i] = np.max(high[i-13:i+1])
-        min_low_14[i] = np.min(low[i-13:i+1])
+    # Align 1d levels to 4h timeframe (previous day's levels available after 1d close)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
+    # Calculate 24-period volume MA for 4h volume confirmation (24 periods = 4 days of 4h data)
+    vol_ma_24_4h = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24_4h[i] = np.mean(volume[i-23:i+1])
+    
+    # Calculate Choppiness Index on 4h data (using 14-period)
     chop = np.full(n, np.nan)
     for i in range(14, n):
-        if max_high_14[i] > min_low_14[i] and not np.isnan(atr_14[i]):
-            sum_atr = np.sum(atr_14[i-13:i+1])
-            range_14 = max_high_14[i] - min_low_14[i]
-            chop[i] = 100 * np.log10(sum_atr / range_14) / np.log10(14)
+        # True Range
+        tr1 = high[i] - low[i]
+        tr2 = abs(high[i] - close[i-1])
+        tr3 = abs(low[i] - close[i-1])
+        tr = max(tr1, tr2, tr3)
+        
+        # Sum of TR over 14 periods
+        sum_tr = 0
+        for j in range(14):
+            idx = i - j
+            tr1_j = high[idx] - low[idx]
+            tr2_j = abs(high[idx] - close[idx-1]) if idx > 0 else 0
+            tr3_j = abs(low[idx] - close[idx-1]) if idx > 0 else 0
+            tr_j = max(tr1_j, tr2_j, tr3_j)
+            sum_tr += tr_j
+        
+        # Highest high and lowest low over 14 periods
+        hh = high[i-13:i+1].max() if i >= 13 else high[:i+1].max()
+        ll = low[i-13:i+1].min() if i >= 13 else low[:i+1].min()
+        
+        if sum_tr > 0 and hh > ll:
+            chop[i] = 100 * np.log10(sum_tr / (hh - ll)) / np.log10(14)
         else:
-            chop[i] = np.nan
+            chop[i] = 50.0  # neutral
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian (20), volume MA (20), and chop (14)
-    start_idx = max(20, 20, 14)
+    # Start index: need enough for EMA, volume MA, and chop
+    start_idx = max(34, 24, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(vol_ma_24_4h[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -81,23 +101,26 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        vol_ma = vol_ma_20[i]
+        ema_trend = ema_34_1d_aligned[i]
+        pivot_val = pivot_1d_aligned[i]
+        r3_val = r3_1d_aligned[i]
+        s3_val = s3_1d_aligned[i]
+        vol_ma_4h = vol_ma_24_4h[i]
         chop_val = chop[i]
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > 2.0 * vol_ma
-        
-        # Regime filter: Choppiness Index < 38.2 (trending market)
-        trending_regime = chop_val < 38.2
+        # Volume confirmation: current 4h volume > 2.0 * 24-period average
+        volume_confirm = curr_volume > 2.0 * vol_ma_4h
+        # Choppiness filter: only trade when CHOP > 61.8 (ranging market)
+        chop_filter = chop_val > 61.8
         
         if position == 0:
             # Look for entry signals
-            # Long: Break above Donchian high AND volume confirmation AND trending regime
-            long_entry = (curr_high > donch_high[i] and 
-                         volume_confirm and trending_regime)
-            # Short: Break below Donchian low AND volume confirmation AND trending regime
-            short_entry = (curr_low < donch_low[i] and 
-                          volume_confirm and trending_regime)
+            # Long: Break above R3 AND price > EMA34 (uptrend) AND volume confirmation AND chop filter
+            long_entry = (curr_high > r3_val and 
+                         curr_close > ema_trend and volume_confirm and chop_filter)
+            # Short: Break below S3 AND price < EMA34 (downtrend) AND volume confirmation AND chop filter
+            short_entry = (curr_low < s3_val and 
+                          curr_close < ema_trend and volume_confirm and chop_filter)
             
             if long_entry:
                 signals[i] = 0.25
@@ -109,16 +132,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Price closes below Donchian low (channel breakdown)
-            if curr_close < donch_low[i]:
+            # Exit: Price crosses below pivot OR EMA34 trend turns down
+            if (curr_close < pivot_val or curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: Price closes above Donchian high (channel breakdown)
-            if curr_close > donch_high[i]:
+            # Exit: Price crosses above pivot OR EMA34 trend turns up
+            if (curr_close > pivot_val or curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ChoppinessFilter"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
 timeframe = "4h"
 leverage = 1.0
