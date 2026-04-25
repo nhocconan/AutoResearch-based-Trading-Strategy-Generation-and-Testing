@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout with 1d EMA34 Trend and Volume Spike
-Hypothesis: Donchian channel breakouts capture medium-term trends. Using 1d EMA34 as HTF trend filter ensures alignment with long-term trend, reducing false signals in both bull and bear markets. Volume confirmation (current volume > 2.0 * 20-period average) ensures participation. Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 12-30 trades/year on 12h.
+4h Donchian(20) Breakout with Volume Spike and ADX Trend Filter
+Hypothesis: Donchian channel breakouts capture strong momentum moves. 
+Volume confirmation ensures participation, while ADX > 25 filters for trending markets.
+This combination works in both bull and bear markets by catching breakouts in the direction 
+of the trend. Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 20-50 trades/year on 4h.
 """
 
 import numpy as np
@@ -18,36 +21,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Donchian channels (20-period) from prior bars only
+    # Calculate Donchian channels (20-period)
     lookback = 20
-    # Shift to exclude current bar: use prior 20 bars for channel
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
     
-    # Volume confirmation: current volume > 2.0 * 20-bar average (stricter to reduce trades)
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
+    
+    # ADX calculation for trend filter (14-period)
+    plus_dm = pd.Series(high).diff()
+    minus_dm = pd.Series(low).diff().mul(-1)
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    
+    tr1 = pd.Series(high).sub(pd.Series(low))
+    tr2 = pd.Series(high).sub(pd.Series(close).shift(1)).abs()
+    tr3 = pd.Series(low).sub(pd.Series(close).shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = lookback + 1
+    start_idx = max(lookback, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
@@ -55,15 +63,15 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
+        trend_filter = adx[i] > 25  # ADX > 25 indicates trending market
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above upper Donchian AND volume spike AND price > 1d EMA34 (uptrend)
-            long_entry = (curr_close > highest_high[i]) and vol_spike and (curr_close > ema_trend)
-            # Short: price breaks below lower Donchian AND volume spike AND price < 1d EMA34 (downtrend)
-            short_entry = (curr_close < lowest_low[i]) and vol_spike and (curr_close < ema_trend)
+            # Long: price breaks above upper Donchian AND volume spike AND trending market
+            long_entry = (curr_close > upper[i]) and vol_spike and trend_filter
+            # Short: price breaks below lower Donchian AND volume spike AND trending market
+            short_entry = (curr_close < lower[i]) and vol_spike and trend_filter
             
             if long_entry:
                 signals[i] = 0.25
@@ -75,16 +83,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below lower Donchian (mean reversion) OR trend change (price < EMA)
-            if (curr_close < lowest_low[i]) or (curr_close < ema_trend):
+            # Exit: price falls below lower Donchian (breakdown) OR loss of momentum (ADX < 20)
+            if (curr_close < lower[i]) or (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above upper Donchian (mean reversion) OR trend change (price > EMA)
-            if (curr_close > highest_high[i]) or (curr_close > ema_trend):
+            # Exit: price rises above upper Donchian (breakout) OR loss of momentum (ADX < 20)
+            if (curr_close > upper[i]) or (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_VolumeSpike_ADXTrend"
+timeframe = "4h"
 leverage = 1.0
