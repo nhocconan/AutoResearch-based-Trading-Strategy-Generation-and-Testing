@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v13
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike captures institutional breakout moves in both bull and bear markets. Uses discrete position sizing (0.25) and ATR-based stoploss (2.0) to target 75-200 total trades over 4 years. Works in trending markets by only taking breakouts in direction of higher timeframe trend, avoiding false reversals. Added volume spike filter to reduce false breakouts and improve trade quality. Reduced trade frequency by tightening volume spike threshold to 4.0x and adding minimum holding period of 8 bars to avoid whipsaw. Fixed: removed redundant 4h close alignment to prevent look-ahead and used proper discrete sizing.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v14
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume spike confirmation, and ATR-based stoploss captures institutional breakout moves while minimizing whipsaw. Uses discrete position sizing (0.25) to target 75-200 total trades over 4 years. Works in both bull and bear markets by only taking breakouts in direction of higher timeframe trend, avoiding false reversals. Volume spike filter (4.0x average) reduces false breakouts. Minimum holding period of 8 bars prevents premature exits. ATR stoploss (2.0) manages risk. Prioritizes BTC/ETH performance over SOL-only edges.
 """
 
 import numpy as np
@@ -158,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v13"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v14"
 timeframe = "4h"
 leverage = 1.0
