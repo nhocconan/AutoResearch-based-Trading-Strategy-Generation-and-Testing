@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume spike confirmation.
-Uses 1d HTF for stable trend identification to reduce whipsaw in both bull and bear markets.
-Long: Close > R1 + price > 1d EMA34 + volume > 2.0 * 20-period average volume.
-Short: Close < S1 + price < 1d EMA34 + volume > 2.0 * 20-period average volume.
+4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v3
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA50 trend filter (more stable than EMA34) and volume spike confirmation.
+Uses 1d HTF for trend identification to reduce whipsaw. Long: Close > R1 + price > 1d EMA50 + volume > 2.0 * 20-period average volume.
+Short: Close < S1 + price < 1d EMA50 + volume > 2.0 * 20-period average volume.
 Exit: Opposite Camarilla level touch OR trend reversal.
-Position size: 0.25 (25% of capital) to balance profit potential and fee drag.
-Target: 12-37 trades/year to stay within 12h optimal range (50-150 total over 4 years).
+Position size: 0.25 to balance profit potential and fee drag.
+Target: 20-35 trades/year to stay well under the 400-trade 4h hard max.
 """
 
 import numpy as np
@@ -29,10 +28,10 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for HTF trend filter
+    # Calculate 1d EMA50 for HTF trend filter (more stable than EMA34)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Camarilla levels from previous 1d bar
     h_1d = df_1d['high'].values
@@ -44,31 +43,31 @@ def generate_signals(prices):
     camarilla_r1_1d = c_1d + (range_1d * 1.1 / 12.0)
     camarilla_s1_1d = c_1d - (range_1d * 1.1 / 12.0)
     
-    # Align Camarilla levels to 12h timeframe (use previous 1d bar's levels)
+    # Align Camarilla levels to 4h timeframe (use previous 1d bar's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    # Volume confirmation: 12h volume > 2.0 * 20-period average
+    # Volume confirmation: 4h volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA34 (34) and volume MA (20)
-    start_idx = max(34, 20)
+    # Start index: need warmup for EMA50 (50) and volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend (bullish = price above EMA34)
-        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
+        # Determine 1d HTF trend (bullish = price above EMA50)
+        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
             # Long setup: price breaks above Camarilla R1 + 1d uptrend + volume spike
@@ -102,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
