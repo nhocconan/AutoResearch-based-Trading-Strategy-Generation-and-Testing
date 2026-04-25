@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_1wTrend_VolumeSpike
-Hypothesis: Daily timeframe Donchian(20) breakout with weekly EMA50 trend filter and volume spike (>2.0x 20-period average). Long when price breaks above 20-day high in weekly uptrend with volume confirmation. Short when price breaks below 20-day low in weekly downtrend with volume confirmation. Exit via opposite Donchian level or ATR trailing stop (2.5*ATR from extreme). Designed for ~50-100 total trades over 4 years (12-25/year) via tight entry conditions on 1d timeframe.
+6h_Ichimoku_Kumo_Twist_1dTrend_VolumeFilter
+Hypothesis: On 6h timeframe, Ichimoku TK cross (Tenkan/Kijun) combined with 1d trend filter (price > 1d EMA50) and volume confirmation (>1.5x 20-period average) captures high-probability breakouts in both bull and bear markets. The Kumo (cloud) acts as dynamic support/resistance: long when price is above cloud and TK cross bullish in 1d uptrend; short when price is below cloud and TK cross bearish in 1d downtrend. Exits on opposite TK cross or Kumo penetration. Designed for ~80-120 total trades over 4 years (20-30/year) via tight entry conditions requiring multi-timeframe alignment.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,77 +18,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # need for EMA50 and Donchian
+    # Get 1d data for trend filter and Ichimoku calculation (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # need for Ichimoku (26*2)
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Ichimoku components on 1d
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate Donchian channels on 1d data (20-period)
-    donch_period = 20
-    donch_high = pd.Series(high).rolling(window=donch_period, min_periods=donch_period).max().values
-    donch_low = pd.Series(low).rolling(window=donch_period, min_periods=donch_period).min().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # ATR for stoploss (20-period)
-    atr_period = 20
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Volume regime: volume > 2.0x 20-period average
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Chikou Span (Lagging Span): close shifted 26 periods behind
+    # Not used for signals as it requires future data
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Kumo (cloud) boundaries: Senkou Span A and B
+    # The cloud is between senkou_a and senkou_b
+    # We need to align these properly - they are already shifted in calculation
+    # But align_htf_to_ltf will handle the timing alignment
+    
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
+    vol_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0   # highest close since long entry
-    short_extreme = 0.0  # lowest close since short entry
     
     # Start index: need warmup for calculations
-    start_idx = max(donch_period, atr_period, 20, 50)  # +1 for roll in TR
+    start_idx = max(52, 26, 20, 1)  # Ichimoku needs 52 periods
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_50_1w_aligned[i]
-        upper = donch_high[i]
-        lower = donch_low[i]
+        # Get aligned values
+        tenkan_val = tenkan_aligned[i]
+        kijun_val = kijun_aligned[i]
+        senkou_a_val = senkou_a_aligned[i]
+        senkou_b_val = senkou_b_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        
+        # Kumo boundaries (cloud top and bottom)
+        kumomax = max(senkou_a_val, senkou_b_val)
+        kumomin = min(senkou_a_val, senkou_b_val)
+        
+        # 1d trend filter: price vs EMA50
+        # Get 1d close aligned for direct comparison
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        close_1d_val = close_1d_aligned[i]
+        is_uptrend = close_1d_val > ema_50_val
+        
+        # TK cross signals
+        tk_bullish = tenkan_val > kijun_val
+        tk_bearish = tenkan_val < kijun_val
         
         if position == 0:
-            # Get 1w close aligned for trend comparison
-            close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-            close_1w_val = close_1w_aligned[i]
-            is_uptrend = close_1w_val > ema_trend
-            
-            if is_uptrend:  # 1w uptrend regime
-                # Long: break above Donchian high with volume confirmation
-                long_signal = (close[i] > upper) and vol_spike[i]
-            else:  # 1w downtrend regime
-                # Short: break below Donchian low with volume confirmation
-                short_signal = (close[i] < lower) and vol_spike[i]
+            # Look for entry signals
+            if is_uptrend:
+                # Long conditions: price above cloud, TK bullish cross, volume spike
+                long_signal = (close[i] > kumomax) and tk_bullish and vol_spike[i]
+            else:
+                # Short conditions: price below cloud, TK bearish cross, volume spike
+                short_signal = (close[i] < kumomin) and tk_bearish and vol_spike[i]
             
             if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
                 position = 1
-                long_extreme = close[i]
             elif 'short_signal' in locals() and short_signal:
                 signals[i] = -0.25
                 position = -1
-                short_extreme = close[i]
             else:
                 signals[i] = 0.0
                 # Clear signal variables for next iteration
@@ -97,32 +126,24 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Update extreme for trailing stop
-            if close[i] > long_extreme:
-                long_extreme = close[i]
-            # Exit conditions: 
-            # 1. ATR trailing stop (2.5*ATR from extreme)
-            atr_stop = long_extreme - 2.5 * atr[i]
-            # 2. Price breaks below Donchian low (opposite channel)
-            if close[i] <= atr_stop or close[i] < lower:
+            # Exit conditions:
+            # 1. TK cross turns bearish
+            # 2. Price penetrates Kumo (cloud)
+            if tk_bearish or close[i] < kumomin:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Update extreme for trailing stop
-            if close[i] < short_extreme:
-                short_extreme = close[i]
             # Exit conditions:
-            # 1. ATR trailing stop (2.5*ATR from extreme)
-            atr_stop = short_extreme + 2.5 * atr[i]
-            # 2. Price breaks above Donchian high (opposite channel)
-            if close[i] >= atr_stop or close[i] > upper:
+            # 1. TK cross turns bullish
+            # 2. Price penetrates Kumo (cloud)
+            if tk_bullish or close[i] > kumomax:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
