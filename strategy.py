@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla R1/S1 Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
-Hypothesis: Camarilla pivot levels (R1/S1) from daily chart act as intraday support/resistance.
-Breakouts above R1 or below S1 with volume confirmation and 1d EMA34 trend filter capture
-strong momentum moves. Chop filter avoids whipsaws in ranging markets. Discrete sizing (0.25)
-controls drawdown. Target: 20-50 trades/year on 4h.
+4h Camarilla H3/L3 Breakout + 1d EMA50 Trend + Volume Spike + Chop Filter
+Hypothesis: Camarilla H3/L3 levels (stronger intraday S/R than R1/S1) from daily chart breakouts
+with volume confirmation, 1d EMA50 trend filter, and chop regime filter capture sustained momentum.
+Discrete sizing (0.25) controls drawdown. Target: 20-50 trades/year on 4h.
+Works in bull/bear via trend filter (EMA50) and regime filter (avoid chop).
 """
 
 import numpy as np
@@ -21,24 +21,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA34 (call ONCE before loop)
+    # Get 1d data for Camarilla pivots and EMA50 (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels (R1, S1) from 1d OHLC
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # Calculate Camarilla pivot levels (H3, L3) from 1d OHLC
+    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
-    camarilla_r1 = daily_close + 1.1 * (daily_high - daily_low) / 12
-    camarilla_s1 = daily_close - 1.1 * (daily_high - daily_low) / 12
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_h3 = daily_close + 1.1 * (daily_high - daily_low) / 4
+    camarilla_l3 = daily_close - 1.1 * (daily_high - daily_low) / 4
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Calculate ATR(14) for stoploss and volatility filter
     if len(close) >= 14:
@@ -71,14 +71,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA34_1d, ATR, and volume MA to propagate
-    start_idx = max(34, 14)
+    # Start index: need enough for EMA50_1d, ATR, and volume MA to propagate
+    start_idx = max(50, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(chop_values[i])):
             if position != 0:
@@ -90,9 +90,9 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema34_1d = ema_34_1d_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
+        ema50_1d = ema_50_1d_aligned[i]
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
         chop = chop_values[i]
@@ -103,10 +103,10 @@ def generate_signals(prices):
         trending_regime = chop < 38.2
         
         if position == 0:
-            # Long: price breaks above R1 AND uptrend (price > 1d EMA34) AND volume spike AND trending regime
-            long_condition = (curr_close > r1) and (curr_close > ema34_1d) and volume_spike and trending_regime
-            # Short: price breaks below S1 AND downtrend (price < 1d EMA34) AND volume spike AND trending regime
-            short_condition = (curr_close < s1) and (curr_close < ema34_1d) and volume_spike and trending_regime
+            # Long: price breaks above H3 AND uptrend (price > 1d EMA50) AND volume spike AND trending regime
+            long_condition = (curr_close > h3) and (curr_close > ema50_1d) and volume_spike and trending_regime
+            # Short: price breaks below L3 AND downtrend (price < 1d EMA50) AND volume spike AND trending regime
+            short_condition = (curr_close < l3) and (curr_close < ema50_1d) and volume_spike and trending_regime
             
             if long_condition:
                 signals[i] = 0.25
@@ -117,15 +117,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or price breaks below S1 (reversal signal)
-            if curr_close <= entry_price - 2.0 * atr_val or curr_close < s1:
+            # Exit long: stoploss (2.0*ATR below entry) or price breaks below L3 (reversal signal)
+            if curr_close <= entry_price - 2.0 * atr_val or curr_close < l3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or price breaks above R1 (reversal signal)
-            if curr_close >= entry_price + 2.0 * atr_val or curr_close > r1:
+            # Exit short: stoploss (2.0*ATR above entry) or price breaks above H3 (reversal signal)
+            if curr_close >= entry_price + 2.0 * atr_val or curr_close > h3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
+name = "4h_Camarilla_H3_L3_Breakout_1dEMA50_Trend_VolumeSpike_ChopFilter_v1"
 timeframe = "4h"
 leverage = 1.0
