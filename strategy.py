@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Index with 12h Supertrend Filter and Volume Confirmation
-Hypothesis: Elder Ray (Bull/Bear Power) measures bull/bear strength relative to EMA13.
-Combined with 12h Supertrend for regime filter and volume confirmation to avoid false signals.
-Works in bull/bear via Supertrend regime filter. Discrete sizing (0.25) limits fee drag (~60-100 trades over 4 years).
+4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Donchian channel breakouts capture strong momentum. 1d EMA34 filters for higher timeframe trend alignment, and volume spike confirms institutional participation. Works in bull/bear via trend filter (long only in uptrend, short only in downtrend). Discrete sizing (0.25) limits fee drag (~75-150 trades over 4 years).
 """
 
 import numpy as np
@@ -20,55 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Supertrend regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h Supertrend (ATR=10, mult=3.0) for regime filter
-    hl2_12h = (df_12h['high'] + df_12h['low']) / 2
-    tr1_12h = df_12h['high'][1:] - df_12h['low'][1:]
-    tr2_12h = np.abs(df_12h['high'][1:] - df_12h['close'][:-1])
-    tr3_12h = np.abs(df_12h['low'][1:] - df_12h['close'][:-1])
-    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
-    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
-    upper_12h = hl2_12h + 3.0 * atr_12h
-    lower_12h = hl2_12h - 3.0 * atr_12h
-    supertrend_12h = np.full_like(hl2_12h, np.nan, dtype=float)
-    direction_12h = np.ones_like(hl2_12h, dtype=int)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(hl2_12h)):
-        if np.isnan(supertrend_12h[i-1]):
-            supertrend_12h[i] = lower_12h[i]
-            direction_12h[i] = 1
-        else:
-            if close_12h := df_12h['close'].iloc[i]:
-                close_12h_val = df_12h['close'].iloc[i]
-            else:
-                close_12h_val = df_12h['close'].values[i]
-            if direction_12h[i-1] == 1:
-                supertrend_12h[i] = max(lower_12h[i], supertrend_12h[i-1])
-                if close_12h_val < supertrend_12h[i]:
-                    direction_12h[i] = -1
-                    supertrend_12h[i] = upper_12h[i]
-                else:
-                    direction_12h[i] = 1
-            else:
-                supertrend_12h[i] = min(upper_12h[i], supertrend_12h[i-1])
-                if close_12h_val > supertrend_12h[i]:
-                    direction_12h[i] = 1
-                    supertrend_12h[i] = lower_12h[i]
-                else:
-                    direction_12h[i] = -1
-    
-    supertrend_dir_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h.astype(float))
-    
-    # Calculate EMA13 for Elder Ray (primary timeframe)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR for stop loss (using 20 periods)
     tr1 = high[1:] - low[1:]
@@ -82,14 +39,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for EMA13 (13), ATR (20), and Supertrend (10)
-    start_idx = max(13, 20)
+    # Start index: need enough for Donchian (20), ATR (20), EMA34 (34)
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_13[i]) or np.isnan(atr[i]) or 
-            np.isnan(supertrend_dir_12h_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,18 +54,27 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema13_val = ema_13[i]
+        ema_trend = ema_34_aligned[i]
         atr_value = atr[i]
-        supertrend_dir = supertrend_dir_12h_aligned[i]
-        bull_pwr = bull_power[i]
-        bear_pwr = bear_power[i]
         
-        # Volume spike: current volume > 1.8 * 20-period average
+        # Donchian(20) channels: 20-period high/low
+        if i >= 20:
+            donch_high = np.max(high[i-19:i+1])
+            donch_low = np.min(low[i-19:i+1])
+        else:
+            donch_high = np.max(high[:i+1])
+            donch_low = np.min(low[:i+1])
+        
+        # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-19:i+1])
         else:
             vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 1.8 * vol_ma_20
+        volume_spike = curr_volume > 2.0 * vol_ma_20
+        
+        # Breakout conditions: price breaks above/below Donchian channels
+        bullish_breakout = curr_close > donch_high
+        bearish_breakout = curr_close < donch_low
         
         # Update tracking variables for trailing stop logic
         if position == 1:
@@ -118,7 +82,7 @@ def generate_signals(prices):
         elif position == -1:
             lowest_since_entry = min(lowest_since_entry, curr_low)
         
-        # Exit conditions: trailing stop or regime/volume change
+        # Exit conditions: trailing stop or reverse breakout
         if position != 0:
             exit_signal = False
             
@@ -126,16 +90,16 @@ def generate_signals(prices):
                 # Trailing stop: exit if price drops 2.5*ATR from highest since entry
                 if curr_close < highest_since_entry - 2.5 * atr_value:
                     exit_signal = True
-                # Exit if Supertrend turns bearish OR volume dies AND weak bull power
-                elif supertrend_dir <= 0 or (not volume_spike and bull_pwr < 0):
+                # Reverse breakout or trend rejection
+                elif curr_close < donch_low or curr_close < ema_trend:
                     exit_signal = True
                     
             elif position == -1:
                 # Trailing stop: exit if price rises 2.5*ATR from lowest since entry
                 if curr_close > lowest_since_entry + 2.5 * atr_value:
                     exit_signal = True
-                # Exit if Supertrend turns bullish OR volume dies AND weak bear power
-                elif supertrend_dir >= 0 or (not volume_spike and bear_pwr > 0):
+                # Reverse breakout or trend rejection
+                elif curr_close > donch_high or curr_close > ema_trend:
                     exit_signal = True
             
             if exit_signal:
@@ -145,12 +109,12 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # Entry conditions: Elder Ray + Supertrend regime + volume
+        # Entry conditions: Donchian breakout + trend alignment + volume
         if position == 0:
-            # Long: Supertrend bullish AND bull power positive AND volume spike
-            long_condition = (supertrend_dir > 0) and (bull_pwr > 0) and volume_spike
-            # Short: Supertrend bearish AND bear power negative AND volume spike
-            short_condition = (supertrend_dir < 0) and (bear_pwr < 0) and volume_spike
+            # Long: break above Donchian high AND price above 1d EMA34
+            long_condition = bullish_breakout and (curr_close > ema_trend) and volume_spike
+            # Short: break below Donchian low AND price below 1d EMA34
+            short_condition = bearish_breakout and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -169,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Supertrend12h_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
