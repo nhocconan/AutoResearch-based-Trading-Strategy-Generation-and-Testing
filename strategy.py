@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3/L3 Breakout + 12h EMA50 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Camarilla H3/L3 levels from 1d chart provide institutional breakout levels.
-Breakouts in direction of 12h EMA50 trend with volume confirmation capture strong moves.
-ATR-based stoploss limits drawdown during sideways/choppy periods. Designed for 4h
-timeframe targeting 20-50 trades/year. Uses discrete position sizing (0.25) to minimize fee churn.
-Works in bull markets via breakout continuation and in bear markets via mean-reversion from extreme
-levels when 12h trend aligns. Uses proper MTF loading with get_htf_data called once before loop.
+1d Camarilla H3/L3 Breakout + 1w EMA50 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Daily Camarilla H3/L3 levels provide institutional breakout levels.
+Breakouts in direction of weekly EMA50 trend with volume confirmation capture strong multi-day moves.
+ATR-based stoploss limits drawdown. Designed for 1d timeframe targeting 7-25 trades/year.
+Uses discrete position sizing (0.25) to minimize fee churn. Works in bull markets via breakout
+continuation and in bear markets via mean-reversion from extreme levels when weekly trend aligns.
 """
 
 import numpy as np
@@ -38,14 +37,14 @@ def generate_signals(prices):
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Get 12h data for EMA50 trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1w data for EMA50 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR(14) for stoploss
     if len(close) >= 14:
@@ -62,26 +61,26 @@ def generate_signals(prices):
     else:
         atr = np.full(n, np.nan)
     
-    # Calculate 20-period volume MA for volume spike detection
-    vol_ma_20 = np.full(n, np.nan)
+    # Calculate 5-period volume MA for volume spike detection (daily)
+    vol_ma_5 = np.full(n, np.nan)
     for i in range(n):
-        start_idx = max(0, i - 19)
-        vol_ma_20[i] = np.mean(volume[start_idx:i+1])
+        start_idx = max(0, i - 4)
+        vol_ma_5[i] = np.mean(volume[start_idx:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA50_12h, ATR, and volume MA to propagate
-    start_idx = max(50, 14, 20)
+    # Start index: need enough for EMA50_1w, ATR, and volume MA to propagate
+    start_idx = max(50, 14, 5)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(camarilla_h3_aligned[i]) or 
             np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_5[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,20 +90,20 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema50_12h = ema_50_12h_aligned[i]
+        ema50_1w = ema_50_1w_aligned[i]
         h3 = camarilla_h3_aligned[i]
         l3 = camarilla_l3_aligned[i]
         atr_val = atr[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_5[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
+        # Volume spike: current volume > 2.0 * 5-period average
         volume_spike = curr_volume > 2.0 * vol_ma
         
         if position == 0:
-            # Long: price breaks above H3 AND uptrend (price > 12h EMA50) AND volume spike
-            long_condition = (curr_close > h3) and (curr_close > ema50_12h) and volume_spike
-            # Short: price breaks below L3 AND downtrend (price < 12h EMA50) AND volume spike
-            short_condition = (curr_close < l3) and (curr_close < ema50_12h) and volume_spike
+            # Long: price breaks above H3 AND uptrend (price > 1w EMA50) AND volume spike
+            long_condition = (curr_close > h3) and (curr_close > ema50_1w) and volume_spike
+            # Short: price breaks below L3 AND downtrend (price < 1w EMA50) AND volume spike
+            short_condition = (curr_close < l3) and (curr_close < ema50_1w) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -131,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3_L3_Breakout_12hEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Camarilla_H3_L3_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
