@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeRegime_v3
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter, volume spike (>2.0x 20-bar avg), and chop regime filter (CHOP < 50) captures strong institutional moves while avoiding choppy markets. Uses ATR(14) stoploss (2.5) and discrete sizing (0.25). This version adds a minimum holding period of 3 bars to reduce churn and targets 20-30 trades/year by requiring strict confluence. Designed to work in both bull and bear markets via trend filter and regime avoidance.
+1d_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeRegime
+Hypothesis: Daily Camarilla R1/S1 breakouts with weekly EMA50 trend filter, volume spike (>2.0x 20-bar avg), and chop regime filter (CHOP < 50) captures strong institutional moves while avoiding choppy markets. Uses ATR(14) stoploss (2.5) and discrete sizing (0.25). Targets 7-25 trades/year by requiring strict confluence of price level, weekly trend, volume, and low-chop regime. Designed to work in both bull and bear markets via trend filter and regime avoidance.
 """
 
 import numpy as np
@@ -18,7 +18,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend and Camarilla calculation
+    # Get 1w data for HTF trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA50 on 1w for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -26,10 +37,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate EMA34 on 1d for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar (R1, S1)
     # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
@@ -42,30 +49,26 @@ def generate_signals(prices):
     r1 = prev_close + 1.1 * camarilla_range / 12
     s1 = prev_close - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1d timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate ATR(14) on 4h for stoploss
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate ATR(14) on 1d for stoploss
+    high_1d_arr = df_1d['high'].values
+    low_1d_arr = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
     # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr1 = high_1d_arr[1:] - low_1d_arr[1:]
+    tr2 = np.abs(high_1d_arr[1:] - close_1d_arr[:-1])
+    tr3 = np.abs(low_1d_arr[1:] - close_1d_arr[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    atr_4h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume average (20-period) for volume spike filter
+    # Volume average (20-period) for volume spike filter on 1d
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Choppiness Index regime filter on 1d (CHOP < 50 = strong trending regime)
@@ -84,17 +87,16 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
     
     # Start index: need warmup for calculations
-    start_idx = max(50, 34, 20, 14, 14)  # EMA34, vol MA, ATR, Chop
+    start_idx = max(50, 50, 20, 14, 14)  # EMA50, vol MA, ATR, Chop
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or 
             np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
-            np.isnan(atr_4h_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma[i]) or 
             np.isnan(chop_aligned[i])):
             # Hold current position or flat
@@ -107,10 +109,10 @@ def generate_signals(prices):
             continue
         
         # Get aligned values
-        ema_val = ema_34_aligned[i]
+        ema_val = ema_50_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        atr_val = atr_4h_aligned[i]
+        atr_val = atr_1d_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_val = volume[i]
         close_val = close[i]
@@ -126,66 +128,52 @@ def generate_signals(prices):
         
         if position == 0:
             # Look for entry signals: Camarilla breakout with trend and volume
-            # Long: price breaks above R1 with uptrend (close > EMA34) and volume spike
+            # Long: price breaks above R1 with uptrend (close > EMA50) and volume spike
             long_signal = (high_val > r1_val) and (close_val > ema_val) and volume_spike and in_strong_trend
-            # Short: price breaks below S1 with downtrend (close < EMA34) and volume spike
+            # Short: price breaks below S1 with downtrend (close < EMA50) and volume spike
             short_signal = (low_val < s1_val) and (close_val < ema_val) and volume_spike and in_strong_trend
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-                bars_since_entry = 0
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            bars_since_entry += 1
             # Exit conditions:
-            # 1. Minimum holding period: 3 bars
-            if bars_since_entry < 3:
-                continue
-            # 2. Stoploss: price moves against position by 2.5*ATR
+            # 1. Stoploss: price moves against position by 2.5*ATR
             if close_val < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-                bars_since_entry = 0
-            # 3. Opposite breakout: price breaks below S1 (exit long)
+            # 2. Opposite breakout: price breaks below S1 (exit long)
             elif close_val < s1_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-                bars_since_entry = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            bars_since_entry += 1
             # Exit conditions:
-            # 1. Minimum holding period: 3 bars
-            if bars_since_entry < 3:
-                continue
-            # 2. Stoploss: price moves against position by 2.5*ATR
+            # 1. Stoploss: price moves against position by 2.5*ATR
             if close_val > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-                bars_since_entry = 0
-            # 3. Opposite breakout: price breaks above R1 (exit short)
+            # 2. Opposite breakout: price breaks above R1 (exit short)
             elif close_val > r1_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-                bars_since_entry = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeRegime_v3"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeRegime"
+timeframe = "1d"
 leverage = 1.0
