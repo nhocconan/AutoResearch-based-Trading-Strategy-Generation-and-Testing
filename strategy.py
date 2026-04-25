@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 12h EMA34 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Donchian breakouts capture strong momentum; 12h EMA34 filters trend direction; volume spike confirms conviction; ATR stoploss manages risk. Works in bull (buy breakouts above upper band in uptrend) and bear (sell breakdowns below lower band in downtrend). Target 19-50 trades/year on 4h to avoid fee drag.
+1d Camarilla H3/L3 Breakout + Weekly EMA34 Trend + Volume Spike
+Hypothesis: Camarilla H3/L3 levels act as intraday resistance/support on 1d timeframe; breakouts with weekly EMA34 trend filter and volume spike capture strong momentum moves. Works in bull markets (long H3 breakouts in uptrend) and bear markets (short L3 breakdowns in downtrend) via symmetric logic. Target 7-25 trades/year on 1d to minimize fee drag.
 """
 
 import numpy as np
@@ -18,15 +18,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get weekly data for EMA34 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for trend filter
-    close_12h = pd.Series(df_12h['close'])
-    ema_34_12h = close_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate weekly EMA34 for trend filter
+    close_1w = pd.Series(df_1w['close'])
+    ema_34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels for 1d using previous day's OHLC
+    # H3 = close + 1.1*(high-low)/2
+    # L3 = close - 1.1*(high-low)/2
+    # We need previous day's data, so we shift by 1
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla H3 and L3 for each day (based on previous day)
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
+    for i in range(1, len(close_1d)):
+        camarilla_h3[i] = close_1d[i-1] + 1.1 * (high_1d[i-1] - low_1d[i-1]) / 2
+        camarilla_l3[i] = close_1d[i-1] - 1.1 * (high_1d[i-1] - low_1d[i-1]) / 2
+    
+    # Align Camarilla levels to lower timeframe (1d->1d is identity, but we keep for consistency)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Calculate ATR(14) for stop management
     atr = np.full(n, np.nan)
@@ -46,12 +70,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for Donchian, EMA34, ATR, volume MA
-    start_idx = max(20, 34, 14, 20)
+    # Start index: need enough for weekly EMA34, ATR, volume MA
+    start_idx = max(34, 14, 20, 2)  # 2 for Camarilla (need previous day)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,15 +88,13 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_34_val = ema_34_12h_aligned[i]
+        ema_34_val = ema_34_1w_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
+        camarilla_h3_val = camarilla_h3_aligned[i]
+        camarilla_l3_val = camarilla_l3_aligned[i]
         
-        # Donchian channels (20-period)
-        highest_20 = np.max(high[i-19:i+1])  # includes current bar
-        lowest_20 = np.min(low[i-19:i+1])
-        
-        # Trend filter: price relative to 12h EMA34
+        # Trend filter: price relative to weekly EMA34
         uptrend = curr_close > ema_34_val
         downtrend = curr_close < ema_34_val
         
@@ -79,11 +102,11 @@ def generate_signals(prices):
         volume_confirm = curr_volume > 2.0 * vol_ma
         
         if position == 0:
-            # Look for breakout signals at Donchian levels
-            # Long: price breaks above upper Donchian with volume confirmation in uptrend
-            long_breakout = (curr_close > highest_20) and volume_confirm and uptrend
-            # Short: price breaks below lower Donchian with volume confirmation in downtrend
-            short_breakout = (curr_close < lowest_20) and volume_confirm and downtrend
+            # Look for breakout signals at Camarilla levels
+            # Long: price breaks above H3 with volume confirmation in uptrend
+            long_breakout = (curr_close > camarilla_h3_val) and volume_confirm and uptrend
+            # Short: price breaks below L3 with volume confirmation in downtrend
+            short_breakout = (curr_close < camarilla_l3_val) and volume_confirm and downtrend
             
             if long_breakout:
                 signals[i] = 0.25
@@ -99,8 +122,8 @@ def generate_signals(prices):
             # Long position management
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit conditions: price closes below lowest Donchian OR 2.5*ATR trailing stop OR EMA34 trend turns down
-            if curr_close < lowest_20 or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_34_val:
+            # Exit conditions: price closes below L3 OR 2.5*ATR trailing stop OR weekly EMA34 trend turns down
+            if curr_close < camarilla_l3_val or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -110,8 +133,8 @@ def generate_signals(prices):
             # Short position management
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit conditions: price closes above highest Donchian OR 2.5*ATR trailing stop OR EMA34 trend turns up
-            if curr_close > highest_20 or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_34_val:
+            # Exit conditions: price closes above H3 OR 2.5*ATR trailing stop OR weekly EMA34 trend turns up
+            if curr_close > camarilla_h3_val or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -120,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_H3L3_Breakout_WeeklyEMA34_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
