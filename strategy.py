@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1h Camarilla H3/L3 Breakout + 4h EMA34 Trend + Volume Spike + Session Filter
-Hypothesis: Camarilla H3/L3 levels act as strong intraday support/resistance.
-Breakouts above H3 or below L3 with 4h EMA34 trend alignment and volume spike capture
-institutional participation. Session filter (08-20 UTC) avoids low-liquidity Asian session.
-Uses discrete position sizing (0.20) to control drawdown. Target: 15-37 trades/year on 1h.
-Uses 4h for signal direction (EMA34 trend), 1h only for entry timing (Camarilla breakout).
+6h Weekly Pivot Reversal with Volume Confirmation and EMA Filter
+Hypothesis: Weekly pivot levels act as strong support/resistance in ranging and trending markets.
+Price reverses from weekly R2/S2 with volume confirmation and 1d EMA50 trend filter.
+Works in bull via buying S2 reversals, bear via selling R2 reversals. Uses discrete position sizing (0.25)
+to control drawdown. Target: 12-37 trades/year on 6h.
 """
 
 import numpy as np
@@ -22,31 +21,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA34 trend filter (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Calculate daily Camarilla pivots for H3/L3 levels
+    # Get 1d data for EMA50 trend filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Camarilla: H3 = close + 1.1*(high-low)*1.1/6, L3 = close - 1.1*(high-low)*1.1/6
-    # Using formula: H3 = C + (H-L)*1.1/6, L3 = C - (H-L)*1.1/6
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 6
-    camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 6
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Camarilla levels to 1h (no extra delay needed for pivot points)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Get 1w data for weekly pivot points (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
+    
+    # Weekly pivot: P = (H+L+C)/3, R2 = P + (H-L), S2 = P - (H-L)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    
+    # Align weekly pivot levels to 6h (no extra delay needed for pivot points)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
     
     # Calculate ATR(14) for stoploss
     if len(close) >= 14:
@@ -58,9 +57,8 @@ def generate_signals(prices):
     else:
         atr = np.full(n, 0.0)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    # Pre-compute volume MA(20) for spike detection
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,17 +69,11 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(atr[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Skip if outside trading session
-        if not in_session[i]:
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(weekly_r2_aligned[i]) or 
+            np.isnan(weekly_s2_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(volume_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,49 +83,46 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_34 = ema_34_4h_aligned[i]
-        h3_level = camarilla_h3_aligned[i]
-        l3_level = camarilla_l3_aligned[i]
+        ema_50 = ema_50_1d_aligned[i]
+        r2_level = weekly_r2_aligned[i]
+        s2_level = weekly_s2_aligned[i]
         atr_val = atr[i]
+        vol_ma = volume_ma_20[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_20
+        # Volume spike: current volume > 1.5 * 20-period average
+        volume_spike = curr_volume > 1.5 * vol_ma
         
         if position == 0:
-            # Long: break above H3 AND uptrend AND volume spike
-            long_condition = curr_high > h3_level and curr_close > ema_34 and volume_spike
-            # Short: break below L3 AND downtrend AND volume spike
-            short_condition = curr_low < l3_level and curr_close < ema_34 and volume_spike
+            # Long: reversal from S2 with volume spike AND above EMA50 (uptrend bias)
+            long_condition = curr_low <= s2_level and curr_close > s2_level and volume_spike and curr_close > ema_50
+            # Short: reversal from R2 with volume spike AND below EMA50 (downtrend bias)
+            short_condition = curr_high >= r2_level and curr_close < r2_level and volume_spike and curr_close < ema_50
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or price falls below EMA34
-            if curr_close <= entry_price - 2.0 * atr_val or curr_close < ema_34:
+            # Exit long: stoploss (2.0*ATR below entry) or price falls below EMA50
+            if curr_close <= entry_price - 2.0 * atr_val or curr_close < ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or price rises above EMA34
-            if curr_close >= entry_price + 2.0 * atr_val or curr_close > ema_34:
+            # Exit short: stoploss (2.0*ATR above entry) or price rises above EMA50
+            if curr_close >= entry_price + 2.0 * atr_val or curr_close > ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_Breakout_4hEMA34_Trend_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_R2S2_Reversal_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
