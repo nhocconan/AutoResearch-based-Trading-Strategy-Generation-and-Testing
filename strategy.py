@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h Weekly Camarilla Pivot Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Weekly Camarilla levels (R4/S4) provide strong monthly support/resistance.
+12h Weekly Camarilla Pivot Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Weekly Camarilla levels (H4/L4) provide strong monthly support/resistance.
 Breakouts with volume spike and 1d EMA34 trend alignment capture institutional flow.
-Designed for 50-150 trades over 4 years. Works in bull/bear via 1d EMA34 trend filter.
+Designed for 12h timeframe with ~50-150 trades over 4 years. Works in bull/bear via 1d EMA34 trend filter.
 Uses weekly pivot calculated from prior week's OHLC (loaded as 1w HTF).
 """
 
@@ -93,8 +93,8 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         
         # Breakout conditions using weekly levels
-        breakout_long = curr_close > weekly_h4_aligned[i]  # Break above weekly R4
-        breakout_short = curr_close < weekly_l4_aligned[i]  # Break below weekly S4
+        breakout_long = curr_close > weekly_h4_aligned[i]  # Break above weekly H4
+        breakout_short = curr_close < weekly_l4_aligned[i]  # Break below weekly L4
         
         if position == 0:
             # Look for entry signals - require: Weekly Camarilla breakout + volume spike + 1d EMA34 trend alignment
@@ -142,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyCamarilla_H4L4_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
-timeframe = "6h"
+name = "12h_WeeklyCamarilla_H4L4_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
+timeframe = "12h"
 leverage = 1.0
