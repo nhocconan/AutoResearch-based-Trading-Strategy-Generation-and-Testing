@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_1wTrend_VolumeRegime
-Hypothesis: Daily Camarilla R1/S1 breakout with 1-week EMA34 trend filter, volume confirmation, and choppiness regime filter.
-Targets 7-25 trades/year by requiring: 1) price breaks daily R1/S1 levels (based on prior day's range),
-2) aligned with 1w EMA34 trend, 3) volume > 1.5x 20-period average, 4) choppiness index < 61.8 (trending market).
-Uses 1d timeframe to minimize fee drag while capturing significant moves. R1/S1 levels provide intraday
-support/resistance. Regime filter avoids whipsaws in ranging markets. Works in both bull and bear markets
-by following the weekly trend while using volume and regime filters for entry quality.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime
+Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter, volume confirmation, and choppiness regime filter.
+Targets 12-37 trades/year by requiring: 1) price breaks daily R1/S1 levels (intraday support/resistance),
+2) aligned with 1d EMA34 trend, 3) volume > 1.5x 20-period average, 4) choppiness index < 61.8 (trending market).
+Uses 12h timeframe to minimize fee drag while capturing significant moves. R1/S1 levels provide
+higher signal quality than H3/L3 for lower timeframe strategies. Regime filter avoids whipsaws in ranging markets.
+Designed to work in both bull and bear markets by using trend filter and regime adaptation.
 """
 
 import numpy as np
@@ -27,13 +27,12 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1w data for EMA34 trend filter (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d data for EMA34 trend filter (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # 1d data for Camarilla pivots (loaded ONCE)
-    df_1d = get_htf_data(prices, '1d')
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -43,9 +42,9 @@ def generate_signals(prices):
     R1 = prev_close + 1.1 * prev_range * (1.0/4.0)
     S1 = prev_close - 1.1 * prev_range * (1.0/4.0)
     
-    # Align 1d levels to 1d timeframe (no shift needed as already daily)
-    R1_aligned = R1  # Already aligned to daily bars
-    S1_aligned = S1  # Already aligned to daily bars
+    # Align 1d levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,7 +62,7 @@ def generate_signals(prices):
     # where n = 14 periods
     sum_atr14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
     chop = 100 * (np.log10(sum_atr14 / (14 * atr_14 + 1e-10)) / np.log10(14))
-    chop_aligned = chop  # Already aligned to daily bars
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop.values)
     
     # Regime filter: trending market (CHOP < 61.8)
     trending_regime = chop_aligned < 61.8
@@ -72,7 +71,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1w EMA34 (34) and previous day data (1) + chop calculation (14+14)
+    # Start index: need enough for 1d EMA34 (34) and previous day data (1) + chop calculation (14+14)
     start_idx = 34 + 14 + 14 + 1  # Conservative warmup
     
     for i in range(start_idx, n):
@@ -83,7 +82,7 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(chop_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -91,9 +90,9 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to 1w EMA34
-        uptrend = curr_close > ema_34_1w_aligned[i]
-        downtrend = curr_close < ema_34_1w_aligned[i]
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
             # Look for entry signals with volume confirmation, trend alignment, and regime filter
@@ -131,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeRegime"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
