@@ -1,26 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v2
-Hypothesis: Camarilla pivot levels (R1/S1) from 1d act as key support/resistance. A break of these levels with volume spike and alignment with 1d EMA34 trend captures strong momentum moves. ATR-based stoploss limits drawdown. Works in bull markets (breakouts continuation) and bear markets (breakdown continuation). Uses discrete position sizing (0.25) to limit fee drag and drawdown. Target: 20-50 trades/year per symbol. Reduced volume spike threshold from 2.0x to 1.5x to increase trade frequency while maintaining edge.
+6h_WilliamsFractal_1dTrend_VolumeBreakout
+Hypothesis: Williams Fractals on 1d identify key swing highs/lows. A break above the most recent bullish fractal (with volume spike and 1d uptrend) signals continuation long; break below bearish fractal (with volume spike and 1d downtrend) signals continuation short. Uses discrete position sizing (0.25) to limit fee drag and drawdown. Works in trending markets by capturing breakouts from swing points. Target: 12-37 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close."""
-    pivot = (high + low + close) / 3.0
-    range_ = high - low
-    r1 = close + range_ * 1.1 / 12.0
-    s1 = close - range_ * 1.1 / 12.0
-    r2 = close + range_ * 1.1 / 6.0
-    s2 = close - range_ * 1.1 / 6.0
-    r3 = close + range_ * 1.1 / 4.0
-    s3 = close - range_ * 1.1 / 4.0
-    r4 = close + range_ * 1.1 / 2.0
-    s4 = close - range_ * 1.1 / 2.0
-    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,60 +18,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot levels and EMA34 trend (loaded ONCE)
+    # 1d data for Williams fractals and EMA34 trend (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d Camarilla levels
-    _, r1_1d, _, _, _, s1_1d, _, _, _ = calculate_camarilla(
-        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
+    # 1d Williams fractals
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values, df_1d['low'].values
     )
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to LTF (4h)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align HTF indicators to LTF (6f) with extra delay for fractals (need 2 extra 1d bars for confirmation)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h volume spike: current volume > 1.5 * 20-period volume MA (reduced from 2.0x to increase trades)
+    # 6h volume spike: current volume > 2.0 * 20-period volume MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma_20)
-    
-    # 4h ATR for dynamic stoploss
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # first bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start index: need volume MA (20) + ATR (14) + aligned HTF arrays
-    start_idx = max(20, 14, 0)
+    # Start index: need volume MA (20) + aligned HTF arrays
+    start_idx = max(20, 0)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_volume = volume[i]
-        curr_atr = atr[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and 1d uptrend
-            long_breakout = (curr_close > r1_1d_aligned[i]) and vol_spike[i] and (curr_close > ema_34_1d_aligned[i])
-            # Short: price breaks below S1 with volume spike and 1d downtrend
-            short_breakout = (curr_close < s1_1d_aligned[i]) and vol_spike[i] and (curr_close < ema_34_1d_aligned[i])
+            # Long: price breaks above bullish fractal with volume spike and 1d uptrend
+            long_breakout = (curr_close > bullish_fractal_aligned[i]) and vol_spike[i] and (curr_close > ema_34_1d_aligned[i])
+            # Short: price breaks below bearish fractal with volume spike and 1d downtrend
+            short_breakout = (curr_close < bearish_fractal_aligned[i]) and vol_spike[i] and (curr_close < ema_34_1d_aligned[i])
             
             if long_breakout:
                 signals[i] = 0.25
@@ -100,20 +78,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: price breaks below S1 OR trend turns down OR ATR stoploss hit
-            if (curr_close < s1_1d_aligned[i]) or (curr_close < ema_34_1d_aligned[i]) or (curr_close < entry_price - 2.0 * curr_atr):
+            # Exit: price breaks below bearish fractal OR trend turns down
+            if (curr_close < bearish_fractal_aligned[i]) or (curr_close < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: price breaks above R1 OR trend turns up OR ATR stoploss hit
-            if (curr_close > r1_1d_aligned[i]) or (curr_close > ema_34_1d_aligned[i]) or (curr_close > entry_price + 2.0 * curr_atr):
+            # Exit: price breaks above bullish fractal OR trend turns up
+            if (curr_close > bullish_fractal_aligned[i]) or (curr_close > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v2"
-timeframe = "4h"
+name = "6h_WilliamsFractal_1dTrend_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
