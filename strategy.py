@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + ADX Regime Filter
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures buying/selling pressure.
-Combined with ADX regime filter (ADX > 25 = trending, < 20 = ranging) to avoid whipsaws.
-In trending markets: go long when Bull Power > 0 and rising, short when Bear Power > 0 and rising.
-In ranging markets: fade extremes (long when Bear Power < -threshold and turning up, short when Bull Power < -threshold and turning down).
-Designed for 6h timeframe to target 12-37 trades/year (50-150 over 4 years) by requiring confluence of
-Elder Ray signals, ADX regime, and volume confirmation, reducing overtrading and fee drag.
-Works in both bull (trend following) and bear (mean reversion in ranges) regimes.
+12h Donchian(20) Breakout with 1d EMA34 Trend Filter and Volume Spike
+Hypothesis: Donchian(20) breakouts capture strong momentum. When aligned with 1d EMA34 trend and confirmed by volume spikes,
+this filters false breakouts and works in both bull (long breakouts) and bear (short breakouts) regimes.
+Designed for 12h timeframe to target 12-37 trades/year (50-150 over 4 years) by requiring confluence of
+Donchian breakout, 1d EMA34 trend, and volume confirmation, reducing overtrading and fee drag.
 """
 
 import numpy as np
@@ -24,139 +21,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA13 and ADX
+    # Load 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d EMA13 for Elder Ray calculation
-    ema_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 1d EMA34 for trend filter
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 1d ADX for regime filter
-    # Calculate +DI, -DI, DX
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian(20) channels on primary timeframe (12h)
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    # We use the previous 20 bars (excluding current) to avoid look-ahead
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # True Range
-    tr1 = pd.Series(high_1d).diff().abs()
-    tr2 = (pd.Series(high_1d) - pd.Series(close_1d.shift(1))).abs()
-    tr3 = (pd.Series(low_1d) - pd.Series(close_1d.shift(1))).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # +DM and -DM
-    up_move = pd.Series(high_1d).diff()
-    down_move = pd.Series(low_1d).diff().abs()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed +DM, -DM, TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Elder Ray parameters
-    ema_period = 13
-    bull_power_threshold = 0.0  # Bull Power > 0
-    bear_power_threshold = 0.0  # Bear Power > 0 (for short)
-    fade_threshold = 0.5  # Threshold for fading in ranging markets
-    
-    # ADX regime thresholds
-    adx_trending = 25
-    adx_ranging = 20
-    
-    # Start index: need enough for EMA and ADX calculations
-    start_idx = max(30, 20)  # EMA13 needs ~25, ADX needs ~30, volume MA needs 20
+    # Start index: need enough for Donchian(20) and EMA34
+    start_idx = max(20, 34)  # Donchian lookback, EMA34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Elder Ray for current bar
-        bull_power = high[i] - ema_1d_aligned[i]
-        bear_power = ema_1d_aligned[i] - low[i]
-        
-        # Calculate previous Elder Ray for momentum
-        if i > start_idx:
-            prev_bull_power = high[i-1] - ema_1d_aligned[i-1]
-            prev_bear_power = ema_1d_aligned[i-1] - low[i-1]
-        else:
-            prev_bull_power = bull_power
-            prev_bear_power = bear_power
-        
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         vol_spike = volume_spike[i]
-        adx_val = adx_aligned[i]
         
-        # Determine regime
-        is_trending = adx_val > adx_trending
-        is_ranging = adx_val < adx_ranging
+        # Trend filter: price relative to 1d EMA34
+        bullish_bias = curr_close > ema_1d_aligned[i]
+        bearish_bias = curr_close < ema_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals
-            long_entry = False
-            short_entry = False
-            
-            if is_trending:
-                # Trending regime: follow Elder Ray momentum
-                # Long: Bull Power > 0 and rising
-                long_entry = (bull_power > bull_power_threshold) and (bull_power > prev_bull_power) and vol_spike
-                # Short: Bear Power > 0 and rising
-                short_entry = (bear_power > bear_power_threshold) and (bear_power > prev_bear_power) and vol_spike
-            elif is_ranging:
-                # Ranging regime: fade extremes
-                # Long: Bear Power < -threshold and turning up (from negative to less negative)
-                long_entry = (bear_power < -fade_threshold) and (bear_power > prev_bear_power) and vol_spike
-                # Short: Bull Power < -threshold and turning down (from positive to less positive)
-                short_entry = (bull_power < -fade_threshold) and (bull_power < prev_bull_power) and vol_spike
+            # Look for entry signals - require ALL conditions: Donchian breakout + trend + volume
+            # Long: price breaks above Donchian upper AND bullish bias AND volume spike
+            long_entry = (curr_high > donchian_upper[i]) and bullish_bias and vol_spike
+            # Short: price breaks below Donchian lower AND bearish bias AND volume spike
+            short_entry = (curr_low < donchian_lower[i]) and bearish_bias and vol_spike
             
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Elder Ray deteriorates or regime changes against position
-            if (bull_power <= 0) or (not is_trending and bull_power < prev_bull_power):
+            # Exit: price falls below Donchian lower (mean reversion) OR loss of bullish bias
+            if (curr_low < donchian_lower[i]) or (curr_close < ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short position management
-            # Exit: Elder Ray deteriorates or regime changes against position
-            if (bear_power <= 0) or (not is_trending and bear_power < prev_bear_power):
+            # Exit: price rises above Donchian upper (mean reversion) OR loss of bearish bias
+            if (curr_high > donchian_upper[i]) or (curr_close > ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_ElderRay_ADX_Regime_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
