@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v2
-Hypothesis: Trade 12h Camarilla R1/S1 breakouts in the direction of the daily EMA34 trend, with volume confirmation.
-Only long when price breaks above Camarilla R1 AND daily close > daily EMA34 AND volume > 1.5 * ATR12h.
-Only short when price breaks below Camarilla S1 AND daily close < daily EMA34 AND volume > 1.5 * ATR12h.
-Uses discrete sizing 0.25 to limit fee drag. Target: 12-30 trades/year.
+4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts in the direction of the daily EMA34 trend, with volume confirmation.
+Only long when price breaks above Camarilla R1 AND daily close > daily EMA34 AND volume > 1.5 * ATR4h.
+Only short when price breaks below Camarilla S1 AND daily close < daily EMA34 AND volume > 1.5 * ATR4h.
+Uses discrete sizing 0.25 to limit fee drag. Target: 20-50 trades/year.
 Daily EMA34 trend filter provides structural edge in both bull and bear markets by aligning with intermediate-term institutional trend.
 """
 
@@ -38,7 +38,7 @@ def generate_signals(prices):
     camarilla_r1_1d = c_1d + (h_1d - l_1d) * 1.1 / 12
     camarilla_s1_1d = c_1d - (h_1d - l_1d) * 1.1 / 12
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
@@ -46,7 +46,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(c_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR for volume confirmation (using 12h data)
+    # Calculate ATR for volume confirmation (using 4h data)
     tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
     tr2 = np.maximum(np.abs(low[1:] - close[:-1]), tr1)
     tr = np.concatenate([[np.inf], tr2])
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
