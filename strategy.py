@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1w EMA34 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Donchian breakouts capture strong momentum moves. Using 1w EMA34 as trend filter ensures we only trade in the direction of the weekly trend. Volume spike confirms institutional participation. ATR-based stoploss limits downside. Works in bull/bear markets by trend-filtering breakout signals.
-Target: 12-37 trades/year (50-150 over 4 years).
+4h Camarilla Pivot R3/S3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Stop
+Hypothesis: Camarilla R3/S3 levels act as strong intraday support/resistance. 
+Breakouts with volume spike and 1d EMA34 trend filter capture momentum moves.
+ATR-based stoploss manages risk. Works in bull/bear by trend-filtering.
+Target: 20-50 trades/year (80-200 over 4 years).
 """
 
 import numpy as np
@@ -11,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,62 +21,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get 1d data for ATR(14) stoploss
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate ATR(14) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Get previous day's high, low, close for Camarilla levels
+    # Since we're on 4h timeframe, we need daily OHLC
+    df_1d_ohlc = get_htf_data(prices, '1d')
+    if len(df_1d_ohlc) < 2:
+        return np.zeros(n)
     
-    # Calculate Donchian(20) channels on 12h
-    # We need to calculate 12h high/low from the prices DataFrame
-    # Since we're on 12h timeframe, we can use rolling window directly
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for each day
+    # R3 = close + 1.1*(high-low)*1.1/4
+    # S3 = close - 1.1*(high-low)*1.1/4
+    high_1d = df_1d_ohlc['high'].values
+    low_1d = df_1d_ohlc['low'].values
+    close_1d = df_1d_ohlc['close'].values
+    
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe (previous day's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_r3, additional_delay_bars=1)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_s3, additional_delay_bars=1)
+    
+    # Calculate ATR(14) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    atr_multiplier = 2.5
     
-    # Start index: need enough for Donchian(20) + EMA34 warmup
-    start_idx = 50
+    # Start index: need enough for EMA34 warmup and ATR
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema_34_aligned[i]) or np.isnan(atr_14_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
-                # Check stoploss
-                if position == 1 and close[i] < entry_price - atr_multiplier * atr_14_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and close[i] > entry_price + atr_multiplier * atr_14_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.0
+                position = 0
             continue
         
         curr_close = close[i]
@@ -82,9 +78,9 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         ema_trend = ema_34_aligned[i]
-        atr_val = atr_14_aligned[i]
-        upper_channel = highest_20[i]
-        lower_channel = lowest_20[i]
+        r3_level = camarilla_r3_aligned[i]
+        s3_level = camarilla_s3_aligned[i]
+        atr_val = atr[i]
         
         # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
@@ -93,45 +89,40 @@ def generate_signals(prices):
             vol_ma_20 = np.mean(volume[:i+1])
         volume_spike = curr_volume > 2.0 * vol_ma_20
         
+        # Update trailing stop for existing positions
+        if position == 1:
+            # Long: trail stop below highest high since entry
+            if curr_close <= entry_price - 2.0 * atr_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.30
+        elif position == -1:
+            # Short: trail stop above lowest low since entry
+            if curr_close >= entry_price + 2.0 * atr_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.30
+        
+        # Look for new entries only when flat
         if position == 0:
-            # Long: price breaks above upper Donchian channel AND above 1w EMA34 (uptrend) AND volume spike
-            long_condition = (curr_high > upper_channel) and (curr_close > ema_trend) and volume_spike
-            # Short: price breaks below lower Donchian channel AND below 1w EMA34 (downtrend) AND volume spike
-            short_condition = (curr_low < lower_channel) and (curr_close < ema_trend) and volume_spike
+            # Long: break above R3 with volume spike and above 1d EMA34 (uptrend)
+            long_condition = (curr_close > r3_level) and volume_spike and (curr_close > ema_trend)
+            # Short: break below S3 with volume spike and below 1d EMA34 (downtrend)
+            short_condition = (curr_close < s3_level) and volume_spike and (curr_close < ema_trend)
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
-        elif position == 1:
-            # Long: trail stoploss or exit on trend reversal
-            # Update stoploss to highest close since entry minus ATR*multiplier
-            if curr_close > entry_price:
-                entry_price = max(entry_price, curr_close)  # trailing entry for stoploss calculation
-            
-            if curr_close < entry_price - atr_multiplier * atr_val or curr_close < ema_trend:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Short: trail stoploss or exit on trend reversal
-            # Update stoploss to lowest close since entry plus ATR*multiplier
-            if curr_close < entry_price:
-                entry_price = min(entry_price, curr_close)  # trailing entry for stoploss calculation
-            
-            if curr_close > entry_price + atr_multiplier * atr_val or curr_close > ema_trend:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "12h_Donchian20_Breakout_1wEMA34_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
