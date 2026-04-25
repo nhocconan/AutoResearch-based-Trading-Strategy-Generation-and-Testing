@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeFilter
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R1 in 4h uptrend (close > 4h EMA50) with volume > 2.0x 20-bar average.
-Short when price breaks below Camarilla S1 in 4h downtrend (close < 4h EMA50) with volume > 2.0x 20-bar average.
-Exit via ATR-based trailing stop (2.5*ATR from extreme) or re-entry into Camarilla H3/L3 range.
-Designed for ~15-30 trades/year by requiring strong breakouts, trend alignment, volume confirmation, and session filter (08-20 UTC).
-Uses 4h for signal direction, 1h only for entry timing to minimize fee drag.
+6h_Ichimoku_Kijun_Tenkan_Cross_1wTrend_Filter
+Hypothesis: 6h Ichimoku Tenkan/Kijun cross with 1w trend filter (price > 1w Kumo cloud top for long, < bottom for short).
+Only trade in alignment with weekly trend to avoid counter-trend whipsaws. Uses Kumo twist (Senkou A/B cross) as additional trend strength filter.
+Designed for ~15-30 trades/year by requiring weekly trend alignment and Kumo confirmation.
+Works in bull/bear markets via weekly trend filter; avoids false signals in sideways markets via Kumo twist requirement.
 """
 
 import numpy as np
@@ -18,129 +16,125 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get 4h data for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1w data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:  # need at least 52 weeks for Ichimoku calculations
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    # Calculate Ichimoku components on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high_1w).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low_1w).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_tenkan + min_low_tenkan) / 2
     
-    # Calculate Camarilla levels from previous day
-    # Camarilla uses previous day's OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high_1w).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low_1w).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_kijun + min_low_kijun) / 2
     
-    # Previous day's OHLC (align to current 1h bars)
-    prev_close = align_htf_to_ltf(prices, df_1d, df_1d['close'].values, additional_delay_bars=1)
-    prev_high = align_htf_to_ltf(prices, df_1d, df_1d['high'].values, additional_delay_bars=1)
-    prev_low = align_htf_to_ltf(prices, df_1d, df_1d['low'].values, additional_delay_bars=1)
-    prev_open = align_htf_to_ltf(prices, df_1d, df_1d['open'].values, additional_delay_bars=1)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # H3 = C + (H-L)*1.1/2, L3 = C - (H-L)*1.1/2
-    camarilla_range = prev_high - prev_low
-    R1 = prev_close + camarilla_range * 1.1 / 12
-    S1 = prev_close - camarilla_range * 1.1 / 12
-    R3 = prev_close + camarilla_range * 1.1 / 4
-    S3 = prev_close - camarilla_range * 1.1 / 4
-    H3 = prev_close + camarilla_range * 1.1 / 2
-    L3 = prev_close - camarilla_range * 1.1 / 2
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2
     
-    # ATR for trailing stop (14-period)
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Align all Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1w, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1w, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_b)
     
-    # Volume regime: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_regime = volume > (2.0 * vol_ma_20)
+    # Kumo twist detection: Senkou A crossing Senkou B (trend strength indicator)
+    # Kumo twist bullish: Senkou A > Senkou B (after previously being below)
+    # Kumo twist bearish: Senkou A < Senkou B (after previously being above)
+    kumo_twist_bullish = senkou_a_aligned > senkou_b_aligned
+    kumo_twist_bearish = senkou_a_aligned < senkou_b_aligned
     
-    # Session filter: 08-20 UTC (inclusive)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    in_session = (hours >= 8) & (hours <= 20)
+    # Weekly trend filter: price relative to Kumo cloud
+    # Weekly uptrend: price > Kumo top (max of Senkou A/B)
+    # Weekly downtrend: price < Kumo bottom (min of Senkou A/B)
+    kumo_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    kumo_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    
+    weekly_uptrend = close > kumo_top
+    weekly_downtrend = close < kumo_bottom
+    
+    # Tenkan/Kijun cross signals
+    # Bullish cross: Tenkan crosses above Kijun
+    # Bearish cross: Tenkan crosses below Kijun
+    tenkan_above_kijun = tenkan_aligned > kijun_aligned
+    tenkan_below_kijun = tenkan_aligned < kijun_aligned
+    
+    # Detect crossovers (requires previous bar state)
+    tenkan_above_kijun_prev = np.roll(tenkan_above_kijun, 1)
+    tenkan_below_kijun_prev = np.roll(tenkan_below_kijun, 1)
+    tenkan_above_kijun_prev[0] = False
+    tenkan_below_kijun_prev[0] = False
+    
+    bullish_cross = tenkan_above_kijun & (~tenkan_above_kijun_prev)
+    bearish_cross = tenkan_below_kijun & (~tenkan_below_kijun_prev)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_high = 0.0   # highest close since long entry
-    short_low = 0.0   # lowest close since short entry
     
-    # Start index: need warmup for calculations
-    start_idx = max(100, atr_period)
+    # Start index: need warmup for Ichimoku calculations (max period is 52)
+    start_idx = 52
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or
-            not in_session[i]):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        # Skip if data not ready
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i])):
+            signals[i] = 0.0
             continue
         
-        ema_trend = ema_50_4h_aligned[i]
-        
         if position == 0:
-            # Only trade in trending regimes (4h EMA50 filter)
-            if close[i] > ema_trend:  # 4h uptrend regime
-                # Long: break above Camarilla R1 with volume spike
-                long_signal = (close[i] > R1[i]) and vol_regime[i]
-            else:  # 4h downtrend regime
-                # Short: break below Camarilla S1 with volume spike
-                short_signal = (close[i] < S1[i]) and vol_regime[i]
+            # Look for entry signals aligned with weekly trend and Kumo twist
+            long_signal = (bullish_cross[i] and 
+                          weekly_uptrend[i] and 
+                          kumo_twist_bullish[i])
             
-            if 'long_signal' in locals() and long_signal:
-                signals[i] = 0.20
+            short_signal = (bearish_cross[i] and 
+                           weekly_downtrend[i] and 
+                           kumo_twist_bearish[i])
+            
+            if long_signal:
+                signals[i] = 0.25
                 position = 1
-                long_high = close[i]
-            elif 'short_signal' in locals() and short_signal:
-                signals[i] = -0.20
+            elif short_signal:
+                signals[i] = -0.25
                 position = -1
-                short_low = close[i]
             else:
                 signals[i] = 0.0
-                # Clear signal variables for next iteration
-                if 'long_signal' in locals(): del long_signal
-                if 'short_signal' in locals(): del short_signal
         elif position == 1:
-            # Long: hold position
-            signals[i] = 0.20
-            # Update highest close
-            if close[i] > long_high:
-                long_high = close[i]
-            # Exit conditions: ATR trailing stop OR re-enter Camarilla H3/L3 range
-            atr_stop = long_high - 2.5 * atr[i]
-            range_exit = (close[i] < H3[i] and close[i] > L3[i])
-            if close[i] <= atr_stop or range_exit:
+            # Long position: exit on bearish cross or weekly trend breakdown
+            signals[i] = 0.25
+            exit_signal = bearish_cross[i] or (~weekly_uptrend[i])
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Short: hold position
-            signals[i] = -0.20
-            # Update lowest close
-            if close[i] < short_low:
-                short_low = close[i]
-            # Exit conditions: ATR trailing stop OR re-enter Camarilla H3/L3 range
-            atr_stop = short_low + 2.5 * atr[i]
-            range_exit = (close[i] > L3[i] and close[i] < H3[i])
-            if close[i] >= atr_stop or range_exit:
+            # Short position: exit on bullish cross or weekly trend breakdown
+            signals[i] = -0.25
+            exit_signal = bullish_cross[i] or (~weekly_downtrend[i])
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeFilter"
-timeframe = "1h"
+name = "6h_Ichimoku_Kijun_Tenkan_Cross_1wTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
