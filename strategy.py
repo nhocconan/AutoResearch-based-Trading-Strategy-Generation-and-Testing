@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout with Volume Spike and ATR Regime Filter
-Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance. 
-Breakouts above H3 or below L3 with volume confirmation and ATR-based volatility regime filter 
-capture institutional moves. Uses ATR percentile to distinguish trending vs ranging markets.
-Works in both bull/bear markets: in bull, longs above H3 with high volatility regime; 
-in bear, shorts below L3 with high volatility regime. Discrete sizing (0.25) limits fee drag.
-Target: 12-30 trades/year (50-120 over 4 years).
+1h Camarilla H3/L3 Breakout + 4h EMA50 Trend + Volume Spike + Session Filter
+Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance on 1h. 
+Breakouts above H3 or below L3 with volume confirmation and 4h EMA50 trend filter capture momentum moves. 
+Session filter (08-20 UTC) reduces noise during low-liquidity hours. 
+Uses 4h for signal direction (EMA50) and 1h for precise entry timing. 
+Discrete sizing (0.20) limits fee drift. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -22,41 +21,51 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR for volatility regime filter (using 14 periods)
-    tr1 = df_1d['high'][1:] - df_1d['low'][1:]
-    tr2 = np.abs(df_1d['high'][1:] - df_1d['close'][:-1])
-    tr3 = np.abs(df_1d['low'][1:] - df_1d['close'][:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate ATR percentile rank (50-period lookback) for regime filter
-    atr_percentile = pd.Series(atr_14_1d).rolling(window=50, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else np.nan, raw=False
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Calculate Camarilla pivot levels (H3, L3) from prior 1h bar (using 4h as proxy for stability)
+    # For 1h strategy, we use prior 4h bar's Camarilla levels to avoid noise
+    camarilla_h3_4h = df_4h['close'] + 1.1 * (df_4h['high'] - df_4h['low']) / 4
+    camarilla_l3_4h = df_4h['close'] - 1.1 * (df_4h['high'] - df_4h['low']) / 4
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3_4h.values)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3_4h.values)
     
-    # Calculate Camarilla pivot levels (H3, L3) from prior 1d bar
-    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    camarilla_h3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 4
-    camarilla_l3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 4
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3.values)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3.values)
+    # Calculate ATR for volatility filtering (using 14 periods on 1h)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for ATR percentile calculation
-    start_idx = 50
+    # Start index: need enough for ATR (14) and EMA50 (50)
+    start_idx = max(14, 50)
     
     for i in range(start_idx, n):
+        # Skip if not in trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if any data not ready
-        if np.isnan(atr_percentile_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,36 +75,34 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        atr_regime = atr_percentile_aligned[i]  # ATR percentile rank (0-100)
+        ema_trend = ema_50_aligned[i]
+        atr_value = atr[i]
         camarilla_h3_val = camarilla_h3_aligned[i]
         camarilla_l3_val = camarilla_l3_aligned[i]
         
-        # Volume spike: current volume > 1.5 * 20-period average
+        # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-19:i+1])
         else:
             vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 1.5 * vol_ma_20
-        
-        # Regime filter: only trade in high volatility regimes (ATR percentile > 60)
-        high_vol_regime = atr_regime > 60
+        volume_spike = curr_volume > 2.0 * vol_ma_20
         
         # Breakout conditions: price breaks above H3 or below L3
         bullish_breakout = curr_close > camarilla_h3_val
         bearish_breakout = curr_close < camarilla_l3_val
         
-        # Exit conditions: reverse breakout or low volatility regime
+        # Exit conditions: reverse breakout or trend rejection
         if position != 0:
             exit_signal = False
             
             if position == 1:
-                # Exit on bearish breakout below L3 or low volatility regime
-                if bearish_breakout or not high_vol_regime:
+                # Exit on bearish breakout below L3 or trend rejection
+                if bearish_breakout or curr_close < ema_trend:
                     exit_signal = True
                     
             elif position == -1:
-                # Exit on bullish breakout above H3 or low volatility regime
-                if bullish_breakout or not high_vol_regime:
+                # Exit on bullish breakout above H3 or trend rejection
+                if bullish_breakout or curr_close > ema_trend:
                     exit_signal = True
             
             if exit_signal:
@@ -103,26 +110,26 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Entry conditions: Camarilla breakout + volume spike + high volatility regime
+        # Entry conditions: Camarilla breakout + trend alignment + volume spike
         if position == 0:
-            # Long: break above H3 AND volume spike AND high vol regime
-            long_condition = bullish_breakout and volume_spike and high_vol_regime
-            # Short: break below L3 AND volume spike AND high vol regime
-            short_condition = bearish_breakout and volume_spike and high_vol_regime
+            # Long: break above H3 AND price above 4h EMA50
+            long_condition = bullish_breakout and (curr_close > ema_trend) and volume_spike
+            # Short: break below L3 AND price below 4h EMA50
+            short_condition = bearish_breakout and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.20
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_VolumeSpike_ATRRegime_v1"
-timeframe = "12h"
+name = "1h_Camarilla_H3L3_Breakout_4hEMA50_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
