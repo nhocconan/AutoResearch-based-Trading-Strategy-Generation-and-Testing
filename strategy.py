@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_KAMA_Regime_Adaptive_Consensus
-Hypothesis: Adaptive strategy that switches between trend-following and mean-reversion based on 1d market regime (ADX). Uses 6h Kaufman Adaptive Moving Average (KAMA) as primary signal generator with volume confirmation. In trending regimes (ADX>25): go long when price > KAMA + 0.5*ATR, short when price < KAMA - 0.5*ATR. In ranging regimes (ADX<20): fade extremes using Bollinger Bands (20,2) on 6h - long at lower band, short at upper band. Volume confirmation (>1.5x 20-period avg) required for all entries. Designed for low trade frequency (<30/year) via regime filtering and strict entry conditions.
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirmation
+Hypothesis: 12-hour Camarilla R3/S3 level breakout with 1-day EMA50 trend filter and volume confirmation (>1.5x 20-period average).
+Long when price breaks above R3 in 1-day uptrend with volume confirmation.
+Short when price breaks below S3 in 1-day downtrend with volume confirmation.
+Exit via opposite Camarilla level (S3 for long, R3 for short) or ATR trailing stop (2.5*ATR from extreme).
+Camarilla levels provide precise support/resistance that adapt to volatility. 1-day trend ensures higher timeframe alignment.
+Volume confirmation filters breakouts with low conviction. Designed for ~50-150 total trades over 4 years (12-37/year) via tight breakout conditions.
 """
 
 import numpy as np
@@ -18,155 +23,129 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for regime filter (ADX)
+    # Get 1d data for trend filter and Camarilla calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # need sufficient data for ADX
+    if len(df_1d) < 20:  # need 20-period for Camarilla and EMA
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d ADX(14) for regime detection
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate Camarilla levels on 1d data (based on previous day's range)
+    # Camarilla levels: based on (high - low) of previous period
+    # R4 = close + 1.5*(high-low), R3 = close + 1.25*(high-low), etc.
+    # But for breakout, we use current day's calculation based on previous day's range
+    # We'll calculate the levels for each day based on that day's OHLC
+    # Actually, Camarilla levels for today are based on yesterday's range
+    # So we need to shift the calculation by 1 day
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    # First day: use same day's data (will be refined with more data)
+    prev_close_1d[0] = close_1d[0]
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
     
-    # Smoothed values
-    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    # Calculate Camarilla levels based on previous day's range
+    range_1d = prev_high_1d - prev_low_1d
+    # R3 = close + 1.25 * range
+    # S3 = close - 1.25 * range
+    camarilla_r3 = prev_close_1d + 1.25 * range_1d
+    camarilla_s3 = prev_close_1d - 1.25 * range_1d
     
-    # Directional Indicators
-    plus_di_14 = 100 * plus_dm_14 / tr_14
-    minus_di_14 = 100 * minus_dm_14 / tr_14
+    # Align Camarilla levels and EMA to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)  # already calculated but realign for clarity
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 6h KAMA(10,2,30) - ER=10, fastest=2, slowest=30
-    # Efficiency Ratio
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if hasattr(np, 'sum') else \
-                 np.array([np.sum(np.abs(np.diff(close[i-10:i+1]))) if i>=10 else 0 for i in range(len(close))])
-    # Simplified volatility calculation for 10-period
-    volatility = pd.Series(np.abs(np.diff(close, n=1))).rolling(window=10, min_periods=1).sum().values
-    volatility = np.concatenate([np.zeros(9), volatility[9:]])  # align
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Smoothing Constants
-    fastest_sc = 2 / (2 + 1)
-    slowest_sc = 2 / (30 + 1)
-    sc = (er * (fastest_sc - slowest_sc) + slowest_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # 6h Bollinger Bands(20,2) for mean reversion regime
-    bb_period = 20
-    bb_std = 2
-    ma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = ma_20 + (bb_std * std_20)
-    bb_lower = ma_20 - (bb_std * std_20)
-    
-    # 6h ATR(14) for trend regime stops
-    atr_period = 14
+    # ATR for stoploss (20-period)
+    atr_period = 20
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # first period
     atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Volume confirmation: >1.5x 20-period average
+    # Volume regime: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_regime = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_extreme = 0.0   # highest close since long entry
+    short_extreme = 0.0  # lowest close since short entry
     
-    # Start index: need warmup for all calculations
-    start_idx = max(30, 14, 20, 10)  # ADX, ATR, BB, KAMA
+    # Start index: need warmup for calculations
+    start_idx = max(100, atr_period, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(kama[i]) or np.isnan(atr[i]) or 
-            np.isnan(ma_20[i]) or np.isnan(std_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        adx_val = adx_aligned[i]
-        kama_val = kama[i]
-        atr_val = atr[i]
-        bb_up = bb_upper[i]
-        bb_low = bb_lower[i]
-        vol_ok = vol_regime[i]
+        ema_trend = ema_50_1d_aligned[i]
+        r3_level = camarilla_r3_aligned[i]
+        s3_level = camarilla_s3_aligned[i]
         
         if position == 0:
-            # Regime detection: ADX > 25 = trending, ADX < 20 = ranging
-            if adx_val > 25:  # Trending regime
-                # Trend following: enter when price extends beyond KAMA by 0.5*ATR
-                long_signal = (close[i] > kama_val + 0.5 * atr_val) and vol_ok
-                short_signal = (close[i] < kama_val - 0.5 * atr_val) and vol_ok
-            elif adx_val < 20:  # Ranging regime
-                # Mean reversion: fade at Bollinger Bands
-                long_signal = (close[i] <= bb_low) and vol_ok
-                short_signal = (close[i] >= bb_up) and vol_ok
-            else:  # Transition regime (20 <= ADX <= 25) - no trading
-                long_signal = False
-                short_signal = False
+            # Only trade in trending regimes (1d EMA50 filter)
+            if close[i] > ema_trend:  # 1d uptrend regime
+                # Long: break above R3 with volume confirmation
+                long_signal = (close[i] > r3_level) and vol_regime[i]
+            else:  # 1d downtrend regime
+                # Short: break below S3 with volume confirmation
+                short_signal = (close[i] < s3_level) and vol_regime[i]
             
-            if long_signal:
+            if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
                 position = 1
-            elif short_signal:
+                long_extreme = close[i]
+            elif 'short_signal' in locals() and short_signal:
                 signals[i] = -0.25
                 position = -1
+                short_extreme = close[i]
             else:
                 signals[i] = 0.0
+                # Clear signal variables for next iteration
+                if 'long_signal' in locals(): del long_signal
+                if 'short_signal' in locals(): del short_signal
         elif position == 1:
-            # Long position
+            # Long: hold position
             signals[i] = 0.25
-            # Exit conditions:
-            # 1. Regime change to ranging (ADX < 20) - take profit
-            # 2. Price returns to KAMA (mean reversion exit)
-            # 3. Opposite signal in same regime
-            if adx_val < 20 or close[i] <= kama_val or \
-               (adx_val > 25 and close[i] < kama_val - 0.5 * atr_val):
+            # Update extreme for trailing stop
+            if close[i] > long_extreme:
+                long_extreme = close[i]
+            # Exit conditions: 
+            # 1. ATR trailing stop (2.5*ATR from extreme)
+            atr_stop = long_extreme - 2.5 * atr[i]
+            # 2. Price breaks below S3 (opposite Camarilla level)
+            if close[i] <= atr_stop or close[i] < s3_level:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Short position
+            # Short: hold position
             signals[i] = -0.25
+            # Update extreme for trailing stop
+            if close[i] < short_extreme:
+                short_extreme = close[i]
             # Exit conditions:
-            # 1. Regime change to ranging (ADX < 20) - take profit
-            # 2. Price returns to KAMA (mean reversion exit)
-            # 3. Opposite signal in same regime
-            if adx_val < 20 or close[i] >= kama_val or \
-               (adx_val > 25 and close[i] > kama_val + 0.5 * atr_val):
+            # 1. ATR trailing stop (2.5*ATR from extreme)
+            atr_stop = short_extreme + 2.5 * atr[i]
+            # 2. Price breaks above R3 (opposite Camarilla level)
+            if close[i] >= atr_stop or close[i] > r3_level:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_KAMA_Regime_Adaptive_Consensus"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
