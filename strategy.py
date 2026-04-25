@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_Regime
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 12h EMA50 trend filter and volume spike confirmation.
-Only trade breakouts in direction of 12h trend. Uses discrete position sizing (0.25) to minimize fee churn.
-Designed for low trade frequency (~20-40/year) to work in both bull and bear markets via trend alignment.
-Camarilla levels provide high-probability reversal/breakout points, volume confirms institutional interest,
-and 12h trend filter avoids counter-trend whipsaws. Added choppiness regime filter to avoid ranging markets.
-Target: 75-150 total trades over 4 years.
+1d_KAMA_Trend_With_Volume_Confirmation
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) identifies adaptive trend direction on daily timeframe.
+Enter long when price > KAMA and volume above average; short when price < KAMA and volume above average.
+Use weekly EMA200 as regime filter to avoid counter-trend trades in strong opposing weekly trends.
+Discrete position sizing (0.25) minimizes fee churn. Target 15-25 trades/year to work in both bull and bear markets.
+KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing strong trends.
 """
 
 import numpy as np
@@ -19,77 +18,66 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h and 1d data for HTF filters
-    df_12h = get_htf_data(prices, '12h')
+    # Get daily data for KAMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 12h close for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate KAMA ( Kaufman Adaptive Moving Average ) on daily close
+    # Parameters: ER period=10, Fast SC=2, Slow SC=30
+    close_1d_series = pd.Series(close_1d)
+    change = abs(close_1d_series - close_1d_series.shift(10))
+    volatility = abs(close_1d_series.diff()).rolling(window=10, min_periods=1).sum()
+    er = change / volatility.replace(0, 1e-10)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama_1d = [close_1d[0]]  # seed
+    for i in range(1, len(close_1d)):
+        kama_1d.append(kama_1d[-1] + sc.iloc[i] * (close_1d[i] - kama_1d[-1]))
+    kama_1d = np.array(kama_1d)
     
-    # Calculate Camarilla levels from 1d OHLC (R1, S1)
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_width = 1.1 * (high_1d - low_1d) / 12.0
-    r1_1d = close_1d + camarilla_width
-    s1_1d = close_1d - camarilla_width
+    # Get weekly data for regime filter (EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align HTF indicators to 4h timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h, additional_delay_bars=1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume spike: volume > 2.0 * 20-period volume MA
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    # Align HTF indicators to 1d timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d, additional_delay_bars=1)
+    ema200_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w, additional_delay_bars=1)
     
-    # Choppiness regime filter: avoid ranging markets (CHOP > 61.8)
-    # CHOP = 100 * log10(sum(ATR,14) / (max(high,14)-min(low,14))) / log10(14)
-    atr_14 = pd.Series(np.maximum.reduce([
-        high[1:] - close[:-1],
-        high[:-1] - close[1:],
-        np.abs(high[1:] - low[:-1])
-    ])).rolling(14, min_periods=14).mean().values
-    atr_14 = np.concatenate([np.full(14, np.nan), atr_14])  # align length
-    
-    max_high_14 = pd.Series(high).rolling(14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(14, min_periods=14).min().values
-    
-    chop = 100 * np.log10(pd.Series(atr_14).rolling(14, min_periods=14).sum().values / 
-                          np.maximum(max_high_14 - min_low_14, 1e-10)) / np.log10(14)
-    chop[np.isnan(chop)] = 100  # default to choppy when not enough data
-    chop_regime = chop < 61.8  # trending when CHOP < 61.8
+    # Volume confirmation: 20-period average volume on 1d
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50), volume MA (20), CHOP (14+14)
-    start_idx = max(50, 20, 28)
+    # Start index: need warmup for KAMA (10) and volume MA (20)
+    start_idx = max(20, 10)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(ema200_aligned[i]) or
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         if position == 0:
-            # Look for Camarilla breakout signals with all filters
-            # Long: price breaks above R1 in uptrend (close > EMA50) + volume spike + trending regime
-            # Short: price breaks below S1 in downtrend (close < EMA50) + volume spike + trending regime
-            long_signal = (close[i] > r1_aligned[i]) and (close[i] > ema50_aligned[i]) and volume_spike[i] and chop_regime[i]
-            short_signal = (close[i] < s1_aligned[i]) and (close[i] < ema50_aligned[i]) and volume_spike[i] and chop_regime[i]
+            # Look for entry signals with volume confirmation and weekly regime filter
+            # Long: price > KAMA, volume above average, and weekly trend up (price > weekly EMA200)
+            # Short: price < KAMA, volume above average, and weekly trend down (price < weekly EMA200)
+            long_signal = (close[i] > kama_aligned[i]) and \
+                         (volume[i] > volume_ma_20[i]) and \
+                         (close[i] > ema200_aligned[i])
+            short_signal = (close[i] < kama_aligned[i]) and \
+                          (volume[i] > volume_ma_20[i]) and \
+                          (close[i] < ema200_aligned[i])
             
             if long_signal:
                 signals[i] = 0.25
@@ -102,22 +90,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price moves back below R1 (failed breakout) or trend reverses
-            exit_signal = (close[i] < r1_aligned[i]) or (close[i] < ema50_aligned[i])
+            # Exit when price moves back below KAMA (trend reversal)
+            exit_signal = close[i] < kama_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price moves back above S1 (failed breakdown) or trend reverses
-            exit_signal = (close[i] > s1_aligned[i]) or (close[i] > ema50_aligned[i])
+            # Exit when price moves back above KAMA (trend reversal)
+            exit_signal = close[i] > kama_aligned[i]
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_Regime"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
