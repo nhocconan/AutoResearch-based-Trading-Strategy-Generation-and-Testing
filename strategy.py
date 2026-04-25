@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-12h Williams Fractal Breakout + 1w EMA50 Trend + Volume Spike + Chop Regime Filter
-Hypothesis: Williams fractals identify significant swing highs/lows on 1w timeframe.
-Breakouts above bearish fractal (short-term resistance) or below bullish fractal (support)
-with 1w EMA50 trend alignment, volume confirmation, and non-choppy 12h regime capture
-strong momentum moves. Works in bull/bear markets via discrete sizing (0.25) and trend filter.
-Primary timeframe 12h targets 50-150 trades over 4 years (12-37/year).
+6h Elder Ray Power + ADX Trend + Volume Confirmation
+Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures buying/selling pressure relative to trend.
+Combined with ADX (>25) for trend strength and volume confirmation, this captures strong directional moves in both bull and bear markets.
+Uses discrete sizing (0.25) to manage drawdowns. Targets 50-150 trades over 4 years on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,31 +20,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for Williams fractals and EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for EMA13 (Elder Ray) and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA50 for trend filter
-    ema_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1d EMA13 for Elder Ray calculation
+    ema_13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
     
-    # 1w Williams fractals (need 2 extra bars for confirmation)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1w['high'].values,
-        df_1w['low'].values,
-    )
-    # Bearish fractal: confirmed 2 bars after center bar (shift=2)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1w, bearish_fractal, additional_delay_bars=2
-    )
-    # Bullish fractal: confirmed 2 bars after center bar (shift=2)
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1w, bullish_fractal, additional_delay_bars=2
-    )
-    
-    # 12h Chop regime filter: CHOP(14) > 61.8 = range (avoid), < 38.2 = trend (favor)
-    def calculate_chop(high_arr, low_arr, close_arr, window=14):
+    # 1d ADX calculation
+    def calculate_adx(high_arr, low_arr, close_arr, window=14):
+        # True Range
         tr1 = np.abs(high_arr[1:] - low_arr[1:])
         tr2 = np.abs(high_arr[1:] - close_arr[:-1])
         tr3 = np.abs(low_arr[1:] - close_arr[:-1])
@@ -54,54 +39,66 @@ def generate_signals(prices):
         tr = np.concatenate([[np.nan], tr])
         atr = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
         
-        highest_high = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
-        lowest_low = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
-        hhll = highest_high - lowest_low
+        # Directional Movement
+        up_move = high_arr[1:] - high_arr[:-1]
+        down_move = low_arr[:-1] - low_arr[1:]
+        up_move = np.concatenate([[0], up_move])
+        down_move = np.concatenate([[0], down_move])
         
-        atr_sum = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
-        chop = 100 * np.log10(atr_sum / np.log(10) / hhll)
-        return chop
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Smoothed DM
+        plus_dm_smooth = pd.Series(plus_dm).ewm(span=window, adjust=False, min_periods=window).mean().values
+        minus_dm_smooth = pd.Series(minus_dm).ewm(span=window, adjust=False, min_periods=window).mean().values
+        
+        # Directional Indicators
+        plus_di = 100 * plus_dm_smooth / atr
+        minus_di = 100 * minus_dm_smooth / atr
+        
+        # DX and ADX
+        dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+        adx = pd.Series(dx).ewm(span=window, adjust=False, min_periods=window).mean().values
+        return adx
     
-    chop_values = calculate_chop(high, low, close)
-    chop_ma = pd.Series(chop_values).rolling(window=14, min_periods=14).mean().values
+    adx_values = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for 1w EMA warmup, fractal confirmation, and indicators
-    start_idx = max(100, 50)  # EMA50 needs ~50, plus fractal confirmation delay
+    # Start index: need enough for EMA13 warmup, ADX, and volume MA
+    start_idx = max(50, 21)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(chop_ma[i]) or 
+        if (np.isnan(ema_13_aligned[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_close = close[i]
         vol_spike = volume_spike[i]
-        chop_val = chop_ma[i]
         
-        # Regime filter: only trade when NOT choppy (CHOP < 61.8 = trending)
-        not_choppy = chop_val < 61.8
+        # Elder Ray Power
+        bull_power = curr_high - ema_13_aligned[i]  # High - EMA13
+        bear_power = ema_13_aligned[i] - curr_low   # EMA13 - Low
         
-        # Trend filter: price relative to 1w EMA50
-        bullish_bias = curr_close > ema_1w_aligned[i]
-        bearish_bias = curr_close < ema_1w_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Look for entry signals - require: Fractal breakout + trend + volume + regime
-            # Long: price breaks above bearish fractal (resistance) AND bullish bias AND volume spike AND not choppy
-            long_entry = (curr_high > bearish_fractal_aligned[i]) and bullish_bias and vol_spike and not_choppy
-            # Short: price breaks below bullish fractal (support) AND bearish bias AND volume spike AND not choppy
-            short_entry = (curr_low < bullish_fractal_aligned[i]) and bearish_bias and vol_spike and not_choppy
+            # Look for entry signals - require: Elder Ray power + trend + volume
+            # Long: bullish power positive AND strong trend AND volume spike
+            long_entry = (bull_power > 0) and strong_trend and vol_spike
+            # Short: bearish power positive AND strong trend AND volume spike
+            short_entry = (bear_power > 0) and strong_trend and vol_spike
             
             if long_entry:
                 signals[i] = 0.25
@@ -113,16 +110,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below bullish fractal (support) OR loss of bullish bias OR choppy regime
-            if (curr_low < bullish_fractal_aligned[i]) or (curr_close < ema_1w_aligned[i]) or (chop_val >= 61.8):
+            # Exit: bull power turns negative OR loss of trend OR no volume confirmation
+            if (bull_power <= 0) or (adx_aligned[i] <= 20) or (not vol_spike):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above bearish fractal (resistance) OR loss of bearish bias OR choppy regime
-            if (curr_high > bearish_fractal_aligned[i]) or (curr_close > ema_1w_aligned[i]) or (chop_val >= 61.8):
+            # Exit: bear power turns negative OR loss of trend OR no volume confirmation
+            if (bear_power <= 0) or (adx_aligned[i] <= 20) or (not vol_spike):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsFractal_Breakout_1wEMA50_Trend_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "6h_ElderRay_Power_ADX_Trend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
