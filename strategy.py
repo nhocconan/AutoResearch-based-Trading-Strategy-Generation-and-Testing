@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout + 1d EMA50 trend + volume spike + chop filter
-Hypothesis: Donchian breakouts capture strong momentum; 1d EMA50 filters trend direction;
-volume spike confirms institutional participation; chop filter avoids whipsaws in ranging markets.
-Works in bull via long breakouts in uptrend, bear via short breakouts in downtrend.
-Target: 20-50 trades/year on 4h timeframe.
+1d Williams Fractal Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: Williams fractals on 1d identify swing points where price respects structure.
+Breakouts above recent bearish fractals or below bullish fractals capture momentum.
+1w EMA50 filters trend direction to avoid counter-trend whipsaws.
+Volume spike confirms institutional participation.
+Works in bull/bear via trend filter and volatility-based position sizing.
+Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,14 +23,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Get 1w data for EMA50 trend filter and Williams fractals
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate Williams fractals on 1w (requires 2-bar confirmation delay)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1w['high'].values,
+        df_1w['low'].values,
+    )
+    # Bearish fractal: extra 2-bar delay for confirmation (needs 2 future 1w bars)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1w, bearish_fractal, additional_delay_bars=2
+    )
+    # Bullish fractal: extra 2-bar delay for confirmation
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1w, bullish_fractal, additional_delay_bars=2
+    )
     
     # Calculate ATR(14) for stoploss and volatility filter
     if len(close) >= 14:
@@ -40,29 +56,9 @@ def generate_signals(prices):
     else:
         atr = np.full(n, 0.0)
     
-    # Calculate Bollinger Band Width for chop regime (20, 2)
-    if len(close) >= 20:
-        sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-        std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-        upper_band = sma_20 + 2 * std_20
-        lower_band = sma_20 - 2 * std_20
-        bb_width = (upper_band - lower_band) / sma_20
-        # Chop regime: bb_width > 50th percentile of last 100 bars = ranging market
-        bb_width_percentile = np.zeros_like(bb_width)
-        for i in range(20, n):
-            window = bb_width[max(0, i-99):i+1]
-            if len(window) > 0:
-                bb_width_percentile[i] = (np.sum(window <= bb_width[i]) / len(window)) * 100
-        chop_condition = bb_width_percentile > 50  # True when choppy/ranging
-    else:
-        chop_condition = np.zeros(n, dtype=bool)
-        bb_width_percentile = np.zeros(n)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     # Start index: need enough for data to propagate
     start_idx = 100
@@ -70,8 +66,9 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(sma_20[i]) if i >= 20 else False):
+            np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,61 +79,52 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         ema_50 = ema_50_aligned[i]
+        bear_fractal = bearish_fractal_aligned[i]
+        bull_fractal = bullish_fractal_aligned[i]
         atr_val = atr[i]
-        is_chop = chop_condition[i] if i < len(chop_condition) else False
         
-        # Donchian channels (20-period)
-        if i >= 20:
-            donchian_high = np.max(high[i-19:i+1])
-            donchian_low = np.min(low[i-19:i+1])
+        # Volume spike: current volume > 2.0 * 50-period average (stricter for 1d)
+        if i >= 50:
+            vol_ma_50 = np.mean(volume[i-49:i+1])
         else:
-            donchian_high = np.max(high[:i+1]) if i >= 0 else 0
-            donchian_low = np.min(low[:i+1]) if i >= 0 else 0
+            vol_ma_50 = np.mean(volume[:i+1])
+        volume_spike = curr_volume > 2.0 * vol_ma_50
         
-        # Volume spike: current volume > 2.0 * 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20 = np.mean(volume[:i+1]) if i >= 0 else 0
-        volume_spike = curr_volume > 2.0 * vol_ma_20
+        # Trend filter
+        uptrend = curr_close > ema_50
+        downtrend = curr_close < ema_50
         
         if position == 0:
-            # Long: price breaks above Donchian high AND volume spike AND uptrend AND not choppy
-            long_condition = (curr_high > donchian_high) and volume_spike and (curr_close > ema_50) and (not is_chop)
-            # Short: price breaks below Donchian low AND volume spike AND downtrend AND not choppy
-            short_condition = (curr_low < donchian_low) and volume_spike and (curr_close < ema_50) and (not is_chop)
+            # Long: price breaks above recent bearish fractal AND volume spike AND uptrend
+            long_condition = (curr_high > bear_fractal) and volume_spike and uptrend
+            # Short: price breaks below recent bullish fractal AND volume spike AND downtrend
+            short_condition = (curr_low < bull_fractal) and volume_spike and downtrend
             
             if long_condition:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-                highest_since_entry = curr_close
             elif short_condition:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-                lowest_since_entry = curr_close
         elif position == 1:
-            # Update highest since entry
-            highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit long: stoploss (2.5*ATR below highest) or trend reversal or chop regime
-            if (curr_close <= highest_since_entry - 2.5 * atr_val) or (curr_close < ema_50) or is_chop:
+            # Exit long: stoploss (2.5*ATR below entry) or trend reversal
+            if curr_close <= entry_price - 2.5 * atr_val or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Update lowest since entry
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit short: stoploss (2.5*ATR above lowest) or trend reversal or chop regime
-            if (curr_close >= lowest_since_entry + 2.5 * atr_val) or (curr_close > ema_50) or is_chop:
+            # Exit short: stoploss (2.5*ATR above entry) or trend reversal
+            if curr_close >= entry_price + 2.5 * atr_val or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_EMA50_Trend_VolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "1d_WilliamsFractal_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
