@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Williams Alligator Breakout with 1d EMA Trend Filter and Volume Spike
-Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend absence/presence.
-Breakouts above Lips or below Jaw with 1d EMA trend alignment and volume spikes
-capture strong moves in both bull and bear markets. Uses 12h timeframe with 1d HTF
-for trend filter. Targets 50-150 trades over 4 years (12-37/year) to avoid fee drag.
+4h Camarilla H3/L3 Breakout with 12h EMA50 Trend Filter and Volume Spike
+Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance.
+Breakouts above H3 or below L3 with 12h EMA trend alignment and volume spikes
+capture strong moves. Uses 4h timeframe with 12h HTF for trend filter.
+Targets 75-200 trades over 4 years (19-50/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,52 +21,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Get 12h data for Camarilla pivots and EMA (call ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on 12h median price
-    # Median price = (high + low) / 2
-    median_price = (high + low) / 2.0
+    # Calculate Camarilla pivot levels for 12h
+    # Camarilla: based on previous period's high, low, close
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
+    prev_close = df_12h['close'].shift(1).values
     
-    # Alligator lines: SMAs of median price
-    # Jaw: 13-period SMA, shifted 8 bars ahead
-    # Teeth: 8-period SMA, shifted 5 bars ahead  
-    # Lips: 5-period SMA, shifted 3 bars ahead
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Avoid look-ahead: use only completed previous period
+    typical_price = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Calculate 34-period EMA on 1d close for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Camarilla levels (H3/L3)
+    H3 = typical_price + range_hl * 1.1 / 4.0
+    L3 = typical_price - range_hl * 1.1 / 4.0
     
-    # Calculate 20-period volume MA on 1d for volume confirmation
-    vol_ma_20_1d = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        vol_ma_20_1d[i] = np.mean(df_1d['volume'].values[i-19:i+1])
+    # Calculate 50-period EMA on 12h close
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d indicators to 12h
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate 20-period volume MA on 12h
+    vol_ma_20_12h = np.full(len(df_12h), np.nan)
+    for i in range(20, len(df_12h)):
+        vol_ma_20_12h[i] = np.mean(df_12h['volume'].values[i-19:i+1])
     
-    # Calculate 20-period volume MA for 12h volume spike
-    vol_ma_20_12h = np.full(n, np.nan)
+    # Align to 4h
+    H3_aligned = align_htf_to_ltf(prices, df_12h, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_12h, L3)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    
+    # Calculate 20-period volume MA for 4h volume spike
+    vol_ma_20_4h = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma_20_12h[i] = np.mean(volume[i-19:i+1])
+        vol_ma_20_4h[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for Alligator and volume MA
-    start_idx = max(20, 13)  # 20 for volume MA, 13 for Alligator jaw
+    # Start index: need enough for volume MA and pivots
+    start_idx = max(20, 1)  # 20 for volume MA, 1 for pivot shift
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(lips[i]) or np.isnan(jaw[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(vol_ma_20_12h[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(vol_ma_20_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,23 +78,23 @@ def generate_signals(prices):
         
         curr_close = close[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_1d_aligned[i]
-        lips_val = lips[i]
-        jaw_val = jaw[i]
-        vol_ma_1d = vol_ma_20_1d_aligned[i]
-        vol_ma_12h = vol_ma_20_12h[i]
+        ema_trend = ema_50_12h_aligned[i]
+        H3 = H3_aligned[i]
+        L3 = L3_aligned[i]
+        vol_ma_12h = vol_ma_20_12h_aligned[i]
+        vol_ma_4h = vol_ma_20_4h[i]
         
-        # Volume confirmation: current 12h volume > 1.8 * 20-period 12h average
-        volume_confirm = curr_volume > 1.8 * vol_ma_12h
+        # Volume confirmation: current 4h volume > 2.0 * 20-period 4h average
+        volume_confirm = curr_volume > 2.0 * vol_ma_4h
         
         if position == 0:
             # Look for entry signals
-            # Long: price crosses above Lips, above 1d EMA, volume confirmation
-            long_entry = (curr_close > lips_val and 
+            # Long: price breaks above H3, above 12h EMA, volume confirmation
+            long_entry = (curr_close > H3 and 
                          curr_close > ema_trend and 
                          volume_confirm)
-            # Short: price crosses below Jaw, below 1d EMA, volume confirmation
-            short_entry = (curr_close < jaw_val and 
+            # Short: price breaks below L3, below 12h EMA, volume confirmation
+            short_entry = (curr_close < L3 and 
                           curr_close < ema_trend and 
                           volume_confirm)
             
@@ -106,16 +110,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below Teeth OR below 1d EMA
-            if curr_close < teeth[i] or curr_close < ema_trend:
+            # Exit: price falls below L3 OR below 12h EMA
+            if curr_close < L3 or curr_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above Teeth OR above 1d EMA
-            if curr_close > teeth[i] or curr_close > ema_trend:
+            # Exit: price rises above H3 OR above 12h EMA
+            if curr_close > H3 or curr_close > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_12hEMA50_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
