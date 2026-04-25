@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrendFilter_VolumeConfirm_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 1d with 1w EMA50 trend filter and volume confirmation.
-Camarilla levels from weekly chart provide strong institutional support/resistance. Breakouts above R1 or below S1
-with 1w EMA trend alignment and volume spike capture momentum moves in both bull and bear markets.
-Target: 7-25 trades/year per symbol (30-100 total over 4 years).
+6h_ADX_DMI_Trend_12hVolRegime_v1
+Hypothesis: Trade 6h ADX/DMI trend strength with 12h volume regime filter.
+ADX > 25 indicates strong trend, DMI crossover gives direction. 12h volume regime (above/below median) acts as trend filter:
+- In high volume regime: only take trend-following signals
+- In low volume regime: only take mean-reversion at extremes
+This adapts to both trending (bull/bear) and ranging markets, reducing whipsaw.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -21,86 +23,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF Camarilla pivot and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for HTF volume regime
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for HTF trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h volume median for regime detection
+    vol_12h = df_12h['volume'].values
+    vol_median_12h = pd.Series(vol_12h).rolling(window=50, min_periods=50).median().values
+    vol_median_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_median_12h)
     
-    # Calculate Camarilla levels from previous 1w bar (HLC of completed weekly candle)
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C = (H+L+C)/3 (typical price)
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
+    # Calculate ADX(14) and DMI(14) on 6h
+    period = 14
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Smoothed TR, +DM, -DM
+    def ma(arr, n):
+        return pd.Series(arr).ewm(alpha=1/n, adjust=False, min_periods=n).mean().values
+    tr_ma = ma(tr, period)
+    plus_dm_ma = ma(plus_dm, period)
+    minus_dm_ma = ma(minus_dm, period)
+    # +DI, -DI, DX, ADX
+    plus_di = 100 * plus_dm_ma / tr_ma
+    minus_di = 100 * minus_dm_ma / tr_ma
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = ma(dx, period)
     
-    typical_price_1w = (h_1w + l_1w + c_1w) / 3.0
-    range_1w = h_1w - l_1w
-    camarilla_r1_1w = typical_price_1w + (range_1w * 1.1 / 12.0)
-    camarilla_s1_1w = typical_price_1w - (range_1w * 1.1 / 12.0)
-    
-    # Align Camarilla levels to 1d timeframe (use previous week's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1_1w)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1_1w)
-    
-    # Volume confirmation: 1d volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Align indicators (already computed on 6h, no HTF alignment needed for same TF)
+    # But we need to handle warmup periods
+    # Volume regime: 1 = high volume (above median), 0 = low volume
+    vol_regime = (volume > vol_median_12h_aligned).astype(float)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and volume MA (20)
-    start_idx = max(50, 20)
+    # Start index: need warmup for ADX/DMI (2*period for stability)
+    start_idx = 2 * period
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or
+            np.isnan(vol_median_12h_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend (bullish = price above EMA50)
-        htf_1w_bullish = close[i] > ema_50_1w_aligned[i]
-        htf_1w_bearish = close[i] < ema_50_1w_aligned[i]
+        # Determine trend direction and strength
+        bullish_cross = plus_di[i] > minus_di[i]
+        bearish_cross = minus_di[i] > plus_di[i]
+        strong_trend = adx[i] > 25
         
         if position == 0:
-            # Long setup: price breaks above Camarilla R1 + 1w uptrend + volume spike
-            long_setup = (close[i] > camarilla_r1_aligned[i]) and htf_1w_bullish and volume_spike[i]
-            
-            # Short setup: price breaks below Camarilla S1 + 1w downtrend + volume spike
-            short_setup = (close[i] < camarilla_s1_aligned[i]) and htf_1w_bearish and volume_spike[i]
-            
-            if long_setup:
-                signals[i] = 0.25
-                position = 1
-            elif short_setup:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
+            # Entry logic depends on volume regime
+            if vol_regime[i] > 0.5:  # High volume regime: trend following
+                if bullish_cross and strong_trend:
+                    signals[i] = 0.25
+                    position = 1
+                elif bearish_cross and strong_trend:
+                    signals[i] = -0.25
+                    position = -1
+            else:  # Low volume regime: mean reversion at extremes
+                # Use price relative to recent high/low for mean reversion
+                lookback = 20
+                if i >= lookback:
+                    recent_high = np.max(high[i-lookback:i+1])
+                    recent_low = np.min(low[i-lookback:i+1])
+                    price_range = recent_high - recent_low
+                    if price_range > 0:
+                        price_pos = (close[i] - recent_low) / price_range
+                        # Extreme oversold in low vol -> long
+                        if price_pos < 0.2 and bullish_cross:
+                            signals[i] = 0.25
+                            position = 1
+                        # Extreme overbought in low vol -> short
+                        elif price_pos > 0.8 and bearish_cross:
+                            signals[i] = -0.25
+                            position = -1
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches Camarilla S1 (stop) OR 1w trend turns bearish
-            if (close[i] <= camarilla_s1_aligned[i]) or (not htf_1w_bullish):
+            # Exit: trend weakens OR reverse crossover
+            if not strong_trend or bearish_cross:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches Camarilla R1 (stop) OR 1w trend turns bullish
-            if (close[i] >= camarilla_r1_aligned[i]) or (htf_1w_bullish):
+            # Exit: trend weakens OR reverse crossover
+            if not strong_trend or bullish_cross:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrendFilter_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_ADX_DMI_Trend_12hVolRegime_v1"
+timeframe = "6h"
 leverage = 1.0
