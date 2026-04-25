@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm_v2
-Hypothesis: Trade Camarilla R3/S3 breakouts on 6h with 1d EMA50 trend filter and volume confirmation (2.0x 24-bar avg). 
-Enhanced version: uses EMA50 instead of EMA34 for stronger trend filter, requires volume spike AND close outside Camarilla H3/L3 levels 
-to avoid false breakouts. Designed for 6h timeframe targeting 12-30 trades/year. Works in bull/bear markets by following 1d trend.
+12h_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1w EMA50 trend filter and volume confirmation (1.8x 24-bar avg). 
+Targets 12-30 trades/year. Uses weekly trend for major market direction, reducing whipsaws in both bull and bear regimes.
 """
 
 import numpy as np
@@ -12,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,35 +19,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter and Camarilla levels
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate EMA50 on 1w close for trend filter
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    
+    # Get 1d data for Camarilla levels (R1/S1)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # Calculate Camarilla H3 and L3 levels from previous day (stronger breakout levels)
+    # Calculate Camarilla R1 and S1 levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla H3 and L3 levels
-    # H3 = close + 1.1*(high - low)/2
-    # L3 = close - 1.1*(high - low)/2
+    # Camarilla R1 and S1 levels
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
     camarilla_range = high_1d - low_1d
-    h3 = close_1d + 1.1 * camarilla_range / 2
-    l3 = close_1d - 1.1 * camarilla_range / 2
+    r1 = close_1d + 1.1 * camarilla_range / 12
+    s1 = close_1d - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 6h timeframe (1-day lagged)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3, additional_delay_bars=1)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3, additional_delay_bars=1)
+    # Align Camarilla levels to 12h timeframe (1-day lagged)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1, additional_delay_bars=1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1, additional_delay_bars=1)
     
-    # Volume confirmation: 2.0x 24-bar average volume (48h = 2 days on 6h)
+    # Volume confirmation: 1.8x 24-bar average volume (48h = 2 days on 12h)
     volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    volume_spike = volume > (1.8 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,20 +63,19 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or
-            np.isnan(l3_aligned[i])):
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend: price above/below EMA50
+        # Determine 1w HTF trend: price above/below EMA50
         trend_bullish = close[i] > ema_50_aligned[i]
         trend_bearish = close[i] < ema_50_aligned[i]
         
         if position == 0:
             # Look for breakout signals with volume confirmation and trend alignment
-            # Require close outside H3/L3 (not just touching) for stronger breakout confirmation
-            long_signal = close[i] > h3_aligned[i] and volume_spike[i] and trend_bullish
-            short_signal = close[i] < l3_aligned[i] and volume_spike[i] and trend_bearish
+            long_signal = close[i] > r1_aligned[i] and volume_spike[i] and trend_bullish
+            short_signal = close[i] < s1_aligned[i] and volume_spike[i] and trend_bearish
             
             if long_signal:
                 signals[i] = 0.25
@@ -85,22 +88,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price breaks below L3 or trend reverses
-            exit_signal = close[i] < l3_aligned[i] or not trend_bullish
+            # Exit when price breaks below S1 or trend reverses
+            exit_signal = close[i] < s1_aligned[i] or not trend_bullish
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price breaks above H3 or trend reverses
-            exit_signal = close[i] > h3_aligned[i] or not trend_bearish
+            # Exit when price breaks above R1 or trend reverses
+            exit_signal = close[i] > r1_aligned[i] or not trend_bearish
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
