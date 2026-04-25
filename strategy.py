@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout with 1w EMA34 Trend Filter and Volume Spike
-Hypothesis: Donchian channel breakouts on daily timeframe capture major trend moves.
-1w EMA34 filter ensures alignment with weekly trend to avoid counter-trend trades.
-Volume spike confirms institutional participation. ATR trailing stop manages risk.
-Target: 15-25 trades/year on 1d (60-100 total over 4 years) to minimize fee drag.
-Works in both bull (breakouts above upper band) and bear (breakouts below lower band).
+12h Camarilla R1/S1 Breakout with 1d EMA34 Trend Filter and Volume Spike
+Hypothesis: Camarilla R1/S1 levels act as strong intraday support/resistance on 12h chart. 
+Breakouts above R1 or below S1 with volume confirmation and aligned with 1d EMA34 trend 
+capture institutional moves in both bull and bear markets. ATR trailing stop manages risk.
+Target: 12-25 trades/year on 12h (50-100 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -22,24 +21,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20)
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20)
-    upper_band = high_roll.max().values
-    lower_band = low_roll.min().values
+    # Camarilla pivot levels from previous day (using typical price)
+    typical_price = (high + low + close) / 3.0
+    prev_typical = pd.Series(typical_price).shift(1)
+    prev_high = pd.Series(high).shift(1)
+    prev_low = pd.Series(low).shift(1)
+    prev_close = pd.Series(close).shift(1)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Calculate Camarilla levels for current day based on previous day
+    R1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
+    S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
+    
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
     # ATR for volatility filter and trailing stop
     tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1w EMA34 trend filter (MTF) - load ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d EMA34 trend filter (MTF)
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,9 +55,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(ema_34_1w_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -62,14 +66,14 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Breakout conditions: price breaks Donchian upper or lower band
-        breakout_long = curr_close > upper_band[i]
-        breakout_short = curr_close < lower_band[i]
+        # Breakout conditions: price breaks Camarilla R1 or S1
+        breakout_long = curr_close > R1[i]
+        breakout_short = curr_close < S1[i]
         
         if position == 0:
-            # Look for entry signals - require: Donchian breakout + volume spike + 1w EMA trend alignment
-            long_entry = breakout_long and vol_spike and (curr_close > ema_34_1w_aligned[i])
-            short_entry = breakout_short and vol_spike and (curr_close < ema_34_1w_aligned[i])
+            # Look for entry signals - require: Camarilla breakout + volume spike + 1d EMA trend alignment
+            long_entry = breakout_long and vol_spike and (curr_close > ema_34_1d_aligned[i])
+            short_entry = breakout_short and vol_spike and (curr_close < ema_34_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
@@ -104,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeSpike"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
