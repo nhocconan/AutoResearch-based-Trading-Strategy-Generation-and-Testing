@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Index + 1d EMA50 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures
-buying/selling pressure relative to trend. Combined with 1d EMA50 trend filter and
-volume confirmation, it captures strong momentum moves in both bull and bear markets.
-ATR-based stoploss controls drawdown. Designed for 6h timeframe targeting 12-30 trades/year.
-Uses discrete position sizing (0.25) to minimize fee churn.
+12h Donchian(20) Breakout + Weekly EMA50 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Weekly EMA50 defines the major trend. 12h Donchian breakouts in that direction with volume confirmation capture momentum moves. ATR stoploss limits drawdown. Works in bull via breakout continuation and in bear via mean-reversion from extreme levels when weekly trend aligns. Targets 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -22,27 +18,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for EMA50 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    daily_close = df_1d['close'].values
-    ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA50 for trend filter
+    weekly_close = df_1w['close'].values
+    ema_50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate EMA13 for Elder Ray (using 6h data)
-    if len(close) >= 13:
-        ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    else:
-        ema_13 = np.full(n, np.nan)
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-19:i+1])
+        donchian_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Buying pressure
-    bear_power = low - ema_13   # Selling pressure
-    
-    # Calculate ATR(14) for stoploss using vectorized calculation
+    # Calculate ATR(14) for stoploss
+    atr = np.full(n, np.nan)
     if len(close) >= 14:
         tr1 = np.abs(np.diff(close, prepend=close[0]))
         tr2 = np.abs(high - np.roll(close, 1))
@@ -50,14 +44,10 @@ def generate_signals(prices):
         tr2[0] = np.abs(high[0] - close[0])
         tr3[0] = np.abs(low[0] - close[0])
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = np.zeros(n)
-        atr[:13] = np.nan
         for i in range(13, n):
             atr[i] = np.mean(tr[i-13:i+1])
-    else:
-        atr = np.full(n, np.nan)
     
-    # Calculate 20-period volume MA for volume spike detection using vectorized approach
+    # Calculate 20-period volume MA for volume spike detection
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -66,13 +56,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA50_1d, EMA13, ATR, and volume MA to propagate
-    start_idx = max(50, 13, 14, 20)
+    # Start index: need enough for weekly EMA50, Donchian, ATR, and volume MA
+    start_idx = max(50, 20, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_13[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -84,10 +75,9 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema50_1d = ema_50_1d_aligned[i]
-        ema13_val = ema_13[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        ema50_1w = ema_50_1w_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
         
@@ -95,10 +85,10 @@ def generate_signals(prices):
         volume_spike = curr_volume > 2.0 * vol_ma
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) AND uptrend (price > 1d EMA50) AND volume spike
-            long_condition = (bull > 0) and (curr_close > ema50_1d) and volume_spike
-            # Short: Bear Power < 0 (selling pressure) AND downtrend (price < 1d EMA50) AND volume spike
-            short_condition = (bear < 0) and (curr_close < ema50_1d) and volume_spike
+            # Long: price breaks above upper Donchian AND weekly uptrend (close > weekly EMA50) AND volume spike
+            long_condition = (curr_close > upper) and (curr_close > ema50_1w) and volume_spike
+            # Short: price breaks below lower Donchian AND weekly downtrend (close < weekly EMA50) AND volume spike
+            short_condition = (curr_close < lower) and (curr_close < ema50_1w) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -109,15 +99,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or Bull Power turns negative (loss of buying pressure)
-            if curr_close <= entry_price - 2.0 * atr_val or bull <= 0:
+            # Exit long: stoploss (2.0*ATR below entry) or price breaks below lower Donchian (reversal signal)
+            if curr_close <= entry_price - 2.0 * atr_val or curr_close < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or Bear Power turns positive (loss of selling pressure)
-            if curr_close >= entry_price + 2.0 * atr_val or bear >= 0:
+            # Exit short: stoploss (2.0*ATR above entry) or price breaks above upper Donchian (reversal signal)
+            if curr_close >= entry_price + 2.0 * atr_val or curr_close > upper:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_WeeklyEMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
