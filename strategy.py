@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume regime filter.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeFilter
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume regime filter.
 Long when price breaks above R1 in uptrend (close > 1d EMA50) with elevated volume (>1.5x 20-bar average).
 Short when price breaks below S1 in downtrend (close < 1d EMA50) with elevated volume.
 Exit when price re-enters H3-L3 range or trend reverses.
-Uses discrete position sizing (0.30) to minimize fee churn and keep trades ~20-40/year.
+Uses discrete position sizing (0.30) to minimize fee churn and keep trades ~12-37/year.
 Designed to work in bull markets via trend-following breakouts and in bear markets via counter-trend fades on extreme volume spikes.
 """
 
@@ -44,7 +44,7 @@ def generate_signals(prices):
     h3 = prev_close + range_hl * 1.1 / 4
     l3 = prev_close - range_hl * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
