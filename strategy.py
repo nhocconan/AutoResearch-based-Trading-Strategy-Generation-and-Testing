@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout with Weekly EMA34 Trend and Volume Spike
-Hypothesis: Donchian channel breakouts capture strong momentum moves. 
-Weekly EMA34 filter ensures alignment with major trend, reducing false breakouts in choppy markets.
-Volume spike confirms institutional participation. 
-Works in bull markets (breakouts above upper channel in uptrend) and bear markets 
-(breakouts below lower channel in downtrend). 12h timeframe targets 12-37 trades/year.
+4h Williams Alligator + Volume Spike + ATR Stoploss
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and exhaustion.
+Long when Lips > Teeth > Jaw (bullish alignment) with volume spike and price > Lips.
+Short when Lips < Teeth < Jaw (bearish alignment) with volume spike and price < Lips.
+Uses ATR-based trailing stop to limit drawdown in bear markets. 4h timeframe targets 20-50 trades/year.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,31 +21,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Williams Alligator: SMAs of median price
+    median_price = (high + low) / 2.0
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # ATR for stoploss (20-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     # Start index: need enough for calculations
-    start_idx = max(20, 34)  # Donchian, weekly EMA alignment
+    start_idx = max(20, 13, 8, 5)  # ATR, jaw, teeth, lips
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -54,37 +56,41 @@ def generate_signals(prices):
         curr_volume = volume[i]
         vol_spike = volume_spike[i]
         
-        # Trend filter: price relative to weekly EMA34
-        uptrend = ema_34_aligned[i] is not None and curr_close > ema_34_aligned[i]
-        downtrend = ema_34_aligned[i] is not None and curr_close < ema_34_aligned[i]
+        # Alligator alignment
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: break above upper Donchian AND uptrend AND volume spike
-            long_entry = (curr_close > highest_high[i]) and uptrend and vol_spike
-            # Short: break below lower Donchian AND downtrend AND volume spike
-            short_entry = (curr_close < lowest_low[i]) and downtrend and vol_spike
+            # Long: bullish alignment AND volume spike AND price > lips
+            long_entry = bullish_alignment and vol_spike and (curr_close > lips[i])
+            # Short: bearish alignment AND volume spike AND price < lips
+            short_entry = bearish_alignment and vol_spike and (curr_close < lips[i])
             
             if long_entry:
                 signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price breaks below lower Donchian (reversal) OR loss of uptrend
-            if (curr_close < lowest_low[i]) or (curr_close < ema_34_aligned[i]):
+            # Exit: bearish alignment OR price < lips (stoploss) OR ATR trailing stop
+            atr_stop = curr_close < (entry_price - 2.0 * atr[i])
+            if (not bullish_alignment) or (curr_close < lips[i]) or atr_stop:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price breaks above upper Donchian (reversal) OR loss of downtrend
-            if (curr_close > highest_high[i]) or (curr_close > ema_34_aligned[i]):
+            # Exit: bullish alignment OR price > lips (stoploss) OR ATR trailing stop
+            atr_stop = curr_close > (entry_price + 2.0 * atr[i])
+            if (not bearish_alignment) or (curr_close > lips[i]) or atr_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_WeeklyEMA34_Trend_VolumeSp"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
