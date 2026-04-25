@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla R3S3 Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Camarilla pivot levels (R3, S3) act as strong support/resistance.
-Breakouts above R3 or below S3 with volume spike indicate institutional interest.
-1d EMA34 filter ensures trading with the higher timeframe trend.
-Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-4h timeframe targets 20-50 trades/year (80-200 over 4 years).
+1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: Daily Donchian channel breakouts capture medium-term trends.
+Weekly EMA50 filter ensures trading with the higher timeframe trend.
+Volume confirmation avoids false breakouts. Works in bull markets (buy breakouts in uptrend)
+and bear markets (sell breakdowns in downtrend). 1d timeframe targets 7-25 trades/year.
 """
 
 import numpy as np
@@ -22,33 +21,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate daily Donchian channels (20-period)
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Camarilla pivot levels from previous day
-    # Need daily data for pivot calculation
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values  # previous day's close
-    prev_high = df_1d['high'].shift(1).values    # previous day's high
-    prev_low = df_1d['low'].shift(1).values      # previous day's low
+    # Daily Donchian high and low (20-period)
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: R3, S3
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + camarilla_range * 1.1 / 4
-    s3 = prev_close - camarilla_range * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Donchian levels to 1d timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,12 +49,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 34)  # volume MA, 1d EMA34 alignment
+    start_idx = max(20, 50)  # Donchian, weekly EMA50 alignment
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -72,16 +63,16 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_aligned[i]
-        downtrend = curr_close < ema_34_aligned[i]
+        # Trend filter: price relative to weekly EMA50
+        uptrend = curr_close > ema_50_aligned[i]
+        downtrend = curr_close < ema_50_aligned[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above R3 AND uptrend AND volume spike
-            long_entry = (curr_high > r3_aligned[i]) and uptrend and vol_spike
-            # Short: price breaks below S3 AND downtrend AND volume spike
-            short_entry = (curr_low < s3_aligned[i]) and downtrend and vol_spike
+            # Long: price breaks above Donchian high AND uptrend AND volume spike
+            long_entry = (curr_high > donchian_high_aligned[i]) and uptrend and vol_spike
+            # Short: price breaks below Donchian low AND downtrend AND volume spike
+            short_entry = (curr_low < donchian_low_aligned[i]) and downtrend and vol_spike
             
             if long_entry:
                 signals[i] = 0.30
@@ -93,16 +84,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below S3 (breakdown) OR loss of uptrend
-            if (curr_low < s3_aligned[i]) or (curr_close < ema_34_aligned[i]):
+            # Exit: price falls below Donchian low (breakdown) OR loss of uptrend
+            if (curr_low < donchian_low_aligned[i]) or (curr_close < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
             # Short position management
-            # Exit: price rises above R3 (breakout) OR loss of downtrend
-            if (curr_high > r3_aligned[i]) or (curr_close > ema_34_aligned[i]):
+            # Exit: price rises above Donchian high (breakout) OR loss of downtrend
+            if (curr_high > donchian_high_aligned[i]) or (curr_close > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
