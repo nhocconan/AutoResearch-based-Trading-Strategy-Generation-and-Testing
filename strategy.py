@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_DynamicSize
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike (>1.8x 20-bar avg) capture institutional breakouts with controlled trade frequency. Uses dynamic position sizing (0.20/0.30) based on trend strength to reduce drawdown in bear markets while maintaining upside in bull markets. R1/S1 levels provide optimal breakout sensitivity. 1d trend ensures alignment with daily momentum. Volume spike confirms participation. Designed for 20-40 trades/year to minimize fee drag and avoid overtrading.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) captures strong institutional breakouts with controlled trade frequency. R1/S1 levels provide timely entries while 1d EMA34 ensures alignment with daily trend. Volume spike confirms participation. Designed for 25-50 trades/year to minimize fee drag. Works in bull markets via long breakouts and bear markets via short breakouts.
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1d for trend filter (more responsive than EMA50)
+    # Calculate EMA34 on 1d for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
@@ -49,13 +49,6 @@ def generate_signals(prices):
     # Volume average (20-period) for volume spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Dynamic sizing based on trend strength (distance from EMA)
-    ema_dist_ratio = np.abs(close - ema_34_aligned) / ema_34_aligned
-    # Normalize to 0-1 range, cap at 0.1 (10% deviation)
-    trend_strength = np.clip(ema_dist_ratio / 0.1, 0, 1)
-    # Size: 0.20 in weak trend, 0.30 in strong trend
-    base_size = 0.20 + 0.10 * trend_strength
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -73,9 +66,9 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = base_size[i]
+                signals[i] = 0.25
             else:
-                signals[i] = -base_size[i]
+                signals[i] = -0.25
             continue
         
         # Get aligned values
@@ -87,10 +80,9 @@ def generate_signals(prices):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        size_val = base_size[i]
         
-        # Volume spike condition: current volume > 1.8x 20-period average
-        volume_spike = vol_val > 1.8 * vol_ma_val
+        # Volume spike condition: current volume > 2.0x 20-period average
+        volume_spike = vol_val > 2.0 * vol_ma_val
         
         if position == 0:
             # Look for entry signals: Camarilla R1/S1 breakout with trend and volume
@@ -100,18 +92,18 @@ def generate_signals(prices):
             short_signal = (low_val < s1_val) and (close_val < ema_val) and volume_spike
             
             if long_signal:
-                signals[i] = size_val
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_val
             elif short_signal:
-                signals[i] = -size_val
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = size_val
+            signals[i] = 0.25
             # Exit conditions:
             # 1. Opposite breakout: price breaks below S1 (exit long)
             if close_val < s1_val:
@@ -120,7 +112,7 @@ def generate_signals(prices):
                 entry_price = 0.0
         elif position == -1:
             # Short: hold position
-            signals[i] = -size_val
+            signals[i] = -0.25
             # Exit conditions:
             # 1. Opposite breakout: price breaks above R1 (exit short)
             if close_val > r1_val:
@@ -130,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_DynamicSize"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
