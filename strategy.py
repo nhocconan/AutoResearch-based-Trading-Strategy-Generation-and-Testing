@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA trend filter and volume spike confirmation.
-Only trade breakouts aligned with 1d EMA direction during volume expansion (>1.5x average volume).
-Targets 20-50 trades/year on 4h timeframe, avoiding fee drag while capturing strong momentum moves.
-Uses discrete sizing (0.25) and ATR-based stoploss (signal→0 when price moves against position by 1.5*ATR).
-Works in both bull and bear markets by requiring volume confirmation and trend alignment.
+1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 1d with 1w EMA trend filter and volume spike confirmation.
+Only trade breakouts aligned with 1w EMA direction during volume expansion (>1.8x average volume).
+Targets 7-25 trades/year on 1d timeframe, avoiding fee drag while capturing strong momentum moves.
+Uses discrete sizing (0.25) and ATR-based stoploss (signal→0 when price moves against position by 2.0*ATR).
+Works in both bull and bear markets by requiring trend alignment and volume confirmation.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,49 +22,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels - primary timeframe
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1d data for Camarilla levels - primary timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for R1 and S1
     # R1 = close + (high - low) * 1.1/12
     # S1 = close - (high - low) * 1.1/12
-    camarilla_range = high_4h - low_4h
-    r1_4h = close_4h + camarilla_range * 1.1 / 12
-    s1_4h = close_4h - camarilla_range * 1.1 / 12
+    camarilla_range = high_1d - low_1d
+    r1_1d = close_1d + camarilla_range * 1.1 / 12
+    s1_1d = close_1d - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    # Align Camarilla levels to 1d timeframe (no shift needed as we're already on 1d)
+    r1_aligned = r1_1d
+    s1_aligned = s1_1d
     
-    # Get 1d data for EMA trend filter - HTF
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for EMA trend filter - HTF
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(34) on 1d
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA(34) on 1w
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA to 4h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align EMA to 1d timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate ATR(14) for stoploss on 4h
+    # Calculate ATR(14) for stoploss on 1d
     # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    atr_4h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_aligned = atr_1d  # already on 1d timeframe
     
     # Calculate volume average (20-period) for volume spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -74,14 +74,14 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start index: need warmup for calculations
-    start_idx = max(50, 34, 21, 20)  # Camarilla needs 2, EMA needs 34, ATR needs 14, vol needs 20
+    start_idx = max(50, 34, 20)  # EMA needs 34, vol needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(atr_4h_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or 
             np.isnan(vol_ma[i])):
             # Hold current position or flat
             if position == 0:
@@ -95,22 +95,22 @@ def generate_signals(prices):
         # Get aligned values
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema_val = ema_1d_aligned[i]
-        atr_val = atr_4h_aligned[i]
+        ema_val = ema_1w_aligned[i]
+        atr_val = atr_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_val = volume[i]
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
         
-        # Volume spike condition: current volume > 1.5x 20-period average
-        volume_spike = vol_val > 1.5 * vol_ma_val
+        # Volume spike condition: current volume > 1.8x 20-period average
+        volume_spike = vol_val > 1.8 * vol_ma_val
         
         if position == 0:
             # Look for entry signals: Camarilla breakout with trend and volume confirmation
-            # Long: price breaks above R1, above 1d EMA, with volume spike
+            # Long: price breaks above R1, above 1w EMA, with volume spike
             long_signal = (high_val > r1_val) and (close_val > ema_val) and volume_spike
-            # Short: price breaks below S1, below 1d EMA, with volume spike
+            # Short: price breaks below S1, below 1w EMA, with volume spike
             short_signal = (low_val < s1_val) and (close_val < ema_val) and volume_spike
             
             if long_signal:
@@ -127,12 +127,12 @@ def generate_signals(prices):
             # Long: hold position
             signals[i] = 0.25
             # Exit conditions:
-            # 1. Stoploss: price moves against position by 1.5*ATR
-            if close_val < entry_price - 1.5 * atr_val:
+            # 1. Stoploss: price moves against position by 2.0*ATR
+            if close_val < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # 2. Trend reversal: price closes below 1d EMA
+            # 2. Trend reversal: price closes below 1w EMA
             elif close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -141,12 +141,12 @@ def generate_signals(prices):
             # Short: hold position
             signals[i] = -0.25
             # Exit conditions:
-            # 1. Stoploss: price moves against position by 1.5*ATR
-            if close_val > entry_price + 1.5 * atr_val:
+            # 1. Stoploss: price moves against position by 2.0*ATR
+            if close_val > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # 2. Trend reversal: price closes above 1d EMA
+            # 2. Trend reversal: price closes above 1w EMA
             elif close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -154,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
