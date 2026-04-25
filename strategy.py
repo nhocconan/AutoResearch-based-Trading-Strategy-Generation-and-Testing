@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Volume Spike + 1d EMA34 Trend + 4h Donchian(20) Breakout
-Hypothesis: Volume spikes confirm institutional interest. Combined with 1d EMA34 trend filter and 4h Donchian breakout, this captures strong momentum moves while minimizing false signals. The 12h timeframe reduces trade frequency to avoid fee drag. Works in bull/bear markets via trend filter - only trades in direction of 1d trend.
+4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Donchian channel breakouts capture strong momentum moves. 
+The 1d EMA34 filters for higher timeframe trend alignment to avoid counter-trend whipsaws.
+Volume spike confirms institutional participation. ATR-based stoploss manages risk.
+Works in bull markets via long breakouts and bear markets via short breakdowns.
+Designed for 4h timeframe to balance trade frequency (~20-50/year) and capture multi-day swings.
 """
 
 import numpy as np
@@ -27,29 +31,34 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 4h data for Donchian(20) channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate ATR(14) for stoploss and position sizing
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 4h Donchian(20) channels
-    donch_high_20 = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
+    # Calculate Donchian channels (20-period) on 4h data
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA34 warmup and Donchian calculation
-    start_idx = 34
+    # Start index: need enough for EMA34 warmup, ATR, and Donchian
+    start_idx = max(34, 14, lookback - 1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i])):
+            np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,8 +67,9 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         ema_trend = ema_34_aligned[i]
-        upper_donch = donch_high_aligned[i]
-        lower_donch = donch_low_aligned[i]
+        atr_val = atr[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         
         # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
@@ -69,36 +79,44 @@ def generate_signals(prices):
         volume_spike = curr_volume > 2.0 * vol_ma_20
         
         if position == 0:
-            # Long: price breaks above 4h Donchian upper channel AND above 1d EMA34 (uptrend filter) with volume spike
-            long_condition = (curr_close > upper_donch) and (curr_close > ema_trend) and volume_spike
-            # Short: price breaks below 4h Donchian lower channel AND below 1d EMA34 (downtrend filter) with volume spike
-            short_condition = (curr_close < lower_donch) and (curr_close < ema_trend) and volume_spike
+            # Long: price breaks above upper Donchian channel AND above 1d EMA34 (uptrend filter)
+            long_condition = (curr_close > upper_channel) and (curr_close > ema_trend) and volume_spike
+            # Short: price breaks below lower Donchian channel AND below 1d EMA34 (downtrend filter)
+            short_condition = (curr_close < lower_channel) and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: price returns below 4h Donchian lower channel or trend breaks
-            if curr_close < lower_donch or curr_close < ema_trend:
+            # Exit conditions: stoploss, trend break, or mean reversion to channel middle
+            stop_loss = entry_price - 2.5 * atr_val
+            trend_break = curr_close < ema_trend
+            mean_revert = curr_close < (upper_channel + lower_channel) / 2  # return to midpoint
+            
+            if curr_close <= stop_loss or trend_break or mean_revert:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price returns above 4h Donchian upper channel or trend breaks
-            if curr_close > upper_donch or curr_close > ema_trend:
+            # Exit conditions: stoploss, trend break, or mean reversion to channel middle
+            stop_loss = entry_price + 2.5 * atr_val
+            trend_break = curr_close > ema_trend
+            mean_revert = curr_close > (upper_channel + lower_channel) / 2  # return to midpoint
+            
+            if curr_close >= stop_loss or trend_break or mean_revert:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_VolumeSpike_1dEMA34_Trend_4hDonchian20_Breakout_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
