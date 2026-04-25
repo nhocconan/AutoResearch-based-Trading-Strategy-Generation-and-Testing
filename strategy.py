@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Williams Alligator Breakout + 1w EMA50 Trend + Volume Spike with ATR Trailing Stop
-Hypothesis: Williams Alligator (jaw/teeth/lips) on 1d captures multi-day trend structure, 
-with breakouts beyond the Alligator's lips indicating strong momentum. Combined with 
-weekly EMA50 trend filter and volume confirmation, this strategy targets 30-100 trades 
-over 4 years (7-25/year) to minimize fee drag. ATR-based trailing stop provides risk 
-control in both bull and bear markets by exiting on trend exhaustion or reversal.
+6h Williams Alligator + 1d EMA50 Trend Filter with Volume Confirmation
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend emergence and exhaustion.
+In bull markets: long when Lips > Teeth > Jaw + price above 1d EMA50 + volume spike.
+In bear markets: short when Lips < Teeth < Jaw + price below 1d EMA50 + volume spike.
+Volume confirmation reduces false signals. Target 50-150 trades over 4 years (12-37/year).
+ATR-based trailing stop manages risk. Works in both regimes by fading extended moves.
 """
 
 import numpy as np
@@ -22,8 +22,12 @@ def calculate_smma(series, period):
     """Calculate Smoothed Moving Average (used in Williams Alligator)"""
     if len(series) < period:
         return np.full_like(series, np.nan)
-    # SMMA is EMA with alpha = 1/period
-    return pd.Series(series).ewm(alpha=1.0/period, adjust=False, min_periods=period).mean().values
+    sma = pd.Series(series).rolling(window=period, min_periods=period).mean().values
+    smma = np.full_like(series, np.nan)
+    smma[period-1] = sma[period-1]
+    for i in range(period, len(series)):
+        smma[i] = (smma[i-1] * (period-1) + series[i]) / period
+    return smma
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,41 +38,23 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
+    median_price = (high + low) / 2  # Williams Alligator uses median price
     
-    # Weekly data for EMA50 trend (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Weekly EMA50 trend filter
-    ema_50_1w = calculate_ema(df_1w['close'].values, 50)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Daily data for Williams Alligator (loaded ONCE)
+    # Daily data for EMA50 trend (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
-    # Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) - all SMMA of median price
-    median_price = (df_1d['high'] + df_1d['low']) / 2
-    jaw = calculate_smma(median_price.values, 13)  # Jaw: 13-period, shifted 8 bars
-    teeth = calculate_smma(median_price.values, 8)  # Teeth: 8-period, shifted 5 bars
-    lips = calculate_smma(median_price.values, 5)   # Lips: 5-period, shifted 3 bars
+    # Daily EMA50 trend filter
+    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Apply shifts (Alligator is typically shifted forward)
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
-    # First values become NaN due to roll
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    # Williams Alligator on 6h median price
+    jaw = calculate_smma(median_price, 13)  # Blue line
+    teeth = calculate_smma(median_price, 8)  # Red line
+    lips = calculate_smma(median_price, 5)   # Green line
     
-    # Align Alligator components to lower timeframe (1d -> 1d, so no change but for consistency)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Volume confirmation: current volume > 1.8 * 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (vol_ma * 1.8)
     
     # ATR for trailing stop (14-period)
     tr1 = high - low
@@ -84,13 +70,13 @@ def generate_signals(prices):
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    # Start index: need enough for weekly EMA, Alligator, volume MA, and ATR
-    start_idx = max(50, 13, 8, 5, 20, 14) + 10
+    # Start index: need enough for Alligator and EMA
+    start_idx = max(50, 30, 13) + 10
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -99,19 +85,14 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Alligator conditions: Lips above Teeth above Jaw = bullish alignment
-        # Lips below Teeth below Jaw = bearish alignment
-        bullish_alignment = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
-        bearish_alignment = lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]
-        
-        # Breakout conditions: price breaks beyond lips with volume
-        breakout_long = curr_close > lips_aligned[i] and bullish_alignment
-        breakout_short = curr_close < lips_aligned[i] and bearish_alignment
+        # Alligator alignment conditions
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:
-            # Look for entry signals - require: Alligator breakout + volume spike + weekly EMA50 trend alignment
-            long_entry = breakout_long and vol_spike and (curr_close > ema_50_1w_aligned[i])
-            short_entry = breakout_short and vol_spike and (curr_close < ema_50_1w_aligned[i])
+            # Look for entry signals - require: Alligator alignment + volume spike + daily EMA50 trend alignment
+            long_entry = bullish_alignment and vol_spike and (curr_close > ema_50_1d_aligned[i])
+            short_entry = bearish_alignment and vol_spike and (curr_close < ema_50_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
@@ -132,16 +113,9 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             
-            # Exit conditions: 
-            # 1. Price retreats below lips (trend weakness)
-            # 2. Weekly trend changes (price crosses below weekly EMA50)
-            # 3. ATR trailing stop (2.5 * ATR from highest high)
-            lips_exit = curr_close < lips_aligned[i]
-            trend_exit = curr_close < ema_50_1w_aligned[i]
+            # Exit conditions: Alligator reversal, trend change, or ATR trailing stop
             trailing_stop = highest_high_since_entry - 2.5 * atr[i]
-            stop_exit = curr_close < trailing_stop
-            
-            if lips_exit or trend_exit or stop_exit:
+            if not bullish_alignment or curr_close < ema_50_1d_aligned[i] or curr_close < trailing_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -151,16 +125,9 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             
-            # Exit conditions:
-            # 1. Price rises above lips (trend weakness)
-            # 2. Weekly trend changes (price crosses above weekly EMA50)
-            # 3. ATR trailing stop (2.5 * ATR from lowest low)
-            lips_exit = curr_close > lips_aligned[i]
-            trend_exit = curr_close > ema_50_1w_aligned[i]
+            # Exit conditions: Alligator reversal, trend change, or ATR trailing stop
             trailing_stop = lowest_low_since_entry + 2.5 * atr[i]
-            stop_exit = curr_close > trailing_stop
-            
-            if lips_exit or trend_exit or stop_exit:
+            if not bearish_alignment or curr_close > ema_50_1d_aligned[i] or curr_close > trailing_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -168,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsAlligator_Breakout_1wEMA50_Trend_VolumeSpike_ATRTrailingStop"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_1dEMA50_Trend_VolumeSpike_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
