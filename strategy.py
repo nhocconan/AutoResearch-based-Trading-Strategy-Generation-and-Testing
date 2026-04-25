@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Camarilla R1/S1 Breakout with 1d EMA34 Trend Filter and Volume Spike
-Hypothesis: Camarilla R1/S1 levels act as strong daily support/resistance. 
-Breakouts above R1 or below S1 with volume confirmation and aligned with 1d EMA34 trend 
-capture swing moves in both bull and bear markets. ATR trailing stop manages risk.
-Target: 12-37 trades/year on 12h (50-150 total over 4 years) to minimize fee drag.
+1d Donchian(20) Breakout with 1w EMA34 Trend Filter and Volume Spike
+Hypothesis: Daily Donchian breakouts capture institutional swing moves. 
+Filtered by weekly EMA34 trend and volume confirmation to avoid false breakouts.
+Works in both bull and bear markets by following the primary trend on 1w.
+Target: 15-25 trades/year on 1d (60-100 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -21,86 +21,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Camarilla pivot levels from previous day (using typical price)
-    typical_price = (high + low + close) / 3.0
-    prev_typical = pd.Series(typical_price).shift(1)
-    prev_high = pd.Series(high).shift(1)
-    prev_low = pd.Series(low).shift(1)
-    prev_close = pd.Series(close).shift(1)
+    # Donchian channel (20-period breakout)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels for current day based on previous day
-    R1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
-    S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
-    # ATR for volatility filter and trailing stop
+    # ATR for volatility filter
     tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1d EMA34 trend filter (MTF)
-    df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA34 trend filter (MTF) - load ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     # Start index: need enough for all indicators
     start_idx = max(20, 34) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+            np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        vol_spike = volume_spike[i]
         
-        # Breakout conditions: price breaks Camarilla R1 or S1
-        breakout_long = curr_close > R1[i]
-        breakout_short = curr_close < S1[i]
+        # Breakout conditions
+        breakout_long = curr_close > highest_20[i]
+        breakout_short = curr_close < lowest_20[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla breakout + volume spike + 1d EMA trend alignment
-            long_entry = breakout_long and vol_spike and (curr_close > ema_34_1d_aligned[i])
-            short_entry = breakout_short and vol_spike and (curr_close < ema_34_1d_aligned[i])
+            # Look for entry signals - require: Donchian breakout + volume spike + 1w EMA trend alignment
+            long_entry = breakout_long and volume_spike[i] and (curr_close > ema_34_1w_aligned[i])
+            short_entry = breakout_short and volume_spike[i] and (curr_close < ema_34_1w_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = curr_high
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position management: ATR trailing stop
-            highest_since_entry = max(highest_since_entry, curr_high)
-            exit_level = highest_since_entry - (2.5 * atr_14[i])
-            
-            if curr_close < exit_level:
+            # Long position: exit on Donchian lower band break (reversal signal)
+            if curr_close < lowest_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position management: ATR trailing stop
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            exit_level = lowest_since_entry + (2.5 * atr_14[i])
-            
-            if curr_close > exit_level:
+            # Short position: exit on Donchian upper band break (reversal signal)
+            if curr_close > highest_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
