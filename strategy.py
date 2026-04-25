@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_ChopRegime_1dTrend
-Hypothesis: Donchian(20) breakouts on 4h with volume spike confirmation and choppiness regime filter (CHOP > 61.8 = range, < 38.2 = trend) aligned with 1d EMA50 trend. In trending regimes (CHOP < 38.2), follow breakout direction with 1d trend. In ranging regimes (CHOP > 61.8), mean revert at Donchian bands. Uses discrete position sizing (0.25) to minimize fee drag. Target: 20-40 trades/year.
+4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_RegimeFilter
+Hypothesis: Camarilla R3/S3 breakouts with 1d EMA34 trend filter and 4h ADX regime filter.
+ADX > 25 confirms strong trend for breakout continuation; ADX < 20 avoids whipsaw in ranging markets.
+Volume spike confirms institutional participation. Discrete sizing (0.30) limits fee drag.
+Designed to work in bull (trend continuation) and bear (mean reversion at R3/S3) markets.
+Target: 30-60 trades/year to stay within proven winning range.
 """
 
 import numpy as np
@@ -14,32 +18,44 @@ def calculate_ema(series, period):
         return np.full_like(series, np.nan)
     return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index: 100 * log10(sum(ATR) / (n * (max(high) - min(low)))) / log10(n)"""
-    if len(close) < period:
-        return np.full_like(close, np.nan)
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index with min_periods"""
+    if len(high) < period + 1:
+        return np.full_like(high, np.nan)
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    tr = np.concatenate([[np.nan], tr])
     
-    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    max_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    min_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    range_hl = max_high - min_low
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    chop = np.where(
-        (range_hl > 0) & (period > 0),
-        100 * np.log10(atr_sum / (range_hl * period)) / np.log10(period),
-        50.0  # neutral when range is zero
-    )
-    return chop
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / np.where(atr != 0, atr, np.nan)
+    di_minus = 100 * dm_minus_smooth / np.where(atr != 0, atr, np.nan)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) != 0, (di_plus + di_minus), np.nan)
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -47,34 +63,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA50 trend filter (loaded ONCE)
+    # 1d data for Camarilla pivots and EMA34 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 trend filter
-    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA34 trend filter
+    ema_34_1d = calculate_ema(df_1d['close'].values, 34)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d Camarilla levels (based on previous day's OHLC) - using R3/S3 (tighter bands for precision)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # 4h Volume spike: current volume > 2.0 * 20-period average
+    # Calculate Camarilla levels: R3, S3 (standard bands)
+    camarilla_range = 1.1 * (prev_high - prev_low)
+    r3 = prev_close + camarilla_range * 0.25  # R3 level
+    s3 = prev_close - camarilla_range * 0.25  # S3 level
+    
+    # Align Camarilla levels to 4h timeframe (already completed 1d bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 4h ADX for regime filter (trending vs ranging)
+    adx = calculate_adx(high, low, close, 14)
+    
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
-    
-    # 4h Choppiness Index (14-period)
-    chop = calculate_choppiness(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian (20) + volume MA (20) + EMA (50) + chop (14)
-    start_idx = max(20, 20, 50, 14)
+    # Start index: need enough for EMA (34) + volume MA (20) + ADX (14) + Camarilla (2)
+    start_idx = max(34, 20, 14, 2)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
@@ -84,63 +110,40 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals
-            long_breakout = curr_high > donchian_high[i]
-            short_breakout = curr_low < donchian_low[i]
+            # Look for entry signals - require: Camarilla R3/S3 breakout + volume spike + 1d EMA34 trend alignment + ADX > 25 (trending)
+            long_breakout = curr_high > r3_aligned[i]
+            short_breakout = curr_low < s3_aligned[i]
             
-            # Regime-based logic
-            if chop[i] < 38.2:  # Trending regime
-                # Follow breakout direction with 1d trend filter
-                long_entry = long_breakout and volume_spike[i] and (curr_close > ema_50_1d_aligned[i])
-                short_entry = short_breakout and volume_spike[i] and (curr_close < ema_50_1d_aligned[i])
-            elif chop[i] > 61.8:  # Ranging regime
-                # Mean revert at Donchian bands
-                long_entry = short_breakout and volume_spike[i] and (curr_close < ema_50_1d_aligned[i])  # short breakout -> long mean reversion
-                short_entry = long_breakout and volume_spike[i] and (curr_close > ema_50_1d_aligned[i])   # long breakout -> short mean reversion
-            else:  # Neutral regime (38.2 <= CHOP <= 61.8)
-                # No clear edge, stay flat
-                long_entry = False
-                short_entry = False
+            long_entry = (long_breakout and volume_spike[i] and 
+                         (curr_close > ema_34_1d_aligned[i]) and (adx[i] > 25))
+            short_entry = (short_breakout and volume_spike[i] and 
+                          (curr_close < ema_34_1d_aligned[i]) and (adx[i] > 25))
             
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below Donchian low or trend turns bearish in trending regime
-            if chop[i] < 38.2:  # Trending regime
-                if curr_close < donchian_low[i] or curr_close < ema_50_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # Ranging or neutral regime: exit at mean reversion
-                if curr_close > (donchian_high[i] + donchian_low[i]) / 2:  # midpoint
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long position: exit when price closes below R3 (failed breakout) or trend turns bearish or ADX < 20 (ranging)
+            if curr_close < r3_aligned[i] or curr_close < ema_34_1d_aligned[i] or adx[i] < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.30
         elif position == -1:
-            # Short position: exit when price closes above Donchian high or trend turns bullish in trending regime
-            if chop[i] < 38.2:  # Trending regime
-                if curr_close > donchian_high[i] or curr_close > ema_50_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # Ranging or neutral regime: exit at mean reversion
-                if curr_close < (donchian_high[i] + donchian_low[i]) / 2:  # midpoint
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short position: exit when price closes above S3 (failed breakout) or trend turns bullish or ADX < 20 (ranging)
+            if curr_close > s3_aligned[i] or curr_close > ema_34_1d_aligned[i] or adx[i] < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ChopRegime_1dTrend"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_RegimeFilter"
 timeframe = "4h"
 leverage = 1.0
