@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR volume spike filter and trend confirmation.
-- Primary timeframe: 4h targeting 100-200 total trades over 4 years (25-50/year).
-- HTF: 1d for ATR-based volume spike filter and EMA50 trend filter.
-- Donchian Channel: Upper/lower bands from 20-period high/low on 4h for breakout.
-- Volume Spike Filter: Current 4h volume > 1.5 * 20-period average 4h volume AND 
-                       1d ATR(14) > 1.2 * 20-period average 1d ATR(14) (volatility expansion).
-- Trend Filter: 4h close > EMA50 for longs, close < EMA50 for shorts.
-- Entry: Long when price breaks above Donchian upper AND volume spike AND uptrend.
-         Short when price breaks below Donchian lower AND volume spike AND downtrend.
-- Exit: Opposite Donchian break (long exits when price < lower band, short exits when price > upper band).
+Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
+- HTF: 1w for EMA50 trend direction filter (avoid counter-trend trades).
+- Donchian Channel: 20-period high/low breakouts for momentum capture.
+- Volume Filter: Current 1d volume > 1.5 * 20-period average 1d volume.
+- Entry: Long when close > upper Donchian AND 1w EMA50 up AND volume confirmation.
+         Short when close < lower Donchian AND 1w EMA50 down AND volume confirmation.
+- Exit: Opposite Donchian break or EMA50 trend reversal.
 - Signal size: 0.25 discrete to minimize fee drag.
-- Designed to capture volatility expansion breakouts in both bull and bear markets.
+- Designed to capture strong trends while filtering chop and false breakouts.
 """
 
 import numpy as np
@@ -29,104 +27,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian Channel (20-period)
-    donchian_window = 20
-    donchian_upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
-    # Calculate 4h EMA50 for trend filter
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Calculate 4h volume MA for volume spike filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d ATR(14) for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient 1d data
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # 1d True Range calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # EMA50 calculation on weekly close
+    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate 20-period Donchian channels on 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # 1d ATR MA for volatility comparison
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    # Donchian upper/lower bands (20-period high/low)
+    donch_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d ATR and ATR MA to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    # Align Donchian levels to 1d timeframe (waits for 1d bar close)
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    
+    # Calculate 1d volume average for confirmation (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 50, 20)  # Donchian20, EMA50, volMA20
+    start_idx = max(50, 20)  # Need 50 for EMA, 20 for Donchian/volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(ema50[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma_1d_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
-        donchian_up = donchian_upper[i]
-        donchian_low = donchian_lower[i]
-        ema50_val = ema50[i]
-        vol_ma_val = vol_ma[i]
-        atr_1d_val = atr_1d_aligned[i]
-        atr_ma_1d_val = atr_ma_1d_aligned[i]
+        donch_high_level = donch_high_aligned[i]
+        donch_low_level = donch_low_aligned[i]
+        ema_50_level = ema_50_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5 * 20-period average volume
+        volume_confirm = curr_volume > 1.5 * vol_ma_20[i]
         
         # Donchian breakout conditions
-        broke_above = curr_high > donchian_up  # Use high for breakout detection
-        broke_below = curr_low < donchian_low   # Use low for breakout detection
+        broke_above = curr_close > donch_high_level
+        broke_below = curr_close < donch_low_level
         
-        # Volume spike filter: 4h volume > 1.5 * 20-period average AND 1d ATR > 1.2 * 20-period average
-        volume_spike = curr_volume > 1.5 * vol_ma_val
-        atr_expansion = atr_1d_val > 1.2 * atr_ma_1d_val
-        volatility_filter = volume_spike and atr_expansion
+        # EMA50 trend direction
+        ema_trend_up = curr_close > ema_50_level
+        ema_trend_down = curr_close < ema_50_level
         
-        # Trend filter: EMA50 direction
-        uptrend = curr_close > ema50_val
-        downtrend = curr_close < ema50_val
-        
-        # Exit conditions: opposite Donchian break
+        # Exit conditions
         if position != 0:
-            # Exit long: price breaks below Donchian lower
+            # Exit long: close breaks below lower Donchian OR EMA50 trend turns down
             if position == 1:
-                if curr_low < donchian_low:
+                if broke_below or ema_trend_down:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Donchian upper
+            # Exit short: close breaks above upper Donchian OR EMA50 trend turns up
             elif position == -1:
-                if curr_high > donchian_up:
+                if broke_above or ema_trend_up:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with volatility and trend filters
+        # Entry conditions: Donchian breakout with EMA50 trend filter and volume confirmation
         if position == 0:
-            # Long: break above upper AND volatility filter AND uptrend
-            long_condition = broke_above and volatility_filter and uptrend
+            # Long: break above upper Donchian AND EMA50 trend up AND volume confirmation
+            long_condition = broke_above and ema_trend_up and volume_confirm
             
-            # Short: break below lower AND volatility filter AND downtrend
-            short_condition = broke_below and volatility_filter and downtrend
+            # Short: break below lower Donchian AND EMA50 trend down AND volume confirmation
+            short_condition = broke_below and ema_trend_down and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -143,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dATRVolSpike_EMA50Trend_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
