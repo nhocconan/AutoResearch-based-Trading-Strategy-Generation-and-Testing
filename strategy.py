@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Confluence_Breakout_1dTrend_VolumeConfirm
-Hypothesis: On 6h timeframe, weekly pivot (from 1w) acts as strong support/resistance. 
-Breakout above R1 or below S1 with 1d EMA34 trend alignment and volume spike confirms institutional interest.
-Works in bull markets via breakout continuation and bear markets via mean reversion at extreme levels (R3/S3).
-Weekly pivots are less noisy than daily and capture smart money levels. Volume spike avoids false breakouts.
-Target: 12-30 trades/year (50-120 over 4 years) to minimize fee drag.
+12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: On 12h timeframe, Camarilla H3/L3 breakout from prior 1d bar, combined with 1d EMA34 trend filter and volume confirmation.
+H3/L3 are stronger reversal/continuation levels than R1/S1 on higher timeframes. 1d EMA34 ensures alignment with daily trend.
+Volume spike confirms breakout strength. Designed for 12-30 trades/year (50-120 over 4 years) to avoid fee drag.
+Works in bull markets via breakout continuation and bear markets via mean reversion at extreme levels (confluence filters reduce false signals).
 """
 
 import numpy as np
@@ -22,33 +21,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot calculation (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
+    # 1d data for EMA34 trend filter and Camarilla calculation (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Weekly pivot points: using prior week's OHLC
-    prev_week_close = df_1w['close'].shift(1).values
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
+    # Prior 1d bar OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot - prev_week_low
-    s1 = 2 * pivot - prev_week_high
-    r2 = pivot + (prev_week_high - prev_week_low)
-    s2 = pivot - (prev_week_high - prev_week_low)
-    r3 = prev_week_high + 2 * (pivot - prev_week_low)
-    s3 = prev_week_low - 2 * (prev_week_high - pivot)
+    # Camarilla levels: H3, L3 (stronger levels for 12h timeframe)
+    camarilla_range = prev_high - prev_low
+    h3 = prev_close + camarilla_range * 1.1 / 4
+    l3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Align weekly pivot levels to 6h timeframe (completed weekly bar)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Align Camarilla levels to 12h timeframe (completed 1d bar)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,9 +54,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -74,11 +65,9 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals
-            # Long: break above R1 with volume spike and 1d EMA34 uptrend
-            # Short: break below S1 with volume spike and 1d EMA34 downtrend
-            long_breakout = curr_high > r1_aligned[i]
-            short_breakout = curr_low < s1_aligned[i]
+            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment
+            long_breakout = curr_high > h3_aligned[i]
+            short_breakout = curr_low < l3_aligned[i]
             
             # Trend filter: price must be on correct side of 1d EMA34
             long_trend = curr_close > ema_34_1d_aligned[i]
@@ -96,17 +85,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below R1 (failed breakout) 
-            # or reaches R3 (take profit at extreme) or trend reverses
-            if curr_close < r1_aligned[i] or curr_close > r3_aligned[i] or curr_close < ema_34_1d_aligned[i]:
+            # Long position: exit when price closes below Camarilla H3 (failed breakout) or trend reverses
+            if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price closes above S1 (failed breakout) 
-            # or reaches S3 (take profit at extreme) or trend reverses
-            if curr_close > s1_aligned[i] or curr_close < s3_aligned[i] or curr_close > ema_34_1d_aligned[i]:
+            # Short position: exit when price closes above Camarilla L3 (failed breakout) or trend reverses
+            if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Confluence_Breakout_1dTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
