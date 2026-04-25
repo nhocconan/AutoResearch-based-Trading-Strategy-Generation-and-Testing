@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot Reversal with Volume Confirmation and EMA Filter
-Hypothesis: Weekly pivot levels act as strong support/resistance in ranging and trending markets.
-Price reverses from weekly R2/S2 with volume confirmation and 1d EMA50 trend filter.
-Works in bull via buying S2 reversals, bear via selling R2 reversals. Uses discrete position sizing (0.25)
-to control drawdown. Target: 12-37 trades/year on 6h.
+12h Donchian Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+Hypothesis: Donchian(20) breakouts on 12h capture medium-term trends, with 1d EMA34 filtering direction.
+Volume spike confirms institutional participation, chop filter avoids whipsaws in ranging markets.
+Works in bull via buying upper band breakouts, bear via selling lower band breakdowns.
+Uses discrete position sizing (0.25) to control drawdown. Target: 12-37 trades/year on 12h.
 """
 
 import numpy as np
@@ -21,33 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter (call ONCE before loop)
+    # Get 1d data for EMA34 trend filter and Donchian calculation (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 1w data for weekly pivot points (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
+    # Calculate 1d Donchian channels (20-period)
+    if len(df_1d) >= 20:
+        donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+        donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+        donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    else:
+        donchian_high_aligned = np.full(n, np.nan)
+        donchian_low_aligned = np.full(n, np.nan)
     
-    # Weekly pivot: P = (H+L+C)/3, R2 = P + (H-L), S2 = P - (H-L)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    
-    # Align weekly pivot levels to 6h (no extra delay needed for pivot points)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
-    
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(14) for stoploss on 12h data
     if len(close) >= 14:
         tr1 = pd.Series(high).diff().abs()
         tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
@@ -57,8 +50,36 @@ def generate_signals(prices):
     else:
         atr = np.full(n, 0.0)
     
-    # Pre-compute volume MA(20) for spike detection
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Choppiness Index(14) on 1d for regime filter
+    if len(df_1d) >= 14:
+        # True Range
+        tr1_1d = pd.Series(df_1d['high']).diff().abs()
+        tr2_1d = (pd.Series(df_1d['high']) - pd.Series(df_1d['close']).shift()).abs()
+        tr3_1d = (pd.Series(df_1d['low']) - pd.Series(df_1d['close']).shift()).abs()
+        tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
+        atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+        
+        # Max High - Min Low over 14 periods
+        max_high_1d = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+        min_low_1d = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+        range_1d = max_high_1d - min_low_1d
+        
+        # Chop = 100 * log10(sum(atr14) / (log14 * (max_high - min_low)))
+        sum_atr_1d = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+        chop = 100 * np.log10(sum_atr_1d / (np.log10(14) * range_1d))
+        chop = np.where(range_1d == 0, 50, chop)  # avoid division by zero
+        chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    else:
+        chop_aligned = np.full(n, 50.0)  # neutral chop
+    
+    # Pre-compute volume spike: current volume > 2.0 * 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        elif i >= 0:
+            vol_ma_20[i] = np.mean(volume[:i+1])
+    volume_spike = volume > 2.0 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,11 +90,11 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(weekly_r2_aligned[i]) or 
-            np.isnan(weekly_s2_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(volume_ma_20[i])):
+            np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,20 +104,24 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_50 = ema_50_1d_aligned[i]
-        r2_level = weekly_r2_aligned[i]
-        s2_level = weekly_s2_aligned[i]
+        ema_34 = ema_34_1d_aligned[i]
+        upper_band = donchian_high_aligned[i]
+        lower_band = donchian_low_aligned[i]
         atr_val = atr[i]
-        vol_ma = volume_ma_20[i]
-        
-        # Volume spike: current volume > 1.5 * 20-period average
-        volume_spike = curr_volume > 1.5 * vol_ma
+        chop_val = chop_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: reversal from S2 with volume spike AND above EMA50 (uptrend bias)
-            long_condition = curr_low <= s2_level and curr_close > s2_level and volume_spike and curr_close > ema_50
-            # Short: reversal from R2 with volume spike AND below EMA50 (downtrend bias)
-            short_condition = curr_high >= r2_level and curr_close < r2_level and volume_spike and curr_close < ema_50
+            # Long: break above upper band AND uptrend AND low chop AND volume spike
+            long_condition = (curr_high > upper_band and 
+                             curr_close > ema_34 and 
+                             chop_val < 61.8 and 
+                             vol_spike)
+            # Short: break below lower band AND downtrend AND low chop AND volume spike
+            short_condition = (curr_low < lower_band and 
+                              curr_close < ema_34 and 
+                              chop_val < 61.8 and 
+                              vol_spike)
             
             if long_condition:
                 signals[i] = 0.25
@@ -107,15 +132,19 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or price falls below EMA50
-            if curr_close <= entry_price - 2.0 * atr_val or curr_close < ema_50:
+            # Exit long: stoploss (2.5*ATR below entry) or price falls below EMA34 or chop > 61.8
+            if (curr_close <= entry_price - 2.5 * atr_val or 
+                curr_close < ema_34 or 
+                chop_val > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or price rises above EMA50
-            if curr_close >= entry_price + 2.0 * atr_val or curr_close > ema_50:
+            # Exit short: stoploss (2.5*ATR above entry) or price rises above EMA34 or chop > 61.8
+            if (curr_close >= entry_price + 2.5 * atr_val or 
+                curr_close > ema_34 or 
+                chop_val > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Weekly_Pivot_R2S2_Reversal_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
