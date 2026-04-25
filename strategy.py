@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeConfirm_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA50 trend filter and volume confirmation.
-Uses 1d trend to capture intermediate market direction, reducing false breakouts.
-Volume confirmation ensures breakouts have conviction. Discrete sizing (0.25) limits fee drag.
-Designed to work in both bull and bear markets by aligning with 1d trend.
-Target: 19-50 trades/year per symbol (75-200 total over 4 years).
+6h_WilliamsFractal_Breakout_1dTrendFilter_v1
+Hypothesis: Trade Williams Fractal breakouts on 6h with 1d EMA34 trend filter.
+Williams Fractals identify potential reversal points; breakouts above/below recent fractals
+with 1d trend alignment capture momentum in both bull and bear markets.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,54 +21,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter and Camarilla pivots
+    # Get 1d data for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for HTF trend filter
+    # Calculate 1d EMA34 for HTF trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
-    
-    camarilla_r1 = close_1d_vals + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d_vals - 1.1 * (high_1d - low_1d) / 12
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    # Compute Williams Fractals on 1d data (requires 2 extra bars for confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Align with 2-bar delay for fractal confirmation (needs 2 future 1d bars to confirm)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and volume MA (20)
-    start_idx = max(50, 20)
+    # Start index: need warmup for EMA34 (34) and fractals (5 bars for pattern + 2 delay)
+    start_idx = max(34, 5 + 2)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend (bullish = price above EMA50)
-        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
+        # Determine 1d HTF trend (bullish = price above EMA34)
+        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long setup: price breaks above R1 + 1d uptrend + volume confirmation
-            long_setup = (close[i] > camarilla_r1_aligned[i]) and htf_1d_bullish and volume_confirm[i]
+            # Long setup: price breaks above bullish fractal + 1d uptrend
+            long_setup = (close[i] > bullish_fractal_aligned[i]) and htf_1d_bullish
             
-            # Short setup: price breaks below S1 + 1d downtrend + volume confirmation
-            short_setup = (close[i] < camarilla_s1_aligned[i]) and htf_1d_bearish and volume_confirm[i]
+            # Short setup: price breaks below bearish fractal + 1d downtrend
+            short_setup = (close[i] < bearish_fractal_aligned[i]) and htf_1d_bearish
             
             if long_setup:
                 signals[i] = 0.25
@@ -82,20 +79,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches S1 (stop) OR 1d trend turns bearish
-            if (close[i] <= camarilla_s1_aligned[i]) or (not htf_1d_bullish):
+            # Exit: price touches bearish fractal (stop) OR 1d trend turns bearish
+            if (close[i] <= bearish_fractal_aligned[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches R1 (stop) OR 1d trend turns bullish
-            if (close[i] >= camarilla_r1_aligned[i]) or (htf_1d_bullish):
+            # Exit: price touches bullish fractal (stop) OR 1d trend turns bullish
+            if (close[i] >= bullish_fractal_aligned[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_WilliamsFractal_Breakout_1dTrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
