@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter_v1
-Hypothesis: 4-hour Camarilla R1/S1 breakout with 1d EMA34 trend filter and chop regime filter.
-Targets 19-50 trades/year by requiring: 1) price breaks daily R1/S1 levels (strong breakout),
-2) aligned with 1d EMA34 trend, 3) choppiness index < 61.8 (trending market). Uses 4h timeframe
-to balance trade frequency and fee drag while capturing significant moves in both bull and bear markets.
-Chop filter prevents whipsaws in ranging markets, improving performance in bear/range regimes like 2025.
+6h_ElderRay_BullBearPower_RegimeFilter_v1
+Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with 1-day EMA13 trend filter and regime detection via ADX(14) < 20 for mean reversion.
+Targets 12-37 trades/year by requiring: 1) Bull Power > 0 and Bear Power < 0 for momentum confirmation,
+2) price > 1d EMA13 for uptrend bias (or < for downtrend), 3) ADX < 20 indicating ranging market for mean reversion entries.
+Uses 6h timeframe to balance trade frequency and fee drag while capturing reversals in ranging markets.
 """
 
 import numpy as np
@@ -26,42 +25,56 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1d data for EMA34 trend filter (loaded ONCE)
+    # 1d data for EMA13 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # 1d data for Camarilla pivots (loaded ONCE)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
+    # 1d data for ADX(14) regime filter (loaded ONCE)
+    # Calculate ADX components: +DM, -DM, TR
+    plus_dm = np.zeros(len(df_1d))
+    minus_dm = np.zeros(len(df_1d))
+    tr = np.zeros(len(df_1d))
     
-    # Camarilla R1 and S1 levels (R1 = C + 1.1*(HL/12), S1 = C - 1.1*(HL/12))
-    R1 = prev_close + 1.1 * prev_range * (1.0/12.0)
-    S1 = prev_close - 1.1 * prev_range * (1.0/12.0)
+    for i in range(1, len(df_1d)):
+        high_diff = df_1d['high'].iloc[i] - df_1d['high'].iloc[i-1]
+        low_diff = df_1d['low'].iloc[i-1] - df_1d['low'].iloc[i]
+        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
+        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
+        tr[i] = max(df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+                    abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+                    abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1]))
     
-    # Align 1d levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Choppiness Index filter (14-period) - loaded ONCE
-    chop_period = 14
-    true_range = np.maximum(high - low, 
-                           np.absolute(high - np.concatenate([[close[0]], close[:-1]])),
-                           np.absolute(low - np.concatenate([[close[0]], close[:-1]])))
-    atr_sum = pd.Series(true_range).rolling(window=chop_period, min_periods=chop_period).sum().values
-    highest_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
-    lowest_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(chop_period)
-    chop_filter = chop < 61.8  # Trending market regime
+    period = 14
+    if len(tr) >= period:
+        atr = wilder_smooth(tr, period)
+        plus_di = 100 * wilder_smooth(plus_dm, period) / atr
+        minus_di = 100 * wilder_smooth(minus_dm, period) / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = wilder_smooth(dx, period)
+    else:
+        adx = np.full_like(tr, np.nan)
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13_1d_aligned
+    bear_power = low - ema_13_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for chop calculation (14) and previous day data (1)
-    start_idx = max(34, chop_period) + 1
+    # Start index: need enough for ADX calculation
+    start_idx = 14 + 13  # ADX period + EMA warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -70,31 +83,32 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(chop[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Regime filter: ADX < 20 indicates ranging market (mean reversion favorable)
+        ranging = adx_aligned[i] < 20
+        
+        # Trend filter: price relative to 1d EMA13
+        uptrend = curr_close > ema_13_1d_aligned[i]
+        downtrend = curr_close < ema_13_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals with chop filter
-            # Long breakout: price breaks above R1 with uptrend and trending market
-            long_breakout = (curr_close > R1_aligned[i]) and uptrend and chop_filter[i]
-            # Short breakout: price breaks below S1 with downtrend and trending market
-            short_breakout = (curr_close < S1_aligned[i]) and downtrend and chop_filter[i]
+            # Look for entry signals in ranging market
+            # Long: Bull Power > 0 (strong bulls) and Bear Power < 0 (weak bears) in uptrend bias
+            # Short: Bear Power < 0 (strong bears) and Bull Power > 0 (weak bulls) in downtrend bias
+            long_signal = ranging and bull_power[i] > 0 and bear_power[i] < 0 and uptrend
+            short_signal = ranging and bear_power[i] < 0 and bull_power[i] > 0 and downtrend
             
-            if long_breakout:
+            if long_signal:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            elif short_breakout:
+            elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -102,16 +116,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Exit if price breaks below S1 (mean reversion) or trend changes or chop becomes high
-            if curr_close < S1_aligned[i] or not uptrend or chop_filter[i] == False:
+            # Exit if Bear Power becomes positive (bulls weakening) or trend changes
+            if bear_power[i] >= 0 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Exit if price breaks above R1 (mean reversion) or trend changes or chop becomes high
-            if curr_close > R1_aligned[i] or not downtrend or chop_filter[i] == False:
+            # Exit if Bull Power becomes negative (bears weakening) or trend changes
+            if bull_power[i] <= 0 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter_v1"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_RegimeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
