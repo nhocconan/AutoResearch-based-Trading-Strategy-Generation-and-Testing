@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3_S3_Breakout_1wEMA50_Trend_VolumeSpike_v1
-Hypothesis: Trade daily Camarilla R3/S3 breakouts with 1-week EMA50 trend filter and volume spike confirmation.
-- Trend filter: price > 1w close + 0.5*ATR(14) = bullish, price < 1w close - 0.5*ATR(14) = bearish, else ranging.
-- In trending markets: buy breakouts above R3, sell breakdowns below S3.
-- In ranging markets: fade extremes at R3/S3 with mean reversion to pivot.
-- Volume confirmation: require volume > 1.5x 20-period average to avoid false breakouts.
-- Position size: 0.25. Target: 30-100 total trades over 4 years = 7-25/year.
-- Works in both bull and bear: ATR trend filter adapts to volatility regime, volume filters noise.
+6h_ElderRay_WeeklyTrend_RegimeFilter_v1
+Hypothesis: Trade 6h Elder Ray (Bull/Bear Power) with 1w trend filter and volatility regime.
+- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+- 1w EMA50 trend: bullish if close > EMA50, bearish if close < EMA50
+- Volatility regime: ATR(14) percentile > 0.7 = high vol (trade with trend), < 0.3 = low vol (fade extremes)
+- In bull trend + high vol: buy when Bull Power > 0 and rising
+- In bear trend + high vol: sell when Bear Power < 0 and falling
+- In low vol: fade at 2.0*ATR from EMA13 (mean reversion)
+- Volume confirmation: require volume > 1.3x 20-period average
+- Position size: 0.25. Target: 50-150 total trades over 4 years = 12-37/year.
+- Works in bull via trend-following, in bear via mean reversion in low vol and selective shorting.
 """
 
 import numpy as np
@@ -26,106 +29,103 @@ def generate_signals(prices):
     
     # Get 1w data for HTF trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1w ATR(14) for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1w EMA50 for trend filter
     close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # True Range calculation
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # Calculate 13-period EMA for Elder Ray (on 6h data)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
+    
+    # ATR(14) for volatility regime
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    tr = np.concatenate([[np.nan], tr])
+    atr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    atr_14_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    # ATR percentile rank (50-period lookback) for volatility regime
+    atr_percentile = np.zeros_like(atr14)
+    for i in range(50, len(atr14)):
+        window = atr14[i-50:i+1]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            atr_percentile[i] = (np.sum(valid <= atr14[i]) / len(valid)) * 100
     
-    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
-    # Need to resample daily OHLC from 15m data? No - we can use 1d data from prices if available
-    # Since we're on 1d timeframe, we can use the daily OHLC directly
-    # But we need previous day's OHLC for today's Camarilla levels
-    # For 1d timeframe, we can shift the daily OHLC by 1
-    
-    # Since prices is already 1d timeframe, we can use:
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_ = prev_high - prev_low
-    
-    # Camarilla levels
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
-    r3 = pivot + (range_ * 1.1 / 4)
-    s3 = pivot - (range_ * 1.1 / 4)
-    
-    # Volume spike confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for ATR(14) and volume MA (20)
-    start_idx = max(14, 20)
+    # Start index: need warmup for EMA13(13), ATR(14), vol MA(20), ATR percentile(50)
+    start_idx = max(13, 14, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_14_1w_aligned[i]) or 
-            np.isnan(r3[i]) or
-            np.isnan(s3[i]) or
-            np.isnan(pivot[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(ema13[i]) or
+            np.isnan(atr14[i]) or
+            np.isnan(atr_percentile[i]) or
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend using ATR bands
-        # Align 1w close to 1d timeframe
-        close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-        htf_1w_bullish = close[i] > (close_1w_aligned[i] + (0.5 * atr_14_1w_aligned[i]))
-        htf_1w_bearish = close[i] < (close_1w_aligned[i] - (0.5 * atr_14_1w_aligned[i]))
+        # Determine 1w HTF trend
+        htf_1w_bullish = close[i] > ema50_1w_aligned[i]
+        htf_1w_bearish = close[i] < ema50_1w_aligned[i]
         
-        # Determine if we are in trending or ranging market based on ATR bands
-        trending_market = htf_1w_bullish or htf_1w_bearish
-        ranging_market = not trending_market
+        # Determine volatility regime
+        high_vol = atr_percentile[i] > 70  # ATR percentile > 70 = high volatility
+        low_vol = atr_percentile[i] < 30   # ATR percentile < 30 = low volatility
         
         if position == 0:
-            if trending_market:
-                # Trending market: trade breakout continuation
-                long_setup = (close[i] > r3[i]) and htf_1w_bullish and volume_spike[i]
-                short_setup = (close[i] < s3[i]) and htf_1w_bearish and volume_spike[i]
-            else:
-                # Ranging market: trade mean reversion at extremes
-                long_setup = (close[i] < s3[i]) and (close[i] > s1[i]) and volume_spike[i]  # Oversold bounce
-                short_setup = (close[i] > r3[i]) and (close[i] < r1[i]) and volume_spike[i]  # Overbought rejection
-            
-            if long_setup:
-                signals[i] = 0.25
-                position = 1
-            elif short_setup:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
+            if htf_1w_bullish and high_vol:
+                # Bull trend + high vol: trend following on bull power strength
+                long_setup = (bull_power[i] > 0) and (bull_power[i] > bull_power[i-1]) and volume_spike[i]
+                if long_setup:
+                    signals[i] = 0.25
+                    position = 1
+            elif htf_1w_bearish and high_vol:
+                # Bear trend + high vol: trend following on bear power weakness
+                short_setup = (bear_power[i] < 0) and (bear_power[i] < bear_power[i-1]) and volume_spike[i]
+                if short_setup:
+                    signals[i] = -0.25
+                    position = -1
+            elif low_vol:
+                # Low volatility: mean reversion at 2.0*ATR from EMA13
+                long_setup = (close[i] < (ema13[i] - 2.0 * atr14[i])) and volume_spike[i]
+                short_setup = (close[i] > (ema13[i] + 2.0 * atr14[i])) and volume_spike[i]
+                if long_setup:
+                    signals[i] = 0.25
+                    position = 1
+                elif short_setup:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
             # Exit conditions
-            if trending_market:
-                # In trending market: exit on trend reversal or touch of S3
-                exit_signal = (not htf_1w_bullish) or (close[i] < s3[i])
+            if htf_1w_bullish and high_vol:
+                # In bull trend + high vol: exit on bear power turning positive (weakness)
+                exit_signal = bear_power[i] > 0
+            elif low_vol:
+                # In low vol: exit on mean reversion to EMA13 or overextension
+                exit_signal = (close[i] > ema13[i]) or (close[i] > (ema13[i] + 1.5 * atr14[i]))
             else:
-                # In ranging market: exit on mean reversion to pivot or touch of R3
-                exit_signal = (close[i] > pivot[i]) or (close[i] > r3[i])
+                # Default: exit on trend reversal or power failure
+                exit_signal = (not htf_1w_bullish) or (bull_power[i] <= 0)
             
             if exit_signal:
                 signals[i] = 0.0
@@ -134,12 +134,15 @@ def generate_signals(prices):
             # Short: hold position
             signals[i] = -0.25
             # Exit conditions
-            if trending_market:
-                # In trending market: exit on trend reversal or touch of R3
-                exit_signal = htf_1w_bullish or (close[i] > r3[i])
+            if htf_1w_bearish and high_vol:
+                # In bear trend + high vol: exit on bull power turning negative (weakness)
+                exit_signal = bull_power[i] < 0
+            elif low_vol:
+                # In low vol: exit on mean reversion to EMA13 or overextension
+                exit_signal = (close[i] < ema13[i]) or (close[i] < (ema13[i] - 1.5 * atr14[i]))
             else:
-                # In ranging market: exit on mean reversion to pivot or touch of S3
-                exit_signal = (close[i] < pivot[i]) or (close[i] < s3[i])
+                # Default: exit on trend reversal or power failure
+                exit_signal = (not htf_1w_bearish) or (bear_power[i] >= 0)
             
             if exit_signal:
                 signals[i] = 0.0
@@ -147,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R3_S3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_WeeklyTrend_RegimeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
