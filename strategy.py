@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + 1d EMA34 Trend + Volume Spike
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures
-buying/selling pressure relative to trend. In strong uptrends (price > 1d EMA34),
-Bull Power > 0 indicates buying momentum for longs. In strong downtrends (price < 1d EMA34),
-Bear Power < 0 indicates selling pressure for shorts. Volume spike confirms institutional
-participation. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
-6h timeframe targets 12-37 trades/year (50-150 over 4 years).
+6h Weekly Pivot Donchian Breakout + Volume Spike
+Hypothesis: Weekly Camarilla pivot levels (R3/S3, R4/S4) provide significant support/resistance.
+Donchian(20) breakout in the direction of weekly pivot (above R3 for long, below S3 for short)
+captures institutional breakouts with volume confirmation. Weekly timeframe ensures structural
+levels, 6h provides timely execution. Works in bull markets (breakouts above weekly resistance)
+and bear markets (breakdowns below weekly support). Targets 12-37 trades/year.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,52 +22,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly Camarilla pivot levels
+    # Weekly OHLC from previous completed weekly bar
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate EMA13 for Elder Ray (using close)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Pivot point (PP) = (H + L + C) / 3
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Range = H - L
+    range_w = weekly_high - weekly_low
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Buying pressure
-    bear_power = low - ema_13   # Selling pressure
+    # Camarilla levels
+    r3 = pp + (range_w * 1.1 / 4.0)  # R3
+    s3 = pp - (range_w * 1.1 / 4.0)  # S3
+    r4 = pp + (range_w * 1.1 / 2.0)  # R4
+    s4 = pp - (range_w * 1.1 / 2.0)  # S4
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Align weekly levels to 6h timeframe (completed weekly bar only)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    
+    # Donchian(20) channels on 6h
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 13, 34)  # volume MA, EMA13, 1d EMA34 alignment
+    start_idx = max(lookback, 20)  # Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        curr_high = high[i]
+        curr_low = low[i]
         curr_close = close[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
         vol_spike = volume_spike[i]
-        
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_aligned[i]
-        downtrend = curr_close < ema_34_aligned[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: Bull Power > 0 AND uptrend AND volume spike
-            long_entry = (curr_bull_power > 0) and uptrend and vol_spike
-            # Short: Bear Power < 0 AND downtrend AND volume spike
-            short_entry = (curr_bear_power < 0) and downtrend and vol_spike
+            # Long: Donchian breakout above R3 AND volume spike
+            long_entry = (curr_high > donchian_high[i-1]) and (donchian_high[i-1] > r3_aligned[i]) and vol_spike
+            # Short: Donchian breakdown below S3 AND volume spike
+            short_entry = (curr_low < donchian_low[i-1]) and (donchian_low[i-1] < s3_aligned[i]) and vol_spike
             
             if long_entry:
                 signals[i] = 0.25
@@ -80,16 +93,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Bull Power turns negative (loss of buying pressure) OR loss of uptrend
-            if (curr_bull_power <= 0) or (curr_close < ema_34_aligned[i]):
+            # Exit: Donchian breakdown below midpoint OR loss of weekly structure
+            midpoint = (donchian_high[i-1] + donchian_low[i-1]) / 2.0
+            if curr_close < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: Bear Power turns positive (loss of selling pressure) OR loss of downtrend
-            if (curr_bear_power >= 0) or (curr_close > ema_34_aligned[i]):
+            # Exit: Donchian breakout above midpoint OR loss of weekly structure
+            midpoint = (donchian_high[i-1] + donchian_low[i-1]) / 2.0
+            if curr_close > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_VolumeSpike_1dEMA34_Trend"
+name = "6h_WeeklyPivot_DonchianBreakout_VolumeSpike"
 timeframe = "6h"
 leverage = 1.0
