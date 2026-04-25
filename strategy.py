@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike
-Hypothesis: Trade 4h Camarilla R3/S3 breakouts aligned with daily EMA34 trend and volume spike (>1.5*ATR14).
+4h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike_v2
+Hypothesis: Trade 4h Camarilla R3/S3 breakouts aligned with daily EMA34 trend and volume spike (>1.8*ATR14).
+Tighter volume threshold and minimum holding period (4 bars) to reduce overtrading vs prior variants.
 Only trade in direction of daily trend to avoid whipsaws. Uses discrete sizing 0.25 to limit fee drag.
-Target: 20-50 trades/year to avoid fee drag while maintaining edge. Works in bull/bear via daily trend filter.
+Target: 15-40 trades/year to avoid fee drag while maintaining edge. Works in bull/bear via daily trend filter.
 """
 
 import numpy as np
@@ -70,8 +71,8 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
         
-        # Volume confirmation: current volume > 1.5 * ATR (tightened to reduce trades)
-        volume_confirm = volume[i] > 1.5 * atr[i]
+        # Volume confirmation: current volume > 1.8 * ATR (tighter to reduce trades)
+        volume_confirm = volume[i] > 1.8 * atr[i]
         
         # Determine daily trend from EMA34
         daily_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)[i]
@@ -105,8 +106,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             bars_since_entry += 1
-            # Minimum holding period: 3 bars (~12 hours for 4h)
-            if bars_since_entry < 3:
+            # Minimum holding period: 4 bars (~16 hours for 4h)
+            if bars_since_entry < 4:
                 signals[i] = 0.25
             else:
                 # Long: hold position
@@ -118,8 +119,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
         elif position == -1:
             bars_since_entry += 1
-            # Minimum holding period: 3 bars (~12 hours for 4h)
-            if bars_since_entry < 3:
+            # Minimum holding period: 4 bars (~16 hours for 4h)
+            if bars_since_entry < 4:
                 signals[i] = -0.25
             else:
                 # Short: hold position
@@ -132,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike"
+name = "4h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
