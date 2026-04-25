@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-1h Camarilla R1S1 Breakout with 4h EMA34 Trend and Volume Spike
-Hypothesis: Camarilla pivot levels (R1/S1) on 1h chart act as intraday support/resistance. 
-Breakouts above R1 or below S1 with volume confirmation and aligned 4h EMA34 trend capture 
-intraday momentum moves. The 4h EMA34 ensures we trade with higher timeframe momentum, 
-reducing false breakouts. Volume spike confirms participation. Designed for moderate 
-trade frequency (15-37/year) on 1h timeframe to work in both bull and bear markets 
-via trend following with tight risk control.
+6h Donchian(20) Breakout with Weekly Pivot Direction and Volume Confirmation
+Hypothesis: Donchian channel breakouts capture momentum moves. Weekly pivot (R1/S1) from 1w timeframe provides 
+institutional bias - only take breakouts aligned with weekly trend. Volume confirmation ensures participation. 
+Designed for low trade frequency (12-37/year) on 6h timeframe to work in both bull and bear markets via 
+trend following with institutional alignment.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,32 +21,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA34 trend (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Get 1w data for weekly pivot (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 4h close for trend
-    ema_34_4h = pd.Series(df_4h['close'].values).ewm(
+    # Calculate weekly Camarilla pivots (R1, S1) from previous week's data
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
+    
+    # Weekly Camarilla R1/S1: close ± (high-low)*1.1/2
+    weekly_r1 = prev_week_close + (prev_week_high - prev_week_low) * 1.1 / 2
+    weekly_s1 = prev_week_close - (prev_week_high - prev_week_low) * 1.1 / 2
+    
+    # Align to LTF (6h) - no extra delay needed as pivots based on completed weekly bar
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # Get 1d data for additional trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate 34-period EMA on 1d close for trend
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
         span=34, adjust=False, min_periods=34
     ).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 1h data for Camarilla pivot calculation (R1, S1 levels) using previous 1h bar
-    if len(prices) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla pivots for each 1h bar: based on previous hour's high, low, close
-    # We need to shift to avoid look-ahead: use previous hour's data to calculate current hour's levels
-    prev_high = prices['high'].shift(1).values
-    prev_low = prices['low'].shift(1).values
-    prev_close = prices['close'].shift(1).values
-    
-    # Camarilla formulas for R1/S1:
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Calculate Donchian channel (20-period) on 6h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,14 +61,16 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA, volume MA, and to avoid NaN from shift
-    start_idx = max(34, 20) + 1
+    # Start index: need enough for Donchian, volume MA, EMA, and weekly pivot alignment
+    start_idx = max(20, 34) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(camarilla_r1[i]) or 
-            np.isnan(camarilla_s1[i]) or
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -73,45 +79,47 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_4h_aligned[i]
-        r1_level = camarilla_r1[i]
-        s1_level = camarilla_s1[i]
+        upper_donchian = donchian_high[i]
+        lower_donchian = donchian_low[i]
+        ema_trend = ema_34_1d_aligned[i]
+        weekly_r1 = weekly_r1_aligned[i]
+        weekly_s1 = weekly_s1_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above R1 resistance AND volume spike AND price > 4h EMA34 (uptrend)
-            long_entry = (curr_close > r1_level) and vol_spike and (curr_close > ema_trend)
-            # Short: price breaks below S1 support AND volume spike AND price < 4h EMA34 (downtrend)
-            short_entry = (curr_close < s1_level) and vol_spike and (curr_close < ema_trend)
+            # Long: price breaks above Donchian high AND volume spike AND price > weekly R1 (bullish bias) AND price > 1d EMA34
+            long_entry = (curr_close > upper_donchian) and vol_spike and (curr_close > weekly_r1) and (curr_close > ema_trend)
+            # Short: price breaks below Donchian low AND volume spike AND price < weekly S1 (bearish bias) AND price < 1d EMA34
+            short_entry = (curr_close < lower_donchian) and vol_spike and (curr_close < weekly_s1) and (curr_close < ema_trend)
             
             if long_entry:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_entry:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below S1 support (broken support) OR price crosses below EMA (trend change)
-            if (curr_close < s1_level) or (curr_close < ema_trend):
+            # Exit: price crosses below Donchian low (breakdown) OR price crosses below weekly S1 (bias change) OR price crosses below EMA (trend change)
+            if (curr_close < lower_donchian) or (curr_close < weekly_s1) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above R1 resistance (broken resistance) OR price crosses above EMA (trend change)
-            if (curr_close > r1_level) or (curr_close > ema_trend):
+            # Exit: price crosses above Donchian high (breakout) OR price crosses above weekly R1 (bias change) OR price crosses above EMA (trend change)
+            if (curr_close > upper_donchian) or (curr_close > weekly_r1) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA34_Trend_VolumeSpike"
-timeframe = "1h"
+name = "6h_Donchian20_Breakout_WeeklyPivotR1S1_VolumeSpike_1dEMA34"
+timeframe = "6h"
 leverage = 1.0
