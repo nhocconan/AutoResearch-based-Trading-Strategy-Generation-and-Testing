@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_VolumeSpike_Breakout_4hEMA20_Trend_1dRegime
-Hypothesis: For 1h timeframe, use 4h EMA20 for trend direction and 1d Camarilla H3/L3 for structure, with volume spike confirmation on 1h for entry timing. Target 15-35 trades/year by requiring confluence of 4h trend, 1d breakout level, and 1h volume spike. Works in bull markets via breakout continuation and bear markets via mean reversion at extreme levels (H4/L4) when 1d regime is choppy.
+6h_Ichimoku_TK_Cross_Cloud_Filter_1wTrend
+Hypothesis: Ichimoku TK cross with cloud filter and weekly trend alignment for 6h timeframe.
+Works in bull markets via TK cross above cloud with weekly uptrend, and in bear markets via TK cross below cloud with weekly downtrend.
+Cloud acts as dynamic support/resistance reducing false signals. Weekly trend filter ensures alignment with higher timeframe momentum.
+Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -18,66 +21,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h data for EMA20 trend filter (loaded ONCE)
-    df_4h = get_htf_data(prices, '4h')
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Weekly data for trend filter (loaded ONCE)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d data for Camarilla calculation (loaded ONCE)
+    # Weekly EMA200 trend filter (loaded ONCE)
+    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Daily data for Ichimoku calculation (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla levels: H3, L3, H4, L4 for breakout and extreme reversal
-    camarilla_range = prev_high - prev_low
-    h3 = prev_close + camarilla_range * 1.1 / 4
-    l3 = prev_close - camarilla_range * 1.1 / 4
-    h4 = prev_close + camarilla_range * 1.1 / 2
-    l4 = prev_close - camarilla_range * 1.1 / 2
+    # Ichimoku components (standard settings: 9, 26, 52)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Camarilla levels to 1h timeframe (completed 1d bar)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_tenkan + min_low_tenkan) / 2
     
-    # 1h volume spike: current volume > 2.0 * 20-period average
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_kijun + min_low_kijun) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 52 periods ahead
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    chikou = close_1d
+    
+    # Align Ichimoku components to 6h timeframe (completed 1d bar)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Cloud top and bottom (Senkou Span A and B)
+    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
-    
-    # 1h ATR for stoploss
-    tr0 = np.abs(high - low)
-    tr1 = np.abs(high[1:] - close[:-1])
-    tr2 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[tr0[0]], np.maximum(tr1, tr2)])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 1h chop regime filter: BBW percentile < 30% = choppy (mean revert), > 70% = trending (follow)
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
-    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
-    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=100).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    choppy_market = bb_width_percentile < 30  # choppy = mean revert
-    trending_market = bb_width_percentile > 70  # trending = follow breakout
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 4h EMA (20), volume MA (20), ATR (14), BB (100)
-    start_idx = max(20, 20, 14, 100)
+    # Start index: need enough for Ichimoku calculation (52) + weekly EMA (200)
+    start_idx = max(52, 200)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(bb_width_percentile[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or np.isnan(cloud_top[i]) or 
+            np.isnan(cloud_bottom[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -87,66 +95,51 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals
-            # In trending market: follow 4h EMA20 direction with 1d H3/L3 breakout
-            # In choppy market: mean revert at 1d H4/L4 extremes
-            long_breakout = curr_high > h3_aligned[i]
-            short_breakout = curr_low < l3_aligned[i]
-            long_extreme = curr_low < l4_aligned[i]  # price at extreme low
-            short_extreme = curr_high > h4_aligned[i]  # price at extreme high
+            # TK cross signals with cloud filter and weekly trend alignment
+            tk_cross_bullish = tenkan_aligned[i] > kijun_aligned[i]
+            tk_cross_bearish = tenkan_aligned[i] < kijun_aligned[i]
             
-            # Trend filter: price must be on correct side of 4h EMA20
-            long_trend = curr_close > ema_20_4h_aligned[i]
-            short_trend = curr_close < ema_20_4h_aligned[i]
+            # Price above/below cloud
+            price_above_cloud = curr_close > cloud_top[i]
+            price_below_cloud = curr_close < cloud_bottom[i]
             
-            if trending_market[i]:
-                # Trending market: follow breakout with trend
-                long_entry = (long_breakout and volume_spike[i] and long_trend)
-                short_entry = (short_breakout and volume_spike[i] and short_trend)
-            else:
-                # Choppy market: mean revert from extremes
-                long_entry = (long_extreme and volume_spike[i])
-                short_entry = (short_extreme and volume_spike[i])
+            # Weekly trend alignment
+            weekly_uptrend = curr_close > ema_200_1w_aligned[i]
+            weekly_downtrend = curr_close < ema_200_1w_aligned[i]
+            
+            # Long entry: TK cross bullish + price above cloud + weekly uptrend + volume spike
+            long_entry = tk_cross_bullish and price_above_cloud and weekly_uptrend and volume_spike[i]
+            
+            # Short entry: TK cross bearish + price below cloud + weekly downtrend + volume spike
+            short_entry = tk_cross_bearish and price_below_cloud and weekly_downtrend and volume_spike[i]
             
             if long_entry:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
             elif short_entry:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit conditions
-            # 1. Price closes below 4h EMA20 (trend fail)
-            # 2. Price reaches opposite Camarilla level (take profit)
-            # 3. ATR stoploss
-            atr_stop = entry_price - 2.0 * atr[i]
-            if (curr_close < ema_20_4h_aligned[i] or 
-                curr_close > l3_aligned[i] or  # took profit at opposite level
-                curr_close < atr_stop):
+            # Long position: exit when TK cross turns bearish OR price closes below cloud bottom OR weekly trend turns down
+            if (tenkan_aligned[i] < kijun_aligned[i]) or (curr_close < cloud_bottom[i]) or (curr_close < ema_200_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short position: exit conditions
-            # 1. Price closes above 4h EMA20 (trend fail)
-            # 2. Price reaches opposite Camarilla level (take profit)
-            # 3. ATR stoploss
-            atr_stop = entry_price + 2.0 * atr[i]
-            if (curr_close > ema_20_4h_aligned[i] or 
-                curr_close < h3_aligned[i] or  # took profit at opposite level
-                curr_close > atr_stop):
+            # Short position: exit when TK cross turns bullish OR price closes above cloud top OR weekly trend turns up
+            if (tenkan_aligned[i] > kijun_aligned[i]) or (curr_close > cloud_top[i]) or (curr_close > ema_200_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_VolumeSpike_Breakout_4hEMA20_Trend_1dRegime"
-timeframe = "1h"
+name = "6h_Ichimoku_TK_Cross_Cloud_Filter_1wTrend"
+timeframe = "6h"
 leverage = 1.0
