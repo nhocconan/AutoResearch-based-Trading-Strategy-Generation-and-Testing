@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1dTrend_VolumeConfirm
-Hypothesis: 6h Ichimoku cloud breakout with 1d trend filter (price above/below 1d Kumo) and volume confirmation (>2.0x 20-bar avg). 
-Enters long when price breaks above 6h Kumo cloud in 1d uptrend with volume spike, short when price breaks below 6h Kumo cloud in 1d downtrend with volume spike. 
-Exits when price re-enters the 6h Kumo cloud or 1d trend reverses. 
-Designed for 6h timeframe with ~20-40 trades/year, works in bull/bear by following 1d trend filter and cloud breakout logic.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-bar avg). 
+Enters long when price breaks above R1 in 1d uptrend with volume spike, short when price breaks below S1 in 1d downtrend with volume spike. 
+Uses discrete position sizing (0.25) to minimize fee churn. Designed for 12h timeframe with ~12-37 trades/year, works in bull/bear by following 1d trend.
 """
 
 import numpy as np
@@ -27,51 +26,52 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d Ichimoku components for trend filter: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (52 displacement)
-    tenkan_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
-    kijun_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
-    senkou_span_a_1d = ((tenkan_1d + kijun_1d) / 2).shift(22)  # displaced 26 periods forward, but we use 22 for alignment
-    senkou_span_b_1d = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2).shift(22)
-    # Kumo top/bottom for 1d trend: price > max(Senkou A, Senkou B) = uptrend, price < min = downtrend
-    kumo_top_1d = np.maximum(senkou_span_a_1d.values, senkou_span_b_1d.values)
-    kumo_bottom_1d = np.minimum(senkou_span_a_1d.values, senkou_span_b_1d.values)
-    kumo_top_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_top_1d)
-    kumo_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom_1d)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6h Ichimoku components for entry signals
-    tenkan_6h = (pd.Series(high).rolling(window=9, min_periods=9).max() + pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
-    kijun_6h = (pd.Series(high).rolling(window=26, min_periods=26).max() + pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
-    senkou_span_a_6h = ((tenkan_6h + kijun_6h) / 2).shift(22)
-    senkou_span_b_6h = ((pd.Series(high).rolling(window=52, min_periods=52).max() + pd.Series(low).rolling(window=52, min_periods=52).min()) / 2).shift(22)
-    # Kumo top/bottom for 6h: cloud boundaries
-    kumo_top_6h = np.maximum(senkou_span_a_6h.values, senkou_span_b_6h.values)
-    kumo_bottom_6h = np.minimum(senkou_span_a_6h.values, senkou_span_b_6h.values)
+    # Calculate Camarilla levels from previous 1d bar
+    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # Using previous 1d bar to avoid look-ahead
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = np.nan  # First value invalid
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    camarilla_range = prev_high_1d - prev_low_1d
+    r1_1d = prev_close_1d + 1.1 * camarilla_range / 12
+    s1_1d = prev_close_1d - 1.1 * camarilla_range / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough data for Ichimoku calculations (52 for Senkou B)
-    start_idx = 52
+    # Start index: need at least 1 bar of previous data and EMA34 warmup
+    start_idx = max(34, 20, 1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kumo_top_1d_aligned[i]) or 
-            np.isnan(kumo_bottom_1d_aligned[i]) or 
-            np.isnan(kumo_top_6h[i]) or 
-            np.isnan(kumo_bottom_6h[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above 6h Kumo top in 1d uptrend (price > 1d Kumo top) with volume confirmation
-            long_setup = (close[i] > kumo_top_6h[i]) and (close[i-1] <= kumo_top_6h[i-1]) and (close[i] > kumo_top_1d_aligned[i]) and volume_spike[i]
-            # Short: price breaks below 6h Kumo bottom in 1d downtrend (price < 1d Kumo bottom) with volume confirmation
-            short_setup = (close[i] < kumo_bottom_6h[i]) and (close[i-1] >= kumo_bottom_6h[i-1]) and (close[i] < kumo_bottom_1d_aligned[i]) and volume_spike[i]
+            # Long: price breaks above R1 in 1d uptrend with volume confirmation
+            long_setup = (close[i] > r1_1d_aligned[i]) and (close[i] > ema_34_1d_aligned[i]) and volume_spike[i]
+            # Short: price breaks below S1 in 1d downtrend with volume confirmation
+            short_setup = (close[i] < s1_1d_aligned[i]) and (close[i] < ema_34_1d_aligned[i]) and volume_spike[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -84,20 +84,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price re-enters 6h Kumo cloud OR 1d trend turns down (price < 1d Kumo bottom)
-            if (close[i] < kumo_top_6h[i]) or (close[i] < kumo_bottom_1d_aligned[i]):
+            # Exit: price breaks below S1 OR trend turns down
+            if (close[i] < s1_1d_aligned[i]) or (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price re-enters 6h Kumo cloud OR 1d trend turns up (price > 1d Kumo top)
-            if (close[i] > kumo_bottom_6h[i]) or (close[i] > kumo_top_1d_aligned[i]):
+            # Exit: price breaks above R1 OR trend turns up
+            if (close[i] > r1_1d_aligned[i]) or (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
