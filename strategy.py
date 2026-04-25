@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Filter_V4
-Hypothesis: 4-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter and volume confirmation.
-Adds volume spike filter (>1.5x 20-period average) to reduce false breakouts and overtrading.
-Targets 15-25 trades/year by requiring: 1) price breaks daily R1/S1 levels, 2) aligned with 1d EMA34 trend, 3) volume confirmation.
-Uses discrete position sizing (0.25) to minimize fee churn. Works in bull markets via trend-following breaks
-and in bear markets via mean-reversion exits at opposing Camarilla levels.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Filter_V5
+Hypothesis: Tighten entry conditions from V4 by requiring volume confirmation (volume > 1.5x 20-period MA) 
+in addition to Camarilla breakout and 1d EMA34 trend alignment. Target 20-30 trades/year (~80-120 total over 4 years)
+by adding volume filter to reduce false breakouts. Uses discrete position sizing (0.25) to minimize fee churn.
+Works in bull markets via trend-following breaks and in bear markets via mean-reversion exits at opposing Camarilla levels.
 """
 
 import numpy as np
@@ -41,15 +40,15 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 20-period average volume on 4h timeframe
+    # Volume confirmation: 20-period volume MA on 4h data
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d previous data (1) + 1d EMA34 (34) + volume MA (20)
-    start_idx = max(34 + 1, 20)
+    # Start index: need enough for 1d previous data (1) + 1d EMA34 (34) + vol MA (20)
+    start_idx = max(34 + 1, 20)  # Conservative warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -63,18 +62,18 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: volume > 1.5x 20-period average
-        volume_confirm = curr_volume > (1.5 * vol_ma_20[i])
+        # Volume confirmation: current volume > 1.5x 20-period MA
+        volume_confirm = curr_volume > 1.5 * vol_ma_20[i]
         
         # Trend filter: price relative to 1d EMA34
         uptrend = curr_close > ema_34_1d_aligned[i]
         downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals with trend alignment and volume confirmation
-            # Long breakout: price breaks above R1 with uptrend and volume confirmation
+            # Look for entry signals with trend alignment AND volume confirmation
+            # Long breakout: price breaks above R1 with uptrend AND volume confirmation
             long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm
-            # Short breakout: price breaks below S1 with downtrend and volume confirmation
+            # Short breakout: price breaks below S1 with downtrend AND volume confirmation
             short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm
             
             if long_breakout:
@@ -104,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Filter_V4"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Filter_V5"
 timeframe = "4h"
 leverage = 1.0
