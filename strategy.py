@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v2
+4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v3
 Hypothesis: Trade Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation on 4h timeframe.
 Only long when price breaks above R1 in bull regime (price > 1d EMA34), short when breaks below S1 in bear regime (price < 1d EMA34).
 Volume spike > 1.5 * ATR4h confirms momentum. Discrete sizing 0.25 to minimize fee drag.
 Target: 20-40 trades/year to avoid overtrading while capturing strong directional moves.
 Works in bull via breakouts, works in bear via short breakdowns, avoids ranging markets via regime filter.
+Fixed: proper Camarilla calculation and alignment, removed redundant calculations inside loop.
 """
 
 import numpy as np
@@ -22,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend regime
+    # Get 1d data for trend regime and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -30,6 +31,22 @@ def generate_signals(prices):
     # Calculate 1d EMA34 for trend regime
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d OHLC for Camarilla levels
+    o_1d = df_1d['open'].values
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    camarilla_r1_1d = c_1d + (h_1d - l_1d) * 1.1 / 12
+    camarilla_s1_1d = c_1d - (h_1d - l_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
     # Calculate ATR for volume spike filter (using 4h data)
     tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
@@ -45,38 +62,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Calculate Camarilla levels from previous day's OHLC
-        # Need to get previous 1d bar's OHLC values
-        if i < len(prices):
-            # For 4h timeframe, we need to map to 1d bars
-            # Use the 1d dataframe to get OHLC
-            # Find the index of the last completed 1d bar
-            # Since we're using aligned data, we can use the 1d values directly
-            pass
-        
-        # Simpler approach: calculate Camarilla from 1d OHLC and align
-        # Get 1d OHLC arrays
-        o_1d = df_1d['open'].values
-        h_1d = df_1d['high'].values
-        l_1d = df_1d['low'].values
-        c_1d = df_1d['close'].values
-        
-        # Calculate Camarilla levels for each 1d bar
-        # R1 = C + (H-L)*1.1/12
-        # S1 = C - (H-L)*1.1/12
-        camarilla_r1_1d = c_1d + (h_1d - l_1d) * 1.1 / 12
-        camarilla_s1_1d = c_1d - (h_1d - l_1d) * 1.1 / 12
-        
-        # Align Camarilla levels to 4h timeframe
-        camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-        camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
-        
-        # Skip if Camarilla data not ready
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -125,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v2"
+name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
