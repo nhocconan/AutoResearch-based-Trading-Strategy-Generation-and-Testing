@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_Pivot_Breakout_1dRegime_Filter
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d ADX regime filter and volume confirmation.
-In trending markets (ADX>25), trade breakouts in direction of trend; in ranging markets (ADX<20), fade at extremes.
-Uses discrete sizing (0.25) to minimize fee churn. Target: 12-37 trades/year.
+12h_Donchian20_Breakout_1dADXRegime_VolumeFilter
+Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation. 
+In trending markets (ADX>25), trade breakouts in direction of trend; in ranging markets (ADX<20), 
+fade at Donchian extremes. Uses discrete sizing (0.25) to minimize fee churn. Target: 12-37 trades/year.
 Works in bull via trend-following breakouts, in bear via mean reversion at extremes when trend weakens.
 """
 
@@ -21,41 +21,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Camarilla calculations (primary timeframe)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 5:
+    # Get 12h data for Donchian calculations (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels for each 6h bar (based on previous bar)
-    R3_6h = np.full(len(close_6h), np.nan)
-    S3_6h = np.full(len(close_6h), np.nan)
-    R4_6h = np.full(len(close_6h), np.nan)
-    S4_6h = np.full(len(close_6h), np.nan)
+    # Calculate Donchian channels for each 12h bar (based on previous 20 bars)
+    upper_12h = np.full(len(close_12h), np.nan)
+    lower_12h = np.full(len(close_12h), np.nan)
     
-    for i in range(1, len(close_6h)):
-        # Camarilla levels based on previous 6h bar's range
-        high_prev = high_6h[i-1]
-        low_prev = low_6h[i-1]
-        close_prev = close_6h[i-1]
-        range_prev = high_prev - low_prev
-        
-        if range_prev > 0:
-            R4_6h[i] = close_prev + (range_prev * 1.1 / 2)  # R4 level
-            S4_6h[i] = close_prev - (range_prev * 1.1 / 2)  # S4 level
-            R3_6h[i] = close_prev + (range_prev * 1.1 / 4)  # R3 level
-            S3_6h[i] = close_prev - (range_prev * 1.1 / 4)  # S3 level
+    for i in range(20, len(close_12h)):
+        upper_12h[i] = np.max(high_12h[i-20:i])  # Highest high of previous 20 bars
+        lower_12h[i] = np.min(low_12h[i-20:i])   # Lowest low of previous 20 bars
     
-    # Align Camarilla levels to original timeframe
-    R3_6h_aligned = align_htf_to_ltf(prices, df_6h, R3_6h)
-    S3_6h_aligned = align_htf_to_ltf(prices, df_6h, S3_6h)
-    R4_6h_aligned = align_htf_to_ltf(prices, df_6h, R4_6h)
-    S4_6h_aligned = align_htf_to_ltf(prices, df_6h, S4_6h)
+    # Align Donchian levels to original timeframe
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
     
-    # Get 1d data for regime filter (ADX) and trend (EMA50)
+    # Get 1d data for regime filter (ADX)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -111,10 +98,6 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 1d EMA50 for trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_ma_20)
@@ -127,26 +110,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R3_6h_aligned[i]) or np.isnan(S3_6h_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         adx = adx_1d_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
         
         if position == 0:
             # Regime-based entry logic
             if adx > 25:  # Trending regime
-                # Long: break above R3 with uptrend and volume spike
-                long_signal = (close[i] > R3_6h_aligned[i]) and (close[i] > ema_trend) and vol_spike[i]
-                # Short: break below S3 with downtrend and volume spike
-                short_signal = (close[i] < S3_6h_aligned[i]) and (close[i] < ema_trend) and vol_spike[i]
+                # Long: break above upper Donchian with volume spike
+                long_signal = (close[i] > upper_12h_aligned[i]) and vol_spike[i]
+                # Short: break below lower Donchian with volume spike
+                short_signal = (close[i] < lower_12h_aligned[i]) and vol_spike[i]
             else:  # Ranging regime (ADX < 25)
-                # Long: mean reversion from S3 with volume spike
-                long_signal = (close[i] < S3_6h_aligned[i]) and vol_spike[i]
-                # Short: mean reversion from R3 with volume spike
-                short_signal = (close[i] > R3_6h_aligned[i]) and vol_spike[i]
+                # Long: mean reversion from lower Donchian with volume spike
+                long_signal = (close[i] < lower_12h_aligned[i]) and vol_spike[i]
+                # Short: mean reversion from upper Donchian with volume spike
+                short_signal = (close[i] > upper_12h_aligned[i]) and vol_spike[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -159,22 +141,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: opposite touch or trend reversal
-            exit_signal = (close[i] > R4_6h_aligned[i]) or (adx < 20 and close[i] > ema_trend)
+            # Exit conditions: opposite touch or trend weakening
+            exit_signal = (close[i] < lower_12h_aligned[i]) or (adx < 20 and close[i] > upper_12h_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: opposite touch or trend reversal
-            exit_signal = (close[i] < S4_6h_aligned[i]) or (adx < 20 and close[i] < ema_trend)
+            # Exit conditions: opposite touch or trend weakening
+            exit_signal = (close[i] > upper_12h_aligned[i]) or (adx < 20 and close[i] < lower_12h_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_Pivot_Breakout_1dRegime_Filter"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dADXRegime_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
