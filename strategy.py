@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: On 4h timeframe, trade Camarilla R1/S1 breakouts in direction of 1d EMA34 trend with volume spike confirmation.
-Uses discrete position sizing (0.25) to limit fee drag. Targets 20-30 trades/year.
-Works in bull markets (breakouts with trend) and bear markets (fades from extremes with volume).
+4h_Camarilla_H3L3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Trade Camarilla H3/L3 breakouts on 4h in direction of 1d EMA34 trend with volume confirmation.
+H3/L3 levels offer stronger breakouts than R1/S1, reducing false signals. Works in bull markets (breakouts with trend)
+and bear markets (fades from extremes with volume). Discrete sizing 0.25 limits fee drag. Target 20-30 trades/year.
 """
 
 import numpy as np
@@ -30,13 +30,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Camarilla levels: R1/S1 from 1d
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Camarilla levels: H3/L3 from 1d
+    camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
     # Align to 4h timeframe (completed 1d bar only)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,19 +51,19 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price closes above R1 + 1d uptrend + volume spike
-            long_setup = (close[i] > camarilla_r1_aligned[i]) and \
+            # Long: price closes above H3 + 1d uptrend + volume spike
+            long_setup = (close[i] > camarilla_h3_aligned[i]) and \
                          (close[i] > ema_34_1d_aligned[i]) and \
                          volume_spike[i]
-            # Short: price closes below S1 + 1d downtrend + volume spike
-            short_setup = (close[i] < camarilla_s1_aligned[i]) and \
+            # Short: price closes below L3 + 1d downtrend + volume spike
+            short_setup = (close[i] < camarilla_l3_aligned[i]) and \
                           (close[i] < ema_34_1d_aligned[i]) and \
                           volume_spike[i]
             
@@ -78,22 +78,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price closes below S1 OR 1d trend turns down
-            if (close[i] < camarilla_s1_aligned[i]) or \
+            # Exit: price closes below L3 OR 1d trend turns down
+            if (close[i] < camarilla_l3_aligned[i]) or \
                (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price closes above R1 OR 1d trend turns up
-            if (close[i] > camarilla_r1_aligned[i]) or \
+            # Exit: price closes above H3 OR 1d trend turns up
+            if (close[i] > camarilla_h3_aligned[i]) or \
                (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_Camarilla_H3L3_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
