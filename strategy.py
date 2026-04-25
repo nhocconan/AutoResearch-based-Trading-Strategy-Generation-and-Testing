@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout with 1w EMA34 Trend and Volume Spike
-Hypothesis: 12h Camarilla H3/L3 levels act as strong weekly support/resistance.
-Breakouts above H3 or below L3 with volume confirmation and 1w EMA34 trend alignment
-capture strong momentum moves. Uses 1w trend filter for multi-timeframe alignment.
-Designed for 12h timeframe targeting 50-150 total trades over 4 years.
-Works in both bull and bear markets via trend filter and discrete sizing.
+4h Camarilla H3/L3 Breakout with 1d EMA34 Trend and Volume Spike
+Hypothesis: Camarilla H3/L3 levels represent stronger support/resistance than R1/S1.
+Breakouts above H3 or below L3 with volume confirmation and 1d EMA34 trend alignment
+capture strong momentum moves while filtering false breakouts. Works in bull/bear via trend filter.
+Discrete sizing (0.30) targets ~75-150 trades over 4 years to minimize fee drag.
 """
 
 import numpy as np
@@ -22,33 +21,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA34
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get 1d data for Camarilla levels (using previous day's OHLC)
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get 1d OHLC data
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Get 1d OHLC data for Camarilla calculation (using previous day's values)
     df_1d_close = df_1d['close'].values
     df_1d_high = df_1d['high'].values
     df_1d_low = df_1d['low'].values
     df_1d_open = df_1d['open'].values
     
-    # Align 1d OHLC to 12h timeframe (using previous day's values)
+    # Align 1d OHLC to 4h timeframe
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d_close)
     high_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d_high)
     low_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d_low)
     open_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d_open)
     
-    # Use previous day's OHLC for Camarilla calculation (shift by 1 bar to avoid look-ahead)
+    # Use previous day's OHLC for Camarilla calculation
     prev_close = close_1d_aligned
     prev_high = high_1d_aligned
     prev_low = low_1d_aligned
@@ -141,9 +135,9 @@ def generate_signals(prices):
         
         # Entry conditions: Camarilla breakout + trend alignment + volume
         if position == 0:
-            # Long: break above Camarilla H3 AND price above 1w EMA34
+            # Long: break above Camarilla H3 AND price above 1d EMA34
             long_condition = bullish_breakout and (curr_close > ema_trend) and volume_spike
-            # Short: break below Camarilla L3 AND price below 1w EMA34
+            # Short: break below Camarilla L3 AND price below 1d EMA34
             short_condition = bearish_breakout and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
@@ -163,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1wEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
