@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot H3/L3 Breakout with 1d EMA34 Trend Filter and Volume Spike
-Hypothesis: Camarilla H3/L3 levels act as intraday support/resistance. Breakouts above H3 (bullish) or below L3 (bearish)
-capture momentum when aligned with 1d EMA34 trend and confirmed by volume spikes. Designed for 4h timeframe
-to target 20-50 trades/year by requiring confluence of Camarilla breakout, 1d EMA34 trend, and volume confirmation,
-reducing overtrading and fee drag. Works in bull (long H3 breakouts) and bear (short L3 breakouts) regimes.
+6h Weekly Pivot + Donchian(20) Breakout with Volume Confirmation
+Hypothesis: Weekly pivot levels (from 1w data) act as strong support/resistance. 
+When price breaks Donchian(20) channels in the direction of the weekly pivot bias 
+(R1 for long, S1 for short) and is confirmed by volume spikes, it captures 
+institutional breakout moves. Works in both bull (break above R1) and bear 
+(break below S1) regimes. Designed for 6h timeframe to target 12-37 trades/year 
+(50-150 over 4 years) by requiring confluence of weekly pivot bias, Donchian 
+breakout, and volume confirmation, minimizing fee drag.
 """
 
 import numpy as np
@@ -21,30 +24,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 1w data ONCE before loop for weekly pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    # Using previous week's OHLC to avoid look-ahead
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Typical price = (high + low + close) / 3
-    # Range = high - low
-    typical_price = (high + low + close) / 3.0
-    daily_range = high - low
+    # Shift by 1 to use previous week's data (avoid look-ahead)
+    weekly_high_prev = np.roll(weekly_high, 1)
+    weekly_low_prev = np.roll(weekly_low, 1)
+    weekly_close_prev = np.roll(weekly_close, 1)
+    # First value will be invalid (rolled from last), set to NaN
+    weekly_high_prev[0] = np.nan
+    weekly_low_prev[0] = np.nan
+    weekly_close_prev[0] = np.nan
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_typical = pd.Series(typical_price).shift(1).values
-    prev_range = pd.Series(daily_range).shift(1).values
+    weekly_pivot = (weekly_high_prev + weekly_low_prev + weekly_close_prev) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low_prev
+    weekly_s1 = 2 * weekly_pivot - weekly_high_prev
     
-    # Camarilla levels based on previous day
-    # H3 = typical + (range * 1.1/4) = typical + range * 0.275
-    # L3 = typical - (range * 1.1/4) = typical - range * 0.275
-    camarilla_h3 = prev_typical + (prev_range * 0.275)
-    camarilla_l3 = prev_typical - (prev_range * 0.275)
+    # Align weekly pivot levels to 6h timeframe (only use after weekly bar closes)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # Donchian(20) channels on primary timeframe (6h)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,13 +66,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Camarilla calculation and EMA34
-    start_idx = max(20, 34)  # Need previous day data + EMA34 warmup
+    # Start index: need enough for Donchian(20) and weekly data
+    start_idx = max(20, 1)  # Donchian lookback, weekly data
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(camarilla_h3[i]) or 
-            np.isnan(camarilla_l3[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -68,44 +82,43 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Trend filter: price relative to 1d EMA34
-        bullish_bias = curr_close > ema_1d_aligned[i]
-        bearish_bias = curr_close < ema_1d_aligned[i]
+        # Weekly pivot bias: price above/below pivot
+        bullish_bias = curr_close > weekly_pivot_aligned[i]
+        bearish_bias = curr_close < weekly_pivot_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require ALL conditions: Camarilla breakout + trend + volume
-            # Long: price breaks above Camarilla H3 AND bullish bias AND volume spike
-            long_entry = (curr_high > camarilla_h3[i]) and bullish_bias and vol_spike
-            # Short: price breaks below Camarilla L3 AND bearish bias AND volume spike
-            short_entry = (curr_low < camarilla_l3[i]) and bearish_bias and vol_spike
+            # Look for entry signals - require ALL conditions: 
+            # Weekly pivot bias (R1 for long, S1 for short) + Donchian breakout + volume spike
+            long_entry = (curr_high > donchian_upper[i]) and bullish_bias and (curr_close > weekly_r1_aligned[i]) and vol_spike
+            short_entry = (curr_low < donchian_lower[i]) and bearish_bias and (curr_close < weekly_s1_aligned[i]) and vol_spike
             
             if long_entry:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             elif short_entry:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below Camarilla L3 (mean reversion) OR loss of bullish bias
-            if (curr_low < camarilla_l3[i]) or (curr_close < ema_1d_aligned[i]):
+            # Exit: price falls below weekly pivot (loss of bullish bias) OR Donchian lower (mean reversion)
+            if (curr_close < weekly_pivot_aligned[i]) or (curr_low < donchian_lower[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above Camarilla H3 (mean reversion) OR loss of bearish bias
-            if (curr_high > camarilla_h3[i]) or (curr_close > ema_1d_aligned[i]):
+            # Exit: price rises above weekly pivot (loss of bearish bias) OR Donchian upper (mean reversion)
+            if (curr_close > weekly_pivot_aligned[i]) or (curr_high > donchian_upper[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Donchian20_Breakout_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
