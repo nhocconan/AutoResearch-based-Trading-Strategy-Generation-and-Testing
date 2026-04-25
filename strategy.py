@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_VolumeWeightedVWAP_Deviation_1dTrend_Filter_v1
-Hypothesis: Trade 6h deviations from volume-weighted VWAP with 1d trend filter. In bullish 1d trend, long when price < VWAP (mean reversion); in bearish 1d trend, short when price > VWAP (mean reversion). Volume-weighted VWAP acts as dynamic fair value. Uses 6h bar's VWAP calculated from typical price and volume. Requires deviation > 1.5% from VWAP to avoid noise. Target: 50-150 total trades over 4 years = 12-37/year.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA trend filter and volume spike confirmation. In bullish 1d trend, long on break above R1; in bearish 1d trend, short on break below S1. Volume must be > 1.5x 20-period average to confirm institutional interest. Uses discrete 0.25 position sizing to limit fee drag. Target: 50-150 total trades over 4 years = 12-37/year.
 """
 
 import numpy as np
@@ -28,46 +28,52 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6h VWAP (volume-weighted average price) for each 6h bar
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 12h data for Camarilla levels and volume
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    typical_price_6h = (df_6h['high'].values + df_6h['low'].values + df_6h['close'].values) / 3.0
-    vwap_6h = (typical_price_6h * df_6h['volume'].values).cumsum() / df_6h['volume'].values.cumsum()
-    # Handle first bar where cumulative volume might be zero
-    vwap_6h = np.where(df_6h['volume'].values.cumsum() == 0, typical_price_6h, vwap_6h)
+    # Calculate Camarilla levels from previous 12h bar
+    # Camarilla R1 = close + (high - low) * 1.1/12
+    # Camarilla S1 = close - (high - low) * 1.1/12
+    prev_close_12h = df_12h['close'].shift(1).values
+    prev_high_12h = df_12h['high'].shift(1).values
+    prev_low_12h = df_12h['low'].shift(1).values
+    camarilla_r1 = prev_close_12h + (prev_high_12h - prev_low_12h) * 1.1 / 12
+    camarilla_s1 = prev_close_12h - (prev_high_12h - prev_low_12h) * 1.1 / 12
     
-    # Align 6h VWAP to 6h timeframe
-    vwap_6h_aligned = align_htf_to_ltf(prices, df_6h, vwap_6h)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
+    
+    # Calculate volume confirmation: current 12h volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA(34)
-    start_idx = 34
+    # Start index: need warmup for EMA(34) and volume MA(20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vwap_6h_aligned[i]) or
-            vwap_6h_aligned[i] == 0):
+            np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
-        
-        # Calculate percentage deviation from VWAP
-        deviation_pct = (close[i] - vwap_6h_aligned[i]) / vwap_6h_aligned[i] * 100.0
         
         # Determine 1d HTF trend using EMA34
         htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
         htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Mean reversion entries: fade deviation from VWAP in direction of 1d trend
-            # In bullish 1d trend: long when price < VWAP (oversold)
-            # In bearish 1d trend: short when price > VWAP (overbought)
-            long_setup = (deviation_pct < -1.5) and htf_1d_bullish  # Oversold in bullish trend
-            short_setup = (deviation_pct > 1.5) and htf_1d_bearish   # Overbought in bearish trend
+            # Breakout entries: follow 1d trend direction
+            # In bullish 1d trend: long on break above R1
+            # In bearish 1d trend: short on break below S1
+            long_setup = (close[i] > camarilla_r1_aligned[i]) and htf_1d_bullish and volume_spike[i]
+            short_setup = (close[i] < camarilla_s1_aligned[i]) and htf_1d_bearish and volume_spike[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -80,8 +86,10 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price returns to VWAP or trend reverses
-            exit_signal = (deviation_pct >= -0.5) or (not htf_1d_bullish)
+            # Exit when price returns to Camarilla H5 level or trend reverses
+            camarilla_h5 = prev_close_12h + (prev_high_12h - prev_low_12h) * 1.1 * 2 / 12  # H5 = close + 1.1*(HL)*2/12
+            camarilla_h5_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h5)
+            exit_signal = (close[i] < camarilla_h5_aligned[i]) or (not htf_1d_bullish)
             
             if exit_signal:
                 signals[i] = 0.0
@@ -89,8 +97,10 @@ def generate_signals(prices):
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price returns to VWAP or trend reverses
-            exit_signal = (deviation_pct <= 0.5) or htf_1d_bullish
+            # Exit when price returns to Camarilla L5 level or trend reverses
+            camarilla_l5 = prev_close_12h - (prev_high_12h - prev_low_12h) * 1.1 * 2 / 12  # L5 = close - 1.1*(HL)*2/12
+            camarilla_l5_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l5)
+            exit_signal = (close[i] > camarilla_l5_aligned[i]) or htf_1d_bullish
             
             if exit_signal:
                 signals[i] = 0.0
@@ -98,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VolumeWeightedVWAP_Deviation_1dTrend_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
