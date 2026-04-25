@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume spike confirmation.
+4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume spike confirmation.
 Goes long when price breaks above R3 with 1d uptrend and volume > 1.5x 20-period average,
 short when price breaks below S3 with 1d downtrend and volume > 1.5x 20-period average.
-Uses discrete sizing (0.25) to minimize fees. Target: 12-30 trades/year.
+Uses discrete sizing (0.25) to minimize fees. Target: 15-30 trades/year.
+R3/S3 are stronger reversal levels than R1/S1, reducing false breakouts and overtrading.
 Works in bull via breakouts with trend, in bear via mean reversion at extremes.
-R3/S3 levels are stronger than R1/S1, reducing false breakouts and improving win rate.
 """
 
 import numpy as np
@@ -41,11 +41,11 @@ def generate_signals(prices):
     r3 = prev_close + 0.55 * camarilla_range  # R3 level
     s3 = prev_close - 0.55 * camarilla_range  # S3 level
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for trend filter (using daily close)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
@@ -67,9 +67,9 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3, 1d uptrend (price > EMA50), volume spike
+            # Long: price breaks above R3, 1d uptrend (close > EMA50), volume spike
             long_signal = (close[i] > r3_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and vol_spike[i]
-            # Short: price breaks below S3, 1d downtrend (price < EMA50), volume spike
+            # Short: price breaks below S3, 1d downtrend (close < EMA50), volume spike
             short_signal = (close[i] < s3_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and vol_spike[i]
             
             if long_signal:
@@ -99,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
