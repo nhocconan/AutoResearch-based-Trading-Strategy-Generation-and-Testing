@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Volume-Weighted RSI + 12h Supertrend Direction + ATR Filter
-Hypothesis: Volume-Weighted RSI (VW-RSI) improves on standard RSI by weighting price changes with volume,
-reducing false signals during low-participation moves. Combined with 12h Supertrend for trend direction
-and ATR-based volatility filter to avoid choppy markets. Works in bull markets (buy VW-RSI<30 in uptrend)
-and bear markets (short VW-RSI>70 in downtrend). Targets 12-37 trades/year via strict confluence.
+4h TRIX + Volume Spike + Choppiness Regime Filter
+Hypothesis: TRIX (Triple Exponential Average) filters noise and shows smoothed momentum.
+Long when TRIX crosses above zero with volume spike in non-choppy market (CHOP > 61.8 = ranging, < 38.2 = trending).
+Short when TRIX crosses below zero with volume spike in trending market.
+Volume spike confirms institutional participation. Works in both bull and bear markets by following momentum.
+4h timeframe targets 19-50 trades/year (75-200 over 4 years).
 """
 
 import numpy as np
@@ -16,84 +17,81 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Load 12h data ONCE before loop for Supertrend
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h Supertrend (ATR=10, mult=3.0)
-    hl2_12h = (df_12h['high'] + df_12h['low']) / 2
-    atr_12h = pd.Series(df_12h['high']).rolling(window=10, min_periods=10).max() - \
-              pd.Series(df_12h['low']).rolling(window=10, min_periods=10).min()
-    atr_12h = pd.Series(atr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
-    upper_12h = hl2_12h + (3.0 * atr_12h)
-    lower_12h = hl2_12h - (3.0 * atr_12h)
-    supertrend_12h = np.full_like(hl2_12h, np.nan, dtype=float)
-    direction_12h = np.ones_like(hl2_12h, dtype=int)  # 1 for uptrend, -1 for downtrend
+    # Calculate TRIX(12,9,9) - triple smoothed EMA of ROC
+    # TRIX = EMA(EMA(EMA(ROC, 12), 9), 9)
+    roc = pd.Series(close).pct_change(periods=1)  # 1-period ROC
+    ema1 = roc.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
+    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
+    trix = ema3.values * 100  # scale for readability
     
-    for i in range(1, len(hl2_12h)):
-        if np.isnan(upper_12h[i-1]) or np.isnan(lower_12h[i-1]) or np.isnan(supertrend_12h[i-1]):
-            upper_12h[i] = hl2_12h[i] + (3.0 * atr_12h[i])
-            lower_12h[i] = hl2_12h[i] - (3.0 * atr_12h[i])
-            supertrend_12h[i] = hl2_12h[i]
-            direction_12h[i] = 1
-        else:
-            if close_12h := df_12h['close'].iloc[i]:
-                pass
-            close_12h = df_12h['close'].iloc[i]
-            if supertrend_12h[i-1] == upper_12h[i-1]:
-                supertrend_12h[i] = lower_12h[i] if close_12h > lower_12h[i] else upper_12h[i]
-                direction_12h[i] = -1 if supertrend_12h[i] == upper_12h[i] else 1
-            else:
-                supertrend_12h[i] = upper_12h[i] if close_12h < upper_12h[i] else lower_12h[i]
-                direction_12h[i] = 1 if supertrend_12h[i] == lower_12h[i] else -1
+    # Calculate TRIX signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Align 12h Supertrend direction to 6h
-    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h.astype(float))
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
-    # Calculate 6h ATR for volatility filter (avoid chop)
-    atr_6h = pd.Series(high).rolling(window=14, min_periods=14).max() - \
-             pd.Series(low).rolling(window=14, min_periods=14).min()
-    atr_6h = pd.Series(atr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma_6h = pd.Series(atr_6h).rolling(window=20, min_periods=20).mean().values
-    volatility_filter = atr_6h > (0.7 * atr_ma_6h)  # Only trade when volatility is above 70% of MA
+    # Choppiness Index (CHOP) - 14 period
+    # CHOP = 100 * log10(sum(ATR, 14) / (max(high,14) - min(low,14))) / log10(14)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Calculate Volume-Weighted RSI (6h)
-    # VW-RSI = 100 - (100 / (1 + RS)) where RS = Avg Gain_Vol / Avg Loss_Vol
-    delta = pd.Series(close).diff().values
-    gain = np.where(delta > 0, delta * volume, 0)
-    loss = np.where(delta < 0, -delta * volume, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    vw_rsi = 100 - (100 / (1 + rs))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    range_hl = max_high - min_low
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    
+    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
+    
+    # Regime filters
+    chop_choppy = chop > 61.8   # ranging market (mean revert)
+    chop_trending = chop < 38.2  # trending market (trend follow)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for all calculations
-    start_idx = max(20, 14, 10)  # volatility MA, VW-RSI, Supertrend
+    # Start index: need enough for calculations
+    start_idx = max(20, 14, 12+9+9)  # volume MA, CHOP, TRIX
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(vw_rsi[i]) or np.isnan(direction_12h_aligned[i]) or 
-            np.isnan(volatility_filter[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        curr_vw_rsi = vw_rsi[i]
-        curr_direction = direction_12h_aligned[i]
-        vol_filter = volatility_filter[i]
+        curr_trix = trix[i]
+        curr_trix_signal = trix_signal[i]
+        prev_trix = trix[i-1]
+        prev_trix_signal = trix_signal[i-1]
+        vol_spike = volume_spike[i]
+        curr_chop = chop[i]
+        
+        # TRIX cross signals
+        trix_cross_up = (prev_trix <= prev_trix_signal) and (curr_trix > curr_trix_signal)
+        trix_cross_down = (prev_trix >= prev_trix_signal) and (curr_trix < curr_trix_signal)
         
         if position == 0:
             # Look for entry signals
-            # Long: VW-RSI < 30 (oversold) AND 12h uptrend AND volatility filter
-            long_entry = (curr_vw_rsi < 30) and (curr_direction > 0) and vol_filter
-            # Short: VW-RSI > 70 (overbought) AND 12h downtrend AND volatility filter
-            short_entry = (curr_vw_rsi > 70) and (curr_direction < 0) and vol_filter
+            # Long: TRIX crosses above signal AND volume spike AND trending market (not choppy)
+            long_entry = trix_cross_up and vol_spike and chop_trending
+            # Short: TRIX crosses below signal AND volume spike AND trending market (not choppy)
+            short_entry = trix_cross_down and vol_spike and chop_trending
             
             if long_entry:
                 signals[i] = 0.25
@@ -105,16 +103,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: VW-RSI > 50 (neutral) OR loss of 12h uptrend
-            if (curr_vw_rsi > 50) or (curr_direction <= 0):
+            # Exit: TRIX crosses below signal OR market becomes choppy (range)
+            if trix_cross_down or chop_choppy:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: VW-RSI < 50 (neutral) OR loss of 12h downtrend
-            if (curr_vw_rsi < 50) or (curr_direction >= 0):
+            # Exit: TRIX crosses above signal OR market becomes choppy (range)
+            if trix_cross_up or chop_choppy:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VolWeightedRSI_Supertrend12h_ATRFilter"
-timeframe = "6h"
+name = "4h_TRIX_VolumeSpike_ChoppinessRegime"
+timeframe = "4h"
 leverage = 1.0
