@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_WeeklyEMA50_Trend_VolumeConfirm
-Hypothesis: On daily timeframe, use weekly EMA50 for trend filter and Donchian(20) breakout for entries with volume confirmation. This strategy targets 10-25 trades/year by requiring strong weekly trend alignment and volume spike, reducing false breakouts in choppy markets. Works in both bull (trend continuation) and bear (trend reversals on weekly timeframe).
+6h_Irwin_Breakout_1dTrend_VolumeSpike
+Hypothesis: Irwin Oscillator (EMA5-EMA34) on 6h with 1d EMA34 trend filter and volume spike confirmation.
+Irwin Oscillator > 0 indicates bullish momentum, < 0 bearish. Enter on zero-cross with trend alignment and volume spike.
+Targets 15-30 trades/year by requiring confluence of momentum, trend, and volume. Works in bull/bear via trend filter.
 """
 
 import numpy as np
@@ -10,30 +12,32 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for EMA50 trend filter (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
+    # 1d data for trend filter (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Irwin Oscillator on 6h: EMA(5) - EMA(34)
+    close_s = pd.Series(close)
+    ema5 = close_s.ewm(span=5, adjust=False, min_periods=5).mean().values
+    ema34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    irwin = ema5 - ema34  # >0 bullish, <0 bearish
     
-    # Daily Donchian(20) breakout levels
-    donchian_high = pd.Series(close).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(close).rolling(window=20, min_periods=20).min().shift(1).values
+    # 1d EMA34 for trend filter (loaded ONCE)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 2.0 * 20-day average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # ATR for stoploss (using daily data)
+    # ATR for stoploss (using 6h data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -44,36 +48,36 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for weekly EMA50 (50) and Donchian (20)
-    start_idx = 50
+    # Start index: need enough for Irwin EMA34 (34), 1d EMA34 (34), volume MA (20)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(irwin[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_irwin = irwin[i]
+        prev_irwin = irwin[i-1]
         
-        # Trend filter: price relative to weekly EMA50
-        uptrend = curr_close > ema_50_1w_aligned[i]
-        downtrend = curr_close < ema_50_1w_aligned[i]
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals with volume spike and trend alignment
-            # Long breakout: price breaks above Donchian high with uptrend and volume spike
-            long_breakout = (curr_close > donchian_high[i]) and uptrend and volume_spike[i]
-            # Short breakout: price breaks below Donchian low with downtrend and volume spike
-            short_breakout = (curr_close < donchian_low[i]) and downtrend and volume_spike[i]
+            # Look for entry signals: Irwin zero-cross with trend and volume
+            # Long: Irwin crosses above zero with uptrend and volume spike
+            long_entry = (prev_irwin <= 0 and curr_irwin > 0) and uptrend and volume_spike[i]
+            # Short: Irwin crosses below zero with downtrend and volume spike
+            short_entry = (prev_irwin >= 0 and curr_irwin < 0) and downtrend and volume_spike[i]
             
-            if long_breakout:
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            elif short_breakout:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -85,8 +89,8 @@ def generate_signals(prices):
             if curr_close < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks below Donchian low (mean reversion) or trend changes
-            elif curr_close < donchian_low[i] or not uptrend:
+            # Exit if Irwin crosses below zero (momentum loss) or trend changes
+            elif curr_irwin < 0 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,8 +101,8 @@ def generate_signals(prices):
             if curr_close > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks above Donchian high (mean reversion) or trend changes
-            elif curr_close > donchian_high[i] or not downtrend:
+            # Exit if Irwin crosses above zero (momentum loss) or trend changes
+            elif curr_irwin > 0 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_WeeklyEMA50_Trend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_Irwin_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
