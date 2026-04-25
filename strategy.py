@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + 1d Williams %R Regime Filter
-Hypothesis: Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA13.
-Williams %R on 1d identifies overbought/oversold conditions. Long when Bull Power > 0,
-Williams %R < -80 (oversold), and price above EMA50. Short when Bear Power < 0,
-Williams %R > -20 (overbought), and price below EMA50. Works in bull via long signals
-on pullbacks, bear via short signals on rallies. Volume confirmation reduces false breaks.
-Target: 12-37 trades/year on 6h.
+12h Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: Donchian channel breakouts capture strong momentum. 
+1w EMA50 provides higher-timeframe trend filter to avoid counter-trend trades.
+Volume spike confirms institutional participation. 
+Works in bull via upside breakouts, bear via downside breakouts.
+Target: 12-37 trades/year on 12h (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -23,38 +22,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray
-    if len(close) >= 13:
-        ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    else:
-        ema13 = np.full(n, np.nan)
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
-    
-    # Get 1d data for Williams %R regime filter
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 14:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Williams %R on 1d: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_1d = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    close_1d = df_1d['close'].values
-    williams_r = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r)
-    
-    # Align Williams %R with 1-bar delay (wait for 1d bar close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Calculate EMA50 for trend filter
-    if len(close) >= 50:
-        ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    else:
-        ema50 = np.full(n, np.nan)
+    # Calculate 1w EMA50
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR(14) for stoploss
     if len(close) >= 14:
@@ -75,8 +51,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(williams_r_aligned[i]) or np.isnan(ema50[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -87,24 +62,29 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        bp = bull_power[i]
-        br = bear_power[i]
-        wr = williams_r_aligned[i]
-        ema50_val = ema50[i]
+        ema_50 = ema_50_1w_aligned[i]
         atr_val = atr[i]
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
+        # Donchian(20) channels: highest high/lowest low of past 20 periods
+        if i >= 20:
+            donchian_high = np.max(high[i-19:i+1])
+            donchian_low = np.min(low[i-19:i+1])
+        else:
+            donchian_high = np.max(high[:i+1])
+            donchian_low = np.min(low[:i+1])
+        
+        # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-19:i+1])
         else:
             vol_ma_20 = np.mean(volume[:i+1])
-        volume_confirm = curr_volume > 1.5 * vol_ma_20
+        volume_spike = curr_volume > 2.0 * vol_ma_20
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure), Williams %R < -80 (oversold), price > EMA50, volume confirm
-            long_condition = (bp > 0) and (wr < -80) and (curr_close > ema50_val) and volume_confirm
-            # Short: Bear Power < 0 (selling pressure), Williams %R > -20 (overbought), price < EMA50, volume confirm
-            short_condition = (br < 0) and (wr > -20) and (curr_close < ema50_val) and volume_confirm
+            # Long: break above Donchian high AND uptrend AND volume spike
+            long_condition = curr_high > donchian_high and curr_close > ema_50 and volume_spike
+            # Short: break below Donchian low AND downtrend AND volume spike
+            short_condition = curr_low < donchian_low and curr_close < ema_50 and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -115,15 +95,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.5*ATR below entry) or Bear Power turns negative
-            if curr_close <= entry_price - 2.5 * atr_val or bear_power[i] < 0:
+            # Exit long: stoploss (2.0*ATR below entry) or price falls below EMA50
+            if curr_close <= entry_price - 2.0 * atr_val or curr_close < ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.5*ATR above entry) or Bull Power turns positive
-            if curr_close >= entry_price + 2.5 * atr_val or bull_power[i] > 0:
+            # Exit short: stoploss (2.0*ATR above entry) or price rises above EMA50
+            if curr_close >= entry_price + 2.0 * atr_val or curr_close > ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_WilliamsR_Regime_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
