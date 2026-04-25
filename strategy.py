@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Weekly Camarilla Pivot R1S1 Breakout with 1w EMA34 Trend and Volume Spike
-Hypothesis: Weekly Camarilla pivot levels (R1/S1) act as strong support/resistance derived from prior weekly candle.
-Breakouts above R1 or below S1 with volume confirmation and aligned 1w EMA34 trend capture swing moves.
-Designed for low trade frequency (7-25/year) with clear entry/exit rules to work in both bull and bear markets.
-Uses 1d primary timeframe and 1w HTF for trend alignment.
+12h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Donchian channel breakouts capture strong momentum moves. 
+Using 12h primary timeframe reduces noise and overtrading vs lower TFs.
+1d EMA34 provides reliable trend filter, volume spike confirms breakout strength.
+Designed for low trade frequency (12-37/year) to work in both bull and bear markets via trend following.
 """
 
 import numpy as np
@@ -27,33 +27,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend and Camarilla pivots (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA34 trend and Donchian channels (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1w close for trend
-    ema_34_1w = calculate_ema(df_1w['close'].values, 34)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 34-period EMA on 1d close for trend
+    ema_34_1d = calculate_ema(df_1d['close'].values, 34)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivots for each 1w bar: based on previous 1w bar's high, low, close
-    if len(df_1w) < 1:
+    # Calculate Donchian(20) channels: 20-period high/low
+    # Use previous 20 completed 1d bars to avoid look-ahead
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Use previous 1w bar's data to avoid look-ahead
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # Donchian upper = max(high of previous 20 days)
+    # Donchian lower = min(low of previous 20 days)
+    high_series = df_1d['high']
+    low_series = df_1d['low']
     
-    # Camarilla formulas:
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align to LTF (1d) - no extra delay needed as pivots are based on completed 1w bar
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    # Align to LTF (12h) - no extra delay needed as channels are based on completed 1d bar
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,14 +60,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA, volume MA, and to avoid NaN from shift
+    # Start index: need enough for EMA, Donchian, volume MA, and to avoid NaN from shift
     start_idx = max(50, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -78,17 +76,17 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_1w_aligned[i]
-        r1_level = camarilla_r1_aligned[i]
-        s1_level = camarilla_s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
+        upper_channel = donchian_upper_aligned[i]
+        lower_channel = donchian_lower_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above R1 resistance AND volume spike AND price > 1w EMA34 (uptrend)
-            long_entry = (curr_close > r1_level) and vol_spike and (curr_close > ema_trend)
-            # Short: price breaks below S1 support AND volume spike AND price < 1w EMA34 (downtrend)
-            short_entry = (curr_close < s1_level) and vol_spike and (curr_close < ema_trend)
+            # Long: price breaks above upper Donchian channel AND volume spike AND price > 1d EMA34 (uptrend)
+            long_entry = (curr_close > upper_channel) and vol_spike and (curr_close > ema_trend)
+            # Short: price breaks below lower Donchian channel AND volume spike AND price < 1d EMA34 (downtrend)
+            short_entry = (curr_close < lower_channel) and vol_spike and (curr_close < ema_trend)
             
             if long_entry:
                 signals[i] = 0.25
@@ -100,16 +98,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below S1 support (broken support) OR price crosses below EMA (trend change)
-            if (curr_close < s1_level) or (curr_close < ema_trend):
+            # Exit: price crosses below lower Donchian channel (broken support) OR price crosses below EMA (trend change)
+            if (curr_close < lower_channel) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above R1 resistance (broken resistance) OR price crosses above EMA (trend change)
-            if (curr_close > r1_level) or (curr_close > ema_trend):
+            # Exit: price crosses above upper Donchian channel (broken resistance) OR price crosses above EMA (trend change)
+            if (curr_close > upper_channel) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyCamarilla_R1S1_Breakout_1wEMA34_Trend_VolumeSpike"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
