@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Camarilla H3/L3 breakout with 1w EMA34 trend filter and volume confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w for EMA34 trend direction.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA34 trend direction and Camarilla pivot levels (from prior 1d OHLC).
 - Camarilla Pivots: H3, L3 levels from prior 1d OHLC for breakout logic.
-- Trend Filter: 1w EMA34 must align with breakout direction (long: close > EMA34, short: close < EMA34).
-- Volume Filter: Current 1d volume > 1.5 * 20-period average 1d volume to confirm momentum.
-- Entry: Long when close > H3 AND close > 1w EMA34 AND volume confirmation.
-         Short when close < L3 AND close < 1w EMA34 AND volume confirmation.
+- Trend Filter: 1d EMA34 must align with breakout direction (long: close > EMA34, short: close < EMA34).
+- Volume Filter: Current 12h volume > 1.5 * 20-period average 12h volume to confirm momentum.
+- Entry: Long when close > H3 AND close > 1d EMA34 AND volume confirmation.
+         Short when close < L3 AND close < 1d EMA34 AND volume confirmation.
 - Exit: Opposite Camarilla break (long exits when close < L3, short exits when close > H3).
 - Signal size: 0.25 discrete to minimize fee drag.
 - Designed to capture momentum bursts aligned with higher timeframe trend while filtering chop/whipsaws.
-- Works in both bull and bear markets by using 1w trend filter to avoid counter-trend trades.
+- Works in both bull and bear markets by following the 1d EMA trend and requiring volume confirmation.
 """
 
 import numpy as np
@@ -44,20 +44,16 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 2
     l3 = prev_close - camarilla_range * 1.1 / 2
     
-    # Align Camarilla levels to 1d timeframe (waits for 1d bar close)
+    # Align Camarilla levels to 12h timeframe (waits for 1d bar close)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Calculate 1d volume average for confirmation (20-period)
+    # Calculate 12h volume average for confirmation (20-period)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -69,7 +65,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,7 +75,7 @@ def generate_signals(prices):
         curr_volume = volume[i]
         h3_level = h3_aligned[i]
         l3_level = l3_aligned[i]
-        ema_34_level = ema_34_1w_aligned[i]
+        ema_34_level = ema_34_1d_aligned[i]
         
         # Volume confirmation: current volume > 1.5 * 20-period average volume
         volume_confirm = curr_volume > 1.5 * vol_ma_20[i]
@@ -130,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_H3L3_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
