@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Williams Alligator + 1d EMA50 Trend + Volume Spike
-Hypothesis: Williams Alligator (jaw/teeth/lips) identifies trend direction and alignment. 1d EMA50 filter ensures higher timeframe trend confirmation. Volume spike (>1.5x 20-period MA) confirms breakout strength. Designed for 12h timeframe with 50-150 total trades over 4 years, works in both bull and bear markets via trend filter and avoids whipsaws in ranging conditions.
+4h Camarilla R3S3 Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: 4h Camarilla R3/S3 level breakouts capture institutional interest. 1d EMA34 ensures alignment with higher timeframe trend. Volume confirmation (>1.8x 20-period MA) filters false breakouts. Designed for 4h timeframe with 75-200 total trades over 4 years, working in both bull and bear markets via trend filter and volume confirmation.
 """
 
 import numpy as np
@@ -18,95 +18,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend (call ONCE before loop)
+    # Get 1d data for EMA34 trend (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need at least 50 days for EMA50
+    if len(df_1d) < 34:  # Need at least 34 days for EMA34
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = pd.Series(df_1d['close'])
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator components (12h)
-    # Jaw: 13-period SMMA, shifted 8 bars
-    # Teeth: 8-period SMMA, shifted 5 bars  
-    # Lips: 5-period SMMA, shifted 3 bars
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Shift as per Alligator definition
-    jaw_shifted = np.full_like(jaw, np.nan)
-    teeth_shifted = np.full_like(teeth, np.nan)
-    lips_shifted = np.full_like(lips, np.nan)
-    
-    if len(jaw) > 8:
-        jaw_shifted[8:] = jaw[:-8]
-    if len(teeth) > 5:
-        teeth_shifted[5:] = teeth[:-5]
-    if len(lips) > 3:
-        lips_shifted[3:] = lips[:-3]
-    
-    # Calculate 20-period volume MA for volume spike confirmation (12h)
+    # Calculate 20-period volume MA for volume spike confirmation (4h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
+    # Calculate ATR(14) for stoploss (4h)
+    atr = np.full(n, np.nan)
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-13:i+1])
+    
+    # Calculate Camarilla levels from previous day (1d)
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    for i in range(1, n):
+        # Previous day's OHLC
+        phigh = high[i-1]
+        plow = low[i-1]
+        pclose = close[i-1]
+        # Camarilla levels
+        camarilla_r3[i] = pclose + (phigh - plow) * 1.1 / 4
+        camarilla_s3[i] = pclose - (phigh - plow) * 1.1 / 4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for Alligator, EMA50, and volume MA
-    start_idx = max(13 + 8, 50, 20)  # jaw shift 8, EMA50, vol MA 20
+    # Start index: need enough for EMA34, volume MA, ATR, and Camarilla
+    start_idx = max(34, 20, 14, 1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(atr[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
-        jaw_val = jaw_shifted[i]
-        teeth_val = teeth_shifted[i]
-        lips_val = lips_shifted[i]
-        ema_50_val = ema_50_1d_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         vol_ma = vol_ma_20[i]
+        atr_val = atr[i]
+        camarilla_r3_val = camarilla_r3[i]
+        camarilla_s3_val = camarilla_s3[i]
         
-        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        uptrend_aligned = (lips_val > teeth_val) and (teeth_val > jaw_val)
-        downtrend_aligned = (lips_val < teeth_val) and (teeth_val < jaw_val)
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_val
+        downtrend = curr_close < ema_34_val
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        volume_confirm = curr_volume > 1.5 * vol_ma
+        # Volume confirmation: current volume > 1.8 * 20-period average
+        volume_confirm = curr_volume > 1.8 * vol_ma
         
         if position == 0:
-            # Look for entry signals
-            # Long: Alligator aligned upward + volume confirmation + price above 1d EMA50
-            long_signal = uptrend_aligned and volume_confirm and (curr_close > ema_50_val)
-            # Short: Alligator aligned downward + volume confirmation + price below 1d EMA50
-            short_signal = downtrend_aligned and volume_confirm and (curr_close < ema_50_val)
+            # Look for breakout signals
+            # Long: price breaks above Camarilla R3 with volume confirmation in uptrend
+            long_breakout = (curr_close > camarilla_r3_val) and volume_confirm and uptrend
+            # Short: price breaks below Camarilla S3 with volume confirmation in downtrend
+            short_breakout = (curr_close < camarilla_s3_val) and volume_confirm and downtrend
             
-            if long_signal:
+            if long_breakout:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            elif short_signal:
+            elif short_breakout:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -114,16 +105,20 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Alligator loses alignment (lips < teeth) OR price crosses below 1d EMA50
-            if (lips_val < teeth_val) or (curr_close < ema_50_val):
+            # Stoploss: 2 * ATR below entry
+            stop_loss = entry_price - 2.0 * atr_val
+            # Exit conditions: price closes below Camarilla S3 OR stoploss hit OR EMA34 trend turns down
+            if curr_close < camarilla_s3_val or curr_close < stop_loss or curr_close < ema_34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: Alligator loses alignment (lips > teeth) OR price crosses above 1d EMA50
-            if (lips_val > teeth_val) or (curr_close > ema_50_val):
+            # Stoploss: 2 * ATR above entry
+            stop_loss = entry_price + 2.0 * atr_val
+            # Exit conditions: price closes above Camarilla R3 OR stoploss hit OR EMA34 trend turns up
+            if curr_close > camarilla_r3_val or curr_close > stop_loss or curr_close > ema_34_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_1dEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
