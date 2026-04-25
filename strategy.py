@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Alligator_WeeklyTrend_VolumeFilter_v1
-Hypothesis: Use Williams Alligator on daily timeframe with 1-week trend filter and volume confirmation.
-Alligator (Smoothed Medians) identifies trend direction and strength; 1-week EMA filters for higher-timeframe alignment;
-volume spike confirms institutional interest. Discrete sizing (0.25) and minimum holding period (3 days) reduce fee drag.
-Designed to work in both bull (trend following) and bear (mean-reversion at extremes) markets via regime-aware exits.
-Target: 15-25 trades/year to minimize fee drag while capturing medium-term swings.
+6h_ElderRay_1dRegime_Filter_v2
+Hypothesis: Trade 6h Elder Ray (Bull/Bear Power) with 1d trend regime filter and volume confirmation.
+Elder Ray measures bull/bear power relative to EMA13. Long when Bull Power > 0 and rising, 
+Short when Bear Power < 0 and falling. Use 1d EMA34 for trend regime (bull/bear/range).
+Only trade in direction of 1d trend: long in bull regime, short in bear regime, flat in range.
+Add volume confirmation (volume > 1.5 * ATR) to avoid false signals.
+Target: 12-30 trades/year to minimize fee drag while capturing sustained moves.
+Discrete sizing: 0.25.
 """
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,79 +24,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Alligator calculation
+    # Get 1d data for trend regime and EMA13 for Elder Ray
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Williams Alligator: three smoothed medians (Jaw, Teeth, Lips)
-    # Median price = (high + low) / 2
-    median_price = (df_1d['high'].values + df_1d['low'].values) / 2
+    # Calculate 1d EMA34 for trend regime
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Jaw: 13-period SMMA, shifted 8 bars
-    jaw = pd.Series(median_price).ewm(alpha=1/13, adjust=False).mean().values
-    jaw = np.roll(jaw, 8)
-    jaw[:8] = np.nan
+    # Calculate EMA13 for Elder Ray (need 1d high/low/close)
+    ema_13_1d_high = pd.Series(df_1d['high'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_low = pd.Series(df_1d['low'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_close = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Teeth: 8-period SMMA, shifted 5 bars
-    teeth = pd.Series(median_price).ewm(alpha=1/8, adjust=False).mean().values
-    teeth = np.roll(teeth, 5)
-    teeth[:5] = np.nan
+    # Align 1d EMA13 to 6h timeframe
+    ema_13_1d_high_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d_high)
+    ema_13_1d_low_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d_low)
+    ema_13_1d_close_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d_close)
     
-    # Lips: 5-period SMMA, shifted 3 bars
-    lips = pd.Series(median_price).ewm(alpha=1/5, adjust=False).mean().values
-    lips = np.roll(lips, 3)
-    lips[:3] = np.nan
-    
-    # Align Alligator lines to 1d timeframe (already aligned via get_htf_data, but ensure no look-ahead)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # 1-week EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate ATR for volume spike filter and stoploss
+    # Calculate ATR for volume spike filter (using 6h data)
     tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
     tr2 = np.maximum(np.abs(low[1:] - close[:-1]), tr1)
-    tr = np.concatenate([[np.inf], tr2])
+    tr = np.concatenate([[np.inf], tr2])  # first TR undefined
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
+    bars_since_entry = 0  # track holding period
     
-    # Start index: need warmup for Alligator (lips: 5+3=8), 1w EMA20 (20), ATR (14)
-    start_idx = max(8, 20, 14)
+    # Start index: need warmup for 1d EMA34 (34) and EMA13 (13) and ATR (14)
+    start_idx = max(34, 13, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(jaw_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_13_1d_high_aligned[i]) or np.isnan(ema_13_1d_low_aligned[i]) or np.isnan(ema_13_1d_close_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             bars_since_entry = 0
             continue
         
-        # Volume spike: current volume > 2.0 * ATR (adaptive threshold for institutional interest)
-        volume_spike = volume[i] > 2.0 * atr[i]
+        # Calculate Elder Ray components
+        bull_power = high[i] - ema_13_1d_close_aligned[i]  # Bull Power = High - EMA13(close)
+        bear_power = low[i] - ema_13_1d_close_aligned[i]   # Bear Power = Low - EMA13(close)
+        
+        # Volume spike: current volume > 1.5 * ATR (adaptive threshold)
+        volume_spike = volume[i] > 1.5 * atr[i]
+        
+        # Determine 1d trend regime
+        # Bull regime: price > EMA34
+        # Bear regime: price < EMA34
+        # Range regime: near EMA34 (within 0.5*ATR of 6h equivalent)
+        # Convert 1d EMA34 to 6h equivalent threshold: use 1d ATR scaled to 6h
+        # Approximate: 1d ATR ≈ 6h ATR * sqrt(4) since 1d = 4*6h bars
+        atr_6h = atr[i]
+        atr_1d_approx = atr_6h * 2.0  # rough approximation
+        regime_threshold = 0.5 * atr_1d_approx
+        
+        if close[i] > ema_34_1d_aligned[i] + regime_threshold:
+            regime = 'bull'  # only allow longs
+        elif close[i] < ema_34_1d_aligned[i] - regime_threshold:
+            regime = 'bear'  # only allow shorts
+        else:
+            regime = 'range'  # no trades
         
         if position == 0:
-            # Alligator alignment: Lips > Teeth > Jaw = bullish; Lips < Teeth < Jaw = bearish
-            bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-            bearish_alignment = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+            # Long setup: Bull Power > 0 and rising (vs previous bar) AND volume spike AND bull regime
+            if i > start_idx:
+                bull_power_prev = high[i-1] - ema_13_1d_close_aligned[i-1]
+                bull_power_rising = bull_power > bull_power_prev
+            else:
+                bull_power_rising = False
             
-            # Long: bullish alignment AND price above lips AND 1w trend up (close > EMA20) AND volume spike
-            long_setup = bullish_alignment and (close[i] > lips_aligned[i]) and \
-                         (close[i] > ema_20_1w_aligned[i]) and volume_spike
-            # Short: bearish alignment AND price below lips AND 1w trend down (close < EMA20) AND volume spike
-            short_setup = bearish_alignment and (close[i] < lips_aligned[i]) and \
-                          (close[i] < ema_20_1w_aligned[i]) and volume_spike
+            long_setup = (bull_power > 0) and bull_power_rising and volume_spike and (regime == 'bull')
+            
+            # Short setup: Bear Power < 0 and falling (vs previous bar) AND volume spike AND bear regime
+            if i > start_idx:
+                bear_power_prev = low[i-1] - ema_13_1d_close_aligned[i-1]
+                bear_power_falling = bear_power < bear_power_prev
+            else:
+                bear_power_falling = False
+            
+            short_setup = (bear_power < 0) and bear_power_falling and volume_spike and (regime == 'bear')
             
             if long_setup:
                 signals[i] = 0.25
@@ -111,10 +123,8 @@ def generate_signals(prices):
             # Long: hold position
             signals[i] = 0.25
             bars_since_entry += 1
-            # Exit: Alligator reverses (lips < teeth) OR 1w trend turns down OR min holding period (3 days)
-            if (lips_aligned[i] < teeth_aligned[i]) or \
-               (close[i] < ema_20_1w_aligned[i]) or \
-               (bars_since_entry >= 3):
+            # Exit: Bull Power <= 0 OR regime turns bearish OR min holding period (8 bars = 1 day)
+            if (bull_power <= 0) or (regime == 'bear') or (bars_since_entry >= 8):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -122,16 +132,14 @@ def generate_signals(prices):
             # Short: hold position
             signals[i] = -0.25
             bars_since_entry += 1
-            # Exit: Alligator reverses (lips > teeth) OR 1w trend turns up OR min holding period (3 days)
-            if (lips_aligned[i] > teeth_aligned[i]) or \
-               (close[i] > ema_20_1w_aligned[i]) or \
-               (bars_since_entry >= 3):
+            # Exit: Bear Power >= 0 OR regime turns bullish OR min holding period (8 bars = 1 day)
+            if (bear_power >= 0) or (regime == 'bull') or (bars_since_entry >= 8):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
     
     return signals
 
-name = "1d_Alligator_WeeklyTrend_VolumeFilter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dRegime_Filter_v2"
+timeframe = "6h"
 leverage = 1.0
