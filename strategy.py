@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 12h EMA50 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Donchian(20) breakouts on 4h capture medium-term momentum. Filtering by 12h EMA50 trend ensures alignment with higher timeframe direction. Volume spike confirms institutional participation. ATR-based stoploss manages risk. Designed for 4h timeframe targeting 20-50 trades/year. Uses discrete position sizing (0.30) to minimize fee churn. Works in bull markets via breakout continuation and in bear markets via avoided counter-trend signals.
+1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Daily Donchian breakouts capture strong momentum moves. 
+1-week EMA50 provides robust trend filter to avoid counter-trend trades.
+Volume spike confirms institutional interest. ATR stoploss manages risk.
+Designed for 1d timeframe targeting 7-25 trades/year. Uses discrete position sizing (0.25) to minimize fee churn.
+Works in bull markets via breakout continuation and in bear markets via mean-reversion from extreme
+levels when 1w trend aligns. Uses proper MTF loading with get_htf_data called once before loop.
 """
 
 import numpy as np
@@ -10,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,16 +23,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1w data for EMA50 trend (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(14) for stoploss on 1d data
     if len(close) >= 14:
         tr1 = np.abs(np.diff(close, prepend=close[0]))
         tr2 = np.abs(high - np.roll(close, 1))
@@ -48,28 +53,32 @@ def generate_signals(prices):
         start_idx = max(0, i - 19)
         vol_ma_20[i] = np.mean(volume[start_idx:i+1])
     
-    # Calculate Donchian channels (20-period)
+    # Calculate Donchian channels (20-period) on 1d data
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(n):
-        start_idx = max(0, i - 19)
-        donchian_high[i] = np.max(high[start_idx:i+1])
-        donchian_low[i] = np.min(low[start_idx:i+1])
+        if i >= 19:
+            start_idx = i - 19
+            donchian_high[i] = np.max(high[start_idx:i+1])
+            donchian_low[i] = np.min(low[start_idx:i+1])
+        else:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA50_12h, ATR, Donchian, and volume MA to propagate
-    start_idx = max(50, 14, 20)
+    # Start index: need enough for EMA50_1w, ATR, Donchian, and volume MA to propagate
+    start_idx = max(50, 14, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(atr[i]) or 
+            np.isnan(vol_ma_20[i]) or 
             np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,7 +88,7 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema50_12h = ema_50_12h_aligned[i]
+        ema50_1w = ema_50_1w_aligned[i]
         upper = donchian_high[i]
         lower = donchian_low[i]
         atr_val = atr[i]
@@ -89,17 +98,17 @@ def generate_signals(prices):
         volume_spike = curr_volume > 2.0 * vol_ma
         
         if position == 0:
-            # Long: price breaks above upper Donchian AND uptrend (close > 12h EMA50) AND volume spike
-            long_condition = (curr_close > upper) and (curr_close > ema50_12h) and volume_spike
-            # Short: price breaks below lower Donchian AND downtrend (close < 12h EMA50) AND volume spike
-            short_condition = (curr_close < lower) and (curr_close < ema50_12h) and volume_spike
+            # Long: price breaks above upper Donchian AND uptrend (close > 1w EMA50) AND volume spike
+            long_condition = (curr_close > upper) and (curr_close > ema50_1w) and volume_spike
+            # Short: price breaks below lower Donchian AND downtrend (close < 1w EMA50) AND volume spike
+            short_condition = (curr_close < lower) and (curr_close < ema50_1w) and volume_spike
             
             if long_condition:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
             elif short_condition:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
         elif position == 1:
@@ -108,17 +117,17 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit short: stoploss (2.0*ATR above entry) or price breaks above upper Donchian (reversal signal)
             if curr_close >= entry_price + 2.0 * atr_val or curr_close > upper:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
