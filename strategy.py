@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: Trade 4h timeframe using Camarilla pivot levels (R1/S1) from 1d for entry, 
-daily EMA34 for trend filter, and daily volume spike (>2.0x 20-bar MA) for confirmation. 
-Enter long when price > daily R1 AND above daily EMA34 AND volume spike. 
-Enter short when price < daily S1 AND below daily EMA34 AND volume spike. 
-Exit on opposite pivot touch (S1 for long, R1 for short) or trend reversal (close crosses EMA34). 
-Uses discrete sizing 0.25 to balance return and drawdown. Target 20-50 trades/year on 4h timeframe. 
-Works in bull/bear via daily trend filter and volume confirmation to avoid false breakouts.
+1d_WeeklyCamarilla_H3L3_Breakout_TrendFilter_VolumeSpike
+Hypothesis: On daily timeframe, trade breakouts of weekly Camarilla H3/L3 levels with 
+weekly EMA34 trend filter and daily volume spike (>2.0x 20-bar MA) confirmation. 
+Enter long when price > weekly H3 AND above weekly EMA34 AND volume spike. 
+Enter short when price < weekly L3 AND below weekly EMA34 AND volume spike. 
+Exit on opposite weekly level touch (L3 for long, H3 for short) or trend reversal. 
+Uses discrete sizing 0.25. Target 15-25 trades/year on 1d timeframe. 
+Weekly Camarilla structure provides robust support/resistance that works in both 
+bull and bear markets, while volume spike filters breakout validity and EMA34 
+ensures alignment with weekly trend.
 """
 
 import numpy as np
@@ -24,28 +26,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots, EMA34, and volume confirmation
+    # Get 1w data for weekly Camarilla levels and EMA34
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly Camarilla levels (based on previous week's range)
+    # H3 = Close + 1.1 * (High - Low) / 2
+    # L3 = Close - 1.1 * (High - Low) / 2
+    weekly_range = high_1w - low_1w
+    h3_1w = close_1w + (1.1 * weekly_range / 2.0)
+    l3_1w = close_1w - (1.1 * weekly_range / 2.0)
+    
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align weekly indicators to daily timeframe (completed weekly bar only)
+    h3_1w_aligned = align_htf_to_ltf(prices, df_1w, h3_1w)
+    l3_1w_aligned = align_htf_to_ltf(prices, df_1w, l3_1w)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Get 1d data for daily volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
-    
-    # Calculate Camarilla pivot levels: 
-    # PP = (H+L+C)/3
-    # R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # Align Camarilla levels to 4h timeframe (completed daily bar only)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 20-bar volume MA on 1d for volume spike detection
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -60,19 +64,19 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike_1d_aligned[i])):
+        if (np.isnan(h3_1w_aligned[i]) or np.isnan(l3_1w_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(volume_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above daily R1 AND above daily EMA34 AND volume spike
-            long_setup = (close[i] > r1_1d_aligned[i]) and \
-                         (close[i] > ema_34_1d_aligned[i]) and \
+            # Long: price above weekly H3 AND above weekly EMA34 AND volume spike
+            long_setup = (close[i] > h3_1w_aligned[i]) and \
+                         (close[i] > ema_34_1w_aligned[i]) and \
                          volume_spike_1d_aligned[i]
-            # Short: price below daily S1 AND below daily EMA34 AND volume spike
-            short_setup = (close[i] < s1_1d_aligned[i]) and \
-                          (close[i] < ema_34_1d_aligned[i]) and \
+            # Short: price below weekly L3 AND below weekly EMA34 AND volume spike
+            short_setup = (close[i] < l3_1w_aligned[i]) and \
+                          (close[i] < ema_34_1w_aligned[i]) and \
                           volume_spike_1d_aligned[i]
             
             if long_setup:
@@ -86,22 +90,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches daily S1 OR closes below daily EMA34
-            if (close[i] <= s1_1d_aligned[i]) or \
-               (close[i] < ema_34_1d_aligned[i]):
+            # Exit: price touches weekly L3 OR closes below weekly EMA34
+            if (close[i] <= l3_1w_aligned[i]) or \
+               (close[i] < ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches daily R1 OR closes above daily EMA34
-            if (close[i] >= r1_1d_aligned[i]) or \
-               (close[i] > ema_34_1d_aligned[i]):
+            # Exit: price touches weekly H3 OR closes above weekly EMA34
+            if (close[i] >= h3_1w_aligned[i]) or \
+               (close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_WeeklyCamarilla_H3L3_Breakout_TrendFilter_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
