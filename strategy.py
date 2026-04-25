@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Williams Alligator with 1d EMA34 Trend and Volume Confirmation
-Hypothesis: Williams Alligator identifies trend absence/presence. When Alligator is 'sleeping' (lines intertwined) 
-and then 'awakens' (lines diverge) with 1d uptrend/downtrend and volume spike, it signals trend start. 
-Uses 4h timeframe with 1d HTF for trend. Targets 75-200 total trades over 4 years (19-50/year).
+12h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Donchian breakouts capture strong momentum moves. 
+Combined with 1d EMA34 trend filter and volume confirmation, this should work in both bull and bear markets by only taking breakouts in the direction of the higher timeframe trend.
+Targets 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 """
 
 import numpy as np
@@ -31,46 +31,21 @@ def generate_signals(prices):
     ).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator on 4h: SMAs of median price
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    median_price = (high + low) / 2
-    
-    # Smoothed Moving Average (SMMA) = EMA with alpha = 1/period
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        alpha = 1.0 / period
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = alpha * arr[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    jaw = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
-    
-    # Align Alligator lines (no extra delay needed for SMMA)
-    jaw_aligned = align_htf_to_ltf(prices, prices, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
-    lips_aligned = align_htf_to_ltf(prices, prices, lips)
-    
-    # Calculate 20-period volume MA for 4h volume confirmation
-    vol_ma_20_4h = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20_4h[i] = np.mean(volume[i-19:i+1])
+    # Calculate 24-period volume MA for 12h volume confirmation (24 * 12h = 12d ~ 2 weeks)
+    vol_ma_24_12h = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24_12h[i] = np.mean(volume[i-23:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Alligator and volume MA
-    start_idx = max(20, 13)  # 20 for volume MA, 13 for jaw
+    # Start index: need enough for Donchian(20), EMA, and volume MA
+    start_idx = max(20, 24, 34)  # 20 for Donchian, 24 for volume MA, 34 for EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(vol_ma_20_4h[i])):
+            np.isnan(vol_ma_24_12h[i])):
             signals[i] = 0.0
             continue
         
@@ -79,31 +54,22 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         ema_trend = ema_34_1d_aligned[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        vol_ma_4h = vol_ma_20_4h[i]
+        vol_ma_12h = vol_ma_24_12h[i]
         
-        # Volume confirmation: current 4h volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > 2.0 * vol_ma_4h
+        # Donchian(20) breakout levels
+        highest_high = np.max(high[i-19:i+1])   # 20-period high including current
+        lowest_low = np.min(low[i-19:i+1])      # 20-period low including current
         
-        # Alligator sleeping: lines intertwined (max-min < 0.1% of price)
-        alligator_range = max(jaw_val, teeth_val, lips_val) - min(jaw_val, teeth_val, lips_val)
-        alligator_sleeping = alligator_range < (curr_close * 0.001)
-        
-        # Alligator awakening: lips outside jaw/teeth with separation
-        lips_above = lips_val > max(jaw_val, teeth_val)
-        lips_below = lips_val < min(jaw_val, teeth_val)
-        lips_separation = abs(lips_val - (jaw_val + teeth_val) / 2) > (curr_close * 0.002)
-        alligator_awakening = (lips_above or lips_below) and lips_separation
+        # Volume confirmation: current 12h volume > 2.0 * 24-period average
+        volume_confirm = curr_volume > 2.0 * vol_ma_12h
         
         if position == 0:
             # Look for entry signals
-            # Long: Alligator awakening AND lips above jaw/teeth AND price > EMA34 (uptrend) AND volume confirmation
-            long_entry = (alligator_awakening and lips_above and 
+            # Long: price breaks above Donchian high AND price > EMA34 (uptrend) AND volume confirmation
+            long_entry = (curr_close > highest_high and 
                          curr_close > ema_trend and volume_confirm)
-            # Short: Alligator awakening AND lips below jaw/teeth AND price < EMA34 (downtrend) AND volume confirmation
-            short_entry = (alligator_awakening and lips_below and 
+            # Short: price breaks below Donchian low AND price < EMA34 (downtrend) AND volume confirmation
+            short_entry = (curr_close < lowest_low and 
                           curr_close < ema_trend and volume_confirm)
             
             if long_entry:
@@ -116,16 +82,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Alligator sleeping again OR lips cross below teeth OR price falls below EMA34
-            if (alligator_sleeping or lips_val < teeth_val or curr_close < ema_trend):
+            # Exit: price falls below Donchian low OR price crosses below EMA34
+            if (curr_close < lowest_low or curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: Alligator sleeping again OR lips cross above teeth OR price rises above EMA34
-            if (alligator_sleeping or lips_val > teeth_val or curr_close > ema_trend):
+            # Exit: price rises above Donchian high OR price crosses above EMA34
+            if (curr_close > highest_high or curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Williams_Alligator_1dEMA34_Trend_VolumeConfirm"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
