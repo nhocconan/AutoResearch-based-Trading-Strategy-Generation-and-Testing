@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout + 1w EMA50 Trend + Volume Spike with ATR Trailing Stop
-Hypothesis: Weekly EMA50 provides strong trend filter on 12h timeframe, reducing false breakouts.
-Camarilla H3/L3 levels capture institutional support/resistance with volume confirmation.
-ATR trailing stop manages risk. Designed for 12h to achieve 50-150 total trades over 4 years.
-Works in bull markets (trend continuation) and bear markets (mean reversion to pivot levels).
+4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike + ATR Trailing Stop
+Hypothesis: Donchian channel breakouts capture institutional momentum with clear structure.
+1d EMA50 provides robust trend filter that works in both bull (continuation) and bear (mean reversion to EMA).
+Volume spike confirms institutional participation. ATR trailing stop manages risk in volatile markets.
+Target: 75-150 trades over 4 years (19-37/year) to minimize fee drag while maintaining edge.
 """
 
 import numpy as np
@@ -26,29 +26,17 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
     
-    # Weekly data for EMA50 trend (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = calculate_ema(df_1w['close'].values, 50)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Daily data for Camarilla pivots (using previous bar)
+    # Daily data for EMA50 trend (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
     
-    prev_range = prev_high - prev_low
-    camarilla_h3 = prev_close + 1.1 * prev_range / 4
-    camarilla_l3 = prev_close - 1.1 * prev_range / 4
+    # Daily EMA50 trend filter
+    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Donchian(20) channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,12 +56,12 @@ def generate_signals(prices):
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    # Start index: need enough for weekly EMA, daily pivots, volume MA, and ATR
-    start_idx = max(50, 20, 14) + 5
+    # Start index: need enough for Donchian, EMA, volume MA
+    start_idx = max(20, 50, 20, 14) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -84,13 +72,13 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         
         # Breakout conditions
-        breakout_long = curr_close > camarilla_h3_aligned[i]
-        breakout_short = curr_close < camarilla_l3_aligned[i]
+        breakout_long = curr_close > highest_high[i]
+        breakout_short = curr_close < lowest_low[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla breakout + volume spike + weekly EMA50 trend alignment
-            long_entry = breakout_long and vol_spike and (curr_close > ema_50_1w_aligned[i])
-            short_entry = breakout_short and vol_spike and (curr_close < ema_50_1w_aligned[i])
+            # Look for entry signals - require: Donchian breakout + volume spike + daily EMA50 trend alignment
+            long_entry = breakout_long and vol_spike and (curr_close > ema_50_1d_aligned[i])
+            short_entry = breakout_short and vol_spike and (curr_close < ema_50_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
@@ -111,9 +99,9 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             
-            # Exit conditions: retrace to L3, trend change, or ATR trailing stop
+            # Exit conditions: retrace to Donchian low, trend change, or ATR trailing stop
             trailing_stop = highest_high_since_entry - 2.5 * atr[i]
-            if curr_close < camarilla_l3_aligned[i] or curr_close < ema_50_1w_aligned[i] or curr_close < trailing_stop:
+            if curr_close < lowest_low[i] or curr_close < ema_50_1d_aligned[i] or curr_close < trailing_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,9 +111,9 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             
-            # Exit conditions: retrace to H3, trend change, or ATR trailing stop
+            # Exit conditions: retrace to Donchian high, trend change, or ATR trailing stop
             trailing_stop = lowest_low_since_entry + 2.5 * atr[i]
-            if curr_close > camarilla_h3_aligned[i] or curr_close > ema_50_1w_aligned[i] or curr_close > trailing_stop:
+            if curr_close > highest_high[i] or curr_close > ema_50_1d_aligned[i] or curr_close > trailing_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike_ATRTrailingStop"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
