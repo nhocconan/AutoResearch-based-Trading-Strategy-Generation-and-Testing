@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_WilliamsVIXFix_MeanReversion_BearRegime
-Hypothesis: In bear markets (2025+), BTC/ETH exhibit mean-reverting spikes. Williams VIX Fix identifies volatility spikes (like VIX) that precede reversals. Long when VIX Fix > 80 (extreme fear) and price below 200 EMA (bearish context). Short when VIX Fix < 20 (extreme complacency) and price above 200 EMA. Use 1d timeframe for low trade frequency (<25/year) to minimize fee drag. 1w EMA50 trend filter ensures alignment with higher timeframe direction. Volume spike (>2.0x 20-bar MA) confirms exhaustion. Discrete sizing 0.25 balances risk and return.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_Regime
+Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation (>1.5x 20-bar MA). 
+12h timeframe targets 12-37 trades/year to minimize fee drag. Uses chop regime filter (BW < 50th percentile = range) 
+to avoid false breakouts in choppy markets. Long when price > R1 AND 1d trend bullish (close > EMA34) AND volume confirm 
+AND not choppy regime. Short when price < S1 AND 1d trend bearish (close < EMA34) AND volume confirm AND not choppy regime. 
+Exit when price re-enters R1/S1 range OR 1d trend reverses. Discrete sizing 0.25 balances profit and fee drag. 
+Works in bull/bear: trend filter adapts to market direction, volume confirms breakout validity, chop filter avoids 
+whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -18,63 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams VIX Fix calculation
+    # Get 1d data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Williams VIX Fix: measures market fear/volatility
-    # Formula: ((Highest Close in Period - Low) / (Highest Close in Period - Lowest Close in Period)) * 100
-    # We use 22-day period (approx 1 month) similar to VIX calculation
-    highest_close_22 = pd.Series(close_1d).rolling(window=22, min_periods=22).max().values
-    lowest_close_22 = pd.Series(close_1d).rolling(window=22, min_periods=22).min().values
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Avoid division by zero
-    denominator = highest_close_22 - lowest_close_22
-    denominator = np.where(denominator == 0, 1e-10, denominator)
+    # Calculate Camarilla levels from previous 1d bar's OHLC
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    prev_close_1d = df_1d['close'].shift(1).values
     
-    vix_fix = ((highest_close_22 - low_1d) / denominator) * 100
-    vix_fix_aligned = align_htf_to_ltf(prices, df_1d, vix_fix)
+    camarilla_range = prev_high_1d - prev_low_1d
+    r1 = prev_close_1d + 1.1 * camarilla_range / 12   # R1 level
+    s1 = prev_close_1d - 1.1 * camarilla_range / 12   # S1 level
     
-    # Get 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
-    # 200 EMA on 1d for bear/bull context
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Chop regime filter: Bollinger Band Width < 50th percentile = range (avoid breakouts in chop)
+    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    # Calculate 50th percentile of BB width over 50-period lookback
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=10).quantile(0.50).values
+    not_choppy = bb_width > bb_width_percentile  # True when trending (BW > median)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for longest indicator (200 EMA)
-    start_idx = 200
+    # Start index: need warmup for 1d EMA34 (34), volume MA (20), BB (50)
+    start_idx = max(34, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(vix_fix_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(bb_width_percentile[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Extreme fear (VIX Fix > 80) AND bearish context (price < 200 EMA) AND volume spike
-            long_setup = (vix_fix_aligned[i] > 80) and \
-                         (close[i] < ema_200_1d_aligned[i]) and \
-                         volume_confirm[i]
-            # Short: Extreme complacency (VIX Fix < 20) AND bullish context (price > 200 EMA) AND volume spike
-            short_setup = (vix_fix_aligned[i] < 20) and \
-                          (close[i] > ema_200_1d_aligned[i]) and \
-                          volume_confirm[i]
+            # Long: price breaks above R1 AND 1d trend bullish AND volume confirm AND not choppy
+            long_setup = (close[i] > r1_aligned[i]) and \
+                         (close[i] > ema_34_1d_aligned[i]) and \
+                         volume_confirm[i] and \
+                         not_choppy[i]
+            # Short: price breaks below S1 AND 1d trend bearish AND volume confirm AND not choppy
+            short_setup = (close[i] < s1_aligned[i]) and \
+                          (close[i] < ema_34_1d_aligned[i]) and \
+                          volume_confirm[i] and \
+                          not_choppy[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -87,20 +98,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: VIX Fix normalizes (< 50) OR price reaches 200 EMA (mean reversion complete)
-            if (vix_fix_aligned[i] < 50) or (close[i] >= ema_200_1d_aligned[i]):
+            # Exit: price re-enters Camarilla R1/S1 range OR 1d trend turns bearish
+            if (close[i] < r1_aligned[i] and close[i] > s1_aligned[i]) or \
+               (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: VIX Fix normalizes (> 50) OR price reaches 200 EMA (mean reversion complete)
-            if (vix_fix_aligned[i] > 50) or (close[i] <= ema_200_1d_aligned[i]):
+            # Exit: price re-enters Camarilla R1/S1 range OR 1d trend turns bullish
+            if (close[i] < r1_aligned[i] and close[i] > s1_aligned[i]) or \
+               (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WilliamsVIXFix_MeanReversion_BearRegime"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_Regime"
+timeframe = "12h"
 leverage = 1.0
