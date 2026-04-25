@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3L3 Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+4h Camarilla H3L3 Breakout + 1d EMA34 Trend + Volume Spike
 Hypothesis: Camarilla H3/L3 levels from 1d timeframe act as key intraday resistance/support.
-Breakouts above H3 or below L3 with volume confirmation, aligned with 1d EMA34 trend,
-and only in trending regimes (Choppiness Index < 38.2) capture momentum moves.
-Designed for 4h timeframe with tight entry conditions to achieve 19-50 trades/year.
+Breakouts above H3 or below L3 with volume confirmation and aligned with 1d EMA34 trend capture
+momentum moves. Designed for 4h timeframe with tight entry conditions to achieve 19-50 trades/year.
 Works in bull (breakouts above H3 in uptrend) and bear (breakouts below L3 in downtrend).
 """
 
@@ -48,36 +47,16 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Calculate Choppiness Index (14-period) on 1d timeframe for regime filter
-    # Chop = 100 * log10(sum(ATR(14)) / log10(range(14))) / log10(14)
-    # Simplified: Chop = 100 * log10(sum(tr_range_14) / (hh_14 - ll_14)) / log10(14)
-    # We'll use a proxy: high-low range based chop for 1d
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # first bar
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14 = hh_14 - ll_14
-    # Avoid division by zero
-    chop_1d = np.where(range_14 > 0, 
-                       100 * np.log10(sum_tr_14 / range_14) / np.log10(14), 
-                       50.0)  # neutral when range is zero
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    chop_filter = chop_1d_aligned < 38.2  # trending regime
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA, volume MA, and chop
+    # Start index: need enough for EMA and volume MA
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(chop_1d_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -89,26 +68,22 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         camarilla_h3_level = camarilla_h3_aligned[i]
         camarilla_l3_level = camarilla_l3_aligned[i]
-        is_trending = chop_filter[i]
         
         if position == 0:
-            # Look for entry signals (only in trending regime)
-            if is_trending:
-                # Long: price breaks above camarilla H3 AND volume spike AND price > EMA (uptrend)
-                long_entry = (curr_high > camarilla_h3_level) and vol_spike and (curr_close > ema_trend)
-                # Short: price breaks below camarilla L3 AND volume spike AND price < EMA (downtrend)
-                short_entry = (curr_low < camarilla_l3_level) and vol_spike and (curr_close < ema_trend)
-                
-                if long_entry:
-                    signals[i] = 0.25
-                    position = 1
-                elif short_entry:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Look for entry signals
+            # Long: price breaks above camarilla H3 AND volume spike AND price > EMA (uptrend)
+            long_entry = (curr_high > camarilla_h3_level) and vol_spike and (curr_close > ema_trend)
+            # Short: price breaks below camarilla L3 AND volume spike AND price < EMA (downtrend)
+            short_entry = (curr_low < camarilla_l3_level) and vol_spike and (curr_close < ema_trend)
+            
+            if long_entry:
+                signals[i] = 0.25
+                position = 1
+            elif short_entry:
+                signals[i] = -0.25
+                position = -1
             else:
-                signals[i] = 0.0  # no entries in choppy regime
+                signals[i] = 0.0
         elif position == 1:
             # Long position management
             # Exit: price crosses below camarilla L3 OR price crosses below EMA (trend change)
@@ -128,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
