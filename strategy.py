@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Williams_VIX_Fix_MeanReversion_1dTrendFilter
-Hypothesis: 4-hour Williams VIX Fix mean reversion with 1-day trend filter and volume confirmation.
-Long when VIX Fix < 20 (extreme fear) in 1-day uptrend with volume confirmation (>1.5x 20-period average).
-Short when VIX Fix > 80 (extreme greed) in 1-day downtrend with volume confirmation.
-Exit via opposite VIX Fix threshold (40 for long exit, 60 for short exit) or ATR trailing stop (1.5*ATR).
-Williams VIX Fix measures market fear/greed - effective in both bull and bear markets for mean reversion trades.
-Volume confirmation ensures mean reversion has conviction. 1-day trend filter aligns with higher timeframe bias.
-Designed for ~25-60 trades over 4 years (6-15/year) via tight VIX Fix extreme conditions.
+12h_Camarilla_R1S1_Breakout_1wTrend_VolumeRegime
+Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-week trend filter (price > 1w EMA50) and volume regime filter (>1.5x 20-period average volume).
+Long when price breaks above R1 in 1-week uptrend with volume confirmation.
+Short when price breaks below S1 in 1-week downtrend with volume confirmation.
+Exit via ATR trailing stop (2.5*ATR from extreme) or opposite Camarilla level (S1 for longs, R1 for shorts).
+Camarilla levels provide precise intraday support/resistance derived from prior day's range.
+Weekly trend filter ensures alignment with higher timeframe bias, reducing counter-trend trades.
+Volume regime confirms breakouts have conviction. Designed for ~75-125 trades over 4 years (19-31/year) via tight breakout conditions.
 """
 
 import numpy as np
@@ -24,33 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (HTF)
+    # Get 1d data for Camarilla calculation (prior day's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # need sufficient data for EMA and VIX Fix calculation
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # need 50 for EMA50
+        return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_1w = df_1w['close'].values
     
-    # Calculate Williams VIX Fix on 1d data
-    # VIX Fix = ( (Highest High in 22 periods - Low) / (Highest High in 22 periods - Lowest Low in 22 periods) ) * 100
-    lookback = 22
-    highest_high = pd.Series(high_1d).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Avoid division by zero
-    hh_ll = highest_high - lowest_low
-    hh_ll = np.where(hh_ll == 0, 1e-10, hh_ll)
-    
-    vix_fix = ((highest_high - low_1d) / hh_ll) * 100
-    vix_fix_aligned = align_htf_to_ltf(prices, df_1d, vix_fix)
-    
-    # ATR for stoploss (14-period)
+    # Calculate ATR for stoploss (14-period)
     atr_period = 14
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -69,26 +59,56 @@ def generate_signals(prices):
     short_extreme = 0.0  # lowest close since short entry
     
     # Start index: need warmup for calculations
-    start_idx = max(100, atr_period, 20, lookback)
+    start_idx = max(100, atr_period, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vix_fix_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_50_1d_aligned[i]
-        vix = vix_fix_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
+        
+        # Calculate Camarilla levels using prior 1d bar (i-1 in 1d timeframe)
+        # We need the 1d bar that completed before current 12h bar
+        # Since we're on 12h timeframe, we look back 2 12h bars to get prior day
+        # But safer: use the 1d data directly with proper alignment
+        if i >= 2:  # need at least 2 bars to have prior completed 1d bar
+            # Get the 1d index that corresponds to the prior completed day
+            # We'll use the 1d bar that ended before the current 12h bar started
+            # Since 12h bars are half of 1d bars, we can use integer division
+            idx_1d = i // 2
+            if idx_1d > 0 and idx_1d < len(df_1d):
+                # Prior completed 1d bar
+                high_1d = df_1d['high'].values[idx_1d - 1]
+                low_1d = df_1d['low'].values[idx_1d - 1]
+                close_1d = df_1d['close'].values[idx_1d - 1]
+                
+                # Calculate Camarilla levels
+                range_1d = high_1d - low_1d
+                if range_1d > 0:
+                    r1 = close_1d + (range_1d * 1.1 / 12)
+                    s1 = close_1d - (range_1d * 1.1 / 12)
+                    r3 = close_1d + (range_1d * 1.1 / 4)
+                    s3 = close_1d - (range_1d * 1.1 / 4)
+                else:
+                    r1 = s1 = r3 = s3 = close_1d
+            else:
+                # Not enough 1d data yet
+                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+                continue
+        else:
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
         
         if position == 0:
-            # Only trade in trending regimes (1d EMA50 filter)
-            if close[i] > ema_trend:  # 1d uptrend regime
-                # Long: extreme fear (VIX Fix < 20) with volume confirmation
-                long_signal = (vix < 20) and vol_regime[i]
-            else:  # 1d downtrend regime
-                # Short: extreme greed (VIX Fix > 80) with volume confirmation
-                short_signal = (vix > 80) and vol_regime[i]
+            # Only trade in trending regimes (1w EMA50 filter)
+            if close[i] > ema_trend:  # 1w uptrend regime
+                # Long: break above R1 with volume confirmation
+                long_signal = (close[i] > r1) and vol_regime[i]
+            else:  # 1w downtrend regime
+                # Short: break below S1 with volume confirmation
+                short_signal = (close[i] < s1) and vol_regime[i]
             
             if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
@@ -110,10 +130,10 @@ def generate_signals(prices):
             if close[i] > long_extreme:
                 long_extreme = close[i]
             # Exit conditions: 
-            # 1. ATR trailing stop (1.5*ATR from extreme)
-            atr_stop = long_extreme - 1.5 * atr[i]
-            # 2. VIX Fix exits extreme fear zone (VIX Fix > 40)
-            if close[i] <= atr_stop or vix > 40:
+            # 1. ATR trailing stop (2.5*ATR from extreme)
+            atr_stop = long_extreme - 2.5 * atr[i]
+            # 2. Price breaks below S1 (opposite Camarilla level)
+            if close[i] <= atr_stop or close[i] < s1:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
@@ -123,15 +143,15 @@ def generate_signals(prices):
             if close[i] < short_extreme:
                 short_extreme = close[i]
             # Exit conditions:
-            # 1. ATR trailing stop (1.5*ATR from extreme)
-            atr_stop = short_extreme + 1.5 * atr[i]
-            # 2. VIX Fix exits extreme greed zone (VIX Fix < 60)
-            if close[i] >= atr_stop or vix < 60:
+            # 1. ATR trailing stop (2.5*ATR from extreme)
+            atr_stop = short_extreme + 2.5 * atr[i]
+            # 2. Price breaks above R1 (opposite Camarilla level)
+            if close[i] >= atr_stop or close[i] > r1:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Williams_VIX_Fix_MeanReversion_1dTrendFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
