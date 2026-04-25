@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation + ATR(14) stoploss
-Hypothesis: Donchian breakouts capture momentum moves. 12h HMA21 filters trend direction to avoid counter-trend whipsaws. Volume confirmation ensures breakout validity. ATR-based trailing stop limits drawdown in bear markets. Designed for 4h timeframe targeting 75-200 trades over 4 years (19-50/year).
+1h Volume Spike + 4h Donchian Breakout + 1d EMA50 Trend Filter
+Hypothesis: Combine 4h Donchian breakouts for structure, 1h volume spikes for momentum confirmation, and 1d EMA50 for trend filter. 
+This multi-timeframe approach reduces false breakouts by requiring alignment across timeframes. 
+Session filter (08-20 UTC) avoids low-liquidity periods. Designed for 1h timeframe targeting 15-35 trades/year.
 """
 
 import numpy as np
@@ -18,149 +20,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HMA21 trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Get 4h data for Donchian channels (call ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:  # Need at least 20 periods for Donchian
         return np.zeros(n)
     
-    # Calculate 12h HMA21 for trend
-    close_12h = pd.Series(df_12h['close'])
-    hma_21_12h = calculate_hma(close_12h.values, 21)
-    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
-    
     # Calculate 4h Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Calculate 4h ATR(14) for stoploss and position sizing
-    atr_14 = np.full(n, np.nan)
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    for i in range(14, n):
-        atr_14[i] = np.mean(tr[i-13:i+1])
+    # Get 1d data for EMA50 trend filter (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:  # Need at least 50 periods for EMA50
+        return np.zeros(n)
     
-    # Calculate 20-period volume MA for volume spike confirmation
+    # Calculate 1d EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate 20-period volume MA for volume spike confirmation (1h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
+    # Precompute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Start index: need enough for Donchian, HMA, ATR, volume MA
-    start_idx = max(20, 21, 14, 20)
+    # Start index: need enough for Donchian, EMA50, and volume MA
+    start_idx = max(20, 50, 20)
     
     for i in range(start_idx, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(hma_21_12h_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
-        hma_21_val = hma_21_12h_aligned[i]
-        atr_14_val = atr_14[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
         vol_ma = vol_ma_20[i]
         
-        # Trend filter: price relative to 12h HMA21
-        uptrend = curr_close > hma_21_val
-        downtrend = curr_close < hma_21_val
+        # Trend filter: price relative to 1d EMA50
+        uptrend = curr_close > ema_50_val
+        downtrend = curr_close < ema_50_val
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        volume_confirm = curr_volume > 1.5 * vol_ma
+        # Volume confirmation: current volume > 2.0 * 20-period average
+        volume_confirm = curr_volume > 2.0 * vol_ma
         
         if position == 0:
             # Look for breakout signals
-            # Long: price breaks above Donchian high with volume confirmation in uptrend
+            # Long: price breaks above 4h Donchian high with volume confirmation in uptrend
             long_breakout = (curr_close > donchian_high_val) and volume_confirm and uptrend
-            # Short: price breaks below Donchian low with volume confirmation in downtrend
+            # Short: price breaks below 4h Donchian low with volume confirmation in downtrend
             short_breakout = (curr_close < donchian_low_val) and volume_confirm and downtrend
             
             if long_breakout:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-                entry_price = curr_close
-                highest_since_entry = curr_close
             elif short_breakout:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
-                entry_price = curr_close
-                lowest_since_entry = curr_close
             else:
                 signals[i] = 0.0
+                position = 0
         elif position == 1:
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit if price drops 2.5 * ATR from highest since entry
-            if curr_close < highest_since_entry - 2.5 * atr_14_val:
-                signals[i] = 0.0
-                position = 0
-            # Exit long: price closes below Donchian low OR HMA21 trend turns down
-            elif curr_close < donchian_low_val or curr_close < hma_21_val:
+            # Exit long: price closes below 4h Donchian low OR EMA50 trend turns down
+            if curr_close < donchian_low_val or curr_close < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit if price rises 2.5 * ATR from lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * atr_14_val:
-                signals[i] = 0.0
-                position = 0
-            # Exit short: price closes above Donchian high OR HMA21 trend turns up
-            elif curr_close > donchian_high_val or curr_close > hma_21_val:
+            # Exit short: price closes above 4h Donchian high OR EMA50 trend turns up
+            if curr_close > donchian_high_val or curr_close > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-def calculate_hma(values, period):
-    """Calculate Hull Moving Average"""
-    if len(values) < period:
-        return np.full_like(values, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    wma_half = np.full_like(values, np.nan)
-    for i in range(half_period - 1, len(values)):
-        wma_half[i] = np.average(values[i - half_period + 1:i + 1], 
-                                weights=np.arange(1, half_period + 1))
-    
-    # WMA of full period
-    wma_full = np.full_like(values, np.nan)
-    for i in range(period - 1, len(values)):
-        wma_full[i] = np.average(values[i - period + 1:i + 1], 
-                                weights=np.arange(1, period + 1))
-    
-    # Raw HMA: 2 * WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final WMA of raw HMA with sqrt_period
-    hma = np.full_like(values, np.nan)
-    for i in range(sqrt_period - 1, len(values)):
-        hma[i] = np.average(raw_hma[i - sqrt_period + 1:i + 1], 
-                           weights=np.arange(1, sqrt_period + 1))
-    
-    return hma
-
-name = "4h_Donchian20_Breakout_12hHMA21_Trend_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1h_VolumeSpike_DonchianBreakout_1dEMA50Trend"
+timeframe = "1h"
 leverage = 1.0
