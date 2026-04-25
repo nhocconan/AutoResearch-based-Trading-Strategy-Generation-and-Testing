@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_12hEMA34_VolumeConfirm_Regime
-Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA34 trend filter and volume confirmation. 
-H3/L3 levels provide stronger breakout signals than R1/S1, reducing false positives. 
-12h EMA34 offers smooth trend filter suitable for 4h entries. Volume spike confirms institutional interest. 
-Designed to work in both bull (breakouts with trend) and bear (mean reversion at extremes) markets 
-by using Camarilla's natural support/resistance structure. Target: 20-50 trades/year.
+1h_Camarilla_H3L3_Breakout_4hTrend_VolumeSpike_Session
+Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA34 trend filter and volume confirmation, 
+restricted to 08-20 UTC session. Uses higher timeframe (4h) for signal direction to reduce 
+overtrading on 1h, while 1h provides precise entry timing. Volume spike confirms momentum. 
+Session filter avoids low-liquidity periods. Designed for 15-37 trades/year on BTC/ETH.
 """
 
 import numpy as np
@@ -22,10 +21,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA34 trend filter (loaded ONCE)
-    df_12h = get_htf_data(prices, '12h')
-    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Precompute session hours (08-20 UTC) once before loop
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 4h data for EMA34 trend filter (loaded ONCE)
+    df_4h = get_htf_data(prices, '4h')
+    ema_34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
     # 1d data for Camarilla pivots (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
@@ -38,7 +41,7 @@ def generate_signals(prices):
     H3 = prev_close + 1.1 * prev_range * 0.5  # H3 = C + 1.1*(HL/2)
     L3 = prev_close - 1.1 * prev_range * 0.5  # L3 = C - 1.1*(HL/2)
     
-    # Align 1d pivot levels to 4h timeframe
+    # Align 1d pivot levels to 1h timeframe
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
@@ -50,13 +53,18 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 12h EMA34 (34) and 1d indicators
+    # Start index: need enough for 4h EMA34 (34) and 1d indicators
     start_idx = 34
     
     for i in range(start_idx, n):
+        # Skip if not in trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
         # Skip if any data not ready
         if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_12h_aligned[i])):
+            np.isnan(ema_34_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -64,9 +72,9 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to 12h EMA34
-        uptrend = curr_close > ema_34_12h_aligned[i]
-        downtrend = curr_close < ema_34_12h_aligned[i]
+        # Trend filter: price relative to 4h EMA34
+        uptrend = curr_close > ema_34_4h_aligned[i]
+        downtrend = curr_close < ema_34_4h_aligned[i]
         
         if position == 0:
             # Look for entry signals with volume spike and trend alignment
@@ -76,18 +84,18 @@ def generate_signals(prices):
             short_breakout = (curr_close < L3_aligned[i]) and downtrend and volume_spike[i]
             
             if long_breakout:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = curr_close
             elif short_breakout:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Stoploss: 2.0 * ATR below entry (using 4h ATR)
+            # Stoploss: 2.0 * ATR below entry (using 1h ATR)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -102,10 +110,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Short position: exit conditions
-            # Calculate 4h ATR (same as above)
+            # Calculate 1h ATR (same as above)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -120,10 +128,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_12hEMA34_VolumeConfirm_Regime"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_Breakout_4hTrend_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
