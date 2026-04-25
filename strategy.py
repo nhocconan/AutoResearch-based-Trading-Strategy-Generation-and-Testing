@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts from the previous 1d bar with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) captures institutional breakouts with controlled trade frequency. The 12h timeframe targets 12-37 trades/year (50-150 over 4 years), balancing signal quality and execution precision. Trend alignment ensures directional bias in both bull and bear markets, volume confirms participation, and discrete sizing (0.25) minimizes fee churn. Works in bull markets via long breakouts and bear markets via short breakouts.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts from the previous 1d bar with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) captures institutional breakouts with controlled trade frequency. The 4h timeframe targets 19-50 trades/year (75-200 over 4 years). Trend alignment ensures directional bias in both bull and bear markets, volume confirms participation, and discrete sizing (0.25) minimizes fee churn. Works in bull markets via long breakouts and bear markets via short breakouts. This version adds a stricter volume spike threshold (2.5x) to reduce overtrading seen in prior variants.
 """
 
 import numpy as np
@@ -42,7 +42,7 @@ def generate_signals(prices):
     r1 = prev_close + 1.1 * camarilla_range * 1.1 / 12
     s1 = prev_close - 1.1 * camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -81,8 +81,8 @@ def generate_signals(prices):
         high_val = high[i]
         low_val = low[i]
         
-        # Volume spike condition: current volume > 2.0x 20-period average
-        volume_spike = vol_val > 2.0 * vol_ma_val
+        # Volume spike condition: current volume > 2.5x 20-period average (stricter to reduce trades)
+        volume_spike = vol_val > 2.5 * vol_ma_val
         
         if position == 0:
             # Look for entry signals: Camarilla R1/S1 breakout with trend and volume
@@ -122,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
