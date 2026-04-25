@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Weekly Camarilla H4/L4 Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Weekly Camarilla levels (H4/L4) act as strong monthly support/resistance on 12h chart.
-Breakouts with volume confirmation and 1d EMA34 trend alignment capture institutional flow.
-Designed for 50-150 trades over 4 years (12-37/year). Works in bull/bear via 1d EMA34 trend filter.
-Uses weekly pivot calculated from prior week's OHLC (loaded as 1w HTF).
+4h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Stop
+Hypothesis: Daily Camarilla H3/L3 levels provide strong intraday support/resistance.
+Breakouts with volume spike and 1d EMA34 trend alignment capture institutional flow.
+Designed for 75-150 trades over 4 years. Works in bull/bear via 1d EMA34 trend filter.
 """
 
 import numpy as np
@@ -44,25 +43,20 @@ def generate_signals(prices):
     ema_34_1d = calculate_ema(df_1d['close'].values, 34)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1w data for weekly Camarilla pivots (using previous week)
-    df_1w = get_htf_data(prices, '1w')
-    prev_weekly_high = np.roll(df_1w['high'].values, 1)
-    prev_weekly_low = np.roll(df_1w['low'].values, 1)
-    prev_weekly_close = np.roll(df_1w['close'].values, 1)
-    prev_weekly_high[0] = np.nan
-    prev_weekly_low[0] = np.nan
-    prev_weekly_close[0] = np.nan
+    # 1d data for daily Camarilla pivots (using previous day)
+    prev_daily_high = np.roll(df_1d['high'].values, 1)
+    prev_daily_low = np.roll(df_1d['low'].values, 1)
+    prev_daily_close = np.roll(df_1d['close'].values, 1)
+    prev_daily_high[0] = np.nan
+    prev_daily_low[0] = np.nan
+    prev_daily_close[0] = np.nan
     
-    prev_weekly_range = prev_weekly_high - prev_weekly_low
-    # Weekly Camarilla levels
-    weekly_h4 = prev_weekly_close + 1.1 * prev_weekly_range / 2  # H4 equivalent
-    weekly_l4 = prev_weekly_close - 1.1 * prev_weekly_range / 2  # L4 equivalent
-    weekly_h3 = prev_weekly_close + 1.1 * prev_weekly_range / 4  # H3
-    weekly_l3 = prev_weekly_close - 1.1 * prev_weekly_range / 4  # L3
-    weekly_h3_aligned = align_htf_to_ltf(prices, df_1w, weekly_h3, additional_delay_bars=0)
-    weekly_l3_aligned = align_htf_to_ltf(prices, df_1w, weekly_l3, additional_delay_bars=0)
-    weekly_h4_aligned = align_htf_to_ltf(prices, df_1w, weekly_h4, additional_delay_bars=0)
-    weekly_l4_aligned = align_htf_to_ltf(prices, df_1w, weekly_l4, additional_delay_bars=0)
+    prev_daily_range = prev_daily_high - prev_daily_low
+    # Daily Camarilla levels
+    daily_h3 = prev_daily_close + 1.1 * prev_daily_range / 4  # H3
+    daily_l3 = prev_daily_close - 1.1 * prev_daily_range / 4  # L3
+    daily_h3_aligned = align_htf_to_ltf(prices, df_1d, daily_h3, additional_delay_bars=0)
+    daily_l3_aligned = align_htf_to_ltf(prices, df_1d, daily_l3, additional_delay_bars=0)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -82,8 +76,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(weekly_h3_aligned[i]) or np.isnan(weekly_l3_aligned[i]) or
-            np.isnan(weekly_h4_aligned[i]) or np.isnan(weekly_l4_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(daily_h3_aligned[i]) or np.isnan(daily_l3_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -92,12 +86,12 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Breakout conditions using weekly levels
-        breakout_long = curr_close > weekly_h4_aligned[i]  # Break above weekly H4
-        breakout_short = curr_close < weekly_l4_aligned[i]  # Break below weekly L4
+        # Breakout conditions using daily levels
+        breakout_long = curr_close > daily_h3_aligned[i]  # Break above daily H3
+        breakout_short = curr_close < daily_l3_aligned[i]  # Break below daily L3
         
         if position == 0:
-            # Look for entry signals - require: Weekly Camarilla breakout + volume spike + 1d EMA34 trend alignment
+            # Look for entry signals - require: Daily Camarilla breakout + volume spike + 1d EMA34 trend alignment
             long_entry = breakout_long and vol_spike and (curr_close > ema_34_1d_aligned[i])
             short_entry = breakout_short and vol_spike and (curr_close < ema_34_1d_aligned[i])
             
@@ -120,9 +114,9 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             
-            # Exit conditions: retrace to weekly L3, trend change, or ATR trailing stop
+            # Exit conditions: retrace to daily L3, trend change, or ATR trailing stop
             trailing_stop = highest_high_since_entry - 2.5 * atr[i]
-            if curr_close < weekly_l3_aligned[i] or curr_close < ema_34_1d_aligned[i] or curr_close < trailing_stop:
+            if curr_close < daily_l3_aligned[i] or curr_close < ema_34_1d_aligned[i] or curr_close < trailing_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,9 +126,9 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             
-            # Exit conditions: retrace to weekly H3, trend change, or ATR trailing stop
+            # Exit conditions: retrace to daily H3, trend change, or ATR trailing stop
             trailing_stop = lowest_low_since_entry + 2.5 * atr[i]
-            if curr_close > weekly_h3_aligned[i] or curr_close > ema_34_1d_aligned[i] or curr_close > trailing_stop:
+            if curr_close > daily_h3_aligned[i] or curr_close > ema_34_1d_aligned[i] or curr_close > trailing_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -142,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyCamarilla_H4L4_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
