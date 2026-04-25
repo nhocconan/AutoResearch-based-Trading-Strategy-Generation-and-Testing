@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v2
-Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume confirmation.
-Optimized version: Reduced trade frequency by requiring stricter volume confirmation (3.0x average) 
-and added minimum holding period of 3 bars to reduce whipsaw. Target: 20-40 trades/year for better 
-fee drag management while maintaining edge in both bull and bear markets via trend alignment.
+12h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume confirmation.
+R1/S1 levels provide intraday support/resistance with lower false breakout frequency than H3/L3.
+1d EMA trend filter ensures alignment with long-term momentum in both bull and bear markets.
+Volume spike confirms institutional participation.
+Target: 12-37 trades/year to minimize fee drag and achieve Sharpe > 1.0 on test.
 """
 
 import numpy as np
@@ -41,24 +42,21 @@ def generate_signals(prices):
     camarilla_r1_1d = c_1d + (range_1d * 1.1 / 12.0)
     camarilla_s1_1d = c_1d - (range_1d * 1.1 / 12.0)
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    # Volume confirmation: 4h volume > 3.0 * 20-period average (stricter to reduce trades)
+    # Volume confirmation: 12h volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (3.0 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0  # Track bars in position for minimum holding period
     
     # Start index: need warmup for EMA34 (34) and volume MA (20)
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        bars_since_entry += 1
-        
         # Skip if data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
@@ -80,42 +78,28 @@ def generate_signals(prices):
             if long_setup:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
             elif short_setup:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long: hold position (minimum 3 bars)
+            # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: Camarilla S1 touch OR 1d trend bearish OR minimum hold met + R1 retest
-            exit_condition = False
-            if bars_since_entry >= 3:
-                exit_condition = (close[i] <= camarilla_s1_aligned[i]) or \
-                                (not htf_1d_bullish) or \
-                                (close[i] < camarilla_r1_aligned[i] * 0.995)  # Slight retracement from R1
-            if exit_condition:
+            # Exit: price touches Camarilla S1 (stop) OR 1d trend turns bearish
+            if (close[i] <= camarilla_s1_aligned[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
         elif position == -1:
-            # Short: hold position (minimum 3 bars)
+            # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: Camarilla R1 touch OR 1d trend bullish OR minimum hold met + S1 retest
-            exit_condition = False
-            if bars_since_entry >= 3:
-                exit_condition = (close[i] >= camarilla_r1_aligned[i]) or \
-                                (htf_1d_bullish) or \
-                                (close[i] > camarilla_s1_aligned[i] * 1.005)  # Slight retracement from S1
-            if exit_condition:
+            # Exit: price touches Camarilla R1 (stop) OR 1d trend turns bullish
+            if (close[i] >= camarilla_r1_aligned[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
