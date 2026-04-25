@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_Regime_H4Confirm
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Adds 4h HMA21 trend confirmation to reduce false breakouts and lower trade frequency.
-Long when price breaks above H3 with 1d uptrend, 4h HMA21 uptrend, and volume spike.
-Short when price breaks below L3 with 1d downtrend, 4h HMA21 downtrend, and volume spike.
-Uses wider Camarilla levels (H3/L3) to reduce false breakouts and lower trade frequency.
-Targets 19-30 trades/year on 4h timeframe to minimize fee drag while capturing strong trends.
-Works in both bull and bear markets by following the 1d EMA34 trend direction.
+1d_KAMA_Trend_RSI_ChopFilter
+Hypothesis: 1d KAMA trend direction combined with RSI(2) extremes and choppiness regime filter.
+Long when KAMA trend up, RSI(2) < 10, and CHOP(14) > 61.8 (range regime).
+Short when KAMA trend down, RSI(2) > 90, and CHOP(14) > 61.8 (range regime).
+Uses weekly EMA34 for trend confirmation to avoid counter-trend trades.
+Targets 7-25 trades/year on 1d timeframe to minimize fee drag while capturing mean reversion in ranging markets.
+Works in both bull and bear markets by fading extremes only in range regimes.
 """
 
 import numpy as np
@@ -19,78 +18,71 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (H3, L3) from previous day
+    # 1d KAMA for trend direction
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # KAMA: ER = |net change| / sum|abs change|, SC = [ER*(fastest-slowest)+slowest]^2
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = pd.Series(change).rolling(window=10, min_periods=1).sum().values
+    net_change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    er = np.where(volatility > 0, net_change / volatility, 0)
+    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Camarilla: H3 = close + (high - low) * 1.1/4, L3 = close - (high - low) * 1.1/4
-    camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Weekly EMA34 for trend confirmation (avoid counter-trend)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # RSI(2) for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # 4h HMA21 for additional trend confirmation
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    wma_half = pd.Series(close_4h).rolling(window=half_len, min_periods=half_len).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x)+1)), raw=True
-    ).values
-    wma_full = pd.Series(close_4h).rolling(window=21, min_periods=21).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x)+1)), raw=True
-    ).values
-    raw_hma = 2 * wma_half - wma_full
-    hma_21 = pd.Series(raw_hma).rolling(window=sqrt_len, min_periods=sqrt_len).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x)+1)), raw=True
-    ).values
-    hma_21_aligned = align_htf_to_ltf(prices, df_4h, hma_21)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Choppiness Index regime filter: CHOP > 61.8 = ranging (mean revert)
+    atr_raw = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    atr = pd.Series(atr_raw).rolling(window=14, min_periods=14).mean().values
+    high_roll = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    low_roll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr * 14 / np.log10((high_roll - low_roll) + 1e-10)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for 1d Camarilla, 1d EMA34, 4h HMA21, and volume MA
-    start_idx = max(1, 34, 21, 20)  # Camarilla needs 1d data, EMA34 needs 34, HMA21 needs 21, vol MA needs 20
+    # Start index: need warmup for 1d KAMA, 1w EMA34, RSI(2), and CHOP(14)
+    start_idx = max(10, 34, 2, 14)  # KAMA needs 10, EMA34 needs 34, RSI needs 2, CHOP needs 14
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(hma_21_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above H3 + 1d uptrend + 4h HMA21 uptrend + volume spike
-            long_setup = (close[i] > camarilla_h3_aligned[i]) and \
-                         (close[i] > ema_34_1d_aligned[i]) and \
-                         (close[i] > hma_21_aligned[i]) and \
-                         volume_spike[i]
-            # Short: price breaks below L3 + 1d downtrend + 4h HMA21 downtrend + volume spike
-            short_setup = (close[i] < camarilla_l3_aligned[i]) and \
-                          (close[i] < ema_34_1d_aligned[i]) and \
-                          (close[i] < hma_21_aligned[i]) and \
-                          volume_spike[i]
+            # Long: KAMA up, RSI(2) oversold (<10), ranging regime (CHOP>61.8)
+            long_setup = (close[i] > kama_aligned[i]) and \
+                         (rsi[i] < 10) and \
+                         (chop[i] > 61.8)
+            # Short: KAMA down, RSI(2) overbought (>90), ranging regime (CHOP>61.8)
+            short_setup = (close[i] < kama_aligned[i]) and \
+                          (rsi[i] > 90) and \
+                          (chop[i] > 61.8)
             
             if long_setup:
                 signals[i] = 0.25
@@ -103,24 +95,24 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price breaks below L3 OR 1d trend turns down OR 4h HMA21 turns down
-            if (close[i] < camarilla_l3_aligned[i]) or \
-               (close[i] < ema_34_1d_aligned[i]) or \
-               (close[i] < hma_21_aligned[i]):
+            # Exit: KAMA turns down OR RSI(2) > 50 (mean reversion complete) OR chop < 38.2 (trend regime)
+            if (close[i] < kama_aligned[i]) or \
+               (rsi[i] > 50) or \
+               (chop[i] < 38.2):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price breaks above H3 OR 1d trend turns up OR 4h HMA21 turns up
-            if (close[i] > camarilla_h3_aligned[i]) or \
-               (close[i] > ema_34_1d_aligned[i]) or \
-               (close[i] > hma_21_aligned[i]):
+            # Exit: KAMA turns up OR RSI(2) < 50 (mean reversion complete) OR chop < 38.2 (trend regime)
+            if (close[i] > kama_aligned[i]) or \
+               (rsi[i] < 50) or \
+               (chop[i] < 38.2):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_Regime_H4Confirm"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
