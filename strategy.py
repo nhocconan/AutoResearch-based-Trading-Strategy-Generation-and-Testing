@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R1 in 1d uptrend (close > 1d EMA50) with volume > 2.0x 20-bar average.
-Short when price breaks below Camarilla S1 in 1d downtrend (close < 1d EMA50) with volume > 2.0x 20-bar average.
+6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+Long when price breaks above Camarilla R3 in 1d uptrend (close > 1d EMA50) with volume > 2.0x 20-bar average.
+Short when price breaks below Camarilla S3 in 1d downtrend (close < 1d EMA50) with volume > 2.0x 20-bar average.
 Exit via ATR-based trailing stop (2.5*ATR from extreme) or re-entry into Camarilla H3/L3 range.
-Designed for ~12-25 trades/year by requiring strong breakouts, trend alignment, and volume confirmation on 12h timeframe.
-Uses 1d HTF for trend filter to avoid look-ahead and ensure proper alignment.
+Designed for ~15-25 trades/year by requiring strong breakouts (R3/S3 levels), trend alignment, and volume confirmation.
+Works in bull/bear markets via 1d EMA50 filter; avoids whipsaws via volume confirmation and tight stops.
 """
 
 import numpy as np
@@ -36,17 +36,15 @@ def generate_signals(prices):
     
     # Calculate Camarilla levels from previous day
     # Camarilla uses previous day's OHLC
+    # Previous day's OHLC (align to current 6h bars)
     prev_close = align_htf_to_ltf(prices, df_1d, df_1d['close'].values, additional_delay_bars=1)
     prev_high = align_htf_to_ltf(prices, df_1d, df_1d['high'].values, additional_delay_bars=1)
     prev_low = align_htf_to_ltf(prices, df_1d, df_1d['low'].values, additional_delay_bars=1)
     prev_open = align_htf_to_ltf(prices, df_1d, df_1d['open'].values, additional_delay_bars=1)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
     # H3 = C + (H-L)*1.1/2, L3 = C - (H-L)*1.1/2
     camarilla_range = prev_high - prev_low
-    R1 = prev_close + camarilla_range * 1.1 / 12
-    S1 = prev_close - camarilla_range * 1.1 / 12
     R3 = prev_close + camarilla_range * 1.1 / 4
     S3 = prev_close - camarilla_range * 1.1 / 4
     H3 = prev_close + camarilla_range * 1.1 / 2
@@ -75,7 +73,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
             np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -85,11 +83,11 @@ def generate_signals(prices):
         if position == 0:
             # Only trade in trending regimes (1d EMA50 filter)
             if close[i] > ema_trend:  # 1d uptrend regime
-                # Long: break above Camarilla R1 with volume spike
-                long_signal = (close[i] > R1[i]) and vol_regime[i]
+                # Long: break above Camarilla R3 with volume spike
+                long_signal = (close[i] > R3[i]) and vol_regime[i]
             else:  # 1d downtrend regime
-                # Short: break below Camarilla S1 with volume spike
-                short_signal = (close[i] < S1[i]) and vol_regime[i]
+                # Short: break below Camarilla S3 with volume spike
+                short_signal = (close[i] < S3[i]) and vol_regime[i]
             
             if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
@@ -131,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
