@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kijun_Bounce_1dTrendFilter_v1
-Hypothesis: Trade price bounces off the Ichimoku Kijun-Sen (base line) on 6h timeframe, 
-filtered by 1d EMA50 trend direction. In bull markets, buy dips to Kijun-Sen; in bear markets, 
-sell rallies to Kijun-Sen. The Kijun-Sen acts as dynamic support/resistance, and 
-aligning with higher timeframe trend increases win rate. Target: 12-37 trades/year per symbol.
+12h_Camarilla_R1_S1_Breakout_1dTrendFilter_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume confirmation.
+Camarilla levels from 1d provide precise intraday support/resistance. Breakouts above R1 or below S1
+with 1d trend alignment capture momentum. Volume confirmation filters false breakouts.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+Works in bull/bear via trend filter: only long in 1d uptrend, short in downtrend.
 """
 
 import numpy as np
@@ -16,70 +17,72 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter
+    # Get 1d data for HTF trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for HTF trend filter
+    # Calculate 1d EMA34 for HTF trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan_sen = (high_tenkan + low_tenkan) / 2
+    # Calculate 1d Camarilla levels (based on previous 1d bar)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun_sen = (high_kijun + low_kijun) / 2
+    # Camarilla R1, S1, H3, L3 calculations
+    # R1 = Close + (High - Low) * 1.1 / 12
+    # S1 = Close - (High - Low) * 1.1 / 12
+    # H3 = Close + (High - Low) * 1.1 / 4
+    # L3 = Close - (High - Low) * 1.1 / 4
+    camarilla_r1 = close_1d_prev + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d_prev - (high_1d - low_1d) * 1.1 / 12
+    camarilla_h3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
+    camarilla_l3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_span_b = (high_senkou_b + low_senkou_b) / 2
+    # Volume confirmation: 12h volume > 20-period SMA
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for longest indicator (Senkou Span B = 52)
-    start_idx = period_senkou_b
+    # Start index: need warmup for EMA34 (34) and volume SMA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(volume_sma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend (bullish = price above EMA50)
-        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
+        # Determine 1d HTF trend (bullish = price above EMA34)
+        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
         
-        # Determine if price is above/below Ichimoku cloud
-        above_cloud = (close[i] > senkou_span_a[i]) and (close[i] > senkou_span_b[i])
-        below_cloud = (close[i] < senkou_span_a[i]) and (close[i] < senkou_span_b[i])
+        # Volume confirmation: current volume > 20-period average
+        volume_confirmed = volume[i] > volume_sma[i]
         
         if position == 0:
-            # Long setup: price bounces up from Kijun-sen in bullish trend AND above cloud
-            long_setup = (close[i] > kijun_sen[i]) and (close[i-1] <= kijun_sen[i-1]) and htf_1d_bullish and above_cloud
+            # Long setup: price breaks above R1 + 1d uptrend + volume confirmation
+            long_setup = (close[i] > camarilla_r1_aligned[i]) and htf_1d_bullish and volume_confirmed
             
-            # Short setup: price bounces down from Kijun-sen in bearish trend AND below cloud
-            short_setup = (close[i] < kijun_sen[i]) and (close[i-1] >= kijun_sen[i-1]) and htf_1d_bearish and below_cloud
+            # Short setup: price breaks below S1 + 1d downtrend + volume confirmation
+            short_setup = (close[i] < camarilla_s1_aligned[i]) and htf_1d_bearish and volume_confirmed
             
             if long_setup:
                 signals[i] = 0.25
@@ -92,20 +95,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price crosses below Kijun-sen (stop) OR trend turns bearish OR price falls below cloud
-            if (close[i] < kijun_sen[i]) or (not htf_1d_bullish) or (not above_cloud):
+            # Exit: price touches S1 (stop) OR 1d trend turns bearish
+            if (close[i] <= camarilla_s1_aligned[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price crosses above Kijun-sen (stop) OR trend turns bullish OR price rises above cloud
-            if (close[i] > kijun_sen[i]) or (htf_1d_bullish) or (above_cloud):
+            # Exit: price touches R1 (stop) OR 1d trend turns bullish
+            if (close[i] >= camarilla_r1_aligned[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Kijun_Bounce_1dTrendFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
