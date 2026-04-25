@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla R3 S3 Breakout + 12h EMA34 Trend + Volume Spike
-Hypothesis: Camarilla pivot levels (R3, S3) act as strong support/resistance.
-Breakout above R3 or below S3 with volume confirmation indicates institutional
-participation. Trend filter (price > 12h EMA34 for longs, price < 12h EMA34 for shorts)
-ensures trades align with higher timeframe momentum. Works in bull markets (buy breakouts in uptrend)
-and bear markets (sell breakdowns in downtrend). 4h timeframe targets 19-50 trades/year.
+1d Donchian(20) Breakout + 1w EMA34 Trend + Volume Spike
+Hypothesis: Daily Donchian breakouts capture medium-term trends. 1-week EMA34
+provides higher timeframe trend filter to avoid counter-trend trades. Volume
+spike confirms institutional participation. Works in bull markets (buy breakouts)
+and bear markets (sell breakdowns). Target: 30-100 trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -22,45 +21,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Calculate 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Calculate Camarilla pivot levels from previous day
-    # Using 1d data for daily pivot calculation
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    # Previous day's OHLC (shifted by 1 to avoid look-ahead)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    df_1w = get_htf_data(prices, '1w')
     
-    # Camarilla calculations
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    r3 = pivot + (range_hl * 1.1 / 4)
-    s3 = pivot - (range_hl * 1.1 / 4)
+    # Calculate 1d Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 34)  # volume MA, 12h EMA34 alignment
+    start_idx = max(20, 20)  # Donchian channels, volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -69,16 +55,16 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Trend filter: price relative to 12h EMA34
-        uptrend = curr_close > ema_34_12h_aligned[i]
-        downtrend = curr_close < ema_34_12h_aligned[i]
+        # Trend filter: price relative to 1w EMA34
+        uptrend = curr_close > ema_34_aligned[i]
+        downtrend = curr_close < ema_34_aligned[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above R3 AND uptrend AND volume spike
-            long_entry = (curr_high > r3_aligned[i]) and uptrend and vol_spike
-            # Short: price breaks below S3 AND downtrend AND volume spike
-            short_entry = (curr_low < s3_aligned[i]) and downtrend and vol_spike
+            # Long: price breaks above Donchian high AND uptrend AND volume spike
+            long_entry = (curr_high > donch_high[i]) and uptrend and vol_spike
+            # Short: price breaks below Donchian low AND downtrend AND volume spike
+            short_entry = (curr_low < donch_low[i]) and downtrend and vol_spike
             
             if long_entry:
                 signals[i] = 0.25
@@ -90,16 +76,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price closes below R3 (breakout failed) OR loss of uptrend
-            if (curr_close < r3_aligned[i]) or (curr_close < ema_34_12h_aligned[i]):
+            # Exit: price breaks below Donchian low OR loss of uptrend
+            if (curr_low < donch_low[i]) or (curr_close < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price closes above S3 (breakdown failed) OR loss of downtrend
-            if (curr_close > s3_aligned[i]) or (curr_close > ema_34_12h_aligned[i]):
+            # Exit: price breaks above Donchian high OR loss of downtrend
+            if (curr_high > donch_high[i]) or (curr_close > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
