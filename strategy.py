@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Volume Spike + Choppiness Filter + ATR Stop
-Hypothesis: Donchian(20) breakouts capture momentum, volume spike confirms institutional interest,
-choppiness filter avoids whipsaws in ranging markets, ATR-based stop manages risk.
-Designed for 4h timeframe with 75-200 total trades over 4 years to balance opportunity and fee drag.
-Works in both bull (breakouts continue) and bear (breakdowns accelerate) markets.
+4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Donchian channels identify significant price channels. Breakouts above 20-period high or 
+below 20-period low with volume confirmation (>2x 20-period volume MA) and aligned 1d EMA34 trend 
+capture momentum moves. ATR-based stoploss (2.5x ATR) manages risk. Designed for 4h timeframe 
+with 75-200 total trades over 4 years to balance opportunity and fee drag. Works in both bull 
+and bear markets by trend filtering.
 """
 
 import numpy as np
@@ -21,82 +22,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for choppiness regime filter (call ONCE before loop)
+    # Get daily data for EMA34 trend filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough days for choppiness calculation
+    if len(df_1d) < 34:  # Need at least 34 days for EMA34
         return np.zeros(n)
     
-    # Calculate Choppiness Index on daily data (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range for daily
-    tr_1d = np.maximum(high_1d - low_1d,
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # First value
-    
-    # ATR 14
-    atr_14_1d = np.full(len(tr_1d), np.nan)
-    for i in range(14, len(tr_1d)):
-        atr_14_1d[i] = np.mean(tr_1d[i-13:i+1])
-    
-    # Sum of TR over 14 periods
-    sum_tr_14 = np.full(len(tr_1d), np.nan)
-    for i in range(14, len(tr_1d)):
-        sum_tr_14[i] = np.sum(tr_1d[i-13:i+1])
-    
-    # Highest high and lowest low over 14 periods
-    hh_14_1d = np.full(len(high_1d), np.nan)
-    ll_14_1d = np.full(len(low_1d), np.nan)
-    for i in range(14, len(high_1d)):
-        hh_14_1d[i] = np.max(high_1d[i-13:i+1])
-        ll_14_1d[i] = np.min(low_1d[i-13:i+1])
-    
-    # Choppiness Index: 100 * log10(sumTR14 / (ATR14 * 14)) / log10(14)
-    chop_1d = np.full(len(tr_1d), np.nan)
-    for i in range(14, len(tr_1d)):
-        if atr_14_1d[i] > 0 and sum_tr_14[i] > 0:
-            chop_1d[i] = 100 * np.log10(sum_tr_14[i] / (atr_14_1d[i] * 14)) / np.log10(14)
-    
-    # Align choppiness to 4h timeframe (needs 2 extra days for confirmation like fractals)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d, additional_delay_bars=2)
-    
-    # Calculate Donchian channels (20-period) on 4h
-    donch_h = np.full(n, np.nan)
-    donch_l = np.full(n, np.nan)
+    # Calculate 20-period Donchian channels (4h)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     for i in range(20, n):
-        donch_h[i] = np.max(high[i-19:i+1])
-        donch_l[i] = np.min(low[i-19:i+1])
+        donchian_high[i] = np.max(high[i-19:i+1])
+        donchian_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate 20-period volume MA for volume spike confirmation
+    # Calculate 20-period volume MA for volume spike confirmation (4h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Calculate ATR (10-period) for stoploss
+    # Calculate ATR(14) for stoploss (4h)
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     atr = np.full(n, np.nan)
-    tr = np.maximum(high - low,
-                    np.maximum(np.abs(high - np.roll(close, 1)),
-                               np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    for i in range(10, n):
-        atr[i] = np.mean(tr[i-9:i+1])
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-13:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    atr_stop = 0.0
     
-    # Start index: need enough for Donchian, volume MA, ATR, and choppiness
-    start_idx = max(20, 10)
+    # Start index: need enough for Donchian, volume MA, ATR, and EMA34
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_h[i]) or np.isnan(donch_l[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -106,66 +72,60 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        donch_high = donch_h[i]
-        donch_low = donch_l[i]
+        donchian_high_val = donchian_high[i]
+        donchian_low_val = donchian_low[i]
         vol_ma = vol_ma_20[i]
         atr_val = atr[i]
-        chop_val = chop_1d_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        volume_confirm = curr_volume > 1.5 * vol_ma
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_val
+        downtrend = curr_close < ema_34_val
         
-        # Choppiness filter: only trade when CHOP < 50 (trending market)
-        trending_regime = chop_val < 50
+        # Volume confirmation: current volume > 2.0 * 20-period average
+        volume_confirm = curr_volume > 2.0 * vol_ma
         
         if position == 0:
             # Look for breakout signals
-            # Long: price breaks above Donchian high with volume confirmation in trending market
-            long_breakout = (curr_close > donch_high) and volume_confirm and trending_regime
-            # Short: price breaks below Donchian low with volume confirmation in trending market
-            short_breakout = (curr_close < donch_low) and volume_confirm and trending_regime
+            # Long: price breaks above Donchian high with volume confirmation in uptrend
+            long_breakout = (curr_close > donchian_high_val) and volume_confirm and uptrend
+            # Short: price breaks below Donchian low with volume confirmation in downtrend
+            short_breakout = (curr_close < donchian_low_val) and volume_confirm and downtrend
             
             if long_breakout:
                 signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
-                atr_stop = entry_price - 2.5 * atr_val
             elif short_breakout:
                 signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
-                atr_stop = entry_price + 2.5 * atr_val
             else:
                 signals[i] = 0.0
+                position = 0
         elif position == 1:
             # Long position management
-            # Stoploss: price closes below ATR stop
-            # Exit: price closes below Donchian low (trailing exit)
-            if curr_close < atr_stop or curr_close < donch_low:
+            # Stoploss: 2.5 * ATR below entry
+            stoploss_level = entry_price - 2.5 * atr_val
+            # Exit conditions: price closes below Donchian low OR stoploss hit OR trend turns down
+            if (curr_close < donchian_low_val) or (curr_close < stoploss_level) or (curr_close < ema_34_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                # Trail stop up: move ATR stop to breakeven + 0.5*ATR after 1*ATR profit
-                profit = curr_close - entry_price
-                if profit > atr_val:
-                    atr_stop = max(atr_stop, entry_price + 0.5 * atr_val)
                 signals[i] = 0.30
         elif position == -1:
             # Short position management
-            # Stoploss: price closes above ATR stop
-            # Exit: price closes above Donchian high (trailing exit)
-            if curr_close > atr_stop or curr_close > donch_high:
+            # Stoploss: 2.5 * ATR above entry
+            stoploss_level = entry_price + 2.5 * atr_val
+            # Exit conditions: price closes above Donchian high OR stoploss hit OR trend turns up
+            if (curr_close > donchian_high_val) or (curr_close > stoploss_level) or (curr_close > ema_34_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                # Trail stop down: move ATR stop to breakeven - 0.5*ATR after 1*ATR profit
-                profit = entry_price - curr_close
-                if profit > atr_val:
-                    atr_stop = min(atr_stop, entry_price - 0.5 * atr_val)
                 signals[i] = -0.30
     
     return signals
 
-name = "4h_Donchian_Breakout_VolumeSpike_ChopFilter_ATRStop"
+name = "4h_Donchian_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
 timeframe = "4h"
 leverage = 1.0
