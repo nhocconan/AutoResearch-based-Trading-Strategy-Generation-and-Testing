@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_HTFRegime
-Hypothesis: On 6h timeframe, trade Camarilla R1/S1 breakouts in direction of 1d EMA50 trend with volume spike confirmation and 1d ADX regime filter.
-Uses discrete position sizing (0.25) to limit fee drag. Targets 15-25 trades/year.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_HTFRegime
+Hypothesis: On 12h timeframe, trade Camarilla R1/S1 breakouts in direction of 1d EMA50 trend with volume spike confirmation and 1d ADX regime filter.
+Uses discrete position sizing (0.25) to limit fee drag. Targets 12-25 trades/year.
 Works in bull markets (breakouts with trend) and bear markets (fades from extremes with volume).
 ADX > 20 ensures we only trade when 1d has sufficient trend strength, reducing whipsaws.
 """
@@ -35,7 +35,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align to 6h timeframe (completed 1d bar only)
+    # Align to 12h timeframe (completed 1d bar only)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -145,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_HTFRegime"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_HTFRegime"
+timeframe = "12h"
 leverage = 1.0
