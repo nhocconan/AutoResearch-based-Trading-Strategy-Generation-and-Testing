@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3L3 Breakout with 1d HMA21 Trend and Volume Spike
-Hypothesis: Camarilla pivot levels (H3/L3) act as strong intraday support/resistance. Breakouts above H3 or below L3 with 
-volume confirmation and aligned 1d HMA21 trend capture institutional moves. The 1d HMA21 reduces lag vs EMA while smoothing 
-noise, providing reliable trend direction. Volume spike confirms participation. Designed for low-moderate trade frequency 
-(19-50/year) on 4h timeframe to work in both bull and bear markets via trend following.
+4h Camarilla H4L4 Breakout with 1d HMA34 Trend and Volume Spike
+Hypothesis: Camarilla H4/L4 levels represent stronger intraday support/resistance than H3/L3.
+Breakouts above H4 or below L4 with volume spike and aligned 1d HMA34 trend capture significant
+institutional moves with lower frequency and higher reliability. Designed for 20-40 trades/year
+on 4h to work in both bull (trend following) and bear (mean reversion via exits) markets.
 """
 
 import numpy as np
@@ -38,34 +38,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HMA21 trend and Camarilla pivots (call ONCE before loop)
+    # Get 1d data for HMA34 trend and Camarilla pivots (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 21-period HMA on 1d close for trend
-    hma_21_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    # Calculate 34-period HMA on 1d close for trend
+    hma_34_1d = calculate_hma(df_1d['close'].values, 34)
+    hma_34_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_34_1d)
     
     # Calculate Camarilla pivots for each 1d bar: based on previous day's high, low, close
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate Camarilla pivots for each 1d bar: based on previous day's high, low, close
-    # We need to shift to avoid look-ahead: use previous day's data to calculate today's levels
+    # Use previous day's data to calculate today's levels (avoid look-ahead)
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
     # Camarilla formulas:
-    # H3 = close + (high - low) * 1.1/6
-    # L3 = close - (high - low) * 1.1/6
-    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    # H4 = close + (high - low) * 1.1/2
+    # L4 = close - (high - low) * 1.1/2
+    camarilla_h4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_l4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
     # Align to LTF (4h) - no extra delay needed as pivots are based on completed 1d bar
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -75,13 +74,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for HMA, volume MA, and to avoid NaN from shift
-    start_idx = max(21, 20) + 1
+    start_idx = max(34, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(hma_21_1d_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or
+        if (np.isnan(hma_34_1d_aligned[i]) or 
+            np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -90,17 +89,17 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        hma_trend = hma_21_1d_aligned[i]
-        h3_level = camarilla_h3_aligned[i]
-        l3_level = camarilla_l3_aligned[i]
+        hma_trend = hma_34_1d_aligned[i]
+        h4_level = camarilla_h4_aligned[i]
+        l4_level = camarilla_l4_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above H3 resistance AND volume spike AND price > 1d HMA21 (uptrend)
-            long_entry = (curr_close > h3_level) and vol_spike and (curr_close > hma_trend)
-            # Short: price breaks below L3 support AND volume spike AND price < 1d HMA21 (downtrend)
-            short_entry = (curr_close < l3_level) and vol_spike and (curr_close < hma_trend)
+            # Long: price breaks above H4 resistance AND volume spike AND price > 1d HMA34 (uptrend)
+            long_entry = (curr_close > h4_level) and vol_spike and (curr_close > hma_trend)
+            # Short: price breaks below L4 support AND volume spike AND price < 1d HMA34 (downtrend)
+            short_entry = (curr_close < l4_level) and vol_spike and (curr_close < hma_trend)
             
             if long_entry:
                 signals[i] = 0.25
@@ -112,16 +111,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below L3 support (broken support) OR price crosses below HMA (trend change)
-            if (curr_close < l3_level) or (curr_close < hma_trend):
+            # Exit: price crosses below L4 support (broken support) OR price crosses below HMA (trend change)
+            if (curr_close < l4_level) or (curr_close < hma_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above H3 resistance (broken resistance) OR price crosses above HMA (trend change)
-            if (curr_close > h3_level) or (curr_close > hma_trend):
+            # Exit: price crosses above H4 resistance (broken resistance) OR price crosses above HMA (trend change)
+            if (curr_close > h4_level) or (curr_close > hma_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dHMA21_Trend_VolumeSpike"
+name = "4h_Camarilla_H4L4_Breakout_1dHMA34_Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
