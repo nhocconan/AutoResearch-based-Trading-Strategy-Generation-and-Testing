@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpiK
-Hypothesis: On 4h timeframe, Camarilla H3/L3 breakout from prior 1d bar, combined with 1d EMA34 trend filter and volume spike confirmation.
+12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: On 12h timeframe, Camarilla H3/L3 breakout from prior 1d bar, combined with 1d EMA34 trend filter and volume spike confirmation.
 H3/L3 levels are strong intraday support/resistance derived from the prior day's range.
 1d EMA34 ensures alignment with daily trend while being responsive enough for swing trading.
 Volume spike confirms institutional participation in the breakout.
-Designed for 15-35 trades/year (60-140 over 4 years) to minimize fee drag.
+Designed for 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
 Works in bull markets via breakout continuation and bear markets via mean reversion at extreme levels.
 """
 
@@ -40,7 +40,7 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 4
     l3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar)
+    # Align Camarilla levels to 12h timeframe (completed 1d bar)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
@@ -79,10 +79,10 @@ def generate_signals(prices):
             short_entry = (short_breakout and volume_spike[i] and short_trend)
             
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
@@ -92,17 +92,17 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short position: exit when price closes above Camarilla L3 (failed breakout) or trend reverses
             if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpiK"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
