@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Williams Alligator with Weekly EMA34 Trend and Volume Confirmation
-Hypothesis: Williams Alligator identifies trend absence/presence on daily timeframe.
-When Alligator is 'sleeping' (lines intertwined) and then 'awakens' (lines diverge) 
-with weekly uptrend/downtrend and volume spike, it signals trend start.
-Uses 1d timeframe with 1w HTF for trend. Targets 30-100 total trades over 4 years (7-25/year).
-Works in both bull/bear markets: Alligator filters chop, weekly trend filters counter-trend,
-volume confirmation ensures momentum legitimacy.
+6h Camarilla Pivot H3/L3 Breakout with 1d EMA34 Trend and Volume Spike
+Hypothesis: Camarilla H3/L3 levels act as strong intraday support/resistance on 1d timeframe.
+Breakout above H3 or below L3 with 1d EMA34 trend alignment and volume spike captures
+continuation moves. Works in both bull/bear markets by following the 1d trend.
+Uses 6h timeframe with 1d HTF for trend/targets. Targets 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -23,57 +21,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA34 trend (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for Camarilla pivots, EMA34 trend, and volume (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on weekly close for trend
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(
+    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
+    # H3 = Close + 1.1*(High - Low)/2
+    # L3 = Close - 1.1*(High - Low)/2
+    # Using previous day's values to avoid look-ahead
+    h3 = df_1d['close'].values + 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
+    l3 = df_1d['close'].values - 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
+    
+    # Calculate 1d EMA34 for trend
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
         span=34, adjust=False, min_periods=34
     ).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Williams Alligator on 1d: SMAs of median price
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    median_price = (high + low) / 2
+    # Calculate 1d volume MA20 for volume confirmation
+    vol_ma_20_1d = np.full(len(df_1d), np.nan)
+    for i in range(20, len(df_1d)):
+        vol_ma_20_1d[i] = np.mean(df_1d['volume'].values[i-19:i+1])
     
-    # Smoothed Moving Average (SMMA) = EMA with alpha = 1/period
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        alpha = 1.0 / period
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = alpha * arr[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    jaw = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
-    
-    # Align Alligator lines (no extra delay needed for SMMA)
-    jaw_aligned = align_htf_to_ltf(prices, prices, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
-    lips_aligned = align_htf_to_ltf(prices, prices, lips)
-    
-    # Calculate 20-period volume MA for 1d volume confirmation
-    vol_ma_20_1d = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20_1d[i] = np.mean(volume[i-19:i+1])
+    # Align all 1d indicators to 6h timeframe (completed 1d bar only)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Alligator and volume MA
-    start_idx = max(20, 13)  # 20 for volume MA, 13 for jaw
+    # Start index: need enough for EMA34 and volume MA
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(vol_ma_20_1d[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -81,32 +66,22 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_1w_aligned[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        vol_ma_1d = vol_ma_20_1d[i]
+        h3_val = h3_aligned[i]
+        l3_val = l3_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
+        vol_ma_1d = vol_ma_20_1d_aligned[i]
         
-        # Volume confirmation: current 1d volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > 2.0 * vol_ma_1d
-        
-        # Alligator sleeping: lines intertwined (max-min < 0.1% of price)
-        alligator_range = max(jaw_val, teeth_val, lips_val) - min(jaw_val, teeth_val, lips_val)
-        alligator_sleeping = alligator_range < (curr_close * 0.001)
-        
-        # Alligator awakening: lips outside jaw/teeth with separation
-        lips_above = lips_val > max(jaw_val, teeth_val)
-        lips_below = lips_val < min(jaw_val, teeth_val)
-        lips_separation = abs(lips_val - (jaw_val + teeth_val) / 2) > (curr_close * 0.002)
-        alligator_awakening = (lips_above or lips_below) and lips_separation
+        # Volume confirmation: current 6h volume > 2.0 * 20-period 1d average
+        # Scale volume comparison: 6h volume vs daily average volume
+        volume_confirm = curr_volume > 2.0 * vol_ma_1d / 4  # 4x 6h bars in 1d
         
         if position == 0:
             # Look for entry signals
-            # Long: Alligator awakening AND lips above jaw/teeth AND price > EMA34 (uptrend) AND volume confirmation
-            long_entry = (alligator_awakening and lips_above and 
+            # Long: Break above H3 AND price > EMA34 (uptrend) AND volume confirmation
+            long_entry = (curr_high > h3_val and 
                          curr_close > ema_trend and volume_confirm)
-            # Short: Alligator awakening AND lips below jaw/teeth AND price < EMA34 (downtrend) AND volume confirmation
-            short_entry = (alligator_awakening and lips_below and 
+            # Short: Break below L3 AND price < EMA34 (downtrend) AND volume confirmation
+            short_entry = (curr_low < l3_val and 
                           curr_close < ema_trend and volume_confirm)
             
             if long_entry:
@@ -119,16 +94,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Alligator sleeping again OR lips cross below teeth OR price falls below EMA34
-            if (alligator_sleeping or lips_val < teeth_val or curr_close < ema_trend):
+            # Exit: Price falls below EMA34 OR breaks below L3 (failed breakout)
+            if (curr_close < ema_trend or curr_low < l3_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: Alligator sleeping again OR lips cross above teeth OR price rises above EMA34
-            if (alligator_sleeping or lips_val > teeth_val or curr_close > ema_trend):
+            # Exit: Price rises above EMA34 OR breaks above H3 (failed breakout)
+            if (curr_close > ema_trend or curr_high > h3_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Williams_Alligator_1wEMA34_Trend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
