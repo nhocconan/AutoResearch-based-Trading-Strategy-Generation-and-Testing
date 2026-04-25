@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + 1d Regime Filter (ADX<20 = range, ADX>25 = trend)
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures buying/selling pressure.
-In ranging markets (ADX<20), fade extremes: short when Bull Power > 0.6*ATR, long when Bear Power > 0.6*ATR.
-In trending markets (ADX>25), follow momentum: long when Bull Power > 0 and rising, short when Bear Power > 0 and rising.
-Uses 1d ADX for regime to avoid whipsaws. Discrete sizing 0.25 targets ~80-120 trades over 4 years.
-Works in bull/bear by adapting to 1d ADX regime.
+12h Donchian(20) Breakout + 1w Supertrend(10,3) + Volume Spike
+Hypothesis: Donchian channel breakouts capture strong momentum moves.
+Filtered by weekly Supertrend to ensure alignment with major trend and avoid counter-trend whipsaws.
+Volume confirmation reduces false breakouts. Discrete sizing (0.25) targets ~50-150 trades over 4 years.
+Works in bull/bear via Supertrend direction filter. Uses proper MTF data loading to avoid look-ahead.
 """
 
 import numpy as np
@@ -22,66 +21,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX regime and EMA13
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for Supertrend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ADX (14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Supertrend on weekly data
+    atr_period = 10
+    multiplier = 3
     
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr1 = df_1w['high'][1:].values - df_1w['low'][1:].values
+    tr2 = np.abs(df_1w['high'][1:].values - df_1w['close'][:-1].values)
+    tr3 = np.abs(df_1w['low'][1:].values - df_1w['close'][:-1].values)
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Basic Upper and Lower Bands
+    hl_avg = (df_1w['high'].values + df_1w['low'].values) / 2
+    upper_band = hl_avg + multiplier * atr
+    lower_band = hl_avg - multiplier * atr
     
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Initialize Supertrend
+    supertrend = np.zeros_like(close_1w := df_1w['close'].values)
+    direction = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close_1w[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        supertrend[i] = upper_band[i] if direction[i] == 1 else lower_band[i]
     
-    # Calculate 1d EMA13 for Elder Ray
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    # Align Supertrend and direction to 12h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
     
-    # Calculate 6h ATR for Elder Ray scaling
+    # Calculate 12h Donchian channels (20-period)
+    donchian_period = 20
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    
+    for i in range(donchian_period-1, n):
+        upper_channel[i] = np.max(high[i-donchian_period+1:i+1])
+        lower_channel[i] = np.min(low[i-donchian_period+1:i+1])
+    
+    # Calculate 12h ATR for volume spike and stop loss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_6h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Volume spike: current volume > 2.5 * 20-period average (strict)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    for i in range(0, 19):
+        vol_ma_20[i] = np.mean(volume[:i+1])
+    volume_spike = volume > 2.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Start index: need enough for ADX (30) + ATR (14) + EMA13 (13)
-    start_idx = max(30, 14, 13)
+    # Start index: need enough for Donchian (20), ATR (14), and weekly data
+    start_idx = max(donchian_period-1, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(ema_13_aligned[i]) or 
-            np.isnan(atr_6h[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
+            np.isnan(atr_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,63 +112,67 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        ema_13 = ema_13_aligned[i]
-        adx = adx_1d_aligned[i]
-        atr = atr_6h[i]
+        curr_volume = volume[i]
+        upper_donchian = upper_channel[i]
+        lower_donchian = lower_channel[i]
+        st_direction = direction_aligned[i]
+        atr_value = atr_12h[i]
+        vol_spike = volume_spike[i]
         
-        # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-        bull_power = curr_high - ema_13
-        bear_power = ema_13 - curr_low
+        # Breakout conditions
+        bullish_breakout = curr_close > upper_donchian
+        bearish_breakout = curr_close < lower_donchian
         
-        # Regime filters
-        is_ranging = adx < 20
-        is_trending = adx > 25
+        # Update tracking variables for trailing stop logic
+        if position == 1:
+            highest_since_entry = max(highest_since_entry, curr_high)
+        elif position == -1:
+            lowest_since_entry = min(lowest_since_entry, curr_low)
         
-        # Exit conditions: regime change or power reversal
+        # Exit conditions: trailing stop or reverse breakout
         if position != 0:
             exit_signal = False
             
             if position == 1:
-                # Exit long if: regime turns ranging AND Bull Power fades, OR Bear Power rises
-                if is_ranging and bull_power < 0.3 * atr:
+                # Trailing stop: exit if price drops 3.0*ATR from highest since entry
+                if curr_close < highest_since_entry - 3.0 * atr_value:
                     exit_signal = True
-                elif bear_power > 0.4 * atr and bear_power > bull_power:
+                # Reverse breakout or trend rejection
+                elif curr_close < lower_donchian or st_direction == -1:
                     exit_signal = True
                     
             elif position == -1:
-                # Exit short if: regime turns ranging AND Bear Power fades, OR Bull Power rises
-                if is_ranging and bear_power < 0.3 * atr:
+                # Trailing stop: exit if price rises 3.0*ATR from lowest since entry
+                if curr_close > lowest_since_entry + 3.0 * atr_value:
                     exit_signal = True
-                elif bull_power > 0.4 * atr and bull_power > bear_power:
+                # Reverse breakout or trend rejection
+                elif curr_close > upper_donchian or st_direction == 1:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
                 continue
         
-        # Entry conditions
+        # Entry conditions: Donchian breakout + weekly Supertrend alignment + volume
         if position == 0:
-            # Ranging market: fade extremes
-            if is_ranging:
-                # Short when Bull Power is strong (overbought)
-                if bull_power > 0.6 * atr:
-                    signals[i] = -0.25
-                    position = -1
-                # Long when Bear Power is strong (oversold)
-                elif bear_power > 0.6 * atr:
-                    signals[i] = 0.25
-                    position = 1
-            # Trending market: follow momentum
-            elif is_trending:
-                # Long when Bull Power positive and rising
-                if bull_power > 0 and bull_power > 0.5 * (bull_power + bear_power):
-                    signals[i] = 0.25
-                    position = 1
-                # Short when Bear Power positive and rising
-                elif bear_power > 0 and bear_power > 0.5 * (bull_power + bear_power):
-                    signals[i] = -0.25
-                    position = -1
+            # Long: break above upper Donchian AND weekly uptrend AND volume spike
+            long_condition = bullish_breakout and (st_direction == 1) and vol_spike
+            # Short: break below lower Donchian AND weekly downtrend AND volume spike
+            short_condition = bearish_breakout and (st_direction == -1) and vol_spike
+            
+            if long_condition:
+                signals[i] = 0.25
+                position = 1
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
+            elif short_condition:
+                signals[i] = -0.25
+                position = -1
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
         elif position == 1:
             signals[i] = 0.25
         elif position == -1:
@@ -154,6 +180,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dADX_Regime_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1wSupertrend_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
