@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike
-Hypothesis: Donchian breakouts capture strong moves, filtered by weekly EMA50 trend.
-Volume spike confirms breakout authenticity. Works in bull/bear by following weekly trend.
-Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+6h Elder Ray Bull/Bear Power + 1d Williams Fractal Regime + Volume Confirmation
+Hypothesis: Elder Ray measures bull/bear power via EMA(13) deviation. Williams Fractal on 1d identifies swing points for regime filtering. Trade in direction of daily trend (above/below pivot) with 6h Elder Ray signals confirmed by volume. Works in bull/bear by aligning with daily structure while using 6h momentum for timing.
+Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,32 +19,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # 1d Williams Fractals for regime (need 2-bar confirmation)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Additional 2-bar delay for fractal confirmation (needs 2 future 1d bars)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # 1d volume average for confirmation
+    # 1d pivot point (using previous day OHLC)
+    pivot_1d = (df_1d['high'].shift(1) + df_1d['low'].shift(1) + df_1d['close'].shift(1)) / 3.0
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d.values)
+    
+    # 6h volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian + EMA50 + VolMA20
-    start_idx = max(20, 50, 20)
+    # Start index: need enough for EMA13 + VolMA20 + HTF data
+    start_idx = max(13, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,30 +60,42 @@ def generate_signals(prices):
         
         curr_close = close[i]
         curr_volume = volume[i]
-        ema_50_level = ema_50_1w_aligned[i]
+        pivot_level = pivot_1d_aligned[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
-        volume_spike = curr_volume > 2.0 * vol_ma_20[i]
+        # Volume spike: current volume > 1.8 * 20-period average
+        volume_spike = curr_volume > 1.8 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_up = curr_close > highest_20[i-1]  # Break above previous period's high
-        breakout_down = curr_close < lowest_20[i-1]  # Break below previous period's low
+        # Elder Ray conditions: bull power > 0 and rising, bear power < 0 and falling
+        # Use 3-period momentum for power confirmation
+        if i >= 3:
+            bull_power_rising = bull_power[i] > bull_power[i-3]
+            bear_power_falling = bear_power[i] < bear_power[i-3]
+        else:
+            bull_power_rising = False
+            bear_power_falling = False
         
-        # Exit conditions: opposite Donchian breakout
+        bullish_momentum = bull_power[i] > 0 and bull_power_rising
+        bearish_momentum = bear_power[i] < 0 and bear_power_falling
+        
+        # Regime filter: price above/below daily pivot + fractal confirmation
+        bullish_regime = (curr_close > pivot_level) and (bullish_fractal_aligned[i] == 1.0)
+        bearish_regime = (curr_close < pivot_level) and (bearish_fractal_aligned[i] == 1.0)
+        
+        # Exit conditions: opposite momentum or regime breakdown
         if position != 0:
-            if position == 1 and breakout_down:
+            if position == 1 and (not bullish_momentum or not bullish_regime):
                 signals[i] = 0.0
                 position = 0
                 continue
-            elif position == -1 and breakout_up:
+            elif position == -1 and (not bearish_momentum or not bearish_regime):
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Entry conditions: Donchian breakout + trend + volume
+        # Entry conditions: momentum + regime + volume
         if position == 0:
-            long_condition = breakout_up and (curr_close > ema_50_level) and volume_spike
-            short_condition = breakout_down and (curr_close < ema_50_level) and volume_spike
+            long_condition = bullish_momentum and bullish_regime and volume_spike
+            short_condition = bearish_momentum and bearish_regime and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -91,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dWilliamsFractal_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
