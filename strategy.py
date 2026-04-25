@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyDonchian20_Breakout_1dADX25_TrendFilter
-Hypothesis: Weekly Donchian(20) breakouts aligned with daily ADX>25 trend capture strong momentum moves.
-Works in bull/bear via daily ADX trend filter (only trade in trend direction). Uses 6h timeframe for lower frequency.
-Target: 50-150 total trades over 4 years = 12-37/year.
+12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: Camarilla pivot H3/L3 levels from 1d act as strong support/resistance.
+Breakouts above H3 or below L3 with volume spike and 1d EMA34 trend alignment capture
+institutional moves. Uses 12h timeframe to reduce trade frequency and fee drift.
+Designed for 50-150 trades over 4 years (12-37/year) on BTC/ETH/SOL.
 """
 
 import numpy as np
@@ -16,65 +17,29 @@ def calculate_ema(series, period):
         return np.full_like(series, np.nan)
     return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index (ADX) with min_periods"""
-    if len(high) < period + 1:
-        return np.full_like(high, np.nan)
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for the period"""
+    pivot = (high + low + close) / 3
+    range_hl = high - low
     
-    # True Range
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan  # First value has no previous close
+    # Resistance levels
+    r1 = close + (range_hl * 1.1 / 12)
+    r2 = close + (range_hl * 1.1 / 6)
+    r3 = close + (range_hl * 1.1 / 4)
+    r3 = close + (range_hl * 1.1 / 4)
+    r4 = close + (range_hl * 1.1 / 2)
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = np.nan
-    dm_minus[0] = np.nan
+    # Support levels
+    s1 = close - (range_hl * 1.1 / 12)
+    s2 = close - (range_hl * 1.1 / 6)
+    s3 = close - (range_hl * 1.1 / 4)
+    s4 = close - (range_hl * 1.1 / 2)
     
-    # Smooth TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        alpha = 1.0 / period
-        for i in range(period, len(data)):
-            if not np.isnan(data[i]):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-            else:
-                result[i] = result[i-1]
-        return result
+    # H3/L3 are the same as R3/S3 in Camarilla notation
+    h3 = r3
+    l3 = s3
     
-    tr_smooth = wilder_smooth(tr, period)
-    dm_plus_smooth = wilder_smooth(dm_plus, period)
-    dm_minus_smooth = wilder_smooth(dm_minus, period)
-    
-    # Directional Indicators
-    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, period)
-    
-    return adx
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel with min_periods"""
-    if len(high) < period:
-        return np.full_like(high, np.nan), np.full_like(low, np.nan)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    return upper, lower
+    return h3, l3
 
 def generate_signals(prices):
     n = len(prices)
@@ -86,65 +51,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian(20) breakout (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Weekly Donchian(20) levels
-    donch_upper, donch_lower = calculate_donchian(df_1w['high'].values, df_1w['low'].values, 20)
-    donch_upper_aligned = align_htf_to_ltf(prices, df_1w, donch_upper)
-    donch_lower_aligned = align_htf_to_ltf(prices, df_1w, donch_lower)
-    
-    # Daily data for ADX>25 trend filter (loaded ONCE)
+    # 1d data for H3/L3 levels and EMA34 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily ADX
-    adx = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # 1d EMA34 trend filter
+    ema_34_1d = calculate_ema(df_1d['close'].values, 34)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # 1d Camarilla H3/L3 levels
+    h3, l3 = calculate_camarilla(
+        df_1d['high'].values, 
+        df_1d['low'].values, 
+        df_1d['close'].values
+    )
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for weekly Donchian (20) + daily ADX (14+14) + volume MA (20)
-    start_idx = max(20, 28, 20) + 5
+    # Start index: need enough for EMA (34) + volume MA (20)
+    start_idx = max(34, 20) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_upper_aligned[i]) or np.isnan(donch_lower_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         
         if position == 0:
-            # Look for entry signals - require: Weekly Donchian breakout + ADX>25 + volume spike
-            long_breakout = curr_close > donch_upper_aligned[i]
-            short_breakout = curr_close < donch_lower_aligned[i]
-            strong_trend = adx_aligned[i] > 25
-            vol_confirmed = volume_spike[i] and vol_ma[i] > 0
+            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment
+            long_entry = (curr_close > h3_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close > ema_34_1d_aligned[i])
+            short_entry = (curr_close < l3_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close < ema_34_1d_aligned[i])
             
-            if long_breakout and strong_trend and vol_confirmed:
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            elif short_breakout and strong_trend and vol_confirmed:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below weekly Donchian lower or ADX weakens
-            if curr_close < donch_lower_aligned[i] or adx_aligned[i] < 20:
+            # Long position: exit when price closes below H3 or trend turns bearish
+            if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price closes above weekly Donchian upper or ADX weakens
-            if curr_close > donch_upper_aligned[i] or adx_aligned[i] < 20:
+            # Short position: exit when price closes above L3 or trend turns bullish
+            if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -152,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyDonchian20_Breakout_1dADX25_TrendFilter"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
