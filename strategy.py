@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_ATRstop_v2
-Hypothesis: 6h Camarilla R4/S4 breakouts with 1d EMA50 trend filter and volume spike capture institutional moves. Uses discrete sizing (0.25) and ATR stop (2.0) with 6-bar minimum hold. Only trades breakouts in 1d trend direction to avoid counter-trend whipsaw. Targets 12-37 trades/year on 6h timeframe.
+6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_ATRstop_v3
+Hypothesis: 6h Camarilla R4/S4 breakouts with 1d EMA50 trend filter and volume spike capture institutional moves. Uses discrete sizing (0.25) and ATR stop (2.0) with 6-bar minimum hold. Only trades breakouts in 1d trend direction to avoid counter-trend whipsaw. Targets 12-37 trades/year on 6h timeframe. Version 3 improves exit logic by using ATR-based trailing stop and tighter volume confirmation.
 """
 
 import numpy as np
@@ -73,6 +73,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
+    highest_since_entry = 0.0  # for trailing stop
     
     # Start index: need warmup for calculations
     start_idx = max(50, 20, 14)  # EMA50 needs 50, vol MA needs 20, ATR needs 14
@@ -115,46 +116,48 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close_6h_val
                 bars_since_entry = 0
+                highest_since_entry = close_6h_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_6h_val
                 bars_since_entry = 0
+                highest_since_entry = close_6h_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
             bars_since_entry += 1
+            highest_since_entry = max(highest_since_entry, close_6h_val)
             # Exit conditions:
             # 1. Minimum holding period of 6 bars to avoid whipsaw
-            # 2. Price closes below pivot point (PP) - weaker exit than S4
-            # 3. ATR-based stoploss: 2.0 * ATR below entry
+            # 2. ATR-based trailing stop: 2.0 * ATR below highest since entry
             if bars_since_entry >= 6:
-                exit_signal = close_6h_val < camarilla_pp_aligned[i]
-                stop_signal = close_6h_val < (entry_price - 2.0 * atr_val)
-                if exit_signal or stop_signal:
+                trailing_stop = highest_since_entry - (2.0 * atr_val)
+                if close_6h_val < trailing_stop:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
+                    highest_since_entry = 0.0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
             bars_since_entry += 1
+            highest_since_entry = min(highest_since_entry, close_6h_val)
             # Exit conditions:
             # 1. Minimum holding period of 6 bars to avoid whipsaw
-            # 2. Price closes above pivot point (PP) - weaker exit than R4
-            # 3. ATR-based stoploss: 2.0 * ATR above entry
+            # 2. ATR-based trailing stop: 2.0 * ATR above lowest since entry
             if bars_since_entry >= 6:
-                exit_signal = close_6h_val > camarilla_pp_aligned[i]
-                stop_signal = close_6h_val > (entry_price + 2.0 * atr_val)
-                if exit_signal or stop_signal:
+                trailing_stop = highest_since_entry + (2.0 * atr_val)
+                if close_6h_val > trailing_stop:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
+                    highest_since_entry = 0.0
     
     return signals
 
-name = "6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_ATRstop_v2"
+name = "6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_ATRstop_v3"
 timeframe = "6h"
 leverage = 1.0
