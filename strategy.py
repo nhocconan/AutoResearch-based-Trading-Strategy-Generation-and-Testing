@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Trend_Following_With_Choppiness_Filter_v1
-Hypothesis: Ride 1d trends using EMA20/50 crossovers filtered by 1w Choppiness Index to avoid whipsaws in ranging markets.
-Only trade when EMA20 > EMA50 for longs (or EMA20 < EMA50 for shorts) AND 1w market is trending (CHOP < 50).
-Exit on opposite EMA crossover or when market becomes choppy (CHOP >= 60).
-Position size: 0.30 to balance capture and fee drag.
-Target: 10-20 trades/year to stay well under 150-trade 1d hard max.
-Works in bull (captures uptrends) and bear (captures downtrends) markets by being directionally flexible.
+6h_Donchian20_Breakout_12hTrend_1dVolumeConfirm_v1
+Hypothesis: Trade 6h Donchian(20) breakouts aligned with 12h EMA50 trend and confirmed by 1d volume spike (volume > 1.5x 20-period average).
+Donchian breakouts capture momentum; 12h EMA50 filters for higher-timeframe trend alignment; 1d volume spike adds conviction.
+Only long when price > upper band + 12h uptrend + volume spike; only short when price < lower band + 12h downtrend + volume spike.
+Exit on opposite band touch or trend reversal.
+Position size: 0.25 to balance profit and fee drag.
+Target: 12-30 trades/year (50-120 over 4 years) to stay well under 300-trade 6h hard max.
+Works in bull (breakouts with trend) and bear (strong breakdowns with trend) markets.
 """
 
 import numpy as np
@@ -21,105 +22,87 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 12h data for HTF trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA50 for HTF trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA20 and EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d volume spike: current 1d volume > 1.5x 20-period average
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_1d > (1.5 * vol_ma_20)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))  # bool -> float for alignment
     
-    # Get 1w data for Choppiness Index regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1w Choppiness Index (CHOP) for regime detection
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range calculation
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_period = 14
-    chop_period = 14
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    highest_high = pd.Series(high_1w).rolling(window=chop_period, min_periods=chop_period).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=chop_period, min_periods=chop_period).min().values
-    
-    # Avoid division by zero
-    hl_range = highest_high - lowest_low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    
-    # Choppiness Index: 100 * log10(sum(ATR) / (highest_high - lowest_low)) / log10(chop_period)
-    chop = 100 * np.log10(pd.Series(atr).rolling(window=chop_period, min_periods=chop_period).sum().values / hl_range) / np.log10(chop_period)
-    chop = np.where(np.isnan(chop), 50.0, chop)  # default to neutral if not enough data
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Calculate 6h Donchian(20) channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and CHOP (14)
-    start_idx = max(50, chop_period)
+    # Start index: need warmup for Donchian (20), 12h EMA50 (50), 1d vol MA (20)
+    start_idx = max(lookback, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_spike_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend (bullish = EMA20 > EMA50)
-        htf_1d_bullish = ema_20_1d_aligned[i] > ema_50_1d_aligned[i]
-        htf_1d_bearish = ema_20_1d_aligned[i] < ema_50_1d_aligned[i]
+        # Determine 12h HTF trend (bullish = price above EMA50)
+        htf_12h_bullish = close[i] > ema_50_12h_aligned[i]
+        htf_12h_bearish = close[i] < ema_50_12h_aligned[i]
         
-        # Regime filter: only trade in trending markets (CHOP < 50), exit when choppy (CHOP >= 60)
-        is_trending = chop_aligned[i] < 50.0
-        is_choppy = chop_aligned[i] >= 60.0
+        # Volume confirmation: 1d volume spike
+        vol_confirmed = vol_spike_aligned[i] > 0.5  # treated as boolean
         
         if position == 0:
-            # Long setup: EMA20 > EMA50 + trending regime
-            long_setup = htf_1d_bullish and is_trending
+            # Long setup: price breaks above upper Donchian band + 12h uptrend + volume spike
+            long_setup = (close[i] > highest_high[i]) and htf_12h_bullish and vol_confirmed
             
-            # Short setup: EMA20 < EMA50 + trending regime
-            short_setup = htf_1d_bearish and is_trending
+            # Short setup: price breaks below lower Donchian band + 12h downtrend + volume spike
+            short_setup = (close[i] < lowest_low[i]) and htf_12h_bearish and vol_confirmed
             
             if long_setup:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             elif short_setup:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.30
-            # Exit: EMA20 <= EMA50 (trend reversal) OR market becomes choppy
-            if (not htf_1d_bullish) or is_choppy:
+            signals[i] = 0.25
+            # Exit: price touches lower Donchian band (stop) OR 12h trend turns bearish
+            if (close[i] <= lowest_low[i]) or (not htf_12h_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.30
-            # Exit: EMA20 >= EMA50 (trend reversal) OR market becomes choppy
-            if (htf_1d_bullish) or is_choppy:
+            signals[i] = -0.25
+            # Exit: price touches upper Donchian band (stop) OR 12h trend turns bullish
+            if (close[i] >= highest_high[i]) or (htf_12h_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Trend_Following_With_Choppiness_Filter_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_12hTrend_1dVolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
