@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeConfirm_Regime_v2
-Hypothesis: Trade 4h Camarilla H3/L3 breakouts with 1d EMA34 trend filter, volume confirmation (>1.8x 20-bar MA), and choppiness regime filter (CHOP < 61.8 for trending markets). 
-Reduced trade frequency by increasing volume confirmation threshold from 1.5x to 1.8x to combat fee drag. Uses EMA34 for faster trend adaptation than EMA50. 
-Discrete sizing 0.25 balances profit and fee drag. Target: 15-25 trades/year (~60-100 over 4 years) to stay within fee drag limits while maintaining edge.
+4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeConfirm_Regime_v3
+Hypothesis: Trade 4h Camarilla H3/L3 breakouts with 1d EMA34 trend filter, volume confirmation (>1.8x 20-bar MA), and choppiness regime filter (CHOP < 61.8 for trending markets). Reduced trade frequency by increasing volume confirmation threshold from 1.5x to 1.8x to combat fee drag. Uses EMA34 for faster trend adaptation than EMA50. Discrete sizing 0.25 balances profit and fee drag. Target: 15-25 trades/year (~60-100 over 4 years) to stay within fee drag limits while maintaining edge.
 """
 
 import numpy as np
@@ -118,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeConfirm_Regime_v2"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeConfirm_Regime_v3"
 timeframe = "4h"
 leverage = 1.0
