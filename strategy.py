@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_RSI_MeanReversion_4hTrendFilter
-Hypothesis: Mean reversion on 1h RSI extremes (oversold/overbought) with 4h EMA trend filter to avoid counter-trend trades. Works in ranging markets (bear/consolidation) via reversals and in bull markets via pullbacks to trend.
-Target: 15-30 trades/year (60-120 total over 4 years) using discrete sizing (0.20) and session filter (08-20 UTC) to reduce noise.
+6h_Ichimoku_TK_Cross_CloudFilter_1dTrend
+Hypothesis: Ichimoku Tenkan-Kijun cross with cloud filter from 1d timeframe on 6h chart.
+Works in bull markets (price above cloud, bullish TK cross) and bear markets (price below cloud, bearish TK cross).
+Uses 1d Ichimoku cloud as regime filter to avoid counter-trend trades. Targets 12-30 trades/year.
 """
 
 import numpy as np
@@ -11,92 +12,107 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # 1h RSI(14) for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values
+    # Get 1d data for Ichimoku cloud (senkou span A/B) and trend
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 4h EMA(50) for trend filter (avoid counter-trend)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
+    displacement = 26
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Calculate Tenkan-sen (Conversion Line): (highest high + lowest low)/2 for past 9 periods
+    tenkan_1d = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                 pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Session filter: 08:00-20:00 UTC (reduce noise outside active hours)
-    hours = prices.index.hour  # DatetimeIndex from parquet
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate Kijun-sen (Base Line): (highest high + lowest low)/2 for past 26 periods
+    kijun_1d = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+    
+    # Calculate Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a_1d = ((tenkan_1d + kijun_1d) / 2).shift(displacement)
+    
+    # Calculate Senkou Span B (Leading Span B): (highest high + lowest low)/2 for past 52 periods shifted 26 periods ahead
+    senkou_span_b_1d = ((pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                         pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2).shift(displacement)
+    
+    # Align Ichimoku components to 6h timeframe (completed 1d bar only)
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d.values)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d.values)
+    
+    # Determine cloud top and bottom (Senkou Span A/B)
+    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
+    
+    # 1d trend filter: price above/below cloud
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for RSI (14), EMA50 (50), volume MA (20)
-    start_idx = max(14, 50, 20)
+    # Start index: need warmup for Ichimoku components
+    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period) + displacement
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi_values[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_1d_aligned[i]) or 
+            np.isnan(kijun_1d_aligned[i]) or 
+            np.isnan(cloud_top[i]) or 
+            np.isnan(cloud_bottom[i])):
             signals[i] = 0.0
             continue
         
-        # Require session filter and volume spike for entry precision
-        if not (in_session[i] and volume_spike[i]):
-            # Hold current position if any, but no new entries outside filters
-            if position == 1:
-                signals[i] = 0.20
-            elif position == -1:
-                signals[i] = -0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: RSI oversold (<30) + price above 4h EMA (uptrend bias)
-            long_setup = (rsi_values[i] < 30) and (close[i] > ema_50_4h_aligned[i])
-            # Short: RSI overbought (>70) + price below 4h EMA (downtrend bias)
-            short_setup = (rsi_values[i] > 70) and (close[i] < ema_50_4h_aligned[i])
+            # Long: price above cloud + Tenkan crosses above Kijun (bullish TK cross)
+            bullish_tk_cross = (tenkan_1d_aligned[i] > kijun_1d_aligned[i]) and \
+                               (tenkan_1d_aligned[i-1] <= kijun_1d_aligned[i-1])
+            long_setup = price_above_cloud[i] and bullish_tk_cross
+            
+            # Short: price below cloud + Tenkan crosses below Kijun (bearish TK cross)
+            bearish_tk_cross = (tenkan_1d_aligned[i] < kijun_1d_aligned[i]) and \
+                               (tenkan_1d_aligned[i-1] >= kijun_1d_aligned[i-1])
+            short_setup = price_below_cloud[i] and bearish_tk_cross
             
             if long_setup:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_setup:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long: hold until RSI reverts to neutral (50) or trend breaks
-            signals[i] = 0.20
-            if (rsi_values[i] >= 50) or (close[i] < ema_50_4h_aligned[i]):
+            # Long: hold position
+            signals[i] = 0.25
+            # Exit: price crosses below cloud OR Tenkan crosses below Kijun
+            if (close[i] < cloud_top[i]) or \
+               (tenkan_1d_aligned[i] < kijun_1d_aligned[i] and tenkan_1d_aligned[i-1] >= kijun_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Short: hold until RSI reverts to neutral (50) or trend breaks
-            signals[i] = -0.20
-            if (rsi_values[i] <= 50) or (close[i] > ema_50_4h_aligned[i]):
+            # Short: hold position
+            signals[i] = -0.25
+            # Exit: price crosses above cloud OR Tenkan crosses above Kijun
+            if (close[i] > cloud_bottom[i]) or \
+               (tenkan_1d_aligned[i] > kijun_1d_aligned[i] and tenkan_1d_aligned[i-1] <= kijun_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_RSI_MeanReversion_4hTrendFilter"
-timeframe = "1h"
+name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend"
+timeframe = "6h"
 leverage = 1.0
