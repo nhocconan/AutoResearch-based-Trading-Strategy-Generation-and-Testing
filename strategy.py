@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_Regime
-Hypothesis: Tight Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume spike confirmation, and choppiness regime filter to avoid overtrading. Targets 20-40 trades/year by requiring: 1) price breaks R1/S1 levels, 2) aligned with 1d EMA34 trend, 3) volume > 2.5x 20-period average, 4) choppy market filter (CHOP < 61.8) to avoid whipsaws in ranging markets. Uses discrete position sizing (0.25) to minimize fee churn.
+6h_WilliamsVixFix_MeanReversion_1dTrendFilter
+Hypothesis: Williams Vix Fix (WVF) identifies extreme fear/greed on 6h; mean revert from extreme WVF readings when aligned with 1d trend (EMA34). 
+In bull markets, extreme fear (low WVF) = long opportunity; in bear markets, extreme greed (high WVF) = short opportunity.
+Volume confirmation filters weak signals. Targets 12-30 trades/year by requiring extreme WVF (<20 for long, >80 for short) + 1d EMA trend + volume spike.
+Uses discrete sizing (0.25) to limit fee churn. Works in both bull (buy fear) and bear (sell greed) regimes.
 """
 
 import numpy as np
@@ -10,61 +13,41 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1d data for EMA34 trend filter and Camarilla pivots (loaded ONCE)
+    # 1d data for EMA34 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
+    # Williams Vix Fix: WVF = ((Highest Close in LB - Low) / (Highest Close in LB - Lowest Low in LB)) * 100
+    lb = 22  # lookback period
+    highest_close = pd.Series(close).rolling(window=lb, min_periods=lb).max().values
+    lowest_low = pd.Series(low).rolling(window=lb, min_periods=lb).min().values
+    wvf = ((highest_close - low) / (highest_close - lowest_low)) * 100
+    # Handle division by zero (when highest_close == lowest_low)
+    wvf = np.where((highest_close - lowest_low) == 0, 100, wvf)
     
-    # Camarilla R1 and S1 levels
-    R1 = prev_close + 1.1 * prev_range * (1.0/12.0)  # R1 = C + 1.1*(HL/12)
-    S1 = prev_close - 1.1 * prev_range * (1.0/12.0)  # S1 = C - 1.1*(HL/12)
-    
-    # Align 1d pivot levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume confirmation: current volume > 2.5 * 20-period average (stricter spike)
+    # Volume confirmation: volume > 2.0 x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 2.5)
-    
-    # Choppiness regime filter: avoid whipsaw in ranging markets
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
-    tr1 = pd.Series(high).diff().abs()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr_14 / np.log10(highest_high - lowest_low)) / np.log10(14)
-    chop_values = chop.values
-    chop_regime = chop_values < 61.8  # Trending market (not choppy/ranging)
+    volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA34 (34) and 1d pivots (2)
-    start_idx = 34
+    # Start index: need enough for WVF lb (22) and 1d EMA (34)
+    start_idx = max(34, lb) + 1
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -73,8 +56,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_values[i])):
+        if (np.isnan(wvf[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -87,54 +69,31 @@ def generate_signals(prices):
         downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals with volume confirmation, trend alignment, and regime filter
-            # Long breakout: price breaks above R1 with uptrend, volume confirmation, and trending regime
-            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i] and chop_regime[i]
-            # Short breakout: price breaks below S1 with downtrend, volume confirmation, and trending regime
-            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i] and chop_regime[i]
+            # Extreme fear (WVF < 20) = potential long opportunity in any regime
+            # Extreme greed (WVF > 80) = potential short opportunity in any regime
+            extreme_fear = wfv[i] < 20
+            extreme_greed = wfv[i] > 80
             
-            if long_breakout:
+            if extreme_fear and uptrend and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            elif short_breakout:
+            elif extreme_greed and downtrend and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit conditions
-            # Calculate 4h ATR for stoploss
-            tr1 = high[1:] - low[1:]
-            tr2 = np.abs(high[1:] - close[:-1])
-            tr3 = np.abs(low[1:] - close[:-1])
-            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-            
-            if curr_close < entry_price - 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit if price breaks below S1 (mean reversion) or trend changes
-            elif curr_close < S1_aligned[i] or not uptrend:
+            # Long position: exit when fear subsides (WVF > 40) or trend changes
+            if wvf[i] > 40 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit conditions
-            # Calculate 4h ATR (same as above)
-            tr1 = high[1:] - low[1:]
-            tr2 = np.abs(high[1:] - close[:-1])
-            tr3 = np.abs(low[1:] - close[:-1])
-            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-            
-            if curr_close > entry_price + 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit if price breaks above R1 (mean reversion) or trend changes
-            elif curr_close > R1_aligned[i] or not downtrend:
+            # Short position: exit when greed subsides (WVF < 60) or trend changes
+            if wfv[i] < 60 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -142,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_Regime"
-timeframe = "4h"
+name = "6h_WilliamsVixFix_MeanReversion_1dTrendFilter"
+timeframe = "6h"
 leverage = 1.0
