@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian20_Breakout_WeeklyTrend
-Hypothesis: Daily Donchian(20) breakout with weekly EMA34 trend filter and volume confirmation.
-Works in bull markets (breakouts with weekly uptrend) and bear markets (fades from weekly extremes with volume).
-Designed for low trade frequency (~10-25/year) to minimize fee drag on 1d timeframe.
+6h_WeeklyPivot_HL_Breakout_1dTrend_VolumeSpike
+Hypothesis: 6h breakout above/below weekly pivot H/L levels with 1d EMA34 trend filter and volume confirmation.
+Weekly pivots provide structural support/resistance that works in both bull and bear markets.
+Uses discrete position sizing (0.25) to limit fee drag. Targets 15-25 trades/year.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,54 +20,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA34 trend filter
+    # Get weekly data for pivot points (H/L)
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Weekly pivot: H = (H+L+C)/3 + (H-L), L = (H+L+C)/3 - (H-L)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    weekly_h = pivot_1w + (high_1w - low_1w)  # R1 equivalent
+    weekly_l = pivot_1w - (high_1w - low_1w)  # S1 equivalent
     
-    # Get daily data for Donchian channels
+    # Align weekly pivot to 6h (completed weekly bar only)
+    weekly_h_aligned = align_htf_to_ltf(prices, df_1w, weekly_h)
+    weekly_l_aligned = align_htf_to_ltf(prices, df_1w, weekly_l)
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily Donchian(20) channels
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align to 1d timeframe (completed daily bar only)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 2.0x 24-period average (4 periods per day on 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for Donchian (20 bars), EMA34 (34), volume MA (20)
-    start_idx = max(20, 34, 20)
+    # Start index: need warmup for weekly pivot (1 bar), EMA34 (34), volume MA (24)
+    start_idx = max(1, 34, 24)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
+        if (np.isnan(weekly_h_aligned[i]) or 
+            np.isnan(weekly_l_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price closes above upper Donchian + weekly uptrend + volume spike
-            long_setup = (close[i] > high_20_aligned[i]) and \
-                         (close[i] > ema_34_1w_aligned[i]) and \
+            # Long: price closes above weekly H + 1d uptrend + volume spike
+            long_setup = (close[i] > weekly_h_aligned[i]) and \
+                         (close[i] > ema_34_1d_aligned[i]) and \
                          volume_spike[i]
-            # Short: price closes below lower Donchian + weekly downtrend + volume spike
-            short_setup = (close[i] < low_20_aligned[i]) and \
-                          (close[i] < ema_34_1w_aligned[i]) and \
+            # Short: price closes below weekly L + 1d downtrend + volume spike
+            short_setup = (close[i] < weekly_l_aligned[i]) and \
+                          (close[i] < ema_34_1d_aligned[i]) and \
                           volume_spike[i]
             
             if long_setup:
@@ -81,22 +83,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price closes below lower Donchian OR weekly trend turns down
-            if (close[i] < low_20_aligned[i]) or \
-               (close[i] < ema_34_1w_aligned[i]):
+            # Exit: price closes below weekly L OR 1d trend turns down
+            if (close[i] < weekly_l_aligned[i]) or \
+               (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price closes above upper Donchian OR weekly trend turns up
-            if (close[i] > high_20_aligned[i]) or \
-               (close[i] > ema_34_1w_aligned[i]):
+            # Exit: price closes above weekly H OR 1d trend turns up
+            if (close[i] > weekly_h_aligned[i]) or \
+               (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WeeklyDonchian20_Breakout_WeeklyTrend"
-timeframe = "1d"
+name = "6h_WeeklyPivot_HL_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
