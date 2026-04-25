@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_RegimeFilter
-Hypothesis: Camarilla R3/S3 breakouts on 6h timeframe with 1d EMA50 trend filter and 
-6h ADX regime filter (ADX>25 for trending markets). Only trade breakouts in direction 
-of daily trend when market is trending. Uses discrete position sizing (0.25) to minimize 
-fee churn. Designed for low trade frequency (~15-25/year) to work in both bull and bear 
-markets via trend alignment and regime filtering. Camarilla R3/S3 levels represent 
-strong support/resistance where breakouts have higher follow-through than R1/S1 levels.
+12h_Camarilla_R3S3_Breakout_1wTrend_Filter
+Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe with 1w EMA34 trend filter. 
+Only trade breakouts in direction of weekly trend to avoid counter-trend whipsaws.
+Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade 
+frequency (~12-25/year) to work in both bull and bear markets via HTF trend alignment.
+Camarilla levels provide institutional support/resistance with higher reliability 
+than standard Donchian breaks in ranging markets. Weekly trend filter ensures we 
+only trade with the dominant multi-week momentum.
 """
 
 import numpy as np
@@ -22,100 +23,77 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for HTF trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA34 on 1w close for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align HTF EMA34 to 12h timeframe (standard 1-bar delay for EMA)
+    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w, additional_delay_bars=1)
+    
+    # Get 1d data for Camarilla pivot calculation (standard practice)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1d close for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate previous day's Camarilla levels (use prior day's OHLC)
+    # Calculate Camarilla levels from previous 1d bar
     # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We need to shift by 1 to use previous day's levels
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    # First value will be invalid (rolled from last), but min_periods will handle it
+    # We use the previous completed 1d bar to avoid look-ahead
+    camarilla_R3 = np.full(n, np.nan)
+    camarilla_S3 = np.full(n, np.nan)
     
-    # Calculate Camarilla levels for previous day
-    prev_range_1d = prev_high_1d - prev_low_1d
-    camarilla_r3_1d = prev_close_1d + (prev_range_1d * 1.1 / 4)
-    camarilla_s3_1d = prev_close_1d - (prev_range_1d * 1.1 / 4)
+    for i in range(1, n):
+        # Use previous 1d bar's OHLC (index i-1 in 1d data corresponds to bar before current 12h bar)
+        # Find the 1d bar that completed before current 12h bar
+        # Since we're on 12h timeframe, we need to map to daily bars
+        # Simpler approach: use the 1d bar from 2 bars ago to ensure it's completed
+        if i >= 2:
+            prev_close = close_1d[-(i//2 + 1)] if (i//2 + 1) <= len(close_1d) else close_1d[-1]
+            prev_high = high_1d[-(i//2 + 1)] if (i//2 + 1) <= len(high_1d) else high_1d[-1]
+            prev_low = low_1d[-(i//2 + 1)] if (i//2 + 1) <= len(low_1d) else low_1d[-1]
+            
+            # More robust: use rolling window of 1d data aligned to 12h
+            pass
     
-    # Align HTF indicators to 6h timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d, additional_delay_bars=1)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d, additional_delay_bars=1)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d, additional_delay_bars=1)
+    # Simpler approach: calculate Camarilla on 1d then align
+    # Typical Camarilla calculation
+    HLDiff = high_1d - low_1d
+    camarilla_R3_1d = close_1d + (HLDiff * 1.1 / 4)
+    camarilla_S3_1d = close_1d - (HLDiff * 1.1 / 4)
     
-    # Calculate 6h ADX for regime filter (trending when ADX > 25)
-    # ADX calculation: +DI, -DI, DX, then ADX = smoothed DX
-    period = 14
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with original indices
-    
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        """Wilder's smoothing (EMA with alpha=1/period)"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(arr[1:period])
-        # Subsequent values: Wilder smoothing
-        for i in range(period, len(arr)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    atr = smooth_wilder(tr, period)
-    plus_di = 100 * smooth_wilder(plus_dm, period) / atr
-    minus_di = 100 * smooth_wilder(minus_dm, period) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth_wilder(dx, period)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3_1d)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and ADX (2*period)
-    start_idx = max(50, 2*period)
+    # Start index: need warmup for EMA34 (34) and enough data for alignment
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(adx[i])):
+        if (np.isnan(ema34_aligned[i]) or 
+            np.isnan(camarilla_R3_aligned[i]) or
+            np.isnan(camarilla_S3_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        is_trending = adx[i] > 25
-        
         if position == 0:
-            # Look for Camarilla R3/S3 breakout signals with trend filter
-            # Long: price breaks above camarilla R3 in uptrend (close > EMA50)
-            # Short: price breaks below camarilla S3 in downtrend (close < EMA50)
-            long_signal = (close[i] > camarilla_r3_aligned[i]) and (close[i] > ema50_aligned[i]) and is_trending
-            short_signal = (close[i] < camarilla_s3_aligned[i]) and (close[i] < ema50_aligned[i]) and is_trending
+            # Look for Camarilla breakout signals with weekly trend filter
+            # Long: price breaks above R3 in uptrend (close > EMA34_1w)
+            # Short: price breaks below S3 in downtrend (close < EMA34_1w)
+            long_signal = (close[i] > camarilla_R3_aligned[i]) and (close[i] > ema34_aligned[i])
+            short_signal = (close[i] < camarilla_S3_aligned[i]) and (close[i] < ema34_aligned[i])
             
             if long_signal:
                 signals[i] = 0.25
@@ -128,22 +106,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price moves back below EMA50 (trend reversal) or breaks S3 (mean reversion)
-            exit_signal = (close[i] < ema50_aligned[i]) or (close[i] < camarilla_s3_aligned[i])
+            # Exit when price moves back below R3 (mean reversion) or trend turns
+            exit_signal = (close[i] < camarilla_R3_aligned[i]) or (close[i] < ema34_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price moves back above EMA50 (trend reversal) or breaks R3 (mean reversion)
-            exit_signal = (close[i] > ema50_aligned[i]) or (close[i] > camarilla_r3_aligned[i])
+            # Exit when price moves back above S3 (mean reversion) or trend turns
+            exit_signal = (close[i] > camarilla_S3_aligned[i]) or (close[i] > ema34_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_RegimeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
