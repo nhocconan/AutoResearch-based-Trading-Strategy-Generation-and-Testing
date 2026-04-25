@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot Donchian Breakout + Volume Spike
-Hypothesis: Weekly pivot levels (PP, R1, S1, R2, S2) act as key support/resistance. 
-Breakouts above weekly R1 or below S1 with Donchian(20) confirmation and volume spike 
-indicate institutional participation. Works in bull markets via breakouts with momentum 
-and in bear markets via fade at weekly R2/S2 when price is extended from weekly VWAP.
-Target: 12-25 trades/year on 6h (50-100 total over 4 years).
+12h Camarilla Pivot H3L3 Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: On 12h timeframe, Camarilla H3/L3 levels act as significant support/resistance. 
+Breakouts with volume confirmation and alignment with weekly EMA50 trend capture institutional moves. 
+Works in bull markets via breakouts with trend and in bear markets via trend filter (avoids counter-trend entries).
+Target: 12-30 trades/year on 12h (50-120 total over 4 years).
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,43 +21,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation and VWAP (call ONCE before loop)
-    df_w = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla pivot calculation (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_w) < 5:
+    # Get 1w data for EMA50 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 20 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly VWAP
-    typical_price_w = (df_w['high'] + df_w['low'] + df_w['close']) / 3
-    vwap_w = (typical_price_w * df_w['volume']).cumsum() / df_w['volume'].cumsum()
-    vwap_w_values = vwap_w.values
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate weekly pivot points from previous week OHLC
-    # PP = (high + low + close) / 3
-    # R1 = 2*PP - low, S1 = 2*PP - high
-    # R2 = PP + (high - low), S2 = PP - (high - low)
-    prev_week_close = df_w['close'].values
-    prev_week_high = df_w['high'].values
-    prev_week_low = df_w['low'].values
+    # Calculate Camarilla pivots from previous 1d OHLC
+    # H3 = close + 1.0*(high-low), L3 = close - 1.0*(high-low)
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    rang = prev_high - prev_low
+    H3 = prev_close + 1.0 * rang
+    L3 = prev_close - 1.0 * rang
     
-    PP = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    R1 = 2 * PP - prev_week_low
-    S1 = 2 * PP - prev_week_high
-    R2 = PP + (prev_week_high - prev_week_low)
-    S2 = PP - (prev_week_high - prev_week_low)
-    
-    # Align weekly levels to 6h
-    PP_aligned = align_htf_to_ltf(prices, df_w, PP)
-    R1_aligned = align_htf_to_ltf(prices, df_w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_w, S1)
-    R2_aligned = align_htf_to_ltf(prices, df_w, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_w, S2)
-    vwap_w_aligned = align_htf_to_ltf(prices, df_w, vwap_w_values)
-    
-    # Calculate Donchian(20) on 6h for breakout confirmation
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Align Camarilla levels to 12h (use previous day's levels for current day's trading)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,37 +54,29 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian and volume MA
-    start_idx = max(lookback, 20)
+    # Start index: need enough for volume MA and HTF alignment
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(PP_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or np.isnan(vwap_w_aligned[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
-        PP_level = PP_aligned[i]
-        R1_level = R1_aligned[i]
-        S1_level = S1_aligned[i]
-        R2_level = R2_aligned[i]
-        S2_level = S2_aligned[i]
-        vwap_level = vwap_w_aligned[i]
-        upper_donchian = highest_high[i]
-        lower_donchian = lowest_low[i]
+        H3_level = H3_aligned[i]
+        L3_level = L3_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above R1 AND Donchian breakout AND volume spike AND price > weekly VWAP
-            long_entry = (curr_close > R1_level) and (curr_high > upper_donchian) and vol_spike and (curr_close > vwap_level)
-            # Short: price breaks below S1 AND Donchian breakdown AND volume spike AND price < weekly VWAP
-            short_entry = (curr_close < S1_level) and (curr_low < lower_donchian) and vol_spike and (curr_close < vwap_level)
+            # Long: price breaks above H3 AND volume spike AND price > 1w EMA50 (uptrend)
+            long_entry = (curr_close > H3_level) and vol_spike and (curr_close > ema_trend)
+            # Short: price breaks below L3 AND volume spike AND price < 1w EMA50 (downtrend)
+            short_entry = (curr_close < L3_level) and vol_spike and (curr_close < ema_trend)
             
             if long_entry:
                 signals[i] = 0.25
@@ -106,32 +85,19 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
             else:
-                # Fade at weekly R2/S2 when price is extended from VWAP (mean reversion in ranges)
-                # Long: price < S2 AND price < VWAP (oversold)
-                fade_long = (curr_close < S2_level) and (curr_close < vwap_level)
-                # Short: price > R2 AND price > VWAP (overbought)
-                fade_short = (curr_close > R2_level) and (curr_close > vwap_level)
-                
-                if fade_long:
-                    signals[i] = 0.20
-                    position = 1
-                elif fade_short:
-                    signals[i] = -0.20
-                    position = -1
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below S1 (reversal) OR price < weekly VWAP (mean reversion signal)
-            if (curr_close < S1_level) or (curr_close < vwap_level):
+            # Exit: price crosses below L3 (reversal) OR price < 1w EMA50 (trend change)
+            if (curr_close < L3_level) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above R1 (reversal) OR price > weekly VWAP (mean reversion signal)
-            if (curr_close > R1_level) or (curr_close > vwap_level):
+            # Exit: price crosses above H3 (reversal) OR price > 1w EMA50 (trend change)
+            if (curr_close > H3_level) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_DonchianBreakout_VolumeSpike_VWAPFade"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_VolumeSpike_1wEMA50_Trend"
+timeframe = "12h"
 leverage = 1.0
