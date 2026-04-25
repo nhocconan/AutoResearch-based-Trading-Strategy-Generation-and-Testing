@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3L3 Breakout with Volume Spike and 1d EMA34 Trend Filter
-Hypothesis: Camarilla H3/L3 levels act as intraday support/resistance. Breakouts with volume confirmation indicate institutional participation. The 1d EMA34 trend filter ensures trades align with the daily trend, reducing false breakouts in choppy markets and improving performance in both bull and bear regimes. Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 20-40 trades/year on 4h.
+4h Camarilla H3L3 Breakout with Volume Spike and 1d EMA34 Trend Filter + ATR Stoploss
+Hypothesis: Camarilla H3/L3 levels act as intraday support/resistance. Breakouts with volume confirmation indicate institutional participation. The 1d EMA34 trend filter ensures trades align with the daily trend, reducing false breakouts in choppy markets. ATR-based stoploss manages risk. Discrete sizing (0.0, ±0.25) minimizes fee churn. Designed to work in both bull (trend-following) and bear (mean-reversion at extremes) regimes by aligning with higher timeframe trend.
 """
 
 import numpy as np
@@ -29,7 +29,6 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla pivots from previous 1d OHLC
-    # H4 = close + 1.5*(high-low), H3 = close + 1.0*(high-low), L3 = close - 1.0*(high-low), L4 = close - 1.5*(high-low)
     prev_close = df_1d['close'].values
     prev_high = df_1d['high'].values
     prev_low = df_1d['low'].values
@@ -41,28 +40,38 @@ def generate_signals(prices):
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
+    # Calculate ATR(14) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Start index: need enough for volume MA and EMA
+    # Start index: need enough for volume MA, ATR, and EMA
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
+        curr_high = high[i]
+        curr_low = low[i]
         H3_level = H3_aligned[i]
         L3_level = L3_aligned[i]
         ema_trend = ema_34_1d_aligned[i]
+        atr_val = atr[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
@@ -75,23 +84,27 @@ def generate_signals(prices):
             if long_entry:
                 signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below L3 (reversal) OR price < 1d EMA34 (trend change)
-            if (curr_close < L3_level) or (curr_close < ema_trend):
+            # Exit: ATR-based stoploss OR price crosses below L3 (reversal) OR price < 1d EMA34 (trend change)
+            stop_price = entry_price - 2.5 * atr_val
+            if (curr_low <= stop_price) or (curr_close < L3_level) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above H3 (reversal) OR price > 1d EMA34 (trend change)
-            if (curr_close > H3_level) or (curr_close > ema_trend):
+            # Exit: ATR-based stoploss OR price crosses above H3 (reversal) OR price > 1d EMA34 (trend change)
+            stop_price = entry_price + 2.5 * atr_val
+            if (curr_high >= stop_price) or (curr_close > H3_level) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_VolumeSpike_1dEMA34_Trend"
+name = "4h_Camarilla_H3L3_Breakout_VolumeSpike_1dEMA34_Trend_ATR_SL"
 timeframe = "4h"
 leverage = 1.0
