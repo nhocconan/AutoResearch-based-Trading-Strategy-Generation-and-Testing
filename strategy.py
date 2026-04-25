@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Alligator_ElderRay_1wTrend_Filter_v1
-Hypothesis: Daily timeframe strategy using Williams Alligator (trend) and Elder Ray (momentum) with 1-week trend filter.
-Alligator confirms trend direction (bullish when lips > teeth > jaw, bearish when lips < teeth < jaw).
-Elder Ray provides entry timing: bull power > 0 for longs, bear power < 0 for shorts.
-1-week trend filter ensures we only trade in the direction of the higher timeframe trend.
-Designed for low trade frequency (~15-25/year) with strong edge in both bull and bear markets via trend-following logic.
+6h_Ichimoku_Cloud_Breakout_WeeklyTrend_Confirm
+Hypothesis: Ichimoku cloud breakout on 6h with weekly EMA50 trend filter and volume confirmation.
+Long when price breaks above cloud in uptrend (close > weekly EMA50) with volume spike.
+Short when price breaks below cloud in downtrend (close < weekly EMA50) with volume spike.
+Exit when price re-enters cloud or trend reverses. Designed for low trade frequency and robustness.
 """
 
 import numpy as np
@@ -14,105 +13,94 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Alligator and Elder Ray calculations (primary timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 6h data for Ichimoku calculations (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 52:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Williams Alligator: SMAs of median price (typical price)
-    # Jaw: 13-period SMMA shifted 8 bars
-    # Teeth: 8-period SMMA shifted 5 bars  
-    # Lips: 5-period SMMA shifted 3 bars
-    median_price_1d = (high_1d + low_1d) / 2
+    # Ichimoku components (standard periods: 9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    def smma(values, period):
-        """Smoothed Moving Average (same as RMA/Wilder's MA)"""
-        result = np.full_like(values, np.nan)
-        if len(values) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(values[:period])
-        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_value) / period
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    jaw = smma(median_price_1d, 13)
-    teeth = smma(median_price_1d, 8)
-    lips = smma(median_price_1d, 5)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_a = (tenkan_sen + kijun_sen) / 2
     
-    # Shift to align with Alligator tradition
-    jaw_shifted = np.full_like(jaw, np.nan)
-    teeth_shifted = np.full_like(teeth, np.nan)
-    lips_shifted = np.full_like(lips, np.nan)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    if len(jaw) > 8:
-        jaw_shifted[8:] = jaw[:-8]
-    if len(teeth) > 5:
-        teeth_shifted[5:] = teeth[:-5]
-    if len(lips) > 3:
-        lips_shifted[3:] = lips[:-3]
+    # Align Ichimoku components to original timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen)
+    kijun_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_b)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema_13_1d
-    bear_power = low_1d - ema_13_1d
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
     
-    # Align all indicators to original timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Get 1w data for trend filter
+    # Get weekly data for trend filter (EMA50)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    # 1-week EMA20 for trend direction
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Weekly EMA50 for trend direction
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need warmup for calculations
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Alligator trend condition: bullish when lips > teeth > jaw, bearish when lips < teeth < jaw
-        alligator_bullish = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        alligator_bearish = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
-        
-        # 1-week trend filter
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long entry: Alligator bullish AND weekly uptrend AND bull power positive
-            long_signal = alligator_bullish and weekly_uptrend and (bull_power_aligned[i] > 0)
-            # Short entry: Alligator bearish AND weekly downtrend AND bear power negative
-            short_signal = alligator_bearish and weekly_downtrend and (bear_power_aligned[i] < 0)
+            # Regime-based entry logic
+            if close[i] > ema_trend:  # Uptrend regime (weekly)
+                # Long: break above cloud with volume spike
+                long_signal = (close[i] > cloud_top[i]) and vol_spike[i]
+                # Short: break below cloud only if extreme volume spike (counter-trend fade)
+                short_signal = (close[i] < cloud_bottom[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
+            else:  # Downtrend regime (weekly)
+                # Short: break below cloud with volume spike
+                short_signal = (close[i] < cloud_bottom[i]) and vol_spike[i]
+                # Long: break above cloud only if extreme volume spike (counter-trend fade)
+                long_signal = (close[i] > cloud_top[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
             
             if long_signal:
                 signals[i] = 0.25
@@ -125,22 +113,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: Alligator turns bearish OR weekly trend turns down
-            exit_signal = alligator_bearish or (not weekly_uptrend)
+            # Exit conditions: re-enter cloud or trend reversal
+            exit_signal = (close[i] < cloud_top[i]) or (close[i] < ema_trend * 0.99)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: Alligator turns bullish OR weekly trend turns up
-            exit_signal = alligator_bullish or (not weekly_downtrend)
+            # Exit conditions: re-enter cloud or trend reversal
+            exit_signal = (close[i] > cloud_bottom[i]) or (close[i] > ema_trend * 1.01)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Alligator_ElderRay_1wTrend_Filter_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Breakout_WeeklyTrend_Confirm"
+timeframe = "6h"
 leverage = 1.0
