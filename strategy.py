@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_HMA21_Cross_ATR_Volume_Regime_v1
-Hypothesis: Trade HMA(21) crossovers with ATR-based position sizing (0.25) and volume confirmation (>1.5x 20-bar average). Only trade when choppiness regime indicates trend (CHOP < 38.2) to avoid whipsaws in ranging markets. Uses 1d EMA50 as HTF trend filter for alignment. Designed for low trade frequency (<25/year) to minimize fee drag while capturing strong trending moves. Works in both bull and bear regimes by following HTF trend direction.
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Trade Camarilla R3/S3 breakouts on 12h timeframe with 1d EMA50 trend filter and volume confirmation (>2x average). Only trade when 1d ADX > 25 to ensure strong trending conditions. Uses discrete position sizing (0.30) to limit fee drawdown. Designed for low trade frequency (15-25/year) to survive bear markets like 2022 and range-bound periods like 2025.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend
+    # Get 1d data for HTF trend and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -28,40 +28,8 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h HMA(21)
-    def wma(arr, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(arr, weights/weights.sum(), mode='valid')
-    
-    def hma(arr, window):
-        half = window // 2
-        sqrt = int(np.sqrt(window))
-        wma_half = wma(arr, half)
-        wma_full = wma(arr, window)
-        hma_val = 2 * wma_half - wma_full
-        return wma(hma_val, sqrt)
-    
-    hma_21 = hma(close, 21)
-    # Pad the beginning with NaN since HMA reduces array size
-    hma_21_padded = np.full(n, np.nan)
-    hma_21_padded[20:] = hma_21  # HMA(21) needs 21 bars to start
-    
-    # Calculate 4h ATR(14) for volatility filtering
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
-    
-    # Calculate 4h Choppiness Index (CHOP) for regime filter
-    def calculate_chop(high, low, close, window=14):
+    # Calculate 1d ADX(14) for trend strength filter
+    def calculate_adx(high, low, close, window=14):
         # True Range
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
@@ -71,96 +39,126 @@ def generate_signals(prices):
         tr3[0] = 0
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
         
-        # Sum of TR over window
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed TR, DM+
         tr_sum = pd.Series(tr).rolling(window=window, min_periods=window).sum().values
+        dm_plus_sum = pd.Series(dm_plus).rolling(window=window, min_periods=window).sum().values
+        dm_minus_sum = pd.Series(dm_minus).rolling(window=window, min_periods=window).sum().values
         
-        # Highest high and lowest low over window
-        hh = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        ll = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        # Directional Indicators
+        tr_sum_safe = np.where(tr_sum == 0, 1e-10, tr_sum)
+        di_plus = 100 * dm_plus_sum / tr_sum_safe
+        di_minus = 100 * dm_minus_sum / tr_sum_safe
         
-        # Choppiness Index
-        chop = np.zeros(len(close))
-        for i in range(len(close)):
-            if tr_sum[i] > 0 and hh[i] > ll[i]:
-                chop[i] = 100 * np.log10(tr_sum[i] / (hh[i] - ll[i])) / np.log10(window)
-            else:
-                chop[i] = 50.0  # neutral value
-        return chop
+        # DX and ADX
+        dx = np.zeros(len(close))
+        dx_denom = di_plus + di_minus
+        dx_denom_safe = np.where(dx_denom == 0, 1e-10, dx_denom)
+        dx = 100 * np.abs(di_plus - di_minus) / dx_denom_safe
+        
+        adx = pd.Series(dx).rolling(window=window, min_periods=window).mean().values
+        return adx
     
-    chop = calculate_chop(high, low, close, window=14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, window=14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 12h Camarilla levels (based on previous day's OHLC)
+    def calculate_camarilla(high, low, close):
+        # Camarilla levels use previous period's OHLC
+        # R4 = close + ((high-low) * 1.1/2)
+        # R3 = close + ((high-low) * 1.1/4)
+        # S3 = close - ((high-low) * 1.1/4)
+        # S4 = close - ((high-low) * 1.1/2)
+        # We use R3/S3 as breakout levels
+        range_hl = high - low
+        r3 = close + (range_hl * 1.1 / 4)
+        s3 = close - (range_hl * 1.1 / 4)
+        return r3, s3
+    
+    # Shift by 1 to use previous bar's OHLC (no look-ahead)
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    high_shift[0] = np.nan
+    low_shift[0] = np.nan
+    close_shift[0] = np.nan
+    
+    camarilla_r3, camarilla_s3 = calculate_camarilla(high_shift, low_shift, close_shift)
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need warmup for all indicators
-    start_idx = max(50, 21, 14, 20)  # EMA50 needs 50, HMA21 needs 21, ATR needs 14, vol needs 20
+    start_idx = max(50, 20)  # EMA50 needs 50, Camarilla needs 20 (due to shift)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(hma_21_padded[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(vol_ratio[i])):
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
         
         # Determine 1d HTF trend (bullish = price above EMA50)
         df_1d_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
         if np.isnan(df_1d_close_aligned[i]):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
         htf_1d_bullish = df_1d_close_aligned[i] > ema_50_1d_aligned[i]
         htf_1d_bearish = df_1d_close_aligned[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation: moderate spike (vol_ratio > 1.5)
-        volume_confirmed = vol_ratio[i] > 1.5
+        # Volume confirmation: strong spike (vol_ratio > 2.0)
+        volume_confirmed = vol_ratio[i] > 2.0
         
-        # Regime filter: only trade when market is trending (CHOP < 38.2)
-        regime_filter = chop[i] < 38.2
+        # Trend strength filter: only trade when ADX > 25 (strong trend)
+        trend_filter = adx_1d_aligned[i] > 25.0
         
         if position == 0:
-            # Long setup: HMA crossover bullish + 1d uptrend + volume confirmation + trending regime
-            if i > 0 and not np.isnan(hma_21_padded[i-1]) and not np.isnan(hma_21_padded[i]):
-                hma_cross_bull = close[i] > hma_21_padded[i] and close[i-1] <= hma_21_padded[i-1]
-                hma_cross_bear = close[i] < hma_21_padded[i] and close[i-1] >= hma_21_padded[i-1]
-            else:
-                hma_cross_bull = False
-                hma_cross_bear = False
+            # Long setup: price breaks above Camarilla R3 + 1d uptrend + volume confirmation + strong trend
+            long_setup = (close[i] > camarilla_r3[i]) and htf_1d_bullish and volume_confirmed and trend_filter
             
-            long_setup = hma_cross_bull and htf_1d_bullish and volume_confirmed and regime_filter
-            short_setup = hma_cross_bear and htf_1d_bearish and volume_confirmed and regime_filter
+            # Short setup: price breaks below Camarilla S3 + 1d downtrend + volume confirmation + strong trend
+            short_setup = (close[i] < camarilla_s3[i]) and htf_1d_bearish and volume_confirmed and trend_filter
             
             if long_setup:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_setup:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
-            # Exit: HMA crossover bearish OR 1d trend turns bearish
-            if i > 0 and not np.isnan(hma_21_padded[i-1]) and not np.isnan(hma_21_padded[i]):
-                hma_cross_bear = close[i] < hma_21_padded[i] and close[i-1] >= hma_21_padded[i-1]
-            else:
-                hma_cross_bear = False
-            if hma_cross_bear or (not htf_1d_bullish):
+            signals[i] = 0.30
+            # Exit: price touches Camarilla S3 (opposite level) OR 1d trend turns bearish
+            if (close[i] <= camarilla_s3[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
-            # Exit: HMA crossover bullish OR 1d trend turns bullish
-            if i > 0 and not np.isnan(hma_21_padded[i-1]) and not np.isnan(hma_21_padded[i]):
-                hma_cross_bull = close[i] > hma_21_padded[i] and close[i-1] <= hma_21_padded[i-1]
-            else:
-                hma_cross_bull = False
-            if hma_cross_bull or htf_1d_bullish:
+            signals[i] = -0.30
+            # Exit: price touches Camarilla R3 (opposite level) OR 1d trend turns bullish
+            if (close[i] >= camarilla_r3[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_HMA21_Cross_ATR_Volume_Regime_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
