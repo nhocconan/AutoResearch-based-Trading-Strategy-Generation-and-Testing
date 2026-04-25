@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_H1L1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Trade Camarilla H1/L1 breakouts on daily timeframe with 1w trend filter and volume spike confirmation.
-In bull markets (price > weekly EMA34): buy when price breaks above H1 level with volume > 1.5x average.
-In bear markets (price < weekly EMA34): sell when price breaks below L1 level with volume > 1.5x average.
-Exit on opposite Camarilla level touch (H4/L4) or trend reversal.
-Position size: 0.25 to manage drawdown.
-Target: 15-25 trades/year to stay well under 150-trade 1d hard max.
-Uses proven Camarilla structure with volume confirmation for BTC/ETH edge.
+6h_KeltnerBreakout_VolumeSpike_1dTrend_v1
+Hypothesis: Trade Keltner Channel breakouts with volume spike confirmation and 1d EMA trend filter.
+Long when price breaks above upper Keltner (EMA20 + 2*ATR10) with volume > 1.5x average volume and price > 1d EMA50.
+Short when price breaks below lower Keltner (EMA20 - 2*ATR10) with volume > 1.5x average volume and price < 1d EMA50.
+Exit on opposite Keltner touch or trend reversal.
+Uses 6h timeframe for entries with 1d HTF trend filter.
+Position size: 0.25 to balance drawdown and return.
+Target: 15-30 trades/year to stay well under 300-trade 6h hard max.
 Works in bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets.
 """
 
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,65 +25,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:  # Need at least 35 bars for EMA34
+    # Get 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for HTF trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA50 for HTF trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate average volume for spike detection (20-period SMA)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Keltner Channel components on 6h data
+    # EMA20 for middle line
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # ATR10 for channel width
+    tr1 = np.maximum(high - low, 0)
+    tr2 = np.absolute(high - np.roll(close, 1))
+    tr3 = np.absolute(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Upper and lower Keltner bands
+    upper_keltner = ema_20 + 2.0 * atr_10
+    lower_keltner = ema_20 - 2.0 * atr_10
+    
+    # Volume average (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for volume SMA (20)
-    start_idx = 20
+    # Start index: need warmup for EMA20 (20) and ATR10 (10) and volume MA (20)
+    start_idx = max(20, 10, 20)
     
     for i in range(start_idx, n):
-        # Skip if HTF data not ready
-        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_sma_20[i]):
+        # Skip if data not ready
+        if (np.isnan(ema_20[i]) or np.isnan(atr_10[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Calculate Camarilla levels from previous day's range
-        if i >= 1:
-            prev_high = high[i-1]
-            prev_low = low[i-1]
-            prev_close = close[i-1]
-            daily_range = prev_high - prev_low
-            
-            # Camarilla levels
-            h4 = prev_close + daily_range * 1.1 / 2
-            h3 = prev_close + daily_range * 1.1 / 4
-            h2 = prev_close + daily_range * 1.1 / 6
-            h1 = prev_close + daily_range * 1.1 / 12
-            l1 = prev_close - daily_range * 1.1 / 12
-            l2 = prev_close - daily_range * 1.1 / 6
-            l3 = prev_close - daily_range * 1.1 / 4
-            l4 = prev_close - daily_range * 1.1 / 2
-        else:
-            # Not enough data for Camarilla calculation
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
+        # Determine 1d HTF trend (bullish = price above EMA50)
+        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
         
-        # Determine 1w HTF trend (bullish = price above weekly EMA34)
-        htf_1w_bullish = close[i] > ema_34_1w_aligned[i]
-        htf_1w_bearish = close[i] < ema_34_1w_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_spike = volume[i] > 1.5 * vol_sma_20[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long setup: price breaks above H1 + 1w uptrend + volume spike
-            long_setup = (close[i] > h1) and htf_1w_bullish and volume_spike
+            # Long setup: price breaks above upper Keltner + volume spike + 1d uptrend
+            long_setup = (close[i] > upper_keltner[i]) and volume_spike and htf_1d_bullish
             
-            # Short setup: price breaks below L1 + 1w downtrend + volume spike
-            short_setup = (close[i] < l1) and htf_1w_bearish and volume_spike
+            # Short setup: price breaks below lower Keltner + volume spike + 1d downtrend
+            short_setup = (close[i] < lower_keltner[i]) and volume_spike and htf_1d_bearish
             
             if long_setup:
                 signals[i] = 0.25
@@ -96,20 +93,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches L4 (stop) OR 1w trend turns bearish
-            if (close[i] <= l4) or (not htf_1w_bullish):
+            # Exit: price touches lower Keltner (stop) OR 1d trend turns bearish
+            if (close[i] <= lower_keltner[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches H4 (stop) OR 1w trend turns bullish
-            if (close[i] >= h4) or (htf_1w_bullish):
+            # Exit: price touches upper Keltner (stop) OR 1d trend turns bullish
+            if (close[i] >= upper_keltner[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_H1L1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_KeltnerBreakout_VolumeSpike_1dTrend_v1"
+timeframe = "6h"
 leverage = 1.0
