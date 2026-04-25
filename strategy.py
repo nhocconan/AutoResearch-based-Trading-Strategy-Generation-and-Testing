@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike
-Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance. 
-Breakouts above R3 or below S3 with 1d EMA trend alignment and volume spikes 
-capture strong moves. Uses 4h timeframe with 1d HTF for trend filter. 
-Targets 75-200 trades over 4 years (19-50/year) to avoid fee drag.
+12h Williams Alligator Breakout with 1d EMA Trend Filter and Volume Spike
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend absence/presence.
+Breakouts above Lips or below Jaw with 1d EMA trend alignment and volume spikes
+capture strong moves in both bull and bear markets. Uses 12h timeframe with 1d HTF
+for trend filter. Targets 50-150 trades over 4 years (12-37/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,56 +21,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA (call ONCE before loop)
+    # Get 1d data for EMA trend filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for 1d
-    # Camarilla: based on previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Williams Alligator on 12h median price
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2.0
     
-    # Avoid look-ahead: use only completed previous day
-    typical_price = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
+    # Alligator lines: SMAs of median price
+    # Jaw: 13-period SMA, shifted 8 bars ahead
+    # Teeth: 8-period SMA, shifted 5 bars ahead  
+    # Lips: 5-period SMA, shifted 3 bars ahead
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Camarilla levels
-    R3 = typical_price + range_hl * 1.1 / 2.0
-    S3 = typical_price - range_hl * 1.1 / 2.0
-    
-    # Calculate 34-period EMA on 1d close
+    # Calculate 34-period EMA on 1d close for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 20-period volume MA on 1d
+    # Calculate 20-period volume MA on 1d for volume confirmation
     vol_ma_20_1d = np.full(len(df_1d), np.nan)
     for i in range(20, len(df_1d)):
         vol_ma_20_1d[i] = np.mean(df_1d['volume'].values[i-19:i+1])
     
-    # Align to 4h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align 1d indicators to 12h
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 20-period volume MA for 4h volume spike
-    vol_ma_20_4h = np.full(n, np.nan)
+    # Calculate 20-period volume MA for 12h volume spike
+    vol_ma_20_12h = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma_20_4h[i] = np.mean(volume[i-19:i+1])
+        vol_ma_20_12h[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for volume MA and pivots
-    start_idx = max(20, 1)  # 20 for volume MA, 1 for pivot shift
+    # Start index: need enough for Alligator and volume MA
+    start_idx = max(20, 13)  # 20 for volume MA, 13 for Alligator jaw
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(vol_ma_20_4h[i])):
+            np.isnan(lips[i]) or np.isnan(jaw[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(vol_ma_20_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,22 +75,22 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         ema_trend = ema_34_1d_aligned[i]
-        R3 = R3_aligned[i]
-        S3 = S3_aligned[i]
+        lips_val = lips[i]
+        jaw_val = jaw[i]
         vol_ma_1d = vol_ma_20_1d_aligned[i]
-        vol_ma_4h = vol_ma_20_4h[i]
+        vol_ma_12h = vol_ma_20_12h[i]
         
-        # Volume confirmation: current 4h volume > 2.0 * 20-period 4h average
-        volume_confirm = curr_volume > 2.0 * vol_ma_4h
+        # Volume confirmation: current 12h volume > 1.8 * 20-period 12h average
+        volume_confirm = curr_volume > 1.8 * vol_ma_12h
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above R3, above 1d EMA, volume confirmation
-            long_entry = (curr_close > R3 and 
+            # Long: price crosses above Lips, above 1d EMA, volume confirmation
+            long_entry = (curr_close > lips_val and 
                          curr_close > ema_trend and 
                          volume_confirm)
-            # Short: price breaks below S3, below 1d EMA, volume confirmation
-            short_entry = (curr_close < S3 and 
+            # Short: price crosses below Jaw, below 1d EMA, volume confirmation
+            short_entry = (curr_close < jaw_val and 
                           curr_close < ema_trend and 
                           volume_confirm)
             
@@ -110,16 +106,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below S3 OR below 1d EMA
-            if curr_close < S3 or curr_close < ema_trend:
+            # Exit: price falls below Teeth OR below 1d EMA
+            if curr_close < teeth[i] or curr_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above R3 OR above 1d EMA
-            if curr_close > R3 or curr_close > ema_trend:
+            # Exit: price rises above Teeth OR above 1d EMA
+            if curr_close > teeth[i] or curr_close > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Williams_Alligator_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
