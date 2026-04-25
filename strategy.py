@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1w trend filter and volume spike confirmation.
-Goes long when price breaks above R1 with 1w uptrend (price > weekly EMA50) and volume > 2.0x 20-period average,
-short when price breaks below S1 with 1w downtrend (price < weekly EMA50) and volume > 2.0x 20-period average.
-Exit on opposite Camarilla level touch or trend reversal. Uses discrete sizing (0.25) to minimize fees.
-Target: 12-37 trades/year. Works in bull via breakouts with trend, in bear via mean reversion at extremes.
+4h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter_VolumeSpike
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter, choppiness regime filter (CHOP<38.2 = trending), and volume spike confirmation.
+Goes long when price breaks above R1 with 1d uptrend (price > EMA50), low chop (<38.2), and volume > 2.0x 20-period average.
+Short when price breaks below S1 with 1d downtrend (price < EMA50), low chop, and volume spike.
+Exit on opposite Camarilla level touch. Uses discrete sizing (0.25) to minimize fees.
+Target: 20-40 trades/year. Works in bull via breakouts with trend, in bear via mean reversion at extremes.
 """
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculations (using daily OHLC)
+    # Get 1d data for Camarilla and trend calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -40,19 +40,35 @@ def generate_signals(prices):
     r1 = prev_close + 0.275 * camarilla_range
     s1 = prev_close - 0.275 * camarilla_range
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Choppiness Index (CHOP) on 1d - trending when CHOP < 38.2
+    def calculate_chop(high_arr, low_arr, close_arr, period=14):
+        if len(high_arr) < period + 1:
+            return np.full_like(high_arr, 50.0)
+        tr1 = np.abs(high_arr[1:] - low_arr[1:])
+        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
+        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.abs(high_arr[0] - low_arr[0])], tr])
+        atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+        hh = pd.Series(high_arr).rolling(window=period, min_periods=period).max().values
+        ll = pd.Series(low_arr).rolling(window=period, min_periods=period).min().values
+        chop = np.where((hh - ll) > 0, -100 * np.log10(atr.sum() / (hh - ll)) / np.log10(period), 50.0)
+        # Pad to same length
+        chop_full = np.full_like(close_arr, 50.0)
+        chop_full[period:] = chop[period-1:]
+        return chop_full
+    
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    chop_filter = chop_1d_aligned < 38.2  # Trending regime
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,15 +83,16 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         if position == 0:
-            # Long: price breaks above R1, 1w uptrend (price > weekly EMA50), volume spike
-            long_signal = (close[i] > r1_aligned[i]) and (close[i] > ema_50_1w_aligned[i]) and vol_spike[i]
-            # Short: price breaks below S1, 1w downtrend (price < weekly EMA50), volume spike
-            short_signal = (close[i] < s1_aligned[i]) and (close[i] < ema_50_1w_aligned[i]) and vol_spike[i]
+            # Long: price breaks above R1, 1d uptrend (price > EMA50), trending regime (CHOP<38.2), volume spike
+            long_signal = (close[i] > r1_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and chop_filter[i] and vol_spike[i]
+            # Short: price breaks below S1, 1d downtrend (price < EMA50), trending regime, volume spike
+            short_signal = (close[i] < s1_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and chop_filter[i] and vol_spike[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -88,22 +105,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price closes below S1 (mean reversion) or 1w trend turns down
-            exit_signal = (close[i] < s1_aligned[i]) or (close[i] < ema_50_1w_aligned[i])
-            if exit_signal:
+            # Exit when price closes below S1 (mean reversion)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price closes above R1 (mean reversion) or 1w trend turns up
-            exit_signal = (close[i] > r1_aligned[i]) or (close[i] > ema_50_1w_aligned[i])
-            if exit_signal:
+            # Exit when price closes above R1 (mean reversion)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
