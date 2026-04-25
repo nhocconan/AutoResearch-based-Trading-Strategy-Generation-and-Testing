@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Williams Fractal Breakout + 1w EMA50 Trend + Volume Spike
-Hypothesis: Williams fractals on 1d identify swing highs/lows with confirmation delay; breakouts from these levels with 1w EMA50 trend filter and volume spike capture strong momentum moves. Works in both bull (buy breakouts above bearish fractals in uptrend) and bear (sell breakdowns below bullish fractals in downtrend) via symmetric logic. Target 12-37 trades/year on 12h to avoid fee drag.
+4h Williams Fractal Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Williams fractals on 1d identify major swing points with 2-bar confirmation delay. Breakouts above/below these levels with 1d EMA34 trend filter and volume spike capture strong momentum moves. Works in bull (buy breakouts above bearish fractals in uptrend) and bear (sell breakdowns below bullish fractals in downtrend) via symmetric logic. Target 20-50 trades/year on 4h to avoid fee drag.
 """
 
 import numpy as np
@@ -18,18 +18,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA34 trend filter (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = pd.Series(df_1w['close'])
-    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Get 1d data for Williams fractals (need 2 extra bars for confirmation)
-    df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
     
@@ -60,12 +59,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for EMA50, ATR, volume MA, fractals
-    start_idx = max(50, 14, 20, 50)  # 50 for EMA and fractal stability
+    # Start index: need enough for EMA34, ATR, volume MA, fractals
+    start_idx = max(34, 14, 20, 50)  # 50 for fractal stability
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
             np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -78,15 +77,15 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_50_val = ema_50_1w_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
         bearish_fractal_val = bearish_fractal_aligned[i]
         bullish_fractal_val = bullish_fractal_aligned[i]
         
-        # Trend filter: price relative to 1w EMA50
-        uptrend = curr_close > ema_50_val
-        downtrend = curr_close < ema_50_val
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_val
+        downtrend = curr_close < ema_34_val
         
         # Volume confirmation: current volume > 2.0 * 20-period average
         volume_confirm = curr_volume > 2.0 * vol_ma
@@ -112,8 +111,8 @@ def generate_signals(prices):
             # Long position management
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit conditions: price closes below bullish fractal OR 2.5*ATR trailing stop OR EMA50 trend turns down
-            if curr_close < bullish_fractal_val or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_50_val:
+            # Exit conditions: price closes below bullish fractal OR 2.5*ATR trailing stop OR EMA34 trend turns down
+            if curr_close < bullish_fractal_val or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -123,8 +122,8 @@ def generate_signals(prices):
             # Short position management
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit conditions: price closes above bearish fractal OR 2.5*ATR trailing stop OR EMA50 trend turns up
-            if curr_close > bearish_fractal_val or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_50_val:
+            # Exit conditions: price closes above bearish fractal OR 2.5*ATR trailing stop OR EMA34 trend turns up
+            if curr_close > bearish_fractal_val or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -133,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Fractal_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Williams_Fractal_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
