@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v3
+4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v4
 Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d ATR-based trend filter and volume spike confirmation.
 - Trend filter: price > 1d close + 0.5*ATR(14) = bullish, price < 1d close - 0.5*ATR(14) = bearish, else ranging.
 - In trending markets: buy breakouts above R1, sell breakdowns below S1.
@@ -68,6 +68,7 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
     # Volume spike confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -87,14 +88,14 @@ def generate_signals(prices):
             np.isnan(r3_aligned[i]) or
             np.isnan(s3_aligned[i]) or
             np.isnan(pivot_aligned[i]) or
+            np.isnan(close_1d_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Determine 1d HTF trend using ATR bands
-        htf_1d_bullish = close[i] > (close_1d_aligned := align_htf_to_ltf(prices, df_1d, close_1d)[i]) + (0.5 * atr_14_1d_aligned[i])
-        htf_1d_bearish = close[i] < (close_1d_aligned := align_htf_to_ltf(prices, df_1d, close_1d)[i]) - (0.5 * atr_14_1d_aligned[i])
-        # Note: close_1d_aligned is computed twice but it's cheap; could optimize but clarity first
+        htf_1d_bullish = close[i] > close_1d_aligned[i] + (0.5 * atr_14_1d_aligned[i])
+        htf_1d_bearish = close[i] < close_1d_aligned[i] - (0.5 * atr_14_1d_aligned[i])
         
         # Determine if we are in trending or ranging market based on ATR bands
         trending_market = htf_1d_bullish or htf_1d_bearish
@@ -149,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v3"
+name = "4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v4"
 timeframe = "4h"
 leverage = 1.0
