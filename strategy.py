@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Targets 12-37 trades/year by requiring: 1) price breaks R1/S1 levels, 2) aligned with 1d EMA trend, 3) volume > 2x 20-period average.
-Designed for low turnover and high edge in both bull/bear markets via trend alignment and institutional volume confirmation.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Designed for low turnover (~20-50 trades/year) by requiring confluence of: 1) price breaks R1/S1 levels, 
+2) aligned with 1d EMA trend, 3) volume > 2x 20-period average. Uses discrete position sizing (0.25) 
+to minimize fee churn. Works in bull/bear via trend alignment and institutional volume confirmation.
 """
 
 import numpy as np
@@ -39,7 +40,7 @@ def generate_signals(prices):
     R1 = prev_close + 1.1 * prev_range * (1.0/12.0)  # R1 = C + 1.1*(HL/12)
     S1 = prev_close - 1.1 * prev_range * (1.0/12.0)  # S1 = C - 1.1*(HL/12)
     
-    # Align 1d pivot levels to 12h timeframe
+    # Align 1d pivot levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
@@ -93,7 +94,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Stoploss: 2.5 * ATR below entry (using 12h ATR)
+            # Stoploss: 2.5 * ATR below entry (using 4h ATR)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -111,7 +112,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Calculate 12h ATR (same as above)
+            # Calculate 4h ATR (same as above)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -130,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
