@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrend_1dTrendFilter_v1
-Hypothesis: Trade 1h Camarilla R1/S1 breakouts aligned with 4h and 1d trend (EMA50/EMA34) during UTC 08-20 session. Uses strict volume confirmation (vol_ratio > 2.0) and discrete position sizing (0.20) to target 15-35 trades/year. Designed to work in bull/bear via trend filtering and session timing to avoid chop.
+1h_Camarilla_R1S1_Breakout_4hTrend_1dTrendFilter_v2
+Hypothesis: Trade 1h Camarilla R1/S1 breakouts aligned with 4h and 1d trend during UTC 08-20 session. Uses volume confirmation (vol_ratio > 1.8) and discrete sizing (0.20) to target 15-35 trades/year. Added 1h EMA50 filter to avoid chop and tightened volume threshold based on experiment history learnings.
 """
 
 import numpy as np
@@ -39,6 +39,9 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
+    # Calculate 1h EMA50 for additional trend filter (avoid chop)
+    ema_50_1h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
     # Calculate 1h ATR(14) for Camarilla levels
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -47,7 +50,6 @@ def generate_signals(prices):
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Calculate 1h Camarilla levels (based on previous day's range)
-    # For intraday, we use 24-period lookback to approximate daily range
     lookback = 24
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
@@ -55,7 +57,7 @@ def generate_signals(prices):
     for i in range(lookback-1, n):
         highest_high[i] = np.max(high[i-lookback+1:i+1])
         lowest_low[i] = np.min(low[i-lookback+1:i+1])
-        closest_close[i] = close[i-lookback]  # Previous period's close
+        closest_close[i] = close[i-lookback]
     
     # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     R1 = np.full(n, np.nan)
@@ -78,7 +80,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if outside session or data not ready
-        if not in_session[i] or np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]):
+        if not in_session[i] or np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_50_1h[i]) or np.isnan(R1[i]) or np.isnan(S1[i]):
             signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
@@ -91,16 +93,17 @@ def generate_signals(prices):
             
         htf_4h_bullish = close_4h_aligned > ema_50_4h_aligned[i]
         htf_1d_bullish = close_1d_aligned > ema_34_1d_aligned[i]
+        htf_1h_bullish = close[i] > ema_50_1h[i]
         
-        # Volume confirmation: need significant spike
-        volume_confirmed = vol_ratio[i] > 2.0
+        # Volume confirmation: need significant spike (tightened from 2.0 to 1.8 based on history)
+        volume_confirmed = vol_ratio[i] > 1.8
         
         if position == 0:
-            # Long setup: price breaks above R1 + 4h bullish trend + 1d bullish trend + volume
-            long_setup = (close[i] > R1[i]) and htf_4h_bullish and htf_1d_bullish and volume_confirmed
+            # Long setup: price breaks above R1 + 4h bullish trend + 1d bullish trend + 1h bullish + volume
+            long_setup = (close[i] > R1[i]) and htf_4h_bullish and htf_1d_bullish and htf_1h_bullish and volume_confirmed
             
-            # Short setup: price breaks below S1 + 4h bearish trend + 1d bearish trend + volume
-            short_setup = (close[i] < S1[i]) and (not htf_4h_bullish) and (not htf_1d_bullish) and volume_confirmed
+            # Short setup: price breaks below S1 + 4h bearish trend + 1d bearish trend + 1h bearish + volume
+            short_setup = (close[i] < S1[i]) and (not htf_4h_bullish) and (not htf_1d_bullish) and (not htf_1h_bullish) and volume_confirmed
             
             if long_setup:
                 signals[i] = 0.20
@@ -113,20 +116,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.20
-            # Exit: price breaks below S1 OR 1d trend turns bearish
-            if (close[i] < S1[i]) or (not htf_1d_bullish):
+            # Exit: price breaks below S1 OR 1d trend turns bearish OR 1h trend turns bearish
+            if (close[i] < S1[i]) or (not htf_1d_bullish) or (not htf_1h_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.20
-            # Exit: price breaks above R1 OR 1d trend turns bullish
-            if (close[i] > R1[i]) or (htf_1d_bullish):
+            # Exit: price breaks above R1 OR 1d trend turns bullish OR 1h trend turns bullish
+            if (close[i] > R1[i]) or (htf_1d_bullish) or (htf_1h_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dTrendFilter_v1"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dTrendFilter_v2"
 timeframe = "1h"
 leverage = 1.0
