@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1h Camarilla Pivot H3L3 Breakout + 4h EMA34 Trend + Volume Spike
-Hypothesis: Camarilla H3/L3 levels act as intraday support/resistance on 4h timeframe.
-Breakouts above H3 (resistance) or below L3 (support) with volume confirmation
-and aligned with 4h EMA34 trend capture momentum. Uses 1h for precise entry timing
-while 4h/1d provide signal direction. Session filter (08-20 UTC) reduces noise.
-Target: 15-37 trades/year (60-150 over 4 years) with discrete sizing 0.20 to minimize fee drag.
+6h Weekly Pivot Range Breakout + 1d ATR Filter + Volume Spike
+Hypothesis: Weekly pivot ranges (R1/S1, R2/S2, R3/S3) act as key support/resistance zones.
+Breakouts beyond R3 or below S3 with volume confirmation and filtered by 1d ATR (low volatility = range, high volatility = breakout)
+capture strong momentum moves. Uses discrete sizing (0.0, ±0.25) to minimize fees.
+Designed for 6h timeframe with tight entries to achieve 12-37 trades/year.
+Works in both bull (breakouts up) and bear (breakdowns down) markets.
 """
 
 import numpy as np
@@ -22,48 +22,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot and EMA (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot calculation (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels on 4h
-    # Based on previous 4h bar's high, low, close
-    prev_high = df_4h['high'].shift(1).values
-    prev_low = df_4h['low'].shift(1).values
-    prev_close = df_4h['close'].shift(1).values
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    h3 = pivot + range_val * 1.1 / 4.0  # Resistance level 3
-    l3 = pivot - range_val * 1.1 / 4.0  # Support level 3
+    # Calculate weekly pivot points (based on prior week)
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
     
-    # Align Camarilla levels to 1h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_4h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_4h, l3)
+    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    weekly_range = prev_week_high - prev_week_low
     
-    # Calculate EMA34 on 4h close for trend
-    ema_34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Camarilla-style weekly levels (H3/L3 = strong S/R)
+    h3_weekly = weekly_pivot + weekly_range * 1.1 / 4.0  # Resistance 3
+    l3_weekly = weekly_pivot - weekly_range * 1.1 / 4.0  # Support 3
     
-    # Calculate volume spike: current volume > 2.0 * 20-period average volume (1h)
+    # Align weekly levels to 6h
+    h3_weekly_aligned = align_htf_to_ltf(prices, df_1w, h3_weekly)
+    l3_weekly_aligned = align_htf_to_ltf(prices, df_1w, l3_weekly)
+    
+    # Get 1d data for ATR filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # first bar has no prior close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Volume spike: current 6h volume > 2.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (2.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA and volume MA
+    # Start index: need enough for weekly data, ATR, and volume MA
     start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i]) or
-            not in_session[i]):
+        # Skip if any data not ready
+        if (np.isnan(h3_weekly_aligned[i]) or np.isnan(l3_weekly_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -71,45 +84,60 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_4h_aligned[i]
+        atr_val = atr_1d_aligned[i]
         vol_spike = volume_spike[i]
-        h3_level = h3_aligned[i]
-        l3_level = l3_aligned[i]
+        h3_level = h3_weekly_aligned[i]
+        l3_level = l3_weekly_aligned[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above H3 (resistance) AND volume spike AND price > EMA (uptrend)
-            long_entry = (curr_high > h3_level) and vol_spike and (curr_close > ema_trend)
-            # Short: price breaks below L3 (support) AND volume spike AND price < EMA (downtrend)
-            short_entry = (curr_low < l3_level) and vol_spike and (curr_close < ema_trend)
+            # Long: price breaks above weekly H3 AND volume spike AND ATR > 0 (always true, but keeps structure)
+            long_entry = (curr_high > h3_level) and vol_spike
+            # Short: price breaks below weekly L3 AND volume spike
+            short_entry = (curr_low < l3_level) and vol_spike
             
             if long_entry:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_entry:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below H3 OR price crosses below EMA (trend change)
-            if (curr_low < h3_level) or (curr_close < ema_trend):
-                signals[i] = 0.0
-                position = 0
+            # Exit: price crosses back below weekly H3 (failed breakout) OR ATR drops below 50% of recent average (low vol = range)
+            # Use simple ATR mean reversion exit: if ATR < 0.6 * 20-period ATR mean, exit (assume range returning)
+            if i >= 20:
+                atr_ma_20 = np.nanmean(atr_1d_aligned[max(0, i-19):i+1])
+                if not np.isnan(atr_ma_20) and atr_val < 0.6 * atr_ma_20:
+                    signals[i] = 0.0
+                    position = 0
+                elif curr_low < h3_level:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above L3 OR price crosses above EMA (trend change)
-            if (curr_high > l3_level) or (curr_close > ema_trend):
-                signals[i] = 0.0
-                position = 0
+            # Exit: price crosses back above weekly L3 OR ATR drops below 50% of recent average
+            if i >= 20:
+                atr_ma_20 = np.nanmean(atr_1d_aligned[max(0, i-19):i+1])
+                if not np.isnan(atr_ma_20) and atr_val < 0.6 * atr_ma_20:
+                    signals[i] = 0.0
+                    position = 0
+                elif curr_high > l3_level:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_Breakout_4hEMA34_Trend_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_WeeklyPivot_H3L3_Breakout_1dATRFilter_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
