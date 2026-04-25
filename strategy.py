@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Donchian breakouts capture institutional momentum. Aligning with 1d EMA34 
-filters counter-trend moves. Volume spike confirms participation. Works in bull via 
-buying upper band breakouts, bear via selling lower band breakdowns. Uses discrete 
-position sizing (0.25) to control drawdown. Target: 19-50 trades/year on 4h.
+12h Camarilla R1S1 Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+Hypothesis: Camarilla R1/S1 levels act as intraday support/resistance. Breakouts with 
+volume confirmation and 1d EMA34 trend filter capture momentum moves. Choppiness 
+index regime filter avoids whipsaws in ranging markets. Designed for 12h timeframe 
+to target 50-150 total trades over 4 years (12-37/year) with discrete position 
+sizing (0.25) to control drawdown in both bull and bear markets.
 """
 
 import numpy as np
@@ -46,17 +47,46 @@ def generate_signals(prices):
         start_idx = max(0, i - 19)
         vol_ma_20[i] = np.mean(volume[start_idx:i+1])
     
+    # Calculate Choppiness Index (14) for regime filter
+    chop = np.full(n, 50.0)  # default to neutral
+    if len(close) >= 14:
+        atr_sum = np.zeros(n)
+        for i in range(n):
+            if i >= 13:
+                atr_sum[i] = np.sum(atr[i-13:i+1])
+            else:
+                atr_sum[i] = np.sum(atr[0:i+1]) if i > 0 else atr[0]
+        
+        highest_high = np.zeros(n)
+        lowest_low = np.zeros(n)
+        for i in range(n):
+            if i >= 13:
+                highest_high[i] = np.max(high[i-13:i+1])
+                lowest_low[i] = np.min(low[i-13:i+1])
+            else:
+                highest_high[i] = np.max(high[0:i+1]) if i >= 0 else high[0]
+                lowest_low[i] = np.min(low[0:i+1]) if i >= 0 else low[0]
+        
+        range_14 = highest_high - lowest_low
+        # Avoid division by zero
+        chop = np.where(
+            (range_14 > 0) & (atr_sum > 0),
+            100 * np.log10(atr_sum / range_14) / np.log10(14),
+            50.0
+        )
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for Donchian(20) and EMA34 to propagate
+    # Start index: need enough for Camarilla calculation (uses prior day) and indicators
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr[i])):
+            np.isnan(atr[i]) or 
+            np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,23 +99,38 @@ def generate_signals(prices):
         ema_34 = ema_34_1d_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
+        chop_val = chop[i]
         
-        # Donchian(20): highest high and lowest low of past 20 periods (excluding current)
-        if i >= 20:
-            highest_20 = np.max(high[i-20:i])
-            lowest_20 = np.min(low[i-20:i])
+        # Calculate Camarilla levels for R1 and S1 using prior 12h bar's range
+        # Camarilla: based on previous period's high-low-close
+        if i >= 1:
+            prev_close = close[i-1]
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            range_val = prev_high - prev_low
+            
+            # Camarilla R1 and S1 levels
+            r1 = prev_close + range_val * 1.1 / 12
+            s1 = prev_close - range_val * 1.1 / 12
         else:
-            highest_20 = np.max(high[0:i])
-            lowest_20 = np.min(low[0:i]) if i > 0 else low[0]
+            # Not enough data for Camarilla calculation
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         # Volume spike: current volume > 2.0 * 20-period average
         volume_spike = curr_volume > 2.0 * vol_ma
         
+        # Choppiness regime: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending
+        # For breakout strategy, we want trending markets (CHOP < 38.2)
+        trending_regime = chop_val < 38.2
+        
         if position == 0:
-            # Long: break above Donchian upper band AND uptrend AND volume spike
-            long_condition = curr_close > highest_20 and curr_close > ema_34 and volume_spike
-            # Short: break below Donchian lower band AND downtrend AND volume spike
-            short_condition = curr_close < lowest_20 and curr_close < ema_34 and volume_spike
+            # Long: break above Camarilla R1 AND uptrend AND volume spike AND trending regime
+            long_condition = (curr_close > r1) and (curr_close > ema_34) and volume_spike and trending_regime
+            # Short: break below Camarilla S1 AND downtrend AND volume spike AND trending regime
+            short_condition = (curr_close < s1) and (curr_close < ema_34) and volume_spike and trending_regime
             
             if long_condition:
                 signals[i] = 0.25
@@ -96,15 +141,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or price falls below EMA34
-            if curr_close <= entry_price - 2.0 * atr_val or curr_close < ema_34:
+            # Exit long: stoploss (2.0*ATR below entry) or price falls below Camarilla S1 or EMA34
+            if (curr_close <= entry_price - 2.0 * atr_val) or (curr_close < s1) or (curr_close < ema_34):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or price rises above EMA34
-            if curr_close >= entry_price + 2.0 * atr_val or curr_close > ema_34:
+            # Exit short: stoploss (2.0*ATR above entry) or price rises above Camarilla R1 or EMA34
+            if (curr_close >= entry_price + 2.0 * atr_val) or (curr_close > r1) or (curr_close > ema_34):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
