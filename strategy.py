@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike
-Hypothesis: Camarilla H3/L3 breakout on 12h timeframe with 1d EMA34 trend filter and volume spike confirmation.
-Designed for 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
-Uses tight entry conditions: breakout + volume spike + trend alignment.
+4h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike_v2
+Hypothesis: Tighten entry conditions from experiment #87566 to reduce trade frequency and improve test generalization.
+Add 1d ADX > 25 regime filter to ensure trending markets only, reducing whipsaw in ranging markets.
+Target: 20-30 trades/year (80-120 over 4 years) to minimize fee drag while maintaining edge.
+Uses Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike confirmation, and 1d ADX regime filter.
 Works in bull markets via breakout continuation and bear markets via trend following.
 ATR-based stoploss for risk management.
 """
@@ -22,12 +23,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla calculation and EMA34 (loaded ONCE)
+    # 1d data for Camarilla calculation, EMA34 trend filter, and ADX regime filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA34 trend filter (loaded ONCE)
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 1d ADX for regime filter (trending market when ADX > 25)
+    # Calculate ADX components: +DM, -DM, TR
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
+    
+    # True Range
+    tr0 = np.abs(df_1d_high - df_1d_low)
+    tr1 = np.abs(df_1d_high[1:] - df_1d_close[:-1])
+    tr2 = np.abs(df_1d_low[1:] - df_1d_close[:-1])
+    tr_1d = np.concatenate([[tr0[0]], np.maximum(tr1, tr2)])
+    
+    # +DM and -DM
+    up_move = df_1d_high[1:] - df_1d_high[:-1]
+    down_move = df_1d_low[:-1] - df_1d_low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing: alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    tr_1d = pd.Series(tr_1d)
+    plus_dm = pd.Series(plus_dm)
+    minus_dm = pd.Series(minus_dm)
+    
+    atr_1d = tr_1d.ewm(alpha=alpha, adjust=False).mean().values
+    plus_dm_1d = plus_dm.ewm(alpha=alpha, adjust=False).mean().values
+    minus_dm_1d = minus_dm.ewm(alpha=alpha, adjust=False).mean().values
+    
+    # +DI and -DI
+    plus_di_1d = 100 * plus_dm_1d / atr_1d
+    minus_di_1d = 100 * minus_dm_1d / atr_1d
+    
+    # DX and ADX
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = pd.Series(dx_1d).ewm(alpha=alpha, adjust=False).mean().values
+    
+    # Align ADX to 4h timeframe (completed 1d bar)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Prior 1d bar OHLC for Camarilla calculation
     prev_close = df_1d['close'].shift(1).values
@@ -39,7 +82,7 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 4
     l3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (completed 1d bar)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
@@ -58,13 +101,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA (34), volume MA (20), ATR (14)
-    start_idx = max(34, 20, 14)
+    # Start index: need enough for 1d EMA (34), volume MA (20), ATR (14), ADX (14+14=28 for Wilder smoothing)
+    start_idx = max(34, 20, 14, 28)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,7 +117,7 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment
+            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment + ADX > 25 (trending market)
             long_breakout = curr_high > h3_aligned[i]
             short_breakout = curr_low < l3_aligned[i]
             
@@ -82,8 +125,11 @@ def generate_signals(prices):
             long_trend = curr_close > ema_34_1d_aligned[i]
             short_trend = curr_close < ema_34_1d_aligned[i]
             
-            long_entry = (long_breakout and volume_spike[i] and long_trend)
-            short_entry = (short_breakout and volume_spike[i] and short_trend)
+            # Regime filter: only trade in trending markets (ADX > 25)
+            trending_market = adx_1d_aligned[i] > 25.0
+            
+            long_entry = (long_breakout and volume_spike[i] and long_trend and trending_market)
+            short_entry = (short_breakout and volume_spike[i] and short_trend and trending_market)
             
             if long_entry:
                 signals[i] = 0.25
@@ -116,6 +162,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
