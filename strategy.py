@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike
-Hypothesis: On 12h timeframe, Camarilla H4/L4 breakouts with 1d ATR-based trend filter and volume spike produce fewer, higher-quality trades suitable for slower timeframes.
-Uses H4/L4 levels (wider than H3/L3) to reduce false breakouts. Volume spike confirms institutional participation.
+4h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike_V2
+Hypothesis: On 4h timeframe, Camarilla H4/L4 breakouts with 1d ATR-based trend filter and volume spike.
+Uses H4/L4 levels (wider than H3/L3) for fewer, higher-quality breakouts. Volume spike confirms institutional participation.
 1d ATR trend filter ensures trades align with strong daily momentum (price > EMA + 0.5*ATR for long, < EMA - 0.5*ATR for short).
-This filters out weak breakouts in choppy markets while capturing strong trending moves. Target: 12-37 trades/year.
+This filters out weak breakouts in choppy markets while capturing strong trending moves. Target: 20-50 trades/year.
+Optimized for lower trade count to avoid fee drag while maintaining edge in both bull and bear markets.
 """
 
 import numpy as np
@@ -57,19 +58,19 @@ def generate_signals(prices):
     h4 = prev_close + camarilla_range * 0.50  # H4 level (widest)
     l4 = prev_close - camarilla_range * 0.50  # L4 level (widest)
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (completed 1d bar)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: current volume > 2.0 * 30-period average (stricter for fewer trades)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA (34) + ATR (14) + volume MA (20)
-    start_idx = max(34, 14, 20)
+    # Start index: need enough for EMA (34) + ATR (14) + volume MA (30)
+    start_idx = max(34, 14, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -120,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike_V2"
+timeframe = "4h"
 leverage = 1.0
