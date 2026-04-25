@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_DailyRegime_Trend
-Hypothesis: Trade 6h timeframe using weekly pivot points for structure and daily regime (ADX) for trend strength.
-In bull markets: trade breakouts above weekly R1 with strong ADX.
-In bear markets: trade breakdowns below weekly S1 with strong ADX.
-Weekly pivots provide multi-week structure that works across regimes.
-ADX > 25 filters for trending conditions, avoiding whipsaws in ranging markets.
+12h_Camarilla_R1_S1_Breakout_1wTrend_1dVolSpike
+Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1w EMA50 trend filter and 1d volume spike confirmation.
+Primary timeframe 12h reduces trade frequency (target: 12-37 trades/year) to minimize fee drag.
+1w EMA50 provides robust long-term trend filter to avoid counter-trend whipsaws in bear markets.
+Only trade in direction of 1w trend. Volume spike confirms institutional participation.
 Discrete sizing 0.25 to manage risk and minimize fee churn.
-Target: 12-30 trades/year to stay within fee drag limits for 6h timeframe.
 """
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,86 +22,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    # Get daily data for regime filter (ADX)
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get daily data for Camarilla levels and volume
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate weekly pivot points from previous week's OHLC
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_close = df_1w['close'].shift(1).values
-    
-    pivot_point = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot_point - prev_week_low
-    s1 = 2 * pivot_point - prev_week_high
-    r2 = pivot_point + (prev_week_high - prev_week_low)
-    s2 = pivot_point - (prev_week_high - prev_week_low)
-    
-    # Align weekly pivot points to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Calculate daily ADX for regime filter
-    # Need high, low, close for daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate Camarilla levels from previous day's OHLC (R1/S1 levels)
+    prev_day_high = df_1d['high'].shift(1).values
+    prev_day_low = df_1d['low'].shift(1).values
+    prev_day_close = df_1d['close'].shift(1).values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    camarilla_range = prev_day_high - prev_day_low
+    r1 = prev_day_close + 1.1 * camarilla_range / 12  # R1 level
+    s1 = prev_day_close - 1.1 * camarilla_range / 12  # S1 level
     
-    # Smoothed values (Wilder's smoothing)
-    period = 14
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Volume spike: current 1d volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (2.0 * vol_ma_20)
+    # Align volume spike to 12h timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for weekly pivot (1 week) and ADX (14+14=28 days)
-    start_idx = max(14, 28)
+    # Start index: need warmup for weekly EMA50 (50) and daily volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R1 AND strong trend (ADX > 25)
-            long_setup = (close[i] > r1_aligned[i]) and (adx_aligned[i] > 25)
-            # Short: price breaks below weekly S1 AND strong trend (ADX > 25)
-            short_setup = (close[i] < s1_aligned[i]) and (adx_aligned[i] > 25)
+            # Long: price breaks above R1 AND weekly trend bullish (close > EMA50) AND volume spike
+            long_setup = (close[i] > r1_aligned[i]) and \
+                         (close[i] > ema_50_1w_aligned[i]) and \
+                         volume_spike_aligned[i]
+            # Short: price breaks below S1 AND weekly trend bearish (close < EMA50) AND volume spike
+            short_setup = (close[i] < s1_aligned[i]) and \
+                          (close[i] < ema_50_1w_aligned[i]) and \
+                          volume_spike_aligned[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -116,22 +91,31 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price re-enters weekly pivot range OR trend weakens (ADX < 20)
-            if (close[i] < r1_aligned[i] and close[i] > s1_aligned[i]) or \
-               (adx_aligned[i] < 20):
+            # Exit: price re-enters Camarilla H3/L3 range OR weekly trend turns bearish
+            # Calculate H3/L3 for exit
+            h3 = prev_day_close + 1.1 * camarilla_range / 6
+            l3 = prev_day_close - 1.1 * camarilla_range / 6
+            h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+            l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+            if (close[i] < h3_aligned[i] and close[i] > l3_aligned[i]) or \
+               (close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price re-enters weekly pivot range OR trend weakens (ADX < 20)
-            if (close[i] < r1_aligned[i] and close[i] > s1_aligned[i]) or \
-               (adx_aligned[i] < 20):
+            # Exit: price re-enters Camarilla H3/L3 range OR weekly trend turns bullish
+            h3 = prev_day_close + 1.1 * camarilla_range / 6
+            l3 = prev_day_close - 1.1 * camarilla_range / 6
+            h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+            l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+            if (close[i] < h3_aligned[i] and close[i] > l3_aligned[i]) or \
+               (close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyPivot_DailyRegime_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_1dVolSpike"
+timeframe = "12h"
 leverage = 1.0
