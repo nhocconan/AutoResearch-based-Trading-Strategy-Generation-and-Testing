@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: Camarilla H3/L3 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
-Uses discrete position sizing (0.30) to limit fee drag. Targets 20-40 trades/year.
+12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: Camarilla H3/L3 breakout on 12h with 1d EMA34 trend filter and volume confirmation.
+Uses discrete position sizing (0.30) to limit fee drag. Targets 12-37 trades/year.
 Works in bull markets (breakouts with trend) and bear markets (fades from extremes with volume).
 """
 
@@ -30,7 +30,7 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align to 4h timeframe (completed 1d bar only)
+    # Align to 12h timeframe (completed 1d bar only)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
