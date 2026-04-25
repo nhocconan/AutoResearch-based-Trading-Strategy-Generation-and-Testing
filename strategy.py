@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v19
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation captures institutional breakout moves. Uses discrete position sizing (0.25) to target 75-200 total trades over 4 years. ATR-based stoploss (2.0) manages risk. Works in both bull and bear markets by only taking breakouts in direction of higher timeframe trend, avoiding false reversals. Volume spike filter (4.0x average) reduces false breakouts. Minimum holding period of 8 bars prevents premature exits.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v20
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike captures institutional moves. Uses discrete sizing (0.25) and ATR stoploss (2.0) with 8-bar minimum hold. Volume spike threshold reduced to 3.0x average to increase trade frequency while maintaining quality. EMA trend filter uses close price alignment to avoid look-ahead. Works in bull/bear by only taking breakouts in 1d trend direction.
 """
 
 import numpy as np
@@ -67,9 +67,9 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
     
-    # Volume filter: volume > 4.0x 20-period average (tighter filter for quality)
+    # Volume filter: volume > 3.0x 20-period average (adjusted for better frequency)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (4.0 * vol_ma_20)
+    vol_spike = volume > (3.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -158,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v19"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v20"
 timeframe = "4h"
 leverage = 1.0
