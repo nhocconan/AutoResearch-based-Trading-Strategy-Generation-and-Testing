@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike
-Hypothesis: Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Designed for 20-35 trades/year (80-140 over 4 years) to minimize fee drag.
-Uses tight entry conditions: breakout + volume spike + trend alignment (no chop filter to reduce complexity).
+12h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike
+Hypothesis: Camarilla H3/L3 breakout on 12h timeframe with 1d EMA34 trend filter and volume spike confirmation.
+Designed for 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
+Uses tight entry conditions: breakout + volume spike + trend alignment.
 Works in bull markets via breakout continuation and bear markets via trend following.
 ATR-based stoploss for risk management.
 """
@@ -39,7 +39,7 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 4
     l3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar)
+    # Align Camarilla levels to 12h timeframe (completed 1d bar)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
@@ -116,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
