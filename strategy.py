@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Williams Alligator Breakout with 1w EMA50 Trend and Volume Spike v1
-Hypothesis: Williams Alligator (jaw/teeth/lips) on 1d acts as dynamic support/resistance.
-Breakouts above lips or below jaw with volume confirmation (>1.8x 20-bar vol MA) and 1w EMA50 trend
-filter capture strong momentum moves. Uses ATR-based trailing stop (2.0*ATR) for risk control.
-Tight entry conditions target 30-100 total trades over 4 years to avoid fee drag. Works in
-bull markets via long breakouts and in bear markets via short breakdowns. EMA50 on 1w provides
-smoother trend filter than shorter EMAs, reducing whipsaws in choppy markets and improving
-generalization to bear markets (2025+ test period).
+6h Elder Ray Power + 1d ADX Regime + Volume Spike
+Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures bull/bear strength.
+Combine with 1d ADX regime filter: ADX > 25 = trending (trade Elder Ray extremes), ADX < 20 = ranging (fade extremes).
+Volume confirmation (>1.5x 20-bar vol MA) ensures institutional participation.
+Works in bull markets via strong Bull Power + uptrend regime, and in bear markets via strong Bear Power + downtrend regime.
+Discrete sizing (0.25) targets 50-150 total trades over 4 years to minimize fee drag.
 """
 
 import numpy as np
@@ -24,74 +22,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator (call ONCE before loop)
+    # Get 1d data for ADX regime filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on 1d: jaw (13,8), teeth (8,5), lips (5,3)
-    # Alligator lines are smoothed medians (SMMA) of typical price
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Calculate 1d ADX(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    def smma(arr, period):
-        """Smoothed Moving Average (SMMA) - same as RMA/Wilder's"""
-        result = np.full(len(arr), np.nan)
-        if len(arr) < period:
+    # True Range
+    tr_1d = np.zeros(len(df_1d))
+    for i in range(1, len(df_1d)):
+        tr_1d[i] = max(high_1d[i] - low_1d[i], 
+                       abs(high_1d[i] - close_1d[i-1]), 
+                       abs(low_1d[i] - close_1d[i-1]))
+    
+    # Directional Movement
+    plus_dm_1d = np.zeros(len(df_1d))
+    minus_dm_1d = np.zeros(len(df_1d))
+    for i in range(1, len(df_1d)):
+        up_move = high_1d[i] - high_1d[i-1]
+        down_move = low_1d[i-1] - low_1d[i]
+        plus_dm_1d[i] = up_move if up_move > down_move and up_move > 0 else 0
+        minus_dm_1d[i] = down_move if down_move > up_move and down_move > 0 else 0
+    
+    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smooth(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
             return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        # First value: simple average
+        result[period-1] = np.mean(values[1:period])
+        # Wilder smoothing: result[i] = (result[i-1] * (period-1) + values[i]) / period
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
         return result
     
-    jaw = smma(typical_price.values, 13)
-    teeth = smma(typical_price.values, 8)
-    lips = smma(typical_price.values, 5)
+    tr14_1d = wilders_smooth(tr_1d, 14)
+    plus_dm14_1d = wilders_smooth(plus_dm_1d, 14)
+    minus_dm14_1d = wilders_smooth(minus_dm_1d, 14)
     
-    # Align Alligator lines to 1d timeframe (they are already 1d, but need alignment to 1d bars)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Avoid division by zero
+    plus_di14_1d = np.where(tr14_1d != 0, (plus_dm14_1d / tr14_1d) * 100, 0)
+    minus_di14_1d = np.where(tr14_1d != 0, (minus_dm14_1d / tr14_1d) * 100, 0)
     
-    # Get 1w data for EMA50 trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    dx_1d = np.where((plus_di14_1d + minus_di14_1d) != 0, 
+                     (abs(plus_di14_1d - minus_di14_1d) / (plus_di14_1d + minus_di14_1d)) * 100, 0)
+    adx_1d = wilders_smooth(dx_1d, 14)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 20-period volume MA for volume confirmation (1d)
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray Power
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = ema_13 - low   # EMA13 - Low
+    
+    # Calculate 20-period volume MA for volume confirmation (6h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Calculate ATR(14) for stoploss (1d)
-    atr_14 = np.full(n, np.nan)
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    for i in range(14, n):
-        atr_14[i] = np.mean(tr[i-13:i+1])
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    atr_stop = 0.0
     
-    # Start index: need enough for Alligator, EMA50_1w, volume MA, ATR to propagate
-    start_idx = max(13, 50, 20, 14)
+    # Start index: need enough for EMA13, ADX, volume MA to propagate
+    start_idx = max(13, 30, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr_14[i])):
+        if (np.isnan(ema_13[i]) or 
+            np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -101,46 +107,41 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        ema50_1w = ema_50_1w_aligned[i]
+        ema13_val = ema_13[i]
+        adx_val = adx_1d_aligned[i]
+        bull_power_val = bull_power[i]
+        bear_power_val = bear_power[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_14[i]
         
-        # Volume confirmation: current volume > 1.8 * 20-period average (moderate filter)
-        volume_confirm = curr_volume > 1.8 * vol_ma
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        volume_confirm = curr_volume > 1.5 * vol_ma
+        
+        # Regime filters
+        trending_market = adx_val > 25
+        ranging_market = adx_val < 20
         
         if position == 0:
-            # Long breakout: close above lips with volume confirmation and 1w EMA50 uptrend
-            long_breakout = (curr_close > lips_val) and volume_confirm and (curr_close > ema50_1w)
-            # Short breakdown: close below jaw with volume confirmation and 1w EMA50 downtrend
-            short_breakout = (curr_close < jaw_val) and volume_confirm and (curr_close < ema50_1w)
+            # Long entry: strong Bull Power + trending market (ADX>25) + volume confirmation
+            long_entry = (bull_power_val > 0) and trending_market and volume_confirm
+            # Short entry: strong Bear Power + trending market (ADX>25) + volume confirmation
+            short_entry = (bear_power_val > 0) and trending_market and volume_confirm
             
-            if long_breakout:
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                atr_stop = curr_close - 2.0 * atr  # Initial stop
-            elif short_breakout:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                atr_stop = curr_close + 2.0 * atr  # Initial stop
         elif position == 1:
-            # Update trailing stop: raise stop to highest high - 2.0*ATR
-            atr_stop = max(atr_stop, curr_high - 2.0 * atr)
-            # Exit long: price closes below trailing stop
-            if curr_close < atr_stop:
+            # Exit long: Bear Power turns positive OR ADX drops below 20 (trend weakening)
+            if bear_power_val > 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update trailing stop: lower stop to lowest low + 2.0*ATR
-            atr_stop = min(atr_stop, curr_low + 2.0 * atr)
-            # Exit short: price closes above trailing stop
-            if curr_close > atr_stop:
+            # Exit short: Bull Power turns positive OR ADX drops below 20 (trend weakening)
+            if bull_power_val > 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -148,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Williams_Alligator_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_Power_1dADX_Regime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
