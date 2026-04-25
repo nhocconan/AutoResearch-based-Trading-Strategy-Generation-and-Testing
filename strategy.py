@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_Regime
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and choppiness regime filter. 
+12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_Regime
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and choppiness regime filter. 
 Uses 1d EMA34 for strong trend direction (works in bull/bear markets) and chop filter to avoid false breakouts in ranging markets. 
-Designed for 20-40 trades/year on BTC/ETH with controlled risk and low fee drag.
+Designed for 12-25 trades/year on BTC/ETH with controlled risk and low fee drag.
 """
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     H3 = prev_close + 1.1 * prev_range * 0.5  # H3 = C + 1.1*(HL/2)
     L3 = prev_close - 1.1 * prev_range * 0.5  # L3 = C - 1.1*(HL/2)
     
-    # Align 1d pivot levels to 4h timeframe
+    # Align 1d pivot levels to 12h timeframe
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
@@ -132,7 +132,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Calculate 4h ATR (same as above)
+            # Calculate 12h ATR (same as above)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -151,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_Regime"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_Regime"
+timeframe = "12h"
 leverage = 1.0
