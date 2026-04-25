@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1wTrend_Filter
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 1-week EMA50 trend filter and volume spike confirmation.
-Uses higher timeframe trend (1w) for stronger bull/bear alignment, reducing false breakouts.
-Discrete position sizing (0.25) minimizes fee drag. Target: 20-40 trades/year.
+1d_Camarilla_R1_S1_Breakout_1wTrend_Filter
+Hypothesis: Daily Camarilla R1/S1 breakouts with 1-week EMA50 trend filter and volume spike confirmation captures strong momentum moves while minimizing trades. Designed for 15-30 trades/year to avoid fee drag. Uses discrete position sizing (0.25) and trend-following exits.
 """
 
 import numpy as np
@@ -31,7 +29,7 @@ def generate_signals(prices):
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -40,15 +38,15 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate Camarilla levels from previous 1d bar (HLC of prior day)
+    # Calculate Camarilla levels from previous 1d bar
     camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
     camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    # Align Camarilla levels to 1d timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Calculate 20-bar average volume for confirmation on 4h
+    # Calculate 20-bar average volume for confirmation on 1d
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -67,11 +65,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Volume confirmation: current volume > 2.0x 20-bar average (strict filter)
-            volume_confirm = volume[i] > 2.0 * vol_ma20[i]
+            # Volume confirmation: current volume > 1.8x 20-bar average
+            volume_confirm = volume[i] > 1.8 * vol_ma20[i]
             
-            # Long: price breaks above Camarilla R1 in uptrend (above 1w EMA50) with volume spike
-            # Short: price breaks below Camarilla S1 in downtrend (below 1w EMA50) with volume spike
+            # Long: price breaks above Camarilla R1 in uptrend with volume spike
+            # Short: price breaks below Camarilla S1 in downtrend with volume spike
             long_signal = (close[i] > camarilla_r1_aligned[i]) and (close[i] > ema50_1w_aligned[i]) and volume_confirm
             short_signal = (close[i] < camarilla_s1_aligned[i]) and (close[i] < ema50_1w_aligned[i]) and volume_confirm
             
@@ -102,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1wTrend_Filter"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
