@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + 12h EMA34 Trend Filter + Volume Spike
-Hypothesis: Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA13. 
-Combined with 12h EMA34 trend filter and volume spikes, it captures strong momentum moves 
-in both bull and bear markets. Discrete sizing (0.25) controls drawdown. Target: 12-30 trades/year on 6h.
+4h Camarilla R1/S1 Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+Hypothesis: Camarilla pivot levels (R1/S1) from daily chart act as intraday support/resistance.
+Breakouts above R1 or below S1 with volume confirmation and 1d EMA34 trend filter capture
+strong momentum moves. Chop filter avoids whipsaws in ranging markets. Discrete sizing (0.25)
+controls drawdown. Target: 20-50 trades/year on 4h.
 """
 
 import numpy as np
@@ -20,22 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data for Camarilla pivots and EMA34 (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 for Elder Ray (on 6h close)
-    if len(close) >= 13:
-        ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    else:
-        ema_13 = np.full(n, np.nan)
+    # Calculate Camarilla pivot levels (R1, S1) from 1d OHLC
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    camarilla_r1 = daily_close + 1.1 * (daily_high - daily_low) / 12
+    camarilla_s1 = daily_close - 1.1 * (daily_high - daily_low) / 12
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(14) for stoploss and volatility filter
     if len(close) >= 14:
         tr1 = pd.Series(high).diff().abs()
         tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
@@ -45,24 +50,37 @@ def generate_signals(prices):
     else:
         atr = np.full(n, 0.0)
     
-    # Pre-compute 20-period volume MA for volume spike detection
+    # Calculate 20-period volume MA for volume spike detection
     vol_ma_20 = np.zeros(n)
     for i in range(n):
         start_idx = max(0, i - 19)
         vol_ma_20[i] = np.mean(volume[start_idx:i+1])
     
+    # Calculate Choppiness Index (CHOP) for regime filter
+    # CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    if len(close) >= 14:
+        atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum()
+        hh = pd.Series(high).rolling(window=14, min_periods=14).max()
+        ll = pd.Series(low).rolling(window=14, min_periods=14).min()
+        chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
+        chop_values = chop.values
+    else:
+        chop_values = np.full(n, 50.0)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA13, EMA34_12h, and ATR to propagate
-    start_idx = max(13, 34)
+    # Start index: need enough for EMA34_1d, ATR, and volume MA to propagate
+    start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_13[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(chop_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,23 +90,23 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema13_val = ema_13[i]
-        ema34_12h = ema_34_12h_aligned[i]
+        ema34_1d = ema_34_1d_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
-        
-        # Elder Ray components
-        bull_power = curr_high - ema13_val   # Bull Power: High - EMA13
-        bear_power = curr_low - ema13_val    # Bear Power: Low - EMA13
+        chop = chop_values[i]
         
         # Volume spike: current volume > 2.0 * 20-period average
         volume_spike = curr_volume > 2.0 * vol_ma
+        # Chop filter: only trade when trending (CHOP < 38.2)
+        trending_regime = chop < 38.2
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) AND uptrend (price > 12h EMA34) AND volume spike
-            long_condition = bull_power > 0 and curr_close > ema34_12h and volume_spike
-            # Short: Bear Power < 0 (selling pressure) AND downtrend (price < 12h EMA34) AND volume spike
-            short_condition = bear_power < 0 and curr_close < ema34_12h and volume_spike
+            # Long: price breaks above R1 AND uptrend (price > 1d EMA34) AND volume spike AND trending regime
+            long_condition = (curr_close > r1) and (curr_close > ema34_1d) and volume_spike and trending_regime
+            # Short: price breaks below S1 AND downtrend (price < 1d EMA34) AND volume spike AND trending regime
+            short_condition = (curr_close < s1) and (curr_close < ema34_1d) and volume_spike and trending_regime
             
             if long_condition:
                 signals[i] = 0.25
@@ -99,15 +117,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or Bear Power turns negative (selling pressure)
-            if curr_close <= entry_price - 2.0 * atr_val or bear_power < 0:
+            # Exit long: stoploss (2.0*ATR below entry) or price breaks below S1 (reversal signal)
+            if curr_close <= entry_price - 2.0 * atr_val or curr_close < s1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or Bull Power turns positive (buying pressure)
-            if curr_close >= entry_price + 2.0 * atr_val or bull_power > 0:
+            # Exit short: stoploss (2.0*ATR above entry) or price breaks above R1 (reversal signal)
+            if curr_close >= entry_price + 2.0 * atr_val or curr_close > r1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_12hEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
