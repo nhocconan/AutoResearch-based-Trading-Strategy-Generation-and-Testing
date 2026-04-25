@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Daily Donchian breakouts capture major BTC/ETH moves. 1-week EMA50 filters trend direction to avoid counter-trend trades. Volume spike confirms institutional interest. ATR stoploss limits drawdown. Designed for 1d timeframe targeting 7-25 trades/year. Uses discrete position sizing (0.25) to minimize fee churn. Works in bull markets via breakout continuation and in bear markets via mean-reversion from extreme levels when 1w trend aligns.
+6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+Hypothesis: Donchian breakouts capture strong momentum, while weekly pivot direction
+provides institutional bias. Volume confirmation filters false breakouts. Designed
+for 6h timeframe targeting 12-37 trades/year. Works in bull via breakout continuation
+and in bear via mean-reversion when price rejects weekly pivot levels. Uses proper
+MTF loading with get_htf_data called once before loop.
 """
 
 import numpy as np
@@ -10,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,62 +22,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend (call ONCE before loop)
+    # Get weekly data for pivot direction (call ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate weekly pivot points (standard: P = (H+L+C)/3)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Calculate Donchian(20) channels on 1d data
-    def donchian_channels(high, low, window):
-        n = len(high)
-        upper = np.full(n, np.nan)
-        lower = np.full(n, np.nan)
-        for i in range(window-1, n):
-            upper[i] = np.max(high[i-window+1:i+1])
-            lower[i] = np.min(low[i-window+1:i+1])
-        return upper, lower
+    # Get 1d data for volume MA (more stable than 6h)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    donchian_upper, donchian_lower = donchian_channels(high, low, 20)
+    # Calculate 20-period volume MA on 1d
+    vol_ma_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate ATR(14) for stoploss
-    if len(close) >= 14:
-        tr1 = np.abs(np.diff(close, prepend=close[0]))
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr2[0] = np.abs(high[0] - close[0])
-        tr3[0] = np.abs(low[0] - close[0])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = np.zeros(n)
-        atr[:13] = np.nan
-        for i in range(13, n):
-            atr[i] = np.mean(tr[i-13:i+1])
+    # Calculate Donchian channels (20-period) on 6h
+    if len(close) >= 20:
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
+        for i in range(20-1, n):
+            donchian_high[i] = np.max(high[i-19:i+1])
+            donchian_low[i] = np.min(low[i-19:i+1])
     else:
-        atr = np.full(n, np.nan)
-    
-    # Calculate 20-period volume MA for volume spike detection
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(n):
-        start_idx = max(0, i - 19)
-        vol_ma_20[i] = np.mean(volume[start_idx:i+1])
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA50_1w, Donchian, ATR, and volume MA to propagate
-    start_idx = max(50, 20, 14, 20)
+    # Start index: need enough for weekly pivot, Donchian, and volume MA
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,20 +76,20 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema50_1w = ema_50_1w_aligned[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        atr_val = atr[i]
-        vol_ma = vol_ma_20[i]
+        weekly_pivot_val = weekly_pivot_aligned[i]
+        upper_channel = donchian_high[i]
+        lower_channel = donchian_low[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
-        volume_spike = curr_volume > 2.0 * vol_ma
+        # Volume spike: current 6h volume > 1.5 * 20-period 1d volume MA (scaled)
+        # Approximate 6h volume vs daily: 6h is 1/4 of day, so scale accordingly
+        volume_spike = curr_volume > 1.5 * (vol_ma / 4.0)  # vol_ma is daily, divide by 4 for 6h equivalent
         
         if position == 0:
-            # Long: price breaks above upper band AND uptrend (close > 1w EMA50) AND volume spike
-            long_condition = (curr_close > upper) and (curr_close > ema50_1w) and volume_spike
-            # Short: price breaks below lower band AND downtrend (close < 1w EMA50) AND volume spike
-            short_condition = (curr_close < lower) and (curr_close < ema50_1w) and volume_spike
+            # Long: price breaks above upper Donchian AND above weekly pivot AND volume spike
+            long_condition = (curr_close > upper_channel) and (curr_close > weekly_pivot_val) and volume_spike
+            # Short: price breaks below lower Donchian AND below weekly pivot AND volume spike
+            short_condition = (curr_close < lower_channel) and (curr_close < weekly_pivot_val) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -107,15 +100,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or price breaks below lower band (reversal signal)
-            if curr_close <= entry_price - 2.0 * atr_val or curr_close < lower:
+            # Exit long: price breaks below lower Donchian (reversal) or drops below weekly pivot
+            if curr_close < lower_channel or curr_close < weekly_pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or price breaks above upper band (reversal signal)
-            if curr_close >= entry_price + 2.0 * atr_val or curr_close > upper:
+            # Exit short: price breaks above upper Donchian (reversal) or rises above weekly pivot
+            if curr_close > upper_channel or curr_close > weekly_pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_WeeklyPivot_Direction_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
