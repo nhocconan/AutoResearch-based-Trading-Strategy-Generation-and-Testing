@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm
-Hypothesis: Camarilla R3/S3 breakouts on 4h with 1d EMA50 trend filter and volume confirmation. 
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm
+Hypothesis: Camarilla R3/S3 breakouts on 12h with 1d EMA50 trend filter and volume confirmation. 
 R3/S3 represent stronger support/resistance than R1/S1, reducing false breakouts. 
 In trending markets (price > EMA50 for longs, price < EMA50 for shorts), breakouts in trend direction have higher success. 
 Volume confirms breakout validity. Uses discrete position sizing (0.25) to minimize fee churn. 
-Target: 19-50 trades/year, works in both bull/bear by following the 1d trend.
+Target: 12-37 trades/year (50-150 total over 4 years), works in both bull/bear by following the 1d trend.
 """
 
 import numpy as np
@@ -40,7 +40,7 @@ def generate_signals(prices):
     camarilla_s3_1d = close_1d - ((high_1d - low_1d) * 1.1 / 4)
     camarilla_c_1d = close_1d  # Camarilla C is the close
     
-    # Align HTF indicators to 4h timeframe (completed 1d bar lag)
+    # Align HTF indicators to 12h timeframe (completed 1d bar lag)
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d, additional_delay_bars=1)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d, additional_delay_bars=1)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d, additional_delay_bars=1)
@@ -99,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
