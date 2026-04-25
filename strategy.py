@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h Williams Fractal Breakout + 12h EMA50 Trend + Volume Spike
-Hypothesis: Williams fractals on 12h identify major swing points with 2-bar confirmation delay. 
-Breakouts above/below these levels with 12h EMA50 trend filter and volume spike capture strong momentum moves. 
-Works in bull (buy breakouts above bearish fractals in uptrend) and bear (sell breakdowns below bullish fractals in downtrend) via symmetric logic. 
-Target 20-50 trades/year on 4h to avoid fee drag.
+1d Camarilla Pivot H3L3 Breakout + 1w EMA34 Trend + Volume Spike
+Hypothesis: Camarilla H3/L3 levels on 1d act as strong intraday support/resistance. 
+Breakouts above H3 or below L3 with 1w EMA34 trend filter and volume confirmation capture strong momentum moves. 
+Works in bull (buy H3 breakouts in uptrend) and bear (sell L3 breakdowns in downtrend) via symmetric logic. 
+Target 20-50 trades/year on 1d to avoid fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,28 +21,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for EMA34 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = pd.Series(df_12h['close'])
-    ema_50_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = pd.Series(df_1w['close'])
+    ema_34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Get 12h data for Williams fractals (need 2 extra bars for confirmation)
-    if len(df_12h) < 5:
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Williams fractals on 12h
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_12h['high'].values,
-        df_12h['low'].values
-    )
-    # Align with 2 extra delay bars for fractal confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bullish_fractal, additional_delay_bars=2)
+    # Calculate Camarilla pivot levels (H3, L3) on 1d
+    # Camarilla: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+    # Using previous 1d bar's OHLC for current day's levels (no look-ahead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate H3 and L3 for each 1d bar (using that bar's OHLC)
+    camarilla_h3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_l3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align 1d Camarilla levels to 1d timeframe (no extra delay needed as these are based on completed 1d bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
     
     # Calculate ATR(14) for stop management
     atr = np.full(n, np.nan)
@@ -62,13 +69,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for EMA50, ATR, volume MA, fractals
-    start_idx = max(50, 14, 20, 50)  # 50 for EMA50 and fractal stability
+    # Start index: need enough for EMA34, ATR, volume MA
+    start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,25 +87,25 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_50_val = ema_50_12h_aligned[i]
+        ema_34_val = ema_34_1w_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
-        bearish_fractal_val = bearish_fractal_aligned[i]
-        bullish_fractal_val = bullish_fractal_aligned[i]
+        camarilla_h3_val = camarilla_h3_aligned[i]
+        camarilla_l3_val = camarilla_l3_aligned[i]
         
-        # Trend filter: price relative to 12h EMA50
-        uptrend = curr_close > ema_50_val
-        downtrend = curr_close < ema_50_val
+        # Trend filter: price relative to 1w EMA34
+        uptrend = curr_close > ema_34_val
+        downtrend = curr_close < ema_34_val
         
         # Volume confirmation: current volume > 2.0 * 20-period average
         volume_confirm = curr_volume > 2.0 * vol_ma
         
         if position == 0:
-            # Look for breakout signals at fractal levels
-            # Long: price breaks above bearish fractal with volume confirmation in uptrend
-            long_breakout = (curr_close > bearish_fractal_val) and volume_confirm and uptrend
-            # Short: price breaks below bullish fractal with volume confirmation in downtrend
-            short_breakout = (curr_close < bullish_fractal_val) and volume_confirm and downtrend
+            # Look for breakout signals at Camarilla levels
+            # Long: price breaks above H3 with volume confirmation in uptrend
+            long_breakout = (curr_close > camarilla_h3_val) and volume_confirm and uptrend
+            # Short: price breaks below L3 with volume confirmation in downtrend
+            short_breakout = (curr_close < camarilla_l3_val) and volume_confirm and downtrend
             
             if long_breakout:
                 signals[i] = 0.25
@@ -114,8 +121,8 @@ def generate_signals(prices):
             # Long position management
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit conditions: price closes below bullish fractal OR 2.5*ATR trailing stop OR EMA50 trend turns down
-            if curr_close < bullish_fractal_val or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_50_val:
+            # Exit conditions: price closes below L3 OR 2.5*ATR trailing stop OR EMA34 trend turns down
+            if curr_close < camarilla_l3_val or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -125,8 +132,8 @@ def generate_signals(prices):
             # Short position management
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit conditions: price closes above bearish fractal OR 2.5*ATR trailing stop OR EMA50 trend turns up
-            if curr_close > bearish_fractal_val or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_50_val:
+            # Exit conditions: price closes above H3 OR 2.5*ATR trailing stop OR EMA34 trend turns up
+            if curr_close > camarilla_h3_val or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -135,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Williams_Fractal_Breakout_12hEMA50_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_H3L3_Breakout_1wEMA34_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
