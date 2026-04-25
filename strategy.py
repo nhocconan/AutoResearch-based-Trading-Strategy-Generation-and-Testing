@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Volume Spike + ATR Regime + 1d EMA34 Trend
-Hypothesis: In ranging markets (ATR ratio < 0.8), volume spikes trigger mean-reversion trades
-at extremes; in trending markets (ATR ratio >= 0.8), volume spikes trigger continuation trades.
-Uses 1d EMA34 for trend filter and ATR regime filter to adapt to bull/bear conditions.
-Target: 30-60 trades/year on 4h timeframe.
+1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike + Chop Filter
+Hypothesis: Daily Donchian breakouts capture intermediate-term trends in both bull and bear markets.
+Filtered by weekly EMA50 trend direction, volume confirmation, and choppiness regime to avoid whipsaws.
+Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Target: 15-25 trades/year on 1d timeframe.
 """
 
 import numpy as np
@@ -21,69 +20,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend and ATR regime (call ONCE before loop)
+    # Get 1d data for Donchian calculation (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close for trend
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 1w data for EMA50 trend (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate ATR(14) on 1d for regime filter
-    tr1 = np.maximum(df_1d['high'].values, np.roll(df_1d['close'].values, 1)) - np.minimum(df_1d['low'].values, np.roll(df_1d['close'].values, 1))
-    tr1[0] = df_1d['high'].values[0] - df_1d['low'].values[0]  # first bar
-    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate Donchian channels on 1d (based on previous 20 days)
+    # Upper = max(high[-20:]), Lower = min(low[-20:])
+    # Using previous values to avoid look-ahead
+    high_series = pd.Series(df_1d['high'].values)
+    low_series = pd.Series(df_1d['low'].values)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate ATR(50) on 1d for long-term volatility normalization
-    atr_50_1d = pd.Series(tr1).rolling(window=50, min_periods=50).mean().values
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
+    # Align Donchian levels to 1d timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Calculate ATR ratio (short-term/long-term) for regime detection
-    atr_ratio = np.where(atr_50_1d_aligned > 0, atr_14_1d_aligned / atr_50_1d_aligned, 1.0)
+    # Calculate EMA50 on 1w close for trend
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate volume spike: current volume > 2.5 * 20-period average volume
+    # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Calculate price position relative to 1d EMA34
-    price_vs_ema = close - ema_34_1d_aligned
+    # Calculate choppiness index regime filter (14-period)
+    # CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (trend follow)
+    # We'll use CHOP < 50 as trending regime filter to avoid whipsaws in sideways markets
+    tr_range = pd.Series(high - low).rolling(window=14, min_periods=14).max().values - \
+               pd.Series(high - low).rolling(window=14, min_periods=14).min().values
+    atr_14 = pd.Series(tr_range).rolling(window=14, min_periods=14).mean().values
+    sum_tr = pd.Series(tr_range).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr / (atr_14 * 14)) / np.log10(14)
+    chop_regime = chop < 50  # Trending regime
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA, ATR, and volume MA
+    # Start index: need enough for Donchian, EMA, volume MA, and chop
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_ratio[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_vs_ema = price_vs_ema[i]
-        ema_trend = ema_34_1d_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        upper = upper_aligned[i]
+        lower = lower_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
-        ratio = atr_ratio[i]
+        trending = chop_regime[i]
         
         if position == 0:
-            # Look for entry signals based on regime
-            # Regime filter: ATR ratio < 0.8 = ranging (mean reversion), >= 0.8 = trending (continuation)
-            if ratio < 0.8:
-                # Ranging market: mean reversion at extremes
-                # Long: price below EMA AND volume spike
-                long_entry = (curr_vs_ema < 0) and vol_spike
-                # Short: price above EMA AND volume spike
-                short_entry = (curr_vs_ema > 0) and vol_spike
-            else:
-                # Trending market: continuation with volume
-                # Long: price above EMA AND volume spike
-                long_entry = (curr_vs_ema > 0) and vol_spike
-                # Short: price below EMA AND volume spike
-                short_entry = (curr_vs_ema < 0) and vol_spike
+            # Look for entry signals
+            # Long: price breaks above Upper AND volume spike AND price > EMA (uptrend) AND trending regime
+            long_entry = (curr_close > upper) and vol_spike and (curr_close > ema_trend) and trending
+            # Short: price breaks below Lower AND volume spike AND price < EMA (downtrend) AND trending regime
+            short_entry = (curr_close < lower) and vol_spike and (curr_close < ema_trend) and trending
             
             if long_entry:
                 signals[i] = 0.25
@@ -95,16 +100,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses back above EMA (mean reversion) OR volume spike in opposite direction
-            if (curr_vs_ema > 0) or (vol_spike and curr_vs_ema < 0):
+            # Exit: price crosses below Lower OR price crosses below EMA
+            if (curr_close < lower) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses back below EMA (mean reversion) OR volume spike in opposite direction
-            if (curr_vs_ema < 0) or (vol_spike and curr_vs_ema > 0):
+            # Exit: price crosses above Upper OR price crosses above EMA
+            if (curr_close > upper) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolumeSpike_ATRRegime_1dEMA34_Trend"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
