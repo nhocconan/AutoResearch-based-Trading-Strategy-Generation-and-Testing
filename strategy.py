@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_TRIX_VolumeSpike_RegimeFilter_v1
-Hypothesis: Use TRIX (15-period) momentum with volume spike confirmation and choppiness regime filter on daily timeframe.
-TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. Volume spike (>1.5x 20-day average) confirms conviction.
-Choppiness index (CHOP) > 61.8 = ranging market (mean reversion), CHOP < 38.2 = trending (follow TRIX).
-In ranging markets: fade TRIX extremes (short when TRIX > 0.1, long when TRIX < -0.1).
-In trending markets: follow TRIX (long when TRIX > 0, short when TRIX < 0).
-Position size: 0.25 to balance risk and return.
-Target: 15-25 trades/year to stay under 150 total trades hard max for 1d.
-Works in bull (trending follow) and bear (mean reversion in ranges) markets.
+6h_AsymmetricRegime_ADX_EMA21_v1
+Hypothesis: Use asymmetric logic per regime - ADX>25 + price<SMA50 = bear regime (only short retrace to EMA21); ADX<20 = range regime (mean revert at Bollinger Bands); hysteresis prevents whipsaw. Works in bull (buy range dips) and bear (short bear retracements).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,104 +15,123 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter (optional, can be removed if not needed)
-    # df_1w = get_htf_data(prices, '1w')
+    # Calculate indicators
+    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
     
-    # Calculate TRIX (15-period) - triple EMA of ROC
-    # ROC = (close - close.shift(1)) / close.shift(1)
-    roc = np.zeros_like(close)
-    roc[1:] = (close[1:] - close[:-1]) / close[:-1]
+    # ADX(14)
+    plus_dm = high_s.diff()
+    minus_dm = low_s.diff().mul(-1)
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    tr1 = high_s - low_s
+    tr2 = (high_s - close_s.shift()).abs()
+    tr3 = (low_s - close_s.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False).mean() / atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.ewm(alpha=1/14, adjust=False).mean()
+    adx_values = adx.values
     
-    # Triple EMA of ROC
-    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3 * 100  # scale for readability
+    # SMA(50) and EMA(21)
+    sma_50 = close_s.rolling(window=50, min_periods=50).mean().values
+    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Volume spike: volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
-    
-    # Choppiness Index (CHOP) - 14-period
-    # True Range = max(high-low, abs(high-close.prev), abs(low-close.prev))
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    chop_raw = 100 * np.log10(atr_14 * 14) / np.log10((highest_high_14 - lowest_low_14) + 1e-10)
-    chop = np.where((highest_high_14 - lowest_low_14) > 0, chop_raw, 50.0)  # default to neutral when no range
+    # Bollinger Bands(20,2)
+    sma_20 = close_s.rolling(window=20, min_periods=20).mean()
+    std_20 = close_s.rolling(window=20, min_periods=20).std()
+    upper_bb = (sma_20 + 2 * std_20).values
+    lower_bb = (sma_20 - 2 * std_20).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    regime = 0    # 0: unknown, 1: bull, -1: bear, 2: range
     
-    # Start index: need warmup for TRIX (15*3=45), volume MA (20), CHOP (14) -> max 45
-    start_idx = 45
+    # Start index: need warmup for SMA50 and ADX
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(chop[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_values[i]) or np.isnan(sma_50[i]) or np.isnan(ema_21[i]) or
+            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime determination
-        is_ranging = chop[i] > 61.8
-        is_trending = chop[i] < 38.2
-        # Neutral zone (38.2 <= CHOP <= 61.8) - use trending logic as default
+        # Determine regime with hysteresis
+        if regime == 0:  # initial regime detection
+            if adx_values[i] > 25 and close[i] < sma_50[i]:
+                regime = -1  # bear
+            elif adx_values[i] < 20:
+                regime = 2   # range
+            else:
+                regime = 1   # bull (default when not clearly bear or range)
+        elif regime == -1:  # bear regime
+            if adx_values[i] < 18:  # hysteresis exit
+                regime = 2
+            elif adx_values[i] > 25 and close[i] >= sma_50[i]:
+                regime = 1
+        elif regime == 2:   # range regime
+            if adx_values[i] > 22 and close[i] < sma_50[i]:
+                regime = -1  # bear
+            elif adx_values[i] > 22 and close[i] >= sma_50[i]:
+                regime = 1   # bull
+        elif regime == 1:   # bull regime
+            if adx_values[i] < 18:  # hysteresis exit
+                regime = 2
+            elif adx_values[i] > 25 and close[i] < sma_50[i]:
+                regime = -1  # bear
         
         if position == 0:
-            # Entry logic
-            long_signal = False
-            short_signal = False
-            
-            if is_ranging:
-                # In ranging markets: mean reversion - fade TRIX extremes
-                if trix[i] < -0.1 and volume_spike[i]:
-                    long_signal = True
-                elif trix[i] > 0.1 and volume_spike[i]:
-                    short_signal = True
-            else:
-                # In trending or neutral markets: follow TRIX
-                if trix[i] > 0 and volume_spike[i]:
-                    long_signal = True
-                elif trix[i] < 0 and volume_spike[i]:
-                    short_signal = True
-            
-            if long_signal:
-                signals[i] = 0.25
-                position = 1
-            elif short_signal:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
+            if regime == -1:  # bear: short retrace to EMA21
+                if close[i] > ema_21[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif regime == 2:   # range: mean revert at BB
+                if close[i] <= lower_bb[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] >= upper_bb[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif regime == 1:   # bull: buy range dips
+                if close[i] <= lower_bb[i]:
+                    signals[i] = 0.25
+                    position = 1
         elif position == 1:
-            # Long: hold position
             signals[i] = 0.25
-            # Exit: opposite TRIX signal with volume spike OR regime change to ranging with extreme TRIX
-            if ((trix[i] < -0.1 and volume_spike[i]) or 
-                (is_ranging and trix[i] > 0.1 and volume_spike[i])):
-                signals[i] = 0.0
-                position = 0
+            if regime == -1:    # bear: exit long if trend turns bear
+                if adx_values[i] > 25 and close[i] < sma_50[i]:
+                    signals[i] = 0.0
+                    position = 0
+            elif regime == 2:   # range: exit at mean or opposite BB
+                if close[i] >= sma_20.iloc[i] or close[i] >= upper_bb[i]:
+                    signals[i] = 0.0
+                    position = 0
+            elif regime == 1:   # bull: exit at upper BB or trend change
+                if close[i] >= upper_bb[i] or (adx_values[i] > 25 and close[i] < sma_50[i]):
+                    signals[i] = 0.0
+                    position = 0
         elif position == -1:
-            # Short: hold position
             signals[i] = -0.25
-            # Exit: opposite TRIX signal with volume spike OR regime change to ranging with extreme TRIX
-            if ((trix[i] > 0.1 and volume_spike[i]) or 
-                (is_ranging and trix[i] < -0.1 and volume_spike[i])):
-                signals[i] = 0.0
-                position = 0
+            if regime == -1:    # bear: exit at mean or lower BB
+                if close[i] <= sma_20.iloc[i] or close[i] <= lower_bb[i]:
+                    signals[i] = 0.0
+                    position = 0
+            elif regime == 2:   # range: exit at mean or opposite BB
+                if close[i] <= sma_20.iloc[i] or close[i] <= lower_bb[i]:
+                    signals[i] = 0.0
+                    position = 0
+            elif regime == 1:   # bull: exit short if trend turns bull
+                if adx_values[i] > 25 and close[i] >= sma_50[i]:
+                    signals[i] = 0.0
+                    position = 0
     
     return signals
 
-name = "1d_TRIX_VolumeSpike_RegimeFilter_v1"
-timeframe = "1d"
+name = "6h_AsymmetricRegime_ADX_EMA21_v1"
+timeframe = "6h"
 leverage = 1.0
