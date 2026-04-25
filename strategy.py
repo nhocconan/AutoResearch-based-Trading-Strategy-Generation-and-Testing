@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power + 12h SuperTrend + Volume Spike
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures buying/selling pressure.
-Combined with 12h SuperTrend for trend direction and volume spike for confirmation, this captures strong
-momentum moves in both bull and bear markets. 6h timeframe provides sufficient noise reduction while
-catching multi-day trends. Discrete position sizing (0.25) minimizes fee churn.
+4h Donchian(20) breakout + 1d EMA34 trend + volume confirmation
+Hypothesis: Donchian breakouts capture momentum bursts while the 1d EMA34 filter ensures alignment with higher timeframe trend, working in both bull and bear markets. Volume confirmation filters false breakouts. 4h timeframe targets 20-50 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -21,45 +18,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for SuperTrend trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h SuperTrend (ATR=10, mult=3.0)
-    hl2 = (df_12h['high'] + df_12h['low']) / 2
-    atr = pd.Series(df_12h['high'] - df_12h['low']).rolling(window=10, min_periods=10).mean()
-    upper_band = hl2 + (3.0 * atr)
-    lower_band = hl2 - (3.0 * atr)
-    
-    supertrend = np.full(len(df_12h), np.nan)
-    direction = np.full(len(df_12h), np.nan)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(len(df_12h)):
-        if i == 0:
-            supertrend[i] = upper_band[i]
-            direction[i] = 1
-        else:
-            if supertrend[i-1] == upper_band[i-1]:
-                supertrend[i] = lower_band[i] if close[i] > upper_band[i-1] else upper_band[i]
-                direction[i] = -1 if supertrend[i] == upper_band[i] else 1
-            else:
-                supertrend[i] = upper_band[i] if close[i] < lower_band[i-1] else lower_band[i]
-                direction[i] = 1 if supertrend[i] == lower_band[i] else -1
-    
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Elder Ray EMA13 warmup
-    start_idx = 13
+    # Start index: need enough for Donchian(20) and EMA34 warmup
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(supertrend_aligned[i]) or 
-            np.isnan(supertrend_direction_aligned[i])):
+        if np.isnan(ema_34_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,56 +45,49 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
+        ema_trend = ema_34_aligned[i]
         
-        # Elder Ray: EMA13 of close
-        if i >= 13:
-            ema13 = np.mean(close[i-12:i+1])
-        else:
-            ema13 = np.mean(close[:i+1])
+        # Donchian(20) channels: highest high and lowest low of last 20 periods
+        highest_20 = np.max(high[i-19:i+1])
+        lowest_20 = np.min(low[i-19:i+1])
         
-        bull_power = curr_high - ema13
-        bear_power = ema13 - curr_low
-        
-        # Volume spike: current volume > 2.0 * 20-period average
+        # Volume confirmation: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-19:i+1])
         else:
             vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_20
+        volume_confirm = curr_volume > 1.5 * vol_ma_20
         
-        supertrend_val = supertrend_aligned[i]
-        supertrend_dir = supertrend_direction_aligned[i]
-        
-        # Entry logic
+        # Breakout signals with trend filter
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) AND price above SuperTrend (uptrend) AND volume spike
-            long_condition = (bull_power > 0) and (curr_close > supertrend_val) and volume_spike
-            # Short: Bear Power > 0 (selling pressure) AND price below SuperTrend (downtrend) AND volume spike
-            short_condition = (bear_power > 0) and (curr_close < supertrend_val) and volume_spike
+            # Long: price breaks above Donchian upper band AND above daily EMA34 (uptrend filter)
+            long_condition = (curr_close > highest_20) and (curr_close > ema_trend) and volume_confirm
+            # Short: price breaks below Donchian lower band AND below daily EMA34 (downtrend filter)
+            short_condition = (curr_close < lowest_20) and (curr_close < ema_trend) and volume_confirm
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: Bear Power > 0 (selling pressure takes over) OR price breaks below SuperTrend
-            if (bear_power > 0) or (curr_close < supertrend_val):
+            # Exit long: price returns to Donchian lower band or trend breaks
+            if curr_close < lowest_20 or curr_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Bull Power > 0 (buying pressure takes over) OR price breaks above SuperTrend
-            if (bull_power > 0) or (curr_close > supertrend_val):
+            # Exit short: price returns to Donchian upper band or trend breaks
+            if curr_close > highest_20 or curr_close > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_ElderRay_SuperTrend12h_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
