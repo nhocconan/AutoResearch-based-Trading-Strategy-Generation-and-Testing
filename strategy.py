@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + ATR Regime + Volume Spike
-Hypothesis: Donchian channel breakouts capture strong momentum. ATR-based regime filter
-distinguishes trending (ATR rising) from ranging (ATR falling) markets to avoid false breakouts.
-Volume spike confirms institutional participation. Works in both bull and bear via symmetric logic.
-Target 20-30 trades/year on 4h to stay within fee drag limits.
+6h Camarilla R4/S4 Breakout + Weekly Pivot Direction + Volume Spike
+Hypothesis: Weekly Camarilla pivots (R4/S4) from 1w represent major institutional support/resistance. 
+Breakouts above R4 or below S4 with daily EMA50 trend filter and volume spike (>2x avg) capture strong momentum. 
+Works in bull (buy R4 breakouts in uptrend) and bear (sell S4 breakdowns in downtrend) via symmetric logic. 
+Target: 12-37 trades/year on 6h to avoid fee drag.
 """
 
 import numpy as np
@@ -21,33 +21,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR regime filter (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for Camarilla pivots (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for regime filter
-    high_1d = pd.Series(df_1d['high'])
-    low_1d = pd.Series(df_1d['low'])
+    # Calculate weekly Camarilla pivot levels (R4, S4) from weekly OHLC
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    camarilla_r4 = np.full(len(df_1w), np.nan)
+    camarilla_s4 = np.full(len(df_1w), np.nan)
+    
+    for i in range(len(df_1w)):
+        if i == 0:  # First bar has no previous week
+            continue
+        prev_high = high_1w[i-1]
+        prev_low = low_1w[i-1]
+        prev_close = close_1w[i-1]
+        diff = prev_high - prev_low
+        camarilla_r4[i] = prev_close + diff * 1.1 / 2  # R4 level
+        camarilla_s4[i] = prev_close - diff * 1.1 / 2  # S4 level
+    
+    # Align weekly Camarilla levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    
+    # Get daily data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA50 for trend filter
     close_1d = pd.Series(df_1d['close'])
-    tr_1d = np.maximum(
-        high_1d - low_1d,
-        np.maximum(
-            abs(high_1d - close_1d.shift(1)),
-            abs(low_1d - close_1d.shift(1))
-        )
-    )
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
-    
-    # Calculate 4h ATR(14) for stop management
+    # Calculate ATR(14) for stop management
     atr = np.full(n, np.nan)
     tr = np.zeros(n)
     for i in range(1, n):
@@ -65,13 +76,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for Donchian, ATR, volume MA
-    start_idx = max(20, 14, 20)
+    # Start index: need enough for EMA50, ATR, volume MA
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,28 +94,25 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
+        ema_50_val = ema_50_1d_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
-        atr_1d_val = atr_14_1d_aligned[i]
-        upper_channel = donchian_high[i]
-        lower_channel = donchian_low[i]
+        r4_val = camarilla_r4_aligned[i]
+        s4_val = camarilla_s4_aligned[i]
         
-        # Regime filter: ATR rising = trending market (good for breakouts)
-        # Compare current 1d ATR to its 5-period ago value
-        atr_rising = False
-        if i >= 5:  # Need history to check ATR trend
-            atr_1d_prev = atr_14_1d_aligned[i-5]
-            atr_rising = atr_1d_val > atr_1d_prev * 1.1  # 10% increase = rising volatility
+        # Trend filter: price relative to 1d EMA50
+        uptrend = curr_close > ema_50_val
+        downtrend = curr_close < ema_50_val
         
         # Volume confirmation: current volume > 2.0 * 20-period average
         volume_confirm = curr_volume > 2.0 * vol_ma
         
         if position == 0:
-            # Look for breakout signals
-            # Long: price breaks above upper Donchian channel with volume confirmation in rising ATR regime
-            long_breakout = (curr_close > upper_channel) and volume_confirm and atr_rising
-            # Short: price breaks below lower Donchian channel with volume confirmation in rising ATR regime
-            short_breakout = (curr_close < lower_channel) and volume_confirm and atr_rising
+            # Look for breakout signals at weekly Camarilla levels
+            # Long: price breaks above R4 with volume confirmation in uptrend
+            long_breakout = (curr_close > r4_val) and volume_confirm and uptrend
+            # Short: price breaks below S4 with volume confirmation in downtrend
+            short_breakout = (curr_close < s4_val) and volume_confirm and downtrend
             
             if long_breakout:
                 signals[i] = 0.25
@@ -120,8 +128,8 @@ def generate_signals(prices):
             # Long position management
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit conditions: price closes below lower channel OR 2.5*ATR trailing stop
-            if curr_close < lower_channel or curr_close < (highest_since_entry - 2.5 * atr_val):
+            # Exit conditions: price closes below S4 OR 2.5*ATR trailing stop OR EMA50 trend turns down
+            if curr_close < s4_val or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_50_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -131,8 +139,8 @@ def generate_signals(prices):
             # Short position management
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit conditions: price closes above upper channel OR 2.5*ATR trailing stop
-            if curr_close > upper_channel or curr_close > (lowest_since_entry + 2.5 * atr_val):
+            # Exit conditions: price closes above R4 OR 2.5*ATR trailing stop OR EMA50 trend turns up
+            if curr_close > r4_val or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_50_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -141,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_ATR_Regime_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R4S4_Breakout_1wPivot_1dEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
