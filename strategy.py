@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h Williams Fractal Breakout + 1d EMA34 Trend + Volume Spike + Chop Regime Filter
-Hypothesis: Williams fractals identify swing highs/lows. Breakouts above recent bearish fractal (short-term resistance) or below bullish fractal (support) with 1d EMA34 trend alignment, volume confirmation, and non-choppy regime capture momentum moves. Works in bull/bear markets via discrete sizing (0.25) and trend filter. Primary timeframe 12h reduces trade frequency to avoid fee drag.
+4h Camarilla R3S3 Breakout + 1d EMA34 Trend + Volume Spike + Chop Regime Filter
+Hypothesis: Camarilla pivot levels identify intraday support/resistance. Breakouts above R3 or below S3 with 1d EMA34 trend alignment, volume confirmation, and non-choppy regime capture strong momentum moves. Works in bull/bear markets via discrete sizing (0.25) and trend filter. Primary timeframe 4h targets 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,7 +18,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34, Chop regime, and Williams fractals
+    # Load 1d data ONCE before loop for EMA34 and Chop regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -47,18 +47,20 @@ def generate_signals(prices):
     chop_values = calculate_chop(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
-    # Williams fractals on 1d: need 2 extra bars for confirmation
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Bearish fractal = resistance (short entry below), Bullish fractal = support (long entry above)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    # Calculate Camarilla levels from previous 1d bar (use shift to avoid look-ahead)
+    # We need the previous completed 1d bar's high, low, close
+    prev_high = df_1d['high'].shift(1).values  # previous day's high
+    prev_low = df_1d['low'].shift(1).values    # previous day's low
+    prev_close = df_1d['close'].shift(1).values # previous day's close
+    
+    # Camarilla R3 and S3 levels
+    range_hl = prev_high - prev_low
+    camarilla_R3 = prev_close + range_hl * 1.1 / 4
+    camarilla_S3 = prev_close - range_hl * 1.1 / 4
+    
+    # Align Camarilla levels to LTF (they update only when new 1d bar completes)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,13 +69,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for 1d EMA warmup, fractals, and volume MA
-    start_idx = max(50, 21)  # EMA34 needs ~34, plus fractal lookback
+    # Start index: need enough for 1d EMA warmup, Camarilla calculation, and volume MA
+    start_idx = max(50, 21)  # EMA34 needs ~34, plus 1 day shift
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -91,11 +93,11 @@ def generate_signals(prices):
         bearish_bias = curr_close < ema_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require: Fractal breakout + trend + volume + regime
-            # Long: price breaks above bearish fractal (resistance) AND bullish bias AND volume spike AND not choppy
-            long_entry = (curr_high > bearish_fractal_aligned[i]) and bullish_bias and vol_spike and not_choppy
-            # Short: price breaks below bullish fractal (support) AND bearish bias AND volume spike AND not choppy
-            short_entry = (curr_low < bullish_fractal_aligned[i]) and bearish_bias and vol_spike and not_choppy
+            # Look for entry signals - require: Camarilla breakout + trend + volume + regime
+            # Long: price breaks above camarilla_R3 (strong resistance) AND bullish bias AND volume spike AND not choppy
+            long_entry = (curr_high > camarilla_R3_aligned[i]) and bullish_bias and vol_spike and not_choppy
+            # Short: price breaks below camarilla_S3 (strong support) AND bearish bias AND volume spike AND not choppy
+            short_entry = (curr_low < camarilla_S3_aligned[i]) and bearish_bias and vol_spike and not_choppy
             
             if long_entry:
                 signals[i] = 0.25
@@ -107,16 +109,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below bullish fractal (support) OR loss of bullish bias OR choppy regime
-            if (curr_low < bullish_fractal_aligned[i]) or (curr_close < ema_1d_aligned[i]) or (chop_aligned[i] >= 61.8):
+            # Exit: price falls below camarilla_S3 (support) OR loss of bullish bias OR choppy regime
+            if (curr_low < camarilla_S3_aligned[i]) or (curr_close < ema_1d_aligned[i]) or (chop_aligned[i] >= 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above bearish fractal (resistance) OR loss of bearish bias OR choppy regime
-            if (curr_high > bearish_fractal_aligned[i]) or (curr_close > ema_1d_aligned[i]) or (chop_aligned[i] >= 61.8):
+            # Exit: price rises above camarilla_R3 (resistance) OR loss of bearish bias OR choppy regime
+            if (curr_high > camarilla_R3_aligned[i]) or (curr_close > ema_1d_aligned[i]) or (chop_aligned[i] >= 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsFractal_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
