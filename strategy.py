@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm
-Hypothesis: Daily Camarilla R1/S1 breakout with weekly trend filter and volume confirmation. 
-Goes long when price breaks above R1 with weekly uptrend and above-average volume, 
-short when price breaks below S1 with weekly downtrend and above-average volume.
-Uses discrete sizing (0.25) to minimize fees. Target: 15-25 trades/year.
-Works in bull via breakouts with trend, in bear via mean reversion at extremes.
+6h_WilliamsVixFix_Trend_Filter_1d
+Hypothesis: Williams Vix Fix (WVF) identifies volatility spikes and potential bottoms in bear markets.
+Combined with 1d EMA50 trend filter to trade in direction of higher timeframe trend.
+Goes long when WVF > 0.8 (extreme fear) and price > 1d EMA50 (uptrend).
+Goes short when WVF > 0.8 and price < 1d EMA50 (downtrend).
+Uses discrete sizing (0.25) to minimize fees. Target: 12-30 trades/year.
+Works in bull via trend continuation after pullbacks, in bear via mean reversion at volatility extremes.
 """
 
 import numpy as np
@@ -22,63 +23,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculations
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels for today using yesterday's OHLC
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), 
-    # R2 = close + 0.55*(high-low), R1 = close + 0.275*(high-low)
-    # S1 = close - 0.275*(high-low), S2 = close - 0.55*(high-low), etc.
-    # We only need R1 and S1 for breakout
-    prev_close = np.concatenate([[close_1d[0]], close_1d[:-1]])  # yesterday's close
-    prev_high = np.concatenate([[high_1d[0]], high_1d[:-1]])   # yesterday's high
-    prev_low = np.concatenate([[low_1d[0]], low_1d[:-1]])     # yesterday's low
+    # Calculate Williams Vix Fix on 6h data
+    # WVF = ((Highest High in n-period - Low) / (Highest High in n-period - Lowest Low in n-period)) * 100
+    # Normalized to 0-1 range where >0.8 indicates extreme fear
+    lookback = 22  # ~1 month of 6h bars
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 0.275 * camarilla_range
-    s1 = prev_close - 0.275 * camarilla_range
-    
-    # Align Camarilla levels to 1d timeframe (no shift needed as we use yesterday's data)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume confirmation: today's volume vs 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Avoid division by zero
+    hh_ll = highest_high - lowest_low
+    wvf = np.where(hh_ll != 0, ((highest_high - low) / hh_ll) * 100, 0)
+    # Normalize to 0-1
+    wvf_normalized = wvf / 100.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need warmup for calculations
-    start_idx = 100
+    start_idx = lookback
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(wvf_normalized[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         if position == 0:
-            # Long: price breaks above R1, weekly uptrend (price > EMA50), volume above average
-            long_signal = (close[i] > r1_aligned[i]) and (close[i] > ema_50_1w_aligned[i]) and (volume[i] > vol_ma_20[i])
-            # Short: price breaks below S1, weekly downtrend (price < EMA50), volume above average
-            short_signal = (close[i] < s1_aligned[i]) and (close[i] < ema_50_1w_aligned[i]) and (volume[i] > vol_ma_20[i])
+            # Long: extreme fear (WVF > 0.8) and uptrend (price > daily EMA50)
+            long_signal = (wvf_normalized[i] > 0.8) and (close[i] > ema_50_1d_aligned[i])
+            # Short: extreme fear (WVF > 0.8) and downtrend (price < daily EMA50)
+            short_signal = (wvf_normalized[i] > 0.8) and (close[i] < ema_50_1d_aligned[i])
             
             if long_signal:
                 signals[i] = 0.25
@@ -91,22 +75,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price closes below S1 (mean reversion) or weekly trend turns down
-            exit_signal = (close[i] < s1_aligned[i]) or (close[i] < ema_50_1w_aligned[i])
+            # Exit when fear subsides (WVF < 0.5) or trend changes
+            exit_signal = (wvf_normalized[i] < 0.5) or (close[i] < ema_50_1d_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price closes above R1 (mean reversion) or weekly trend turns up
-            exit_signal = (close[i] > r1_aligned[i]) or (close[i] > ema_50_1w_aligned[i])
+            # Exit when fear subsides (WVF < 0.5) or trend changes
+            exit_signal = (wvf_normalized[i] < 0.5) or (close[i] > ema_50_1d_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_WilliamsVixFix_Trend_Filter_1d"
+timeframe = "6h"
 leverage = 1.0
