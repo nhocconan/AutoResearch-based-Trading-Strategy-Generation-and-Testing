@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h Camarilla R3/S3 Breakout with 1d EMA34 Trend and Volume Spike
-Hypothesis: Camarilla R3/S3 levels act as strong intraday support/resistance. 
-Breakout above R3 with 1d uptrend (price > EMA34) and volume spike = bullish continuation.
-Breakdown below S3 with 1d downtrend (price < EMA34) and volume spike = bearish continuation.
-Uses 6h timeframe with 1d HTF for trend and Camarilla calculation. Targets 50-150 total trades over 4 years (12-37/year).
+1h EMA Pullback with 4h Trend and Volume Spike
+Hypothesis: In strong 4h trends (price > EMA50), 1h pullbacks to EMA21 with volume spikes offer high-probability entries.
+Works in bull markets (buy pullbacks in uptrends) and bear markets (sell rallies in downtrends).
+Uses 4h for trend filter, 1h for entry timing and volume confirmation. Targets 60-150 total trades over 4 years (15-37/year).
 """
 
 import numpy as np
@@ -21,97 +20,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and EMA trend (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for EMA50 trend filter (call ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1d close for trend
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
-        span=34, adjust=False, min_periods=34
+    # Calculate 50-period EMA on 4h close for trend
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(
+        span=50, adjust=False, min_periods=50
     ).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Camarilla levels from previous 1d OHLC
-    # R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4
-    camarilla_range = df_1d['high'].values - df_1d['low'].values
-    camarilla_r3 = df_1d['close'].values + camarilla_range * 1.1 / 4
-    camarilla_s3 = df_1d['close'].values - camarilla_range * 1.1 / 4
+    # Calculate 1h EMA21 for pullback entries
+    close_s = pd.Series(close)
+    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align Camarilla levels to 6h (previous day's levels available after 1d close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 20-period volume MA for 6h volume confirmation
-    vol_ma_20_6h = np.full(n, np.nan)
+    # Calculate 20-period volume MA for 1h volume confirmation
+    vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma_20_6h[i] = np.mean(volume[i-19:i+1])
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
+    # Session filter: 08-20 UTC (already datetime64[ms] index)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for volume MA
-    start_idx = 20
+    # Start index: need enough for EMA21 and volume MA
+    start_idx = 21
     
     for i in range(start_idx, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(vol_ma_20_6h[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(ema_21[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        ema_trend_4h = ema_50_4h_aligned[i]
+        ema_21_val = ema_21[i]
+        vol_ma_20_val = vol_ma_20[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_1d_aligned[i]
-        r3_level = camarilla_r3_aligned[i]
-        s3_level = camarilla_s3_aligned[i]
-        vol_ma_6h = vol_ma_20_6h[i]
         
-        # Volume confirmation: current 6h volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > 2.0 * vol_ma_6h
+        # Volume confirmation: current 1h volume > 1.5 * 20-period average
+        volume_confirm = curr_volume > 1.5 * vol_ma_20_val
         
         if position == 0:
             # Look for entry signals
-            # Long: price > EMA34 (uptrend) AND breaks above R3 AND volume confirmation
-            long_entry = (curr_close > ema_trend and 
-                         curr_high > r3_level and 
+            # Long: 4h uptrend (price > EMA50) AND price pulls back to EMA21 AND volume spike
+            long_entry = (curr_close > ema_trend_4h and 
+                         curr_low <= ema_21_val and  # pulled back to or below EMA21
                          volume_confirm)
-            # Short: price < EMA34 (downtrend) AND breaks below S3 AND volume confirmation
-            short_entry = (curr_close < ema_trend and 
-                          curr_low < s3_level and 
+            # Short: 4h downtrend (price < EMA50) AND price rallies to EMA21 AND volume spike
+            short_entry = (curr_close < ema_trend_4h and 
+                          curr_high >= ema_21_val and  # rallied to or above EMA21
                           volume_confirm)
             
             if long_entry:
-                signals[i] = 0.30
+                signals[i] = 0.20
                 position = 1
             elif short_entry:
-                signals[i] = -0.30
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below EMA34 OR breaks below S3 (failed breakout)
-            if curr_close < ema_trend or curr_low < s3_level:
+            # Exit: price breaks below EMA21 OR 4h trend reverses
+            if curr_close < ema_21_val or curr_close < ema_trend_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
         elif position == -1:
             # Short position management
-            # Exit: price rises above EMA34 OR breaks above R3 (failed breakdown)
-            if curr_close > ema_trend or curr_high > r3_level:
+            # Exit: price breaks above EMA21 OR 4h trend reverses
+            if curr_close > ema_21_val or curr_close > ema_trend_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "6h"
+name = "1h_EMA_Pullback_4hTrend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
