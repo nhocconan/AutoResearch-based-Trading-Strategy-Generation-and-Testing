@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + 12h Pivot Direction + Volume Confirmation
-Hypothesis: 6h Donchian breakouts capture medium-term momentum, filtered by 12h pivot
-direction (bullish/bearish bias) to avoid counter-trend trades. Volume confirmation
-ensures institutional participation. Works in bull markets (breakout continuation)
-and bear markets (avoids false breakouts via pivot filter). Targets 12-30 trades/year
-to minimize fee drag on 6h timeframe.
+4h Camarilla R1/S1 Breakout + 1d EMA34 Trend + Volume Spike with ATR Stoploss
+Hypothesis: Camarilla pivot levels from daily chart identify key institutional support/resistance.
+Breakouts above R1 or below S1 with daily EMA34 trend alignment and volume spike capture
+institutional participation. ATR-based stoploss limits drawdown. Works in bull markets (trend
+continuation) and bear markets (mean reversion to pivot levels). 4h timeframe targets
+20-50 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -14,82 +14,99 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_ = prices['open'].values
     
-    # 12h data for pivot direction (loaded ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Daily data for Camarilla pivots and EMA34 (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h pivot points (standard: PP = (H+L+C)/3, bias = close > PP)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla pivot levels for daily data
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), 
+    # R2 = close + 0.55*(high-low), R1 = close + 0.275*(high-low)
+    # S1 = close - 0.275*(high-low), S2 = close - 0.55*(high-low), 
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    pivot_point = (high_12h + low_12h + close_12h) / 3.0
-    pivot_bullish = close_12h > pivot_point  # True = bullish bias
+    daily_range = daily_high - daily_low
+    camarilla_r1 = daily_close + 0.275 * daily_range
+    camarilla_s1 = daily_close - 0.275 * daily_range
     
-    # Align pivot bias to 6h timeframe
-    pivot_bullish_aligned = align_htf_to_ltf(prices, df_12h, pivot_bullish.astype(float))
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # 6h Donchian(20) channels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Daily EMA34 trend filter
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
+    
+    # ATR for stoploss (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Start after Donchian lookback and volume MA
-    start_idx = max(lookback, 20) + 5
+    # Start index: need enough for daily data and volume MA
+    start_idx = max(34, 20, 14) + 5  # extra for safety
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_bullish_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         vol_spike = volume_spike[i]
         
-        # Donchian breakout conditions
-        breakout_long = curr_close > highest_high[i]
-        breakout_short = curr_close < lowest_low[i]
+        # Breakout conditions
+        breakout_long = curr_close > camarilla_r1_aligned[i]
+        breakout_short = curr_close < camarilla_s1_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require: Donchian breakout + volume spike + 12h pivot alignment
-            long_entry = breakout_long and vol_spike and (pivot_bullish_aligned[i] > 0.5)
-            short_entry = breakout_short and vol_spike and (pivot_bullish_aligned[i] < 0.5)
+            # Look for entry signals - require: Camarilla breakout + volume spike + daily EMA34 trend alignment
+            long_entry = breakout_long and vol_spike and (curr_close > ema_34_1d_aligned[i])
+            short_entry = breakout_short and vol_spike and (curr_close < ema_34_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit on Donchian mid-line retrace or pivot flip to bearish
-            donchian_mid = (highest_high[i] + lowest_low[i]) / 2.0
-            if curr_close < donchian_mid or pivot_bullish_aligned[i] < 0.5:
+            # Long position: exit on retrace to S1, trend change, or ATR stoploss
+            stoploss_level = entry_price - 2.5 * atr[i]
+            if curr_close < camarilla_s1_aligned[i] or curr_close < ema_34_1d_aligned[i] or curr_close < stoploss_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit on Donchian mid-line retrace or pivot flip to bullish
-            donchian_mid = (highest_high[i] + lowest_low[i]) / 2.0
-            if curr_close > donchian_mid or pivot_bullish_aligned[i] > 0.5:
+            # Short position: exit on retrace to R1, trend change, or ATR stoploss
+            stoploss_level = entry_price + 2.5 * atr[i]
+            if curr_close > camarilla_r1_aligned[i] or curr_close > ema_34_1d_aligned[i] or curr_close > stoploss_level:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_12hPivot_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
