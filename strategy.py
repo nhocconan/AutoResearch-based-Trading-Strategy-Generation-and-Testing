@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Williams Alligator + 1d EMA50 Trend + Volume Spike
-Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend phases on 6h; when Lips cross above Teeth (bullish) or below Teeth (bearish) with 1d EMA50 trend alignment and volume confirmation, it captures sustainable momentum. Designed for 6h to target 12-37 trades/year (50-150 over 4 years), minimizing fee drag. Works in both bull and bear markets by following 1d trend and avoiding counter-trend entries.
+12h Camarilla H3/L3 Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: Camarilla H3/L3 levels on 12h act as strong support/resistance; breakouts with volume confirmation and weekly EMA50 trend alignment capture momentum moves in both bull and bear markets. Designed for 12h to target 12-37 trades/year (50-150 over 4 years), minimizing fee drag. Uses 1w trend filter to avoid counter-trend entries and reduce whipsaw.
 """
 
 import numpy as np
@@ -18,20 +18,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for indicators
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Williams Alligator on 6h: SMAs of median price
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8)  # 13-period, shifted 8
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5)   # 8-period, shifted 5
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3)    # 5-period, shifted 3
+    # Calculate Camarilla pivot levels (H3, L3) from 12h
+    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    hl_range = df_12h['high'] - df_12h['low']
+    camarilla_h3 = df_12h['close'] + (1.1 * hl_range / 4)
+    camarilla_l3 = df_12h['close'] - (1.1 * hl_range / 4)
     
-    # 1d EMA50 for trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align Camarilla levels to primary timeframe (assumed 12h, but works for lower TF too)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3.values)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3.values)
+    
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # 1w EMA50 for trend filter
+    ema_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume confirmation: current volume > 2.0 * 20-period average (stricter for fewer trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -41,12 +50,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(13+8, 8+5, 5+3, 50, 20)  # Alligator shifts + EMA50 + volume MA
+    start_idx = max(20, 50, 20)  # volume MA, EMA50, Camarilla needs 1 bar
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -55,20 +64,16 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Alligator signals: Lips cross Teeth
-        lips_above_teeth = lips[i] > teeth[i]
-        lips_below_teeth = lips[i] < teeth[i]
-        
-        # Trend filter: price relative to 1d EMA50
-        bullish_bias = curr_close > ema_1d_aligned[i]
-        bearish_bias = curr_close < ema_1d_aligned[i]
+        # Trend filter: price relative to 1w EMA50
+        bullish_bias = curr_close > ema_1w_aligned[i]
+        bearish_bias = curr_close < ema_1w_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require ALL conditions: Alligator cross + trend + volume
-            # Long: Lips cross above Teeth AND bullish bias AND volume spike
-            long_entry = lips_above_teeth and bullish_bias and vol_spike
-            # Short: Lips cross below Teeth AND bearish bias AND volume spike
-            short_entry = lips_below_teeth and bearish_bias and vol_spike
+            # Look for entry signals - require ALL conditions: breakout + trend + volume
+            # Long: price breaks above Camarilla H3 AND bullish bias AND volume spike
+            long_entry = (curr_high > camarilla_h3_aligned[i]) and bullish_bias and vol_spike
+            # Short: price breaks below Camarilla L3 AND bearish bias AND volume spike
+            short_entry = (curr_low < camarilla_l3_aligned[i]) and bearish_bias and vol_spike
             
             if long_entry:
                 signals[i] = 0.25
@@ -80,16 +85,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Lips cross back below Teeth (trend change) OR loss of bullish bias
-            if lips_below_teeth or (curr_close < ema_1d_aligned[i]):
+            # Exit: price falls below Camarilla L3 (mean reversion) OR loss of bullish bias
+            if (curr_low < camarilla_l3_aligned[i]) or (curr_close < ema_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: Lips cross back above Teeth (trend change) OR loss of bearish bias
-            if lips_above_teeth or (curr_close > ema_1d_aligned[i]):
+            # Exit: price rises above Camarilla H3 (mean reversion) OR loss of bearish bias
+            if (curr_high > camarilla_h3_aligned[i]) or (curr_close > ema_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_1dEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
