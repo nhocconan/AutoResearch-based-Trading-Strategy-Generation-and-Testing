@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + Volume Spike with 1d EMA34 Trend
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures bull/bear strength relative to short-term trend.
-In strong trends, Bull Power stays positive in uptrends and Bear Power negative in downtrends.
-Combined with 1d EMA34 for higher-timeframe trend alignment and volume spikes for confirmation,
-this strategy captures sustained momentum moves while avoiding choppy markets.
-Volume spikes filter ensures entries occur with institutional participation.
-6h timeframe targets 12-37 trades/year, minimizing fee drag.
-Works in both bull (strong Bull Power + uptrend) and bear (strong Bear Power + downtrend) markets.
+12h Donchian(20) Breakout + Volume Spike + ATR Stoploss
+Hypothesis: Donchian breakouts capture sustained momentum. Combined with 1d EMA34 trend filter and volume confirmation,
+this strategy targets 12h swings in both bull and bear markets. ATR-based stoploss manages risk. 12h timeframe targets 12-37 trades/year.
 """
 
 import numpy as np
@@ -27,12 +22,9 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA13 for Elder Ray (short-term trend)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -42,22 +34,31 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    atr_stop = 0.0
     
     # Start index: need enough for calculations
-    start_idx = max(13, 20, 34)  # EMA13, volume MA, daily EMA alignment
+    start_idx = max(20, 34, 14)  # Donchian, daily EMA, ATR
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
         vol_spike = volume_spike[i]
         
@@ -67,38 +68,46 @@ def generate_signals(prices):
         
         if position == 0:
             # Look for entry signals
-            # Long: Bull Power > 0 (strong buying) AND uptrend AND volume spike
-            long_entry = (curr_bull_power > 0) and uptrend and vol_spike
-            # Short: Bear Power < 0 (strong selling) AND downtrend AND volume spike
-            short_entry = (curr_bear_power < 0) and downtrend and vol_spike
+            # Long: price breaks above Donchian upper AND uptrend AND volume spike
+            long_entry = (curr_high > highest_high[i]) and uptrend and vol_spike
+            # Short: price breaks below Donchian lower AND downtrend AND volume spike
+            short_entry = (curr_low < lowest_low[i]) and downtrend and vol_spike
             
             if long_entry:
                 signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
+                atr_stop = entry_price - 2.5 * atr[i]
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
+                atr_stop = entry_price + 2.5 * atr[i]
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: Bull Power turns negative OR loss of uptrend (price < EMA34)
-            if (curr_bull_power <= 0) or (curr_close < ema_34_aligned[i]):
+            # Exit: price breaks below Donchian lower OR stoploss hit
+            if (curr_low < lowest_low[i]) or (curr_close < atr_stop):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+                # Trail stoploss upward
+                atr_stop = max(atr_stop, curr_close - 2.5 * atr[i])
         elif position == -1:
             # Short position management
-            # Exit: Bear Power turns positive OR loss of downtrend (price > EMA34)
-            if (curr_bear_power >= 0) or (curr_close > ema_34_aligned[i]):
+            # Exit: price breaks above Donchian upper OR stoploss hit
+            if (curr_high > highest_high[i]) or (curr_close > atr_stop):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
+                # Trail stoploss downward
+                atr_stop = min(atr_stop, curr_close + 2.5 * atr[i])
     
     return signals
 
-name = "6h_ElderRay_VolumeSpike_1dEMA34_Trend"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
