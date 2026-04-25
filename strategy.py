@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout with 1d EMA34 Trend and Volume Spike
-Hypothesis: Camarilla pivot levels (H3/L3) act as strong intraday support/resistance. 
-Breakouts above H3 or below L3 with volume confirmation and 1d EMA34 trend filter capture 
-momentum moves. Works in both bull and bear markets by trading breakouts in trend direction.
-Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 12-37 trades/year on 12h.
+4h Camarilla H3/L3 Breakout with Daily EMA Trend and Volume Spike
+Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance. 
+Breakouts above H3 or below L3 with daily EMA trend alignment and volume confirmation 
+capture momentum moves in both bull and bear markets. Discrete sizing (0.0, ±0.25) 
+minimizes fee churn. Target: 20-50 trades/year on 4h.
 """
 
 import numpy as np
@@ -16,44 +16,52 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous 12h bar
-    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First bar has no previous
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate Camarilla levels from previous day (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    rang = prev_high - prev_low
-    H3 = prev_close + 1.1 * rang / 4
-    L3 = prev_close - 1.1 * rang / 4
+    # Previous day's high, low, close
+    phigh = df_1d['high'].shift(1).values
+    plow = df_1d['low'].shift(1).values
+    pclose = df_1d['close'].shift(1).values
+    
+    # Camarilla calculations
+    range_ = phigh - plow
+    H3 = pclose + (range_ * 1.1 / 4)
+    L3 = pclose - (range_ * 1.1 / 4)
+    H4 = pclose + (range_ * 1.1 / 2)
+    L4 = pclose - (range_ * 1.1 / 2)
+    
+    # Align to 4h timeframe (wait for daily close)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # Daily EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # Load 1d EMA34 trend ONCE before loop (MTF Rule 1)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 34) + 1
+    start_idx = max(34, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -62,16 +70,17 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         vol_spike = volume_spike[i]
-        # Trend filter: price above/below 1d EMA34
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        
+        # Daily trend: price above/below EMA34
+        trend_up = ema_34_aligned[i] > 0 and curr_close > ema_34_aligned[i]
+        trend_down = ema_34_aligned[i] > 0 and curr_close < ema_34_aligned[i]
         
         if position == 0:
             # Look for entry signals
             # Long: price breaks above H3 AND volume spike AND uptrend
-            long_entry = (curr_close > H3[i]) and vol_spike and uptrend
+            long_entry = (curr_close > H3_aligned[i]) and vol_spike and trend_up
             # Short: price breaks below L3 AND volume spike AND downtrend
-            short_entry = (curr_close < L3[i]) and vol_spike and downtrend
+            short_entry = (curr_close < L3_aligned[i]) and vol_spike and trend_down
             
             if long_entry:
                 signals[i] = 0.25
@@ -83,16 +92,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below L3 (breakdown) OR loss of uptrend
-            if (curr_close < L3[i]) or (not uptrend):
+            # Exit: price falls below L3 (reversal) OR loss of trend (price < EMA34)
+            if (curr_close < L3_aligned[i]) or (curr_close < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above H3 (breakout) OR loss of downtrend
-            if (curr_close > H3[i]) or (not downtrend):
+            # Exit: price rises above H3 (reversal) OR loss of trend (price > EMA34)
+            if (curr_close > H3_aligned[i]) or (curr_close > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
