@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_HighLow_Band_Breakout_1dTrend_VolumeSpike
-Hypothesis: On 6h timeframe, price breaks above/below a dynamic band (rolling 20-period high/low)
-with 1d EMA50 trend filter and 6h volume spike confirmation (>1.5x 20-period average volume).
-Targets 15-30 trades/year by requiring confluence of breakout, trend, and volume.
-Works in bull markets via trend-aligned breakouts and in bear markets via mean-reversion exits
-at opposing band levels. Uses discrete position sizing (0.25) to minimize fee churn.
+12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Filter
+Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter.
+Works in bull markets via trend-following breaks of R1/S1 and in bear markets via mean-reversion exits at opposing levels.
+Target: 50-150 total trades over 4 years (12-37/year) by requiring daily Camarilla levels + 1d EMA34 alignment.
+Uses discrete position sizing (0.25) to minimize fee churn. 12h timeframe reduces noise vs lower TFs.
 """
 
 import numpy as np
@@ -14,64 +13,59 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 6h indicators (calculated once)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    volume_s = pd.Series(volume)
-    
-    # 6h Donchian-like bands (20-period high/low)
-    upper_band = high_s.rolling(window=20, min_periods=20).max().values
-    lower_band = low_s.rolling(window=20, min_periods=20).min().values
-    
-    # 6h volume average (20-period)
-    vol_avg = volume_s.rolling(window=20, min_periods=20).mean().values
-    
-    # 1d data for trend filter (loaded ONCE)
+    # 1d data for Camarilla pivots and EMA34 (loaded ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
+    
+    # Camarilla R1 and S1 levels (R1 = C + 1.1*(HL/4), S1 = C - 1.1*(HL/4))
+    R1 = prev_close + 1.1 * prev_range * (1.0/4.0)
+    S1 = prev_close - 1.1 * prev_range * (1.0/4.0)
+    
+    # Align 1d levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 6h bands (20) + 1d EMA50 (50)
-    start_idx = max(20, 50) + 1  # Conservative warmup
+    # Start index: need enough for 1d previous data (1) + 1d EMA34 (34)
+    start_idx = 34 + 1  # Conservative warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_vol = volume[i]
         
-        # Trend filter: price relative to 1d EMA50
-        uptrend = curr_close > ema_50_1d_aligned[i]
-        downtrend = curr_close < ema_50_1d_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_spike = curr_vol > (1.5 * vol_avg[i])
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals with trend and volume confirmation
-            # Long breakout: price breaks above upper band with uptrend and volume spike
-            long_breakout = (curr_close > upper_band[i]) and uptrend and volume_spike
-            # Short breakout: price breaks below lower band with downtrend and volume spike
-            short_breakout = (curr_close < lower_band[i]) and downtrend and volume_spike
+            # Look for entry signals with trend alignment
+            # Long breakout: price breaks above R1 with uptrend
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend
+            # Short breakout: price breaks below S1 with downtrend
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend
             
             if long_breakout:
                 signals[i] = 0.25
@@ -84,17 +78,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit if price breaks below lower band (mean reversion) 
-            # or trend changes to downtrend
-            if curr_close < lower_band[i] or not uptrend:
+            # Long position: exit if price breaks below S1 (mean reversion) or trend changes to downtrend
+            if curr_close < S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit if price breaks above upper band (mean reversion) 
-            # or trend changes to uptrend
-            if curr_close > upper_band[i] or not downtrend:
+            # Short position: exit if price breaks above R1 (mean reversion) or trend changes to uptrend
+            if curr_close > R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_HighLow_Band_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
