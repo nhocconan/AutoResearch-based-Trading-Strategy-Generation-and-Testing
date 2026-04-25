@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v2
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 12h EMA50 trend filter and volume confirmation.
-- Trend filter: price > 12h EMA50 = bullish, price < 12h EMA50 = bearish.
-- In bullish 12h trend: buy breakouts above R1, sell breakdowns below S1.
-- In bearish 12h trend: sell breakdowns below S1, buy breakouts above R1 (continuation logic).
-- Volume confirmation: require volume > 2.0x 20-period average to avoid false breakouts.
-- Exit on trend reversal or mean reversion to pivot.
-- Position size: 0.25. Target: 75-200 total trades over 4 years = 19-50/year.
-- Works in both bull and bear: 12h trend filter captures major moves, volume filter reduces noise.
+1d_KAMA_Trend_RSI_ChopFilter_v1
+Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
+RSI(14) for momentum confirmation, and Choppiness Index(14) for regime filter.
+Only trade when: KAMA trend aligned, RSI not extreme (40-60), and market is trending (CHOP < 38.2).
+This avoids whipsaws in ranging markets and captures sustained trends in both bull and bear regimes.
+Position size: 0.25. Target: 20-60 trades over 4 years (5-15/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -17,102 +14,119 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter and Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # === KAMA (Kaufman Adaptive Moving Average) ===
+    # Fast EMA: 2, Slow EMA: 30
+    fast = 2
+    slow = 30
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Direction = abs(close - close[fast])
+    direction = np.abs(np.diff(close, n=fast))
+    direction = np.concatenate([np.full(fast, np.nan), direction])
     
-    # Calculate 12h Camarilla pivot levels (using previous 12h bar's OHLC)
-    prev_close = np.roll(df_12h['close'].values, 1)
-    prev_high = np.roll(df_12h['high'].values, 1)
-    prev_low = np.roll(df_12h['low'].values, 1)
-    prev_close[0] = df_12h['close'].values[0]
-    prev_high[0] = df_12h['high'].values[0]
-    prev_low[0] = df_12h['low'].values[0]
+    # Volatility = sum of abs(close - close.shift(1)) over slow period
+    volatility = np.abs(np.diff(close, n=1))
+    volatility = np.concatenate([np.full(1, np.nan), volatility])
+    vol_sum = pd.Series(volatility).rolling(window=slow, min_periods=slow).sum().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_ = prev_high - prev_low
+    # ER = direction / volatility (avoid div by zero)
+    er = np.where(vol_sum > 0, direction / vol_sum, 0)
     
-    # Camarilla levels
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
+    # SC = [ER * (fastest - slowest) + slowest]^2
+    fastest = 2.0 / (fast + 1)
+    slowest = 2.0 / (slow + 1)
+    sc = (er * (fastest - slowest) + slowest) ** 2
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
+    # KAMA: first value = close[0], then kama = prev_kama + sc * (close - prev_kama)
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume spike confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # === RSI(14) ===
+    delta = np.diff(close)
+    delta = np.concatenate([np.full(1, np.nan), delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Choppiness Index(14) ===
+    # True Range
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(np.roll(high, 1) - np.roll(close, 1))
+    tr3 = np.abs(np.roll(low, 1) - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # CHOP = 100 * log10(atr_sum / (hh - ll)) / log10(14)
+    range_hl = hh - ll
+    chop = np.where(range_hl > 0, 100 * np.log10(atr_sum / range_hl) / np.log10(14), 50)
+    
+    # === Signals ===
+    # Trend: price > KAMA = bullish, price < KAMA = bearish
+    # Only trade when RSI is moderate (40-60) and market is trending (CHOP < 38.2)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA(50), volume MA (20)
-    start_idx = max(50, 20)
+    start_idx = max(30, 14)  # KAMA slow=30, RSI/CHOP=14
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        # Skip if any indicator not ready
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 12h HTF trend using EMA50
-        htf_12h_bullish = close[i] > ema_50_12h_aligned[i]
-        htf_12h_bearish = close[i] < ema_50_12h_aligned[i]
+        kama_bullish = close[i] > kama[i]
+        kama_bearish = close[i] < kama[i]
+        rsi_moderate = (rsi[i] >= 40) & (rsi[i] <= 60)
+        chop_trending = chop[i] < 38.2  # trending regime
         
         if position == 0:
-            # Breakout logic: trade in direction of 12h trend with volume confirmation
-            long_setup = (close[i] > r1_aligned[i]) and htf_12h_bullish and volume_spike[i]
-            short_setup = (close[i] < s1_aligned[i]) and htf_12h_bearish and volume_spike[i]
-            
-            if long_setup:
+            # Enter long in bullish trend with filters
+            if kama_bullish and rsi_moderate and chop_trending:
                 signals[i] = 0.25
                 position = 1
-            elif short_setup:
+            # Enter short in bearish trend with filters
+            elif kama_bearish and rsi_moderate and chop_trending:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long: hold position
+            # Hold long
             signals[i] = 0.25
-            # Exit on trend reversal or mean reversion to pivot
-            exit_signal = (not htf_12h_bullish) or (close[i] < pivot_aligned[i])
-            
-            if exit_signal:
+            # Exit on bearish trend or choppy market (range)
+            if not (kama_bullish and rsi_moderate and chop_trending):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Short: hold position
+            # Hold short
             signals[i] = -0.25
-            # Exit on trend reversal or mean reversion to pivot
-            exit_signal = htf_12h_bullish or (close[i] > pivot_aligned[i])
-            
-            if exit_signal:
+            # Exit on bullish trend or choppy market (range)
+            if not (kama_bearish and rsi_moderate and chop_trending):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
