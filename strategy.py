@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot Breakout with 1w EMA Trend and Volume Confirmation
-Hypothesis: Camarilla pivot levels (R1, S1) from daily OHLC act as key support/resistance.
-Breakouts above R1 or below S1 with volume spike and aligned with 1-week EMA50 trend
-capture strong momentum moves in both bull and bear markets. ATR trailing stop manages risk.
-Target: 12-30 trades/year on 12h (50-120 total over 4 years) to minimize fee drag.
+4h Camarilla R1/S1 Breakout with 1d EMA Trend and Volume Spike
+Hypothesis: Camarilla pivot levels (R1, S1) from daily OHLC act as key support/resistance. 
+Breakouts above R1 or below S1 with volume confirmation and aligned 1d EMA34 trend capture 
+swing moves in both bull and bear markets. ATR trailing stop manages risk. 
+Target: 20-50 trades/year on 4h (80-200 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -21,23 +21,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for volatility filter and trailing stop
+    # ATR for volatility and trailing stop
     tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: current volume > 2.0 * 24-period average (24*12h = 12d)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # 1-week EMA50 trend filter (MTF)
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA34 trend filter (MTF) - loaded ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Camarilla pivot levels from daily OHLC (MTF)
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    df_1d = get_htf_data(prices, '1d')
     camarilla_r1 = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.1 / 12
     camarilla_s1 = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.1 / 12
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
@@ -49,11 +46,11 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start index: need enough for all indicators
-    start_idx = max(24, 50) + 5  # extra buffer
+    start_idx = max(20, 34) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
@@ -68,9 +65,9 @@ def generate_signals(prices):
         breakout_short = curr_close < s1_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require: pivot breakout + volume spike + 1w EMA trend alignment
-            long_entry = breakout_long and vol_spike and (curr_close > ema_50_1w_aligned[i])
-            short_entry = breakout_short and vol_spike and (curr_close < ema_50_1w_aligned[i])
+            # Look for entry signals - require: pivot breakout + volume spike + 1d EMA trend alignment
+            long_entry = breakout_long and vol_spike and (curr_close > ema_34_1d_aligned[i])
+            short_entry = breakout_short and vol_spike and (curr_close < ema_34_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
@@ -105,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
