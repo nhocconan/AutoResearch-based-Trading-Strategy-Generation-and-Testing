@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout with 1d EMA34 Trend and Volume Spike
-Hypothesis: Camarilla H3/L3 levels on 1d provide strong support/resistance for 12h breakouts.
-Breakouts above H3 or below L3 with volume confirmation and 1d EMA34 trend alignment capture
-strong momentum moves. Works in bull/bear via trend filter. Discrete sizing (0.25) targets
-~50-150 trades over 4 years to minimize fee drag on 12h timeframe.
+6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Confirmation
+Hypothesis: On 6h timeframe, Donchian channel breakouts capture momentum moves.
+Filtering by 1d weekly pivot direction (price above/below weekly pivot) ensures
+trades align with higher-timeframe bias. Volume confirmation avoids low-conviction
+breakouts. Works in bull/bear via pivot-based trend filter. Targets 12-37 trades/year.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,58 +21,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter and Camarilla levels
+    # Get 1d data for weekly pivot calculation (using weekly OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly OHLC from daily data
+    # Group into weeks (5 trading days approx) - use rolling window for simplicity
+    # Weekly high = max of last 5 daily highs, weekly low = min of last 5 daily lows
+    # Weekly close = last daily close, weekly open = first daily open of the week
+    # For pivot calculation, we need typical price: (H+L+C)/3
     
-    # Get 1d OHLC data for Camarilla calculation (using previous day's values)
-    df_1d_close = df_1d['close'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_open = df_1d['open'].values
+    # Calculate rolling weekly OHLC (5-day window)
+    weekly_high = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(low).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(close).rolling(window=5, min_periods=5).apply(lambda x: x[-1], raw=True).values
+    weekly_open = pd.Series(close).rolling(window=5, min_periods=5).apply(lambda x: x[0], raw=True).values
     
-    # Align 1d OHLC to 12h timeframe (using previous day's values)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d_close)
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d_high)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d_low)
-    open_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d_open)
+    # Weekly pivot point: (H + L + C) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Use previous day's OHLC for Camarilla calculation (completed day only)
-    prev_close = close_1d_aligned
-    prev_high = high_1d_aligned
-    prev_low = low_1d_aligned
+    # Align weekly pivot to 6h timeframe (using previous week's value to avoid look-ahead)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # Calculate Camarilla levels using previous day's OHLC
-    range_val = prev_high - prev_low
-    camarilla_h3 = prev_close + range_val * 1.1 / 4
-    camarilla_l3 = prev_close - range_val * 1.1 / 4
-    camarilla_h4 = prev_close + range_val * 1.1 / 2
-    camarilla_l4 = prev_close - range_val * 1.1 / 2
+    # Get 6h data for Donchian channel (20-period)
+    # Donchian upper = max(high, lookback=20)
+    # Donchian lower = min(low, lookback=20)
+    lookback = 20
+    donchian_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate ATR for stop loss (using 14 periods)
+    # Calculate ATR for stop loss (14 periods)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for ATR (14) and EMA34 (34)
-    start_idx = max(14, 34)
+    # Start index: need enough for Donchian (20) and ATR (14)
+    start_idx = max(lookback, 14, 20)  # 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(weekly_pivot_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,48 +83,47 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_aligned[i]
         atr_value = atr[i]
-        h3 = camarilla_h3[i]
-        l3 = camarilla_l3[i]
-        h4 = camarilla_h4[i]
-        l4 = camarilla_l4[i]
+        vol_ma = vol_ma_20[i]
+        pivot = weekly_pivot_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_20
+        # Volume spike condition
+        volume_spike = curr_volume > 1.5 * vol_ma
         
-        # Breakout conditions: price breaks above H3 or below L3
-        bullish_breakout = curr_close > h3
-        bearish_breakout = curr_close < l3
+        # Pivot direction: price above/below weekly pivot
+        above_pivot = curr_close > pivot
+        below_pivot = curr_close < pivot
         
-        # Update tracking variables for trailing stop logic
+        # Donchian breakout conditions
+        bullish_breakout = curr_close > upper
+        bearish_breakout = curr_close < lower
+        
+        # Update tracking variables for trailing stop
         if position == 1:
             highest_since_entry = max(highest_since_entry, curr_high)
         elif position == -1:
             lowest_since_entry = min(lowest_since_entry, curr_low)
         
-        # Exit conditions: trailing stop or reverse breakout
+        # Exit conditions: trailing stop or pivot reversal
         if position != 0:
             exit_signal = False
             
             if position == 1:
-                # Trailing stop: exit if price drops 2.5*ATR from highest since entry
-                if curr_close < highest_since_entry - 2.5 * atr_value:
+                # Trailing stop: exit if price drops 2.0*ATR from highest since entry
+                if curr_close < highest_since_entry - 2.0 * atr_value:
                     exit_signal = True
-                # Reverse breakout or trend rejection
-                elif curr_close < l4 or curr_close < ema_trend:
+                # Pivot reversal (price crosses below weekly pivot)
+                elif curr_close < pivot:
                     exit_signal = True
                     
             elif position == -1:
-                # Trailing stop: exit if price rises 2.5*ATR from lowest since entry
-                if curr_close > lowest_since_entry + 2.5 * atr_value:
+                # Trailing stop: exit if price rises 2.0*ATR from lowest since entry
+                if curr_close > lowest_since_entry + 2.0 * atr_value:
                     exit_signal = True
-                # Reverse breakout or trend rejection
-                elif curr_close > h4 or curr_close > ema_trend:
+                # Pivot reversal (price crosses above weekly pivot)
+                elif curr_close > pivot:
                     exit_signal = True
             
             if exit_signal:
@@ -133,12 +133,12 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # Entry conditions: Camarilla breakout + trend alignment + volume
+        # Entry conditions: Donchian breakout + pivot alignment + volume
         if position == 0:
-            # Long: break above Camarilla H3 AND price above 1d EMA34
-            long_condition = bullish_breakout and (curr_close > ema_trend) and volume_spike
-            # Short: break below Camarilla L3 AND price below 1d EMA34
-            short_condition = bearish_breakout and (curr_close < ema_trend) and volume_spike
+            # Long: Donchian breakout above upper AND price above weekly pivot
+            long_condition = bullish_breakout and above_pivot and volume_spike
+            # Short: Donchian breakout below lower AND price below weekly pivot
+            short_condition = bearish_breakout and below_pivot and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -157,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_Donchian20_Breakout_1dWeeklyPivot_Direction_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
