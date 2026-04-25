@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_ADX_DMI_Trend_Strength_With_Weekly_Pivot_Direction
-Hypothesis: Trade strong ADX trends (ADX>25) in direction of weekly pivot bias (price vs weekly pivot).
-ADX filters weak/choppy markets, weekly pivot provides structural bias.
-Only trade long when price > weekly pivot and ADX rising, short when price < weekly pivot and ADX rising.
-Uses discrete sizing 0.25 to limit drawdown in bear markets.
-Target: 12-30 trades/year on 6h timeframe to minimize fee drag.
+12h_Donchian20_Breakout_1wTrend_ATRRegime_VolumeSpike
+Hypothesis: Trade 12h Donchian(20) breakouts with 1w EMA50 trend filter and ATR-based regime filter.
+Only trade in direction of weekly trend to avoid counter-trend whipsaws. Volume spike confirms momentum.
+ATR regime: trade only when ATR(12)/ATR(48) < 1.2 (low volatility = better breakout reliability).
+Discrete sizing 0.25 to manage risk and minimize fee churn. Target: 12-37 trades/year.
 """
 
 import numpy as np
@@ -14,91 +13,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot point (standard formula: (H+L+C)/3)
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ADX on 6h timeframe (primary)
-    # +DI, -DI, DX calculation
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
+    # Get daily data for ATR regime filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate ATR(12) and ATR(48) on daily timeframe
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr1 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])  # align length
     
-    # Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan, dtype=float)
-        if len(values) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(values[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    atr_12 = pd.Series(tr1).rolling(window=12, min_periods=12).mean().values
+    atr_48 = pd.Series(tr1).rolling(window=48, min_periods=48).mean().values
     
-    period = 14
-    # Pad arrays to align with original indices
-    plus_dm_padded = np.concatenate([[np.nan], plus_dm])
-    minus_dm_padded = np.concatenate([[np.nan], minus_dm])
-    tr_padded = np.concatenate([[np.nan], tr])
+    # ATR ratio: ATR(12)/ATR(48) - regime filter
+    atr_ratio = atr_12 / atr_48
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    atr = wilders_smoothing(tr_padded, period)
-    plus_di = 100 * wilders_smoothing(plus_dm_padded, period) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm_padded, period) / atr
+    # Donchian(20) on 12h timeframe
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, period)
-    
-    # Ensure arrays align with prices index (adjust for padding)
-    # plus_di, minus_di, adx already aligned due to padding logic
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after ADX warmup period
-    start_idx = 2 * period  # Need enough for ADX calculation
+    # Start index: need warmup for weekly EMA50 (50), ATR (48), Donchian (20), volume MA (20)
+    start_idx = max(50, 48, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # ADX trend strength filter: only trade when ADX > 25 (strong trend)
-        strong_trend = adx[i] > 25
+        # Regime filter: only trade when ATR ratio < 1.2 (low volatility regime)
+        in_low_vol_regime = atr_ratio_aligned[i] < 1.2
         
         if position == 0:
-            # Long: price above weekly pivot, strong trend, and +DI > -DI (bullish momentum)
-            long_setup = (close[i] > weekly_pivot_aligned[i]) and \
-                         strong_trend and \
-                         (plus_di[i] > minus_di[i])
-            # Short: price below weekly pivot, strong trend, and -DI > +DI (bearish momentum)
-            short_setup = (close[i] < weekly_pivot_aligned[i]) and \
-                          strong_trend and \
-                          (minus_di[i] > plus_di[i])
+            # Long: price breaks above Donchian high AND weekly trend bullish AND volume spike AND low vol regime
+            long_setup = (close[i] > donch_high[i]) and \
+                         (close[i] > ema_50_1w_aligned[i]) and \
+                         volume_spike[i] and \
+                         in_low_vol_regime
+            # Short: price breaks below Donchian low AND weekly trend bearish AND volume spike AND low vol regime
+            short_setup = (close[i] < donch_low[i]) and \
+                          (close[i] < ema_50_1w_aligned[i]) and \
+                          volume_spike[i] and \
+                          in_low_vol_regime
             
             if long_setup:
                 signals[i] = 0.25
@@ -111,24 +95,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: trend weakens (ADX < 20) OR momentum reverses (-DI > +DI) OR price crosses below pivot
-            if (adx[i] < 20) or \
-               (minus_di[i] > plus_di[i]) or \
-               (close[i] < weekly_pivot_aligned[i]):
+            # Exit: price re-enters Donchian channel OR weekly trend turns bearish
+            if (close[i] < donch_high[i] and close[i] > donch_low[i]) or \
+               (close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: trend weakens (ADX < 20) OR momentum reverses (+DI > -DI) OR price crosses above pivot
-            if (adx[i] < 20) or \
-               (plus_di[i] > minus_di[i]) or \
-               (close[i] > weekly_pivot_aligned[i]):
+            # Exit: price re-enters Donchian channel OR weekly trend turns bullish
+            if (close[i] < donch_high[i] and close[i] > donch_low[i]) or \
+               (close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ADX_DMI_Trend_Strength_With_Weekly_Pivot_Direction"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1wTrend_ATRRegime_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
