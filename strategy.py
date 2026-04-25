@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter (price > 1d EMA50 for long, < 1d EMA50 for short) and volume confirmation (>2.0x 20-bar mean volume). Uses HTF 1d for trend alignment to capture longer-term momentum while reducing whipsaw. Volume confirmation ensures breakouts have conviction. Discrete position sizing (0.25) minimizes fee churn. Designed for 15-25 trades/year per symbol, effective in both bull (breakouts with volume) and bear (trend-following via shorts) markets.
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (price > 1d EMA50 for long, < 1d EMA50 for short) and volume confirmation (>2.0x 20-bar mean volume). Uses HTF 1d for trend alignment to capture medium-term momentum while reducing whipsaw. Volume confirmation ensures breakouts have conviction. Discrete position sizing (0.25) minimizes fee churn. Designed for 12-25 trades/year per symbol, effective in both bull (breakouts with volume) and bear (trend-following via shorts) markets.
 """
 
 import numpy as np
@@ -30,14 +30,14 @@ def generate_signals(prices):
     # Calculate EMA(50) on 1d for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align EMA50 to 4h timeframe
+    # Align EMA50 to 12h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from previous 1d bar (HLC of prior bar)
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)  # R3 = C + 1.1*(H-L)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)  # S3 = C - 1.1*(H-L)
+    # Calculate Camarilla levels from previous 12h bar (HLC of prior bar)
+    camarilla_r3 = close + 1.1 * (high - low)  # R3 = C + 1.1*(H-L)
+    camarilla_s3 = close - 1.1 * (high - low)  # S3 = C - 1.1*(H-L)
     
-    # Align Camarilla levels to 4h timeframe (use previous bar's levels)
+    # Align Camarilla levels to 12h timeframe (use current bar's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
