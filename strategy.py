@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + Weekly Pivot Direction + Volume Confirmation
-Hypothesis: Elder Ray (Bull/Bear Power) captures institutional buying/selling pressure,
-weekly pivot provides directional bias from higher timeframe, volume confirmation ensures
-follow-through. Works in bull markets via buy-the-dips on Bull Power + weekly pivot support,
-and in bear markets via sell-the-rallies on Bear Power + weekly pivot resistance.
-Target: 12-37 trades/year on 6h timeframe.
+12h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + ATR Trailing Stop
+Hypothesis: Donchian breakouts with 1d EMA34 trend filter and volume confirmation capture
+continuation moves in both bull and bear markets. The 12h timeframe targets 12-37 trades/year.
+Volume spike filters low-momentum breakouts. ATR trailing stop manages risk. Works in bull
+markets via breakout continuation and in bear markets via mean-reversion from extreme levels.
 """
 
 import numpy as np
@@ -22,33 +21,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot points (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for EMA34 trend (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * weekly_pivot - weekly_low  # Resistance 1
-    weekly_s1 = 2 * weekly_pivot - weekly_high  # Support 1
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Elder Ray on 6h data: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    if len(close) >= 13:
-        ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-        bull_power = high - ema_13  # Buying pressure
-        bear_power = low - ema_13   # Selling pressure (negative values)
-    else:
-        ema_13 = np.full(n, np.nan)
-        bull_power = np.full(n, np.nan)
-        bear_power = np.full(n, np.nan)
-    
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(14) for stoploss on 12h data
     if len(close) >= 14:
         tr1 = np.abs(np.diff(close, prepend=close[0]))
         tr2 = np.abs(high - np.roll(close, 1))
@@ -63,7 +45,7 @@ def generate_signals(prices):
     else:
         atr = np.full(n, np.nan)
     
-    # Calculate 20-period volume MA for volume confirmation
+    # Calculate 20-period volume MA for volume spike detection
     vol_ma_20 = np.full(n, np.nan)
     for i in range(n):
         start_idx = max(0, i - 19)
@@ -72,20 +54,17 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Start index: need enough for EMA13, ATR, and volume MA to propagate
-    start_idx = max(13, 14, 20)
+    # Start index: need enough for EMA34_1d, ATR, and volume MA to propagate
+    start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(weekly_r1_aligned[i]) or
-            np.isnan(weekly_s1_aligned[i])):
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,42 +74,48 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema13_val = ema_13[i]
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
+        ema34_1d = ema_34_1d_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
-        pivot = weekly_pivot_aligned[i]
-        r1 = weekly_r1_aligned[i]
-        s1 = weekly_s1_aligned[i]
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        volume_confirmed = curr_volume > 1.5 * vol_ma
+        # Volume spike: current volume > 2.0 * 20-period average
+        volume_spike = curr_volume > 2.0 * vol_ma
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) AND price above weekly pivot AND volume confirmed
-            long_condition = (bull_val > 0) and (curr_close > pivot) and volume_confirmed
-            # Short: Bear Power < 0 (selling pressure) AND price below weekly pivot AND volume confirmed
-            short_condition = (bear_val < 0) and (curr_close < pivot) and volume_confirmed
+            # Calculate Donchian channels (20-period) using only past data
+            lookback_start = max(0, i - 19)
+            highest_high = np.max(high[lookback_start:i+1])
+            lowest_low = np.min(low[lookback_start:i+1])
+            
+            # Long: price breaks above 20-period high AND uptrend (price > 1d EMA34) AND volume spike
+            long_condition = (curr_close > highest_high) and (curr_close > ema34_1d) and volume_spike
+            # Short: price breaks below 20-period low AND downtrend (price < 1d EMA34) AND volume spike
+            short_condition = (curr_close < lowest_low) and (curr_close < ema34_1d) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
+                highest_since_entry = curr_close
             elif short_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
+                lowest_since_entry = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or Bear Power turns negative (selling pressure)
-            if curr_close <= entry_price - 2.0 * atr_val or bear_val < 0:
+            # Update highest high since entry
+            highest_since_entry = max(highest_since_entry, curr_high)
+            # ATR trailing stop: exit if price drops 2.5*ATR from highest since entry
+            if curr_close <= highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or Bull Power turns positive (buying pressure)
-            if curr_close >= entry_price + 2.0 * atr_val or bull_val > 0:
+            # Update lowest low since entry
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+            # ATR trailing stop: exit if price rises 2.5*ATR from lowest since entry
+            if curr_close >= lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -138,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_WeeklyPivot_Direction_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "12h"
 leverage = 1.0
