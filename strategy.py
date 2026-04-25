@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-12h Williams Fractal Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
-Hypothesis: Williams Fractals on 1d identify significant swing highs/lows. 
-Break above bullish fractal with volume and 1d EMA34 uptrend signals bullish momentum.
-Break below bearish fractal with volume and 1d EMA34 downtrend signals bearish momentum.
-Choppiness index filter avoids whipsaws in ranging markets. Uses 12h timeframe for lower trade frequency.
-Volume spike confirms institutional participation. Target: 12-37 trades/year.
-Works in bull/bear via EMA34 trend filter and chop regime adaptation.
+4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
+Hypothesis: Donchian(20) breakouts capture momentum, filtered by 1d EMA34 trend and volume confirmation.
+Choppiness index avoids whipsaws in ranging markets. Works in bull/bear via trend filter.
+Target: 20-50 trades/year on 4h timeframe. Uses discrete position sizing to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,34 +20,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams fractals, EMA34 trend, and choppiness index
+    # Get 1d data for EMA34 trend and choppiness index
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:  # Need sufficient data for indicators
         return np.zeros(n)
-    
-    # Calculate 1d Williams Fractals
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and low[n-2] < low[n-1] > low[n]
-    # Bullish fractal: high[n-2] > high[n-1] < high[n] and low[n-2] > low[n-1] < low[n]
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values
-    )
-    
-    # Williams fractals need 2 extra 1d bars for confirmation (center bar + 2 right bars)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1d Choppiness Index (CHOP) for regime filter
-    # CHOP = 100 * log10(sum(ATR1, n) / (max(high, n) - min(low, n))) / log10(n)
-    # where n=14 period
     if len(df_1d) >= 14:
         # True Range
         tr1 = pd.Series(df_1d['high']).diff().abs()
@@ -83,10 +62,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(chop_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -96,10 +72,16 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        bull_fractal = bullish_fractal_aligned[i]
-        bear_fractal = bearish_fractal_aligned[i]
         ema_34 = ema_34_aligned[i]
         chop_value = chop_aligned[i]
+        
+        # Donchian(20) channels: 20-period high/low
+        if i >= 20:
+            donchian_high = np.max(high[i-19:i+1])
+            donchian_low = np.min(low[i-19:i+1])
+        else:
+            donchian_high = np.max(high[:i+1])
+            donchian_low = np.min(low[:i+1])
         
         # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
@@ -112,15 +94,14 @@ def generate_signals(prices):
         uptrend = curr_close > ema_34
         downtrend = curr_close < ema_34
         
-        # Chop filter: CHOP > 61.8 = ranging (avoid breakouts), CHOP < 38.2 = trending (favor breakouts)
-        # We'll use CHOP < 50 as our filter to avoid strong ranging markets
+        # Chop filter: CHOP < 50 = less choppy/more trending (favor breakouts)
         not_choppy = chop_value < 50
         
         if position == 0:
-            # Long: price breaks above bullish fractal AND volume spike AND uptrend AND not choppy
-            long_condition = (curr_high > bull_fractal) and volume_spike and uptrend and not_choppy
-            # Short: price breaks below bearish fractal AND volume spike AND downtrend AND not choppy
-            short_condition = (curr_low < bear_fractal) and volume_spike and downtrend and not_choppy
+            # Long: price breaks above Donchian high AND volume spike AND uptrend AND not choppy
+            long_condition = (curr_high > donchian_high) and volume_spike and uptrend and not_choppy
+            # Short: price breaks below Donchian low AND volume spike AND downtrend AND not choppy
+            short_condition = (curr_low < donchian_low) and volume_spike and downtrend and not_choppy
             
             if long_condition:
                 signals[i] = 0.25
@@ -131,15 +112,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: price returns below bearish fractal or trend changes or choppy market
-            if curr_close <= bear_fractal or not uptrend or chop_value > 61.8:
+            # Exit long: price returns below Donchian low or trend changes or choppy market
+            if curr_close <= donchian_low or not uptrend or chop_value > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above bullish fractal or trend changes or choppy market
-            if curr_close >= bull_fractal or not downtrend or chop_value > 61.8:
+            # Exit short: price returns above Donchian high or trend changes or choppy market
+            if curr_close >= donchian_high or not downtrend or chop_value > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -147,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsFractal_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
