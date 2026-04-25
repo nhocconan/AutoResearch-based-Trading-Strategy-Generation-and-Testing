@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSp_v2
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v2
 Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike confirmation.
 Uses 1d HTF for more stable trend identification vs 12h, reducing whipsaw in sideways markets.
 Long: Close > R1 + price > 1d EMA34 + volume > 2.0 * 20-period average volume.
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSp_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
