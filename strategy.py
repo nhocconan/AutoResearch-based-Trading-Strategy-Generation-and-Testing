@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_RegimeFilter_v1
-Hypothesis: Trade Camarilla R3/S3 breakouts on 6h with 1d EMA34 trend filter and choppiness regime filter (CHOP < 40).
-R3/S3 are stronger breakout levels than H3/L3 or R1/S1, reducing false breakouts in choppy markets.
-Only trade when 1d trend is aligned (price > EMA34 for long, price < EMA34 for short) AND market is trending (Choppiness Index < 40).
+12h_Camarilla_R1S1_Breakout_1wTrend_RegimeFilter_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1w EMA50 trend filter and choppiness regime filter (CHOP < 50).
+R1/S1 are reliable breakout levels that capture momentum with fewer false signals than H3/L3.
+Only trade when 1w trend is aligned (price > EMA50 for long, price < EMA50 for short) AND market is trending (Choppiness Index < 50).
 Exit on opposite Camarilla level touch or trend reversal.
 Position size: 0.25 to balance profit and fee drag.
-Target: 15-25 trades/year to stay well under 300-trade 6h hard max.
+Target: 12-25 trades/year to stay well under 200-trade 12h hard max.
 Works in bull (breakouts with trend) and bear (strong breakdowns with trend) markets.
 """
 
@@ -24,15 +24,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter and Camarilla levels
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA50 for HTF trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
-    
-    # Calculate 1d EMA34 for HTF trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
     h_1d = df_1d['high'].values
@@ -41,14 +46,14 @@ def generate_signals(prices):
     
     typical_price_1d = (h_1d + l_1d + c_1d) / 3.0
     range_1d = h_1d - l_1d
-    camarilla_r3_1d = c_1d + (range_1d * 1.1 / 2.0)   # R3 level
-    camarilla_s3_1d = c_1d - (range_1d * 1.1 / 2.0)   # S3 level
+    camarilla_r1_1d = c_1d + (range_1d * 1.1 / 4.0)   # R1 level
+    camarilla_s1_1d = c_1d - (range_1d * 1.1 / 4.0)   # S1 level
     
-    # Align Camarilla levels to 6h timeframe (use previous 1d bar's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    # Align Camarilla levels to 12h timeframe (use previous 1d bar's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    # Calculate 6h Choppiness Index for regime filter (trending when CHOP < 40)
+    # Calculate 12h Choppiness Index for regime filter (trending when CHOP < 50)
     atr_period = 14
     chop_period = 14
     tr1 = high - low
@@ -69,30 +74,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA34 (34), ATR (14), and CHOP (14)
-    start_idx = max(34, chop_period)
+    # Start index: need warmup for EMA50 (50), ATR (14), and CHOP (14)
+    start_idx = max(50, chop_period)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(chop[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend (bullish = price above EMA34)
-        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
+        # Determine 1w HTF trend (bullish = price above EMA50)
+        htf_1w_bullish = close[i] > ema_50_1w_aligned[i]
+        htf_1w_bearish = close[i] < ema_50_1w_aligned[i]
         
-        # Regime filter: only trade in trending markets (CHOP < 40)
-        is_trending = chop[i] < 40.0
+        # Regime filter: only trade in trending markets (CHOP < 50)
+        is_trending = chop[i] < 50.0
         
         if position == 0:
-            # Long setup: price breaks above Camarilla R3 + 1d uptrend + trending regime
-            long_setup = (close[i] > camarilla_r3_aligned[i]) and htf_1d_bullish and is_trending
+            # Long setup: price breaks above Camarilla R1 + 1w uptrend + trending regime
+            long_setup = (close[i] > camarilla_r1_aligned[i]) and htf_1w_bullish and is_trending
             
-            # Short setup: price breaks below Camarilla S3 + 1d downtrend + trending regime
-            short_setup = (close[i] < camarilla_s3_aligned[i]) and htf_1d_bearish and is_trending
+            # Short setup: price breaks below Camarilla S1 + 1w downtrend + trending regime
+            short_setup = (close[i] < camarilla_s1_aligned[i]) and htf_1w_bearish and is_trending
             
             if long_setup:
                 signals[i] = 0.25
@@ -105,20 +110,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches Camarilla S3 (stop) OR 1d trend turns bearish OR regime turns choppy
-            if (close[i] <= camarilla_s3_aligned[i]) or (not htf_1d_bullish) or (not is_trending):
+            # Exit: price touches Camarilla S1 (stop) OR 1w trend turns bearish OR regime turns choppy
+            if (close[i] <= camarilla_s1_aligned[i]) or (not htf_1w_bullish) or (not is_trending):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches Camarilla R3 (stop) OR 1d trend turns bullish OR regime turns choppy
-            if (close[i] >= camarilla_r3_aligned[i]) or (htf_1d_bullish) or (not is_trending):
+            # Exit: price touches Camarilla R1 (stop) OR 1w trend turns bullish OR regime turns choppy
+            if (close[i] >= camarilla_r1_aligned[i]) or (htf_1w_bullish) or (not is_trending):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_RegimeFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_RegimeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
