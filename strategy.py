@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_1dTrend_WeeklyPivotFilter
-Hypothesis: 6-hour Donchian(20) breakout with 1-day EMA50 trend filter and weekly Camarilla H3/L3 as regime filter.
-Targets 12-30 trades/year by requiring: 1) price breaks 6h Donchian(20) levels, 2) aligned with 1d EMA50 trend,
-3) price not in weekly Camarilla extreme zone (H3/L3) to avoid exhaustion moves. Uses 6h timeframe to reduce
-fee drag while capturing multi-day trends. Weekly pivot filter avoids counter-trend breakouts in ranging conditions.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v2
+Hypothesis: Tighten entry conditions from previous overtraded version by:
+1) Requiring volume > 2.5x 20-period average (was 2.0x) to reduce false breakouts
+2) Adding 4h EMA50 trend filter in addition to 1d EMA34 for stronger trend confirmation
+3) Using discrete position sizing of 0.30 (was 0.25) to capture more profit per trade
+4) Exiting on opposite Camarilla level break (R1 for shorts, S1 for longs) for mean reversion
+Targets 15-30 trades/year by requiring confluence of: 1) price breaks daily R1/S1 levels, 
+2) aligned with both 1d EMA34 and 4h EMA50 trend, 3) volume > 2.5x 20-period average.
+Designed to work in both bull and bear markets by following the higher timeframe trend direction.
 """
 
 import numpy as np
@@ -13,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,37 +29,38 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1d data for EMA50 trend (loaded ONCE)
+    # 1d data for Camarilla pivots and EMA34 (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # 1w data for weekly Camarilla H3/L3 (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
-    # Weekly Camarilla: based on previous week OHLC
-    prev_week_close = df_1w['close'].shift(1).values
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_range = prev_week_high - prev_week_low
-    # H3 = C + 1.1*(HL/2), L3 = C - 1.1*(HL/2)
-    H3 = prev_week_close + 1.1 * prev_week_range * (1.0/2.0)
-    L3 = prev_week_close - 1.1 * prev_week_range * (1.0/2.0)
-    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
+    # Camarilla R1 and S1 levels (R1 = C + 1.1*(HL/4), S1 = C - 1.1*(HL/4))
+    R1 = prev_close + 1.1 * prev_range * (1.0/4.0)
+    S1 = prev_close - 1.1 * prev_range * (1.0/4.0)
     
-    # 6h Donchian(20) - use rolling window on 6h data directly
-    # Need at least 20 periods for Donchian
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Align 1d levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 4h EMA50 trend filter (additional confirmation)
+    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation: current volume > 2.5 * 20-period average (tightened from 2.0)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA50 (50) + 1w data (1) + Donchian(20)
-    start_idx = 50 + 1 + 20  # Conservative warmup
+    # Start index: need enough for 1d previous data (1) + 1d EMA34 (34) + 4h EMA50 (50) + volume MA (20)
+    start_idx = 50 + 20 + 1  # Conservative warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -64,8 +69,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_50_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -73,52 +78,44 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to 1d EMA50
-        uptrend = curr_close > ema_50_1d_aligned[i]
-        downtrend = curr_close < ema_50_1d_aligned[i]
-        
-        # Regime filter: avoid extreme weekly Camarilla zones (exhaustion)
-        # In uptrend, avoid if price >= H3 (overbought)
-        # In downtrend, avoid if price <= L3 (oversold)
-        not_overbought = curr_close < H3_aligned[i]
-        not_oversold = curr_close > L3_aligned[i]
+        # Trend filter: price relative to BOTH 1d EMA34 and 4h EMA50
+        uptrend = (curr_close > ema_34_1d_aligned[i]) and (curr_close > ema_50_4h[i])
+        downtrend = (curr_close < ema_34_1d_aligned[i]) and (curr_close < ema_50_4h[i])
         
         if position == 0:
-            # Look for entry signals with trend alignment and regime filter
-            # Long breakout: price breaks above Donchian high with uptrend and not overbought
-            long_breakout = (curr_close > donchian_high[i]) and uptrend and not_overbought
-            # Short breakout: price breaks below Donchian low with downtrend and not oversold
-            short_breakout = (curr_close < donchian_low[i]) and downtrend and not_oversold
+            # Look for entry signals with volume confirmation and trend alignment
+            # Long breakout: price breaks above R1 with uptrend and volume confirmation
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i]
+            # Short breakout: price breaks below S1 with downtrend and volume confirmation
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i]
             
             if long_breakout:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
             elif short_breakout:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit conditions
-            # Exit if price breaks below Donchian low (mean reversion) or trend changes to downtrend
-            if curr_close < donchian_low[i] or not uptrend:
+            # Long position: exit if price breaks below S1 (mean reversion) or trend changes
+            if curr_close < S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short position: exit conditions
-            # Exit if price breaks above Donchian high (mean reversion) or trend changes to uptrend
-            if curr_close > donchian_high[i] or not downtrend:
+            # Short position: exit if price breaks above R1 (mean reversion) or trend changes
+            if curr_close > R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dTrend_WeeklyPivotFilter"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
