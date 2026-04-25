@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_1dTrendFilter_VolumeConfirm_v1
+4h_Camarilla_H3L3_Breakout_1dTrendFilter_VolumeConfirm_v2
 Hypothesis: Trade Camarilla H3/L3 breakouts on 4h with 1d EMA34 trend filter and volume confirmation.
 Uses daily trend to capture major market direction, reducing false breakouts in choppy markets.
 Discrete sizing (0.25) limits fee drag. Designed to work in both bull and bear markets by aligning with 1d trend.
-Target: 12-37 trades/year per symbol.
+Target: 20-50 trades/year per symbol.
 """
 
 import numpy as np
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dTrendFilter_VolumeConfirm_v1"
+name = "4h_Camarilla_H3L3_Breakout_1dTrendFilter_VolumeConfirm_v2"
 timeframe = "4h"
 leverage = 1.0
