@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Trade daily Camarilla R1/S1 breakouts with 1-week EMA34 trend filter and volume confirmation. 
-In bullish 1w trend: buy R1 breakouts, sell S1 breakdowns (trend continuation). 
-In bearish 1w trend: sell S1 breakdowns, buy R1 breakouts (trend continuation). 
-Volume spike (>2.0x 20-period average) filters low-quality breakouts. 
-Target: 30-100 total trades over 4 years (7-25/year).
+6h_VolumeWeightedVWAP_Deviation_1dTrend_Filter_v1
+Hypothesis: Trade 6h deviations from volume-weighted VWAP with 1d trend filter. In bullish 1d trend, long when price < VWAP (mean reversion); in bearish 1d trend, short when price > VWAP (mean reversion). Volume-weighted VWAP acts as dynamic fair value. Uses 6h bar's VWAP calculated from typical price and volume. Requires deviation > 1.5% from VWAP to avoid noise. Target: 50-150 total trades over 4 years = 12-37/year.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,70 +19,55 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Get 1d data for HTF trend filter (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get 1d data for Camarilla pivot levels (dynamic per 1d bar)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels using previous 1d bar's OHLC
-    prev_close_1d = np.roll(df_1d['close'].values, 1)
-    prev_high_1d = np.roll(df_1d['high'].values, 1)
-    prev_low_1d = np.roll(df_1d['low'].values, 1)
-    prev_close_1d[0] = df_1d['close'].values[0]
-    prev_high_1d[0] = df_1d['high'].values[0]
-    prev_low_1d[0] = df_1d['low'].values[0]
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    range_1d = prev_high_1d - prev_low_1d
+    # Calculate 6h VWAP (volume-weighted average price) for each 6h bar
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
     
-    # Camarilla levels for 1d - using R1/S1 for breakouts
-    r1_1d = pivot_1d + (range_1d * 1.1 / 12)   # R1 level
-    s1_1d = pivot_1d - (range_1d * 1.1 / 12)   # S1 level
+    typical_price_6h = (df_6h['high'].values + df_6h['low'].values + df_6h['close'].values) / 3.0
+    vwap_6h = (typical_price_6h * df_6h['volume'].values).cumsum() / df_6h['volume'].values.cumsum()
+    # Handle first bar where cumulative volume might be zero
+    vwap_6h = np.where(df_6h['volume'].values.cumsum() == 0, typical_price_6h, vwap_6h)
     
-    # Align 1d Camarilla levels to 1d timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    
-    # Volume spike confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Align 6h VWAP to 6h timeframe
+    vwap_6h_aligned = align_htf_to_ltf(prices, df_6h, vwap_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA(34), volume MA (20)
-    start_idx = max(34, 20)
+    # Start index: need warmup for EMA(34)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(pivot_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vwap_6h_aligned[i]) or
+            vwap_6h_aligned[i] == 0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend using EMA34
-        htf_1w_bullish = close[i] > ema_34_1w_aligned[i]
-        htf_1w_bearish = close[i] < ema_34_1w_aligned[i]
+        # Calculate percentage deviation from VWAP
+        deviation_pct = (close[i] - vwap_6h_aligned[i]) / vwap_6h_aligned[i] * 100.0
+        
+        # Determine 1d HTF trend using EMA34
+        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Breakout logic: trade continuation in direction of 1w trend with volume confirmation
-            # In bullish 1w trend: buy R1 breakouts, sell S1 breakdowns
-            # In bearish 1w trend: sell S1 breakdowns, buy R1 breakouts
-            long_setup = (close[i] > r1_1d_aligned[i]) and htf_1w_bullish and volume_spike[i]
-            short_setup = (close[i] < s1_1d_aligned[i]) and htf_1w_bearish and volume_spike[i]
+            # Mean reversion entries: fade deviation from VWAP in direction of 1d trend
+            # In bullish 1d trend: long when price < VWAP (oversold)
+            # In bearish 1d trend: short when price > VWAP (overbought)
+            long_setup = (deviation_pct < -1.5) and htf_1d_bullish  # Oversold in bullish trend
+            short_setup = (deviation_pct > 1.5) and htf_1d_bearish   # Overbought in bearish trend
             
             if long_setup:
                 signals[i] = 0.25
@@ -99,8 +80,8 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit on trend reversal or mean reversion to 1d pivot
-            exit_signal = (not htf_1w_bullish) or (close[i] < pivot_1d_aligned[i])
+            # Exit when price returns to VWAP or trend reverses
+            exit_signal = (deviation_pct >= -0.5) or (not htf_1d_bullish)
             
             if exit_signal:
                 signals[i] = 0.0
@@ -108,8 +89,8 @@ def generate_signals(prices):
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit on trend reversal or mean reversion to 1d pivot
-            exit_signal = htf_1w_bullish or (close[i] > pivot_1d_aligned[i])
+            # Exit when price returns to VWAP or trend reverses
+            exit_signal = (deviation_pct <= 0.5) or htf_1d_bullish
             
             if exit_signal:
                 signals[i] = 0.0
@@ -117,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_VolumeWeightedVWAP_Deviation_1dTrend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
