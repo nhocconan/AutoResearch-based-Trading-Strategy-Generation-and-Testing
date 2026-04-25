@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrendFilter_v3
-Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume confirmation.
-Adds minimum holding period of 3 bars to reduce overtrading. Target: 12-37 trades/year per symbol.
+4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume confirmation.
+Camarilla levels from daily chart provide institutional support/resistance. Breakouts above R1 or below S1
+with 1d EMA trend alignment and volume spike capture momentum moves in both bull and bear markets.
+Target: 19-50 trades/year per symbol (75-200 total over 4 years) to stay within fee drag limits.
 """
 
 import numpy as np
@@ -30,6 +32,8 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar (HLC of completed daily candle)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C = (H+L+C)/3 (typical price)
     h_1d = df_1d['high'].values
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
@@ -39,17 +43,16 @@ def generate_signals(prices):
     camarilla_r1_1d = typical_price_1d + (range_1d * 1.1 / 12.0)
     camarilla_s1_1d = typical_price_1d - (range_1d * 1.1 / 12.0)
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    # Volume confirmation: 12h volume > 1.5 * 20-period average
+    # Volume confirmation: 4h volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
     # Start index: need warmup for EMA34 (34) and volume MA (20)
     start_idx = max(34, 20)
@@ -60,7 +63,6 @@ def generate_signals(prices):
             np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            bars_since_entry += 1
             continue
         
         # Determine 1d HTF trend (bullish = price above EMA34)
@@ -77,34 +79,28 @@ def generate_signals(prices):
             if long_setup:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
             elif short_setup:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            bars_since_entry += 1
-            # Exit: minimum 3 bars held AND (price touches Camarilla S1 OR 1d trend turns bearish)
-            if bars_since_entry >= 3 and ((close[i] <= camarilla_s1_aligned[i]) or (not htf_1d_bullish)):
+            # Exit: price touches Camarilla S1 (stop) OR 1d trend turns bearish
+            if (close[i] <= camarilla_s1_aligned[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            bars_since_entry += 1
-            # Exit: minimum 3 bars held AND (price touches Camarilla R1 OR 1d trend turns bullish)
-            if bars_since_entry >= 3 and ((close[i] >= camarilla_r1_aligned[i]) or (htf_1d_bullish)):
+            # Exit: price touches Camarilla R1 (stop) OR 1d trend turns bullish
+            if (close[i] >= camarilla_r1_aligned[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrendFilter_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
