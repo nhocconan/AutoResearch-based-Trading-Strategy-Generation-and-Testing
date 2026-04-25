@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop
-Hypothesis: Camarilla pivot R1/S1 breakouts with volume spike and 1d EMA34 trend filter capture institutional moves.
-ATR-based stoploss reduces whipsaw in choppy markets. Designed for 75-200 trades over 4 years on 4h timeframe.
-Works in bull/bear via 1d EMA34 trend filter (only trade in trend direction).
+4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSqueeze
+Hypothesis: Camarilla H3/L3 breakouts with volume squeeze breakout and 1d EMA34 trend filter capture explosive moves.
+Volume squeeze (low volatility) followed by expansion captures institutional accumulation/distribution.
+Trades only in 1d EMA34 trend direction to avoid counter-trend whipsaw. Targets 75-150 trades over 4 years.
 """
 
 import numpy as np
@@ -75,12 +75,14 @@ def generate_signals(prices):
         df_1d['low'].values, 
         df_1d['close'].values
     )
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, r3)  # H3 = R3
+    l3_aligned = align_htf_to_ltf(prices, df_1d, s3)  # L3 = S3
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume squeeze: current volume < 0.5 * 20-period average (low volatility)
+    # Volume expansion: current volume > 2.0 * 20-period average (breakout)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_squeeze = volume < (vol_ma * 0.5)
+    volume_expansion = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -92,16 +94,18 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla breakout + volume spike + 1d EMA34 trend alignment
-            long_entry = (curr_close > r1_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close > ema_34_1d_aligned[i])
-            short_entry = (curr_close < s1_aligned[i]) and vol_ma[i] > 0 and volume_spike[i] and (curr_close < ema_34_1d_aligned[i])
+            # Look for entry signals - require: Camarilla H3/L3 breakout + volume expansion + 1d EMA34 trend alignment
+            # Only enter after a volume squeeze period (low volatility) to catch breakouts
+            long_entry = (curr_close > h3_aligned[i]) and volume_expansion[i] and (curr_close > ema_34_1d_aligned[i])
+            short_entry = (curr_close < l3_aligned[i]) and volume_expansion[i] and (curr_close < ema_34_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
@@ -114,18 +118,18 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below R1, trend turns bearish, or ATR stoploss hit
+            # Long position: exit when price closes below H3, trend turns bearish, or ATR stoploss hit
             atr_stop = entry_price - (1.5 * atr_1d_aligned[i])
-            if curr_close < r1_aligned[i] or curr_close < ema_34_1d_aligned[i] or curr_close < atr_stop:
+            if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i] or curr_close < atr_stop:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price closes above S1, trend turns bullish, or ATR stoploss hit
+            # Short position: exit when price closes above L3, trend turns bullish, or ATR stoploss hit
             atr_stop = entry_price + (1.5 * atr_1d_aligned[i])
-            if curr_close > s1_aligned[i] or curr_close > ema_34_1d_aligned[i] or curr_close > atr_stop:
+            if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i] or curr_close > atr_stop:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -134,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSqueeze"
 timeframe = "4h"
 leverage = 1.0
