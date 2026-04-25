@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v2
-Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike confirmation.
-Uses 1d HTF for more stable trend identification vs 12h, reducing whipsaw in sideways markets.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume spike confirmation.
+Uses 1d HTF for stable trend identification to reduce whipsaw in both bull and bear markets.
 Long: Close > R1 + price > 1d EMA34 + volume > 2.0 * 20-period average volume.
 Short: Close < S1 + price < 1d EMA34 + volume > 2.0 * 20-period average volume.
 Exit: Opposite Camarilla level touch OR trend reversal.
 Position size: 0.25 (25% of capital) to balance profit potential and fee drag.
-Target: 20-35 trades/year to stay well under the 400-trade 4h hard max.
+Target: 12-37 trades/year to stay within 12h optimal range (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -44,11 +44,11 @@ def generate_signals(prices):
     camarilla_r1_1d = c_1d + (range_1d * 1.1 / 12.0)
     camarilla_s1_1d = c_1d - (range_1d * 1.1 / 12.0)
     
-    # Align Camarilla levels to 4h timeframe (use previous 1d bar's levels)
+    # Align Camarilla levels to 12h timeframe (use previous 1d bar's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    # Volume confirmation: 4h volume > 2.0 * 20-period average
+    # Volume confirmation: 12h volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
