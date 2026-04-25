@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and ATR volatility filter.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike and ATR volatility filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
 - HTF: 1d for Camarilla pivot levels and volume spike filter.
 - Camarilla Pivots: H3, L3 levels from prior 1d OHLC for breakout logic.
-- Volume Filter: Current 4h volume > 1.8 * 20-period average 4h volume (avoid low-vol fakeouts).
+- Volume Filter: Current 12h volume > 1.8 * 20-period average 12h volume (avoid low-vol fakeouts).
 - ATR Filter: Current ATR(14) < 1.8 * 20-period average ATR(14) to avoid extreme volatility whipsaws.
 - Entry: Long when close > H3 AND volume confirmation AND ATR filter.
          Short when close < L3 AND volume confirmation AND ATR filter.
@@ -43,11 +43,11 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 2
     l3 = prev_close - camarilla_range * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe (waits for 1d bar close)
+    # Align Camarilla levels to 12h timeframe (waits for 1d bar close)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Calculate 4h volume average for confirmation (20-period)
+    # Calculate 12h volume average for confirmation (20-period)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Calculate ATR(14) and its 20-period average for volatility filter
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dVolSpike_ATRVolFilter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dVolSpike_ATRVolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
