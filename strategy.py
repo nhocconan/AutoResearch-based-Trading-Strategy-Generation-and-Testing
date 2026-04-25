@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop
-Hypothesis: Camarilla H3/L3 breakout from 1d pivot levels with 1d EMA34 trend filter, volume confirmation, and ATR-based stoploss on 12h timeframe.
-Designed for 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
-Uses tight entry conditions: breakout + volume spike + 1d EMA34 trend alignment.
-Works in bull markets via breakout continuation and bear markets via trend following.
-ATR stoploss manages risk in volatile markets.
+4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v3
+Hypothesis: Tighten entry conditions from experiment #87589 to reduce trade count and fee drag.
+Add minimum holding period of 4 bars (16h) to prevent whipsaw and overtrading.
+Keep Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+ATR-based stoploss remains for risk management.
+Target: 50-100 total trades over 4 years (12-25/year) to improve test generalization.
 """
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 4
     l3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (completed 1d bar)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
@@ -57,11 +57,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     # Start index: need enough for 1d EMA (34), volume MA (20), ATR (14)
     start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
+        bars_since_entry += 1
+        
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
             np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
@@ -89,33 +92,43 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
+                bars_since_entry = 0
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below Camarilla H3 (failed breakout) 
-            # or trend reverses or ATR stoploss hit
-            atr_stop = entry_price - 2.5 * atr[i]
-            if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i] or curr_close < atr_stop:
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Long position: minimum holding period + exit conditions
+            if bars_since_entry < 4:  # Minimum 4 bars (16h) holding period
                 signals[i] = 0.25
-        elif position == -1:
-            # Short position: exit when price closes above Camarilla L3 (failed breakout) 
-            # or trend reverses or ATR stoploss hit
-            atr_stop = entry_price + 2.5 * atr[i]
-            if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i] or curr_close > atr_stop:
-                signals[i] = 0.0
-                position = 0
             else:
+                # Exit when price closes below Camarilla H3 (failed breakout) 
+                # or trend reverses or ATR stoploss hit
+                atr_stop = entry_price - 2.5 * atr[i]
+                if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i] or curr_close < atr_stop:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+        elif position == -1:
+            # Short position: minimum holding period + exit conditions
+            if bars_since_entry < 4:  # Minimum 4 bars (16h) holding period
                 signals[i] = -0.25
+            else:
+                # Exit when price closes above Camarilla L3 (failed breakout) 
+                # or trend reverses or ATR stoploss hit
+                atr_stop = entry_price + 2.5 * atr[i]
+                if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i] or curr_close > atr_stop:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v3"
+timeframe = "4h"
 leverage = 1.0
