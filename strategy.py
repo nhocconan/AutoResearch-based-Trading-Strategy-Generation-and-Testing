@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h Williams Fractal Breakout with Daily EMA34 Trend and Volume Spike
-Hypothesis: Williams fractals identify significant swing points. Breakouts above recent bearish fractals (resistance) 
-or below recent bullish fractals (support) with volume confirmation and aligned daily EMA34 trend capture 
-continuation moves. The daily EMA34 ensures we trade with higher timeframe momentum, reducing false breakouts. 
-Volume spike confirms participation. Designed for low trade frequency (12-37/year) on 6h timeframe.
+12h Williams Alligator Breakout with Weekly EMA34 Trend and Volume Spike
+Hypothesis: Williams Alligator identifies trend presence and direction. Breakouts above the Alligator's teeth (middle line) 
+with volume confirmation and aligned weekly EMA34 trend capture strong continuation moves. The weekly EMA34 ensures we 
+trade with higher timeframe momentum, reducing false breakouts. Volume spike confirms participation. Designed for low 
+trade frequency (12-37/year) on 12h timeframe to work in both bull and bear markets by following the higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_alligator
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,30 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA34 trend and fractals (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for EMA34 trend and Alligator (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on daily close for trend
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
+    # Calculate 34-period EMA on weekly close for trend
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(
         span=34, adjust=False, min_periods=34
     ).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Williams fractals on daily data
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
+    # Calculate Williams Alligator on weekly data
+    jaw, teeth, lips = compute_williams_alligator(
+        df_1w['high'].values,
+        df_1w['low'].values,
+        df_1w['close'].values
     )
-    # Bearish fractal needs 2 extra 1d bars for confirmation (formed after center bar)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    # Bullish fractal needs 2 extra 1d bars for confirmation
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,14 +49,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA, fractals (with delay), volume MA
-    start_idx = max(34, 20) + 10  # extra buffer for fractal alignment
+    # Start index: need enough for EMA, Alligator, volume MA
+    start_idx = max(34, 20) + 10  # extra buffer for indicator alignment
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -69,17 +66,20 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_34_1d_aligned[i]
-        bear_fractal = bearish_fractal_aligned[i]  # resistance level
-        bull_fractal = bullish_fractal_aligned[i]  # support level
+        ema_trend = ema_34_1w_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above bearish fractal (resistance) AND volume spike AND price > daily EMA34 (uptrend)
-            long_entry = (curr_close > bear_fractal) and vol_spike and (curr_close > ema_trend)
-            # Short: price breaks below bullish fractal (support) AND volume spike AND price < daily EMA34 (downtrend)
-            short_entry = (curr_close < bull_fractal) and vol_spike and (curr_close < ema_trend)
+            # Long: price breaks above Alligator teeth AND volume spike AND price > weekly EMA34 (uptrend)
+            # Alligator must be aligned (jaws < teeth < lips for uptrend)
+            long_entry = (curr_close > teeth_val) and vol_spike and (curr_close > ema_trend) and (jaw_val < teeth_val < lips_val)
+            # Short: price breaks below Alligator teeth AND volume spike AND price < weekly EMA34 (downtrend)
+            # Alligator must be aligned (jaws > teeth > lips for downtrend)
+            short_entry = (curr_close < teeth_val) and vol_spike and (curr_close < ema_trend) and (jaw_val > teeth_val > lips_val)
             
             if long_entry:
                 signals[i] = 0.25
@@ -91,16 +91,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below bullish fractal (support) OR price crosses below EMA (trend change)
-            if (curr_close < bull_fractal) or (curr_close < ema_trend):
+            # Exit: price crosses below Alligator jaws OR price crosses below weekly EMA (trend change)
+            if (curr_close < jaw_val) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above bearish fractal (resistance) OR price crosses above EMA (trend change)
-            if (curr_close > bear_fractal) or (curr_close > ema_trend):
+            # Exit: price crosses above Alligator lips OR price crosses above weekly EMA (trend change)
+            if (curr_close > lips_val) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsFractal_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_Breakout_1wEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
