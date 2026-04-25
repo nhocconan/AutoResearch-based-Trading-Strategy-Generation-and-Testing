@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v3
+4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v4
 Hypothesis: 4h Camarilla R1/S1 breakouts with 1d EMA50 trend filter and volume spike confirmation.
 Primary timeframe 4h targets 20-50 trades/year (75-200 total over 4 years) to minimize fee drag.
 1d EMA50 provides strong trend alignment that works in both bull and bear markets by filtering counter-trend breakouts.
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v3"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v4"
 timeframe = "4h"
 leverage = 1.0
