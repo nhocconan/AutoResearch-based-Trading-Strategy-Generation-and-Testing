@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrend_1dVolRegime_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 1h with 4h EMA50 trend filter and 1d volume regime filter.
-Only trade long when 4h EMA50 up + 1d volume above average, short when 4h EMA50 down + 1d volume above average.
-Use 1h Camarilla levels from prior 4h bar for structure. Volume filter reduces false breakouts in low volatility.
-Target: 20-50 trades/year to minimize fee drag while capturing high-probability breakouts.
-Discrete sizing: 0.20.
+6h_Donchian20_WeeklyPivot_Direction_v1
+Hypothesis: Trade 6h Donchian(20) breakouts in direction of weekly Camarilla pivot bias.
+Weekly Camarilla pivot (from 1w data) defines trend: price above weekly H3 = bull bias, below L3 = bear bias.
+Only take longs when price breaks above Donchian(20) high AND weekly bias is bull.
+Only take shorts when price breaks below Donchian(20) low AND weekly bias is bear.
+Add volume confirmation (volume > 1.3 * 20-period average volume) to avoid false breakouts.
+Target: 12-25 trades/year to minimize fee drag while capturing sustained moves.
+Discrete sizing: 0.25.
 """
 
 import numpy as np
@@ -22,112 +24,134 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly Camarilla pivot levels (using previous week's OHLC)
+    # HLC of previous week: need to shift by 1 week to avoid look-ahead
+    # We'll calculate pivot for each week using prior week's data
+    # Since we get weekly data aligned, we can compute pivot from weekly OHLC
+    # Camarilla formulas:
+    # Pivot = (high + low + close) / 3
+    # H3 = pivot + (high - low) * 1.1 / 4
+    # L3 = pivot - (high - low) * 1.1 / 4
+    # H4 = pivot + (high - low) * 1.1 / 2
+    # L4 = pivot - (high - low) * 1.1 / 2
     
-    # Calculate prior 4h bar OHLC for Camarilla levels
-    # Camarilla uses prior day's OHLC, but we use prior 4h bar for 1h timeframe
-    prior_4h_high = df_4h['high'].shift(1).values  # prior completed 4h bar
-    prior_4h_low = df_4h['low'].shift(1).values
-    prior_4h_close = df_4h['close'].shift(1).values
+    # We need to use the COMPLETED weekly bar's OHLC to avoid look-ahead
+    # Since df_1w contains historical weekly data, we can compute pivot for each week
+    # and align it to 6h timeframe
     
-    # Calculate Camarilla levels for prior 4h bar
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    camarilla_range = prior_4h_high - prior_4h_low
-    r1 = prior_4h_close + camarilla_range * 1.1 / 12
-    s1 = prior_4h_close - camarilla_range * 1.1 / 12
+    # Calculate pivot levels for each weekly bar
+    wk_high = df_1w['high'].values
+    wk_low = df_1w['low'].values
+    wk_close = df_1w['close'].values
     
-    # Align Camarilla levels to 1h timeframe (delayed by one 4h bar for completion)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    pivot = (wk_high + wk_low + wk_close) / 3.0
+    rng = wk_high - wk_low
+    H3 = pivot + rng * 1.1 / 4.0
+    L3 = pivot - rng * 1.1 / 4.0
+    H4 = pivot + rng * 1.1 / 2.0
+    L4 = pivot - rng * 1.1 / 2.0
     
-    # Get 1d data for volume regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Align weekly pivot levels to 6h timeframe
+    # Each weekly pivot level applies to the entire week until next weekly bar
+    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_1w, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1w, L4)
     
-    # Calculate 1d average volume (20-period SMA)
-    avg_vol_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Calculate Donchian(20) on 6h data
+    lookback = 20
+    # Donchian high: highest high over past 20 bars (including current?)
+    # Standard Donchian breakout: break above highest high of past N bars
+    # We'll use past 20 bars excluding current to avoid look-ahead
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # open_time is already datetime64[ms]
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
+    
+    # For first lookback bars, we don't have enough data
+    # But we'll start trading after lookback period anyway
+    
+    # Calculate average volume for volume confirmation
+    vol_lookback = 20
+    avg_volume = np.full(n, np.nan)
+    for i in range(vol_lookback, n):
+        avg_volume[i] = np.mean(volume[i-vol_lookback:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    # Start index: need warmup for 4h EMA50 (50), Camarilla (need prior 4h bar), 1d avg volume (20)
-    start_idx = max(50, 20) + 1  # +1 for prior 4h bar shift
+    # Start index: need warmup for Donchian (20) and volume avg (20)
+    start_idx = max(lookback, vol_lookback)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(avg_vol_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Volume confirmation: current volume > 1.3 * average volume
+        volume_confirm = volume[i] > 1.3 * avg_volume[i]
         
-        # Volume regime: 1d volume above average (avoid low volatility breakouts)
-        volume_regime = volume[i] > avg_vol_1d_aligned[i]
+        # Determine weekly bias from Camarilla levels
+        # Bull bias: price above weekly H3
+        # Bear bias: price below weekly L3
+        # Neutral: between H3 and L3
+        if close[i] > H3_aligned[i]:
+            weekly_bias = 'bull'
+        elif close[i] < L3_aligned[i]:
+            weekly_bias = 'bear'
+        else:
+            weekly_bias = 'neutral'
         
         if position == 0:
-            # Long setup: price breaks above R1, 4h EMA50 up, volume regime
-            if (close[i] > r1_aligned[i] and 
-                close[i-1] <= r1_aligned[i-1] and  # ensure breakout happened this bar
-                ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] and  # 4h EMA50 rising
-                volume_regime):
-                signals[i] = 0.20
-                position = 1
+            # Long setup: price breaks above Donchian high AND volume confirm AND bull bias
+            long_setup = (close[i] > highest_high[i]) and volume_confirm and (weekly_bias == 'bull')
             
-            # Short setup: price breaks below S1, 4h EMA50 down, volume regime
-            elif (close[i] < s1_aligned[i] and 
-                  close[i-1] >= s1_aligned[i-1] and  # ensure breakdown happened this bar
-                  ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] and  # 4h EMA50 falling
-                  volume_regime):
-                signals[i] = -0.20
+            # Short setup: price breaks below Donchian low AND volume confirm AND bear bias
+            short_setup = (close[i] < lowest_low[i]) and volume_confirm and (weekly_bias == 'bear')
+            
+            if long_setup:
+                signals[i] = 0.25
+                position = 1
+                bars_since_entry = 0
+            elif short_setup:
+                signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
-        
+                bars_since_entry = 0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.20
-            # Exit: price breaks below S1 OR 4h EMA50 turns down OR end of session
-            if (close[i] < s1_aligned[i] or 
-                ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] or
-                hour >= 20):  # force exit before session end
+            signals[i] = 0.25
+            bars_since_entry += 1
+            # Exit: price closes below Donchian low OR bear bias OR max holding period (20 bars = ~5 days)
+            if (close[i] < lowest_low[i]) or (weekly_bias == 'bear') or (bars_since_entry >= 20):
                 signals[i] = 0.0
                 position = 0
-        
+                bars_since_entry = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.20
-            # Exit: price breaks above R1 OR 4h EMA50 turns up OR end of session
-            if (close[i] > r1_aligned[i] or 
-                ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] or
-                hour >= 20):  # force exit before session end
+            signals[i] = -0.25
+            bars_since_entry += 1
+            # Exit: price closes above Donchian high OR bull bias OR max holding period (20 bars = ~5 days)
+            if (close[i] > highest_high[i]) or (weekly_bias == 'bull') or (bars_since_entry >= 20):
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolRegime_v1"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_Direction_v1"
+timeframe = "6h"
 leverage = 1.0
