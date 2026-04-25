@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Donchian channel breakouts capture strong momentum. 1d EMA34 filter ensures alignment with higher timeframe trend (works in bull/bear: longs in uptrend, shorts in downtrend). Volume spike confirms institutional participation. Discrete sizing (0.30) balances return and fee drag. Target: 20-50 trades/year (80-200 over 4 years).
+12h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Donchian channel breakouts capture strong momentum on 12h timeframe. 1d EMA34 filter ensures alignment with higher timeframe trend (works in bull/bear: longs in uptrend, shorts in downtrend). Volume spike confirms institutional participation. Target: 12-37 trades/year (50-150 over 4 years) with discrete sizing (0.30) to minimize fee drag.
 """
 
 import numpy as np
@@ -28,7 +28,6 @@ def generate_signals(prices):
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Donchian channels (20-period) from prior periods (no look-ahead)
-    # Upper = max(high of last 20 periods), Lower = min(low of last 20 periods)
     donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
@@ -112,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
