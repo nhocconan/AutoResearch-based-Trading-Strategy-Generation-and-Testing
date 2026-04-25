@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe act as key support/resistance on 12h chart. 
-A break of these levels with volume spike and alignment with 1d EMA34 trend captures strong momentum moves. 
-Uses discrete position sizing (0.25) to limit fee drag and drawdown. Designed to work in both bull and bear markets 
-by trading breakouts in direction of higher timeframe trend.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: Camarilla pivot levels (R1/S1) from 1d act as key support/resistance. A break of these levels with volume spike and alignment with 1d EMA34 trend captures strong momentum moves. Works in bull markets (breakouts continuation) and bear markets (breakdown continuation). Uses discrete position sizing (0.25) to limit fee drag and drawdown.
 """
 
 import numpy as np
@@ -46,12 +43,12 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to LTF (12h)
+    # Align HTF indicators to LTF (4h)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h volume spike: current volume > 2.0 * 20-period volume MA
+    # 4h volume spike: current volume > 2.0 * 20-period volume MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_ma_20)
     
@@ -102,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
