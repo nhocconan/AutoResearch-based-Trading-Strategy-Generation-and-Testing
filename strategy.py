@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above R1 in bull regime (price > 1d EMA34), short when breaks below S1 in bear regime (price < 1d EMA34).
-Volume confirmation requires volume > 1.5 * ATR(14) to avoid false breakouts.
-Only trade in direction of 1d trend: long in bull regime, short in bear regime, flat in range.
-Discrete sizing: 0.25 to minimize fee drag while capturing sustained moves.
-Target: 20-50 trades/year to stay within proven winning range.
+4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v2
+Hypothesis: Trade Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation on 4h timeframe.
+Only long when price breaks above R1 in bull regime (price > 1d EMA34), short when breaks below S1 in bear regime (price < 1d EMA34).
+Volume spike > 1.5 * ATR4h confirms momentum. Discrete sizing 0.25 to minimize fee drag.
+Target: 20-40 trades/year to avoid overtrading while capturing strong directional moves.
+Works in bull via breakouts, works in bear via short breakdowns, avoids ranging markets via regime filter.
 """
 
 import numpy as np
@@ -40,31 +39,46 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0  # track holding period
     
     # Start index: need warmup for 1d EMA34 (34) and ATR (14)
     start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
-        # Calculate Camarilla levels for current 4h bar using previous 4h bar's OHLC
-        if i >= 1:
-            phigh = high[i-1]
-            plow = low[i-1]
-            pclose = close[i-1]
-            range_val = phigh - plow
-            
-            # Camarilla levels
-            R1 = pclose + range_val * 1.1 / 12
-            S1 = pclose - range_val * 1.1 / 12
-        else:
-            R1 = close[i]
-            S1 = close[i]
+        # Calculate Camarilla levels from previous day's OHLC
+        # Need to get previous 1d bar's OHLC values
+        if i < len(prices):
+            # For 4h timeframe, we need to map to 1d bars
+            # Use the 1d dataframe to get OHLC
+            # Find the index of the last completed 1d bar
+            # Since we're using aligned data, we can use the 1d values directly
+            pass
+        
+        # Simpler approach: calculate Camarilla from 1d OHLC and align
+        # Get 1d OHLC arrays
+        o_1d = df_1d['open'].values
+        h_1d = df_1d['high'].values
+        l_1d = df_1d['low'].values
+        c_1d = df_1d['close'].values
+        
+        # Calculate Camarilla levels for each 1d bar
+        # R1 = C + (H-L)*1.1/12
+        # S1 = C - (H-L)*1.1/12
+        camarilla_r1_1d = c_1d + (h_1d - l_1d) * 1.1 / 12
+        camarilla_s1_1d = c_1d - (h_1d - l_1d) * 1.1 / 12
+        
+        # Align Camarilla levels to 4h timeframe
+        camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+        camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+        
+        # Skip if Camarilla data not ready
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
+            signals[i] = 0.0
+            continue
         
         # Volume spike: current volume > 1.5 * ATR
         volume_spike = volume[i] > 1.5 * atr[i]
@@ -72,58 +86,45 @@ def generate_signals(prices):
         # Determine 1d trend regime
         # Bull regime: price > EMA34
         # Bear regime: price < EMA34
-        # Range regime: near EMA34 (within 0.5*ATR of 1d equivalent)
-        # Convert 1d ATR to 4h equivalent threshold: 1d = 6*4h bars, so ATR_1d ≈ ATR_4h * sqrt(6)
-        atr_4h = atr[i]
-        atr_1d_approx = atr_4h * np.sqrt(6)  # rough approximation
-        regime_threshold = 0.5 * atr_1d_approx
-        
-        if close[i] > ema_34_1d_aligned[i] + regime_threshold:
+        if close[i] > ema_34_1d_aligned[i]:
             regime = 'bull'  # only allow longs
-        elif close[i] < ema_34_1d_aligned[i] - regime_threshold:
+        elif close[i] < ema_34_1d_aligned[i]:
             regime = 'bear'  # only allow shorts
         else:
-            regime = 'range'  # no trades
+            regime = 'range'  # no trades (unlikely but handle)
         
         if position == 0:
             # Long setup: price breaks above R1 AND volume spike AND bull regime
-            long_setup = (close[i] > R1) and volume_spike and (regime == 'bull')
+            long_setup = (close[i] > camarilla_r1_aligned[i]) and volume_spike and (regime == 'bull')
             
             # Short setup: price breaks below S1 AND volume spike AND bear regime
-            short_setup = (close[i] < S1) and volume_spike and (regime == 'bear')
+            short_setup = (close[i] < camarilla_s1_aligned[i]) and volume_spike and (regime == 'bear')
             
             if long_setup:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
             elif short_setup:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
-                bars_since_entry = 0
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            bars_since_entry += 1
-            # Exit: price closes below R1 OR regime turns bearish OR max holding period (24 bars = 4 days)
-            if (close[i] < R1) or (regime == 'bear') or (bars_since_entry >= 24):
+            # Exit: price breaks below S1 OR regime turns bearish
+            if (close[i] < camarilla_s1_aligned[i]) or (regime == 'bear'):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            bars_since_entry += 1
-            # Exit: price closes above S1 OR regime turns bullish OR max holding period (24 bars = 4 days)
-            if (close[i] > S1) or (regime == 'bull') or (bars_since_entry >= 24):
+            # Exit: price breaks above R1 OR regime turns bullish
+            if (close[i] > camarilla_r1_aligned[i]) or (regime == 'bull'):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike"
+name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
