@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Williams Alligator + 1w EMA50 Trend + Volume Spike
-Hypothesis: Williams Alligator identifies trend presence and direction via smoothed medians (Jaw/Teeth/Lips). 
-1w EMA50 filters for primary trend alignment to avoid counter-trend trades. Volume spike confirms institutional participation.
-Works in bull via buying when Lips > Teeth > Jaw (bullish alignment) and price > 1w EMA50. 
-Works in bear via selling when Lips < Teeth < Jaw (bearish alignment) and price < 1w EMA50.
-Uses discrete position sizing (0.25) to control drawdown and minimize fee churn.
-Target: 12-37 trades/year on 12h (50-150 total over 4 years).
+4h Camarilla H3/L3 Breakout + 1w EMA50 Trend + Volume Spike + Chop Filter
+Hypothesis: Camarilla pivot levels (H3/L3) act as institutional support/resistance. 
+Breakouts above H3 or below L3 with 1w EMA50 trend alignment capture strong momentum. 
+Volume spike confirms institutional participation. Chop filter (CHOP > 61.8) avoids ranging markets. 
+Works in bull markets via buying H3 breakouts, bear markets via selling L3 breakdowns. 
+Discrete position sizing (0.25) controls drawdown. Target: 19-50 trades/year on 4h.
 """
 
 import numpy as np
@@ -23,6 +22,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get 1d data for Camarilla pivot calculation (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    camarilla_h3 = np.zeros(n)
+    camarilla_l3 = np.zeros(n)
+    for i in range(n):
+        if i == 0:
+            camarilla_h3[i] = 0.0
+            camarilla_l3[i] = 0.0
+        else:
+            # Use previous 1d bar's OHLC (aligned to current 4h bar)
+            idx_1d = i // 96  # Approximate: 96 * 15m = 24h, but we use HTF alignment properly below
+            # Instead, we'll compute daily and align properly
+            camarilla_h3[i] = 0.0
+            camarilla_l3[i] = 0.0
+    
+    # Proper MTF: compute Camarilla on 1d data then align
+    if len(df_1d) >= 1:
+        # Calculate Camarilla levels for each 1d bar
+        camarilla_h3_1d = np.zeros(len(df_1d))
+        camarilla_l3_1d = np.zeros(len(df_1d))
+        for j in range(len(df_1d)):
+            if j == 0:
+                camarilla_h3_1d[j] = 0.0
+                camarilla_l3_1d[j] = 0.0
+            else:
+                high_prev = df_1d['high'].iloc[j-1]
+                low_prev = df_1d['low'].iloc[j-1]
+                close_prev = df_1d['close'].iloc[j-1]
+                range_prev = high_prev - low_prev
+                camarilla_h3_1d[j] = close_prev + range_prev * 1.1 / 4
+                camarilla_l3_1d[j] = close_prev - range_prev * 1.1 / 4
+        
+        # Align to 4h timeframe
+        camarilla_h3 = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
+        camarilla_l3 = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
+    
     # Get 1w data for EMA50 trend filter (call ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
@@ -34,38 +73,18 @@ def generate_signals(prices):
     
     # Calculate ATR(14) for stoploss
     if len(close) >= 14:
-        tr1 = pd.Series(high).diff().abs()
-        tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
-        tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=14, min_periods=14).mean().values
+        tr1 = np.abs(np.diff(high, prepend=high[0]))
+        tr2 = np.abs(np.diff(close, prepend=close[0]))
+        tr3 = np.abs(np.diff(low, prepend=low[0]))
+        tr = np.maximum(np.maximum(tr1, tr2), tr3)
+        atr = np.zeros(n)
+        for i in range(n):
+            if i < 13:
+                atr[i] = 0.0
+            else:
+                atr[i] = np.mean(tr[max(0, i-13):i+1])
     else:
-        atr = np.full(n, 0.0)
-    
-    # Williams Alligator: Smoothed medians (Jaw=13, Teeth=8, Lips=5)
-    # Median price = (high + low) / 2
-    median_price = (high + low) / 2.0
-    
-    # Jaw (13-period SMMA of median)
-    jaw = np.full(n, np.nan)
-    if n >= 13:
-        jaw[12] = np.mean(median_price[:13])
-        for i in range(13, n):
-            jaw[i] = (jaw[i-1] * 12 + median_price[i]) / 13
-    
-    # Teeth (8-period SMMA of median)
-    teeth = np.full(n, np.nan)
-    if n >= 8:
-        teeth[7] = np.mean(median_price[:8])
-        for i in range(8, n):
-            teeth[i] = (teeth[i-1] * 7 + median_price[i]) / 8
-    
-    # Lips (5-period SMMA of median)
-    lips = np.full(n, np.nan)
-    if n >= 5:
-        lips[4] = np.mean(median_price[:5])
-        for i in range(5, n):
-            lips[i] = (lips[i-1] * 4 + median_price[i]) / 5
+        atr = np.zeros(n)
     
     # Pre-compute 20-period volume MA for volume spike detection
     vol_ma_20 = np.zeros(n)
@@ -73,18 +92,49 @@ def generate_signals(prices):
         start_idx = max(0, i - 19)
         vol_ma_20[i] = np.mean(volume[start_idx:i+1])
     
+    # Calculate Choppiness Index (14) for regime filter
+    chop = np.full(n, 50.0)  # default to neutral
+    if n >= 14:
+        # Calculate True Range
+        tr1 = np.abs(high - low)
+        tr2 = np.abs(np.subtract(high, np.concatenate([[close[0]], close[:-1]])))
+        tr3 = np.abs(np.subtract(low, np.concatenate([[close[0]], close[:-1]])))
+        tr = np.maximum(np.maximum(tr1, tr2), tr3)
+        
+        # Calculate ATR sum for CHOP denominator
+        atr_sum = np.zeros(n)
+        for i in range(n):
+            if i < 13:
+                atr_sum[i] = 0.0
+            else:
+                atr_sum[i] = np.sum(tr[max(0, i-13):i+1])
+        
+        # Calculate highest high and lowest low over 14 periods
+        hh = np.zeros(n)
+        ll = np.zeros(n)
+        for i in range(n):
+            start_idx = max(0, i - 13)
+            hh[i] = np.max(high[start_idx:i+1])
+            ll[i] = np.min(low[start_idx:i+1])
+        
+        # Calculate Choppiness Index
+        for i in range(n):
+            if i >= 13 and atr_sum[i] > 0 and hh[i] > ll[i]:
+                chop[i] = 100 * np.log10(atr_sum[i] / (hh[i] - ll[i])) / np.log10(14)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for Alligator (13) and EMA50 to propagate
+    # Start index: need enough for indicators to propagate
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(atr[i]) or
-            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i])):
+            np.isnan(chop[i]) or
+            camarilla_h3[i] == 0.0 or camarilla_l3[i] == 0.0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,22 +147,19 @@ def generate_signals(prices):
         ema_50 = ema_50_1w_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        chop_val = chop[i]
         
         # Volume spike: current volume > 2.0 * 20-period average
         volume_spike = curr_volume > 2.0 * vol_ma
         
-        # Alligator signals: Bullish when Lips > Teeth > Jaw, Bearish when Lips < Teeth < Jaw
-        bullish_alligator = lips_val > teeth_val and teeth_val > jaw_val
-        bearish_alligator = lips_val < teeth_val and teeth_val < jaw_val
+        # Chop filter: avoid extreme chop (CHOP > 61.8) - ranging markets
+        chop_filter = chop_val < 61.8
         
         if position == 0:
-            # Long: Bullish Alligator AND price > 1w EMA50 AND volume spike
-            long_condition = bullish_alligator and curr_close > ema_50 and volume_spike
-            # Short: Bearish Alligator AND price < 1w EMA50 AND volume spike
-            short_condition = bearish_alligator and curr_close < ema_50 and volume_spike
+            # Long: break above Camarilla H3 AND uptrend AND volume spike AND chop filter
+            long_condition = curr_close > camarilla_h3[i] and curr_close > ema_50 and volume_spike and chop_filter
+            # Short: break below Camarilla L3 AND downtrend AND volume spike AND chop filter
+            short_condition = curr_close < camarilla_l3[i] and curr_close < ema_50 and volume_spike and chop_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -123,15 +170,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or Alligator turns bearish or price < 1w EMA50
-            if curr_close <= entry_price - 2.0 * atr_val or not bullish_alligator or curr_close < ema_50:
+            # Exit long: stoploss (2.0*ATR below entry) or price falls below EMA50 or chop becomes extreme
+            if curr_close <= entry_price - 2.0 * atr_val or curr_close < ema_50 or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or Alligator turns bullish or price > 1w EMA50
-            if curr_close >= entry_price + 2.0 * atr_val or not bearish_alligator or curr_close > ema_50:
+            # Exit short: stoploss (2.0*ATR above entry) or price rises above EMA50 or chop becomes extreme
+            if curr_close >= entry_price + 2.0 * atr_val or curr_close > ema_50 or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +186,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
