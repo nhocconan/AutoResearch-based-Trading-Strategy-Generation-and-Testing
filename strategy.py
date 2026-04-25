@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout with 1d EMA34 Trend Filter and Volume Spike + Chop Filter
-Hypothesis: Donchian(20) breakouts capture strong momentum. When aligned with 1d EMA34 trend,
-confirmed by volume spikes, and filtered by choppiness regime (CHOP > 61.8 for mean reversion),
-this strategy avoids false breakouts and works in both bull (long breakouts) and bear (short breakouts)
-regimes. Uses discrete position sizing (0.30) to minimize fee churn and targets 20-50 trades/year.
+12h Donchian(20) Breakout with 1w EMA50 Trend Filter and Volume Spike
+Hypothesis: Donchian(20) breakouts capture strong momentum. When aligned with 1w EMA50 trend and confirmed by volume spikes,
+this filters false breakouts and works in both bull (long breakouts) and bear (short breakouts) regimes.
+Designed for 12h timeframe to target 12-37 trades/year (50-150 over 4 years) by requiring confluence of
+Donchian breakout, 1w EMA50 trend, and volume confirmation, reducing overtrading and fee drag.
 """
 
 import numpy as np
@@ -21,16 +21,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1w EMA50 for trend filter
+    ema_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Donchian(20) channels on primary timeframe (4h)
+    # Donchian(20) channels on primary timeframe (12h)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
@@ -40,26 +40,16 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # Choppiness Index filter: CHOP(14) > 61.8 = ranging market (good for mean reversion exits)
-    # We use CHOP to avoid trading in strong trends where breakouts may fail
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First TR
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr14 * 14 / (highest_high - lowest_low)) / np.log10(14)
-    chop_filter = chop > 61.8  # Only trade when choppy (ranging) market
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian(20), EMA34, and CHOP
-    start_idx = max(20, 34, 14)  # Donchian lookback, EMA34, CHOP
+    # Start index: need enough for Donchian(20) and EMA50
+    start_idx = max(20, 50)  # Donchian lookback, EMA50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -67,18 +57,17 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         vol_spike = volume_spike[i]
-        is_choppy = chop_filter[i]
         
-        # Trend filter: price relative to 1d EMA34
-        bullish_bias = curr_close > ema_1d_aligned[i]
-        bearish_bias = curr_close < ema_1d_aligned[i]
+        # Trend filter: price relative to 1w EMA50
+        bullish_bias = curr_close > ema_1w_aligned[i]
+        bearish_bias = curr_close < ema_1w_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require ALL conditions: Donchian breakout + trend + volume + chop
-            # Long: price breaks above Donchian upper AND bullish bias AND volume spike AND choppy market
-            long_entry = (curr_high > donchian_upper[i]) and bullish_bias and vol_spike and is_choppy
-            # Short: price breaks below Donchian lower AND bearish bias AND volume spike AND choppy market
-            short_entry = (curr_low < donchian_lower[i]) and bearish_bias and vol_spike and is_choppy
+            # Look for entry signals - require ALL conditions: Donchian breakout + trend + volume
+            # Long: price breaks above Donchian upper AND bullish bias AND volume spike
+            long_entry = (curr_high > donchian_upper[i]) and bullish_bias and vol_spike
+            # Short: price breaks below Donchian lower AND bearish bias AND volume spike
+            short_entry = (curr_low < donchian_lower[i]) and bearish_bias and vol_spike
             
             if long_entry:
                 signals[i] = 0.30
@@ -90,16 +79,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below Donchian lower (mean reversion) OR loss of bullish bias OR chop drops (trending)
-            if (curr_low < donchian_lower[i]) or (curr_close < ema_1d_aligned[i]) or (not is_choppy):
+            # Exit: price falls below Donchian lower (mean reversion) OR loss of bullish bias
+            if (curr_low < donchian_lower[i]) or (curr_close < ema_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
             # Short position management
-            # Exit: price rises above Donchian upper (mean reversion) OR loss of bearish bias OR chop drops (trending)
-            if (curr_high > donchian_upper[i]) or (curr_close > ema_1d_aligned[i]) or (not is_choppy):
+            # Exit: price rises above Donchian upper (mean reversion) OR loss of bearish bias
+            if (curr_high > donchian_upper[i]) or (curr_close > ema_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
