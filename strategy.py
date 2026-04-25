@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike with ATR Trailing Stop
-Hypothesis: Camarilla H3/L3 levels on 12h timeframe provide stronger support/resistance 
-than lower timeframes, reducing false breakouts. Combined with daily EMA34 trend filter 
-and volume confirmation, this strategy targets 50-150 trades over 4 years (12-37/year) 
-to minimize fee drag. Works in bull markets (trend continuation) and bear markets 
-(mean reversion to pivot levels) by using ATR-based trailing stop for risk control.
-Primary timeframe: 12h, HTF: 1d for EMA34 trend.
+4h TRIX + Volume Spike + Choppiness Regime Filter
+Hypothesis: TRIX (Triple Exponential Average) identifies momentum shifts with less lag than MACD.
+Combined with volume confirmation to avoid false breakouts and choppiness regime filter (CHOP > 61.8 for mean reversion,
+CHOP < 38.2 for trend following) to adapt to market conditions. Uses 1d EMA50 for higher-timeframe trend alignment.
+Designed for low trade frequency (target: 20-50/year) to minimize fee drag while capturing strong moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,117 +12,125 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def calculate_ema(series, period):
-    """Calculate Exponential Moving Average"""
+    """Calculate Exponential Moving Average with min_periods"""
     if len(series) < period:
         return np.full_like(series, np.nan)
     return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
     
-    # Daily data for EMA34 trend (loaded ONCE)
+    # Daily data for EMA50 trend (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily EMA34 trend filter
-    ema_34_1d = calculate_ema(df_1d['close'].values, 34)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily EMA50 trend filter
+    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h data for Camarilla pivots (using previous bar)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # TRIX calculation (15-period)
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15)
+    ema1 = calculate_ema(close, 15)
+    ema2 = calculate_ema(ema1, 15)
+    ema3 = calculate_ema(ema2, 15)
+    # Avoid division by zero
+    ema3_prev = np.roll(ema3, 1)
+    ema3_prev[0] = ema3[0] if not np.isnan(ema3[0]) else 0
+    trix = 100 * (ema3 - ema3_prev) / ema3_prev
+    trix[0] = 0
     
-    prev_range = prev_high - prev_low
-    camarilla_h3 = prev_close + 1.1 * prev_range / 4
-    camarilla_l3 = prev_close - 1.1 * prev_range / 4
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_signal = calculate_ema(trix, 9)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
-    # ATR for trailing stop (14-period)
+    # Choppiness Index (14-period)
+    # CHOP = 100 * log10(sum(ATR(1)) / (n * log(n))) / log10(n)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr1 = tr  # ATR(1) is just true range
+    atr_sum = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    n_val = 14
+    log_n = np.log10(n_val)
+    chop = 100 * (np.log10(atr_sum) - log_n * np.log10(n_val)) / log_n
+    # Handle edge cases
+    chop = np.where((atr_sum > 0) & (n_val > 1), chop, 50.0)  # default to 50 (neutral)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
-    # Start index: need enough for EMA and volume MA
-    start_idx = max(34, 20, 14) + 5
+    # Start index: need enough for TRIX, EMA, volume MA, CHOP
+    start_idx = max(15*3 + 9, 50, 20, 14) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        vol_spike = volume_spike[i]
-        
-        # Breakout conditions
-        breakout_long = curr_close > camarilla_h3[i]
-        breakout_short = curr_close < camarilla_l3[i]
+        # Regime-based logic
+        # CHOP > 61.8 = ranging market (mean reversion)
+        # CHOP < 38.2 = trending market (trend following)
+        is_ranging = chop[i] > 61.8
+        is_trending = chop[i] < 38.2
         
         if position == 0:
-            # Look for entry signals - require: Camarilla breakout + volume spike + daily EMA34 trend alignment
-            long_entry = breakout_long and vol_spike and (curr_close > ema_34_1d_aligned[i])
-            short_entry = breakout_short and vol_spike and (curr_close < ema_34_1d_aligned[i])
+            # Look for entry signals
+            if is_ranging:
+                # In ranging market: mean reversion at extremes
+                # Long when TRIX crosses above signal AND TRIX is negative (oversold)
+                # Short when TRIX crosses below signal AND TRIX is positive (overbought)
+                trix_cross_above = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]
+                trix_cross_below = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]
+                
+                long_entry = trix_cross_above and (trix[i] < 0) and volume_spike[i]
+                short_entry = trix_cross_below and (trix[i] > 0) and volume_spike[i]
+            else:  # trending or neutral
+                # In trending market: follow TRIX momentum
+                # Long when TRIX crosses above signal with volume spike
+                # Short when TRIX crosses below signal with volume spike
+                trix_cross_above = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]
+                trix_cross_below = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]
+                
+                long_entry = trix_cross_above and volume_spike[i] and (close[i] > ema_50_1d_aligned[i])
+                short_entry = trix_cross_below and volume_spike[i] and (close[i] < ema_50_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                highest_high_since_entry = curr_high
-                lowest_low_since_entry = curr_low
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                highest_high_since_entry = curr_high
-                lowest_low_since_entry = curr_low
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: update highest high and check exit conditions
-            highest_high_since_entry = max(highest_high_since_entry, curr_high)
-            lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
+            # Long position: exit when TRIX crosses below signal OR trend change
+            trix_cross_below = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]
+            trend_change = close[i] < ema_50_1d_aligned[i]
             
-            # Exit conditions: retrace to L3, trend change, or ATR trailing stop
-            trailing_stop = highest_high_since_entry - 2.5 * atr[i]
-            if curr_close < camarilla_l3[i] or curr_close < ema_34_1d_aligned[i] or curr_close < trailing_stop:
+            if trix_cross_below or trend_change:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: update lowest low and check exit conditions
-            highest_high_since_entry = max(highest_high_since_entry, curr_high)
-            lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
+            # Short position: exit when TRIX crosses above signal OR trend change
+            trix_cross_above = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]
+            trend_change = close[i] > ema_50_1d_aligned[i]
             
-            # Exit conditions: retrace to H3, trend change, or ATR trailing stop
-            trailing_stop = lowest_low_since_entry + 2.5 * atr[i]
-            if curr_close > camarilla_h3[i] or curr_close > ema_34_1d_aligned[i] or curr_close > trailing_stop:
+            if trix_cross_above or trend_change:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopRegime_1dEMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
