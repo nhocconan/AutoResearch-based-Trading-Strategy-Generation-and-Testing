@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v10
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts in direction of daily EMA34 trend with volume confirmation.
-Uses ATR-scaled volume threshold (2.0 * ATR) and ATR-based stoploss to reduce overtrading.
-Only long when price breaks above Camarilla R1 AND daily close > daily EMA34 AND volume > 2.0 * ATR14.
-Only short when price breaks below Camarilla S1 AND daily close < daily EMA34 AND volume > 2.0 * ATR14.
-Exit on opposite Camarilla level break or trend reversal. Discrete sizing 0.25 to limit fee drag.
-Target: 20-40 trades/year to avoid fee drag while maintaining edge.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v11
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts aligned with daily EMA34 trend and volume spike (volume > 2.0 * ATR14).
+Uses ATR-scaled volume threshold to reduce noise and overtrading. Discrete sizing 0.25 to limit fee drag.
+Target: 20-40 trades/year to avoid fee drag while maintaining edge. Works in bull/bear via trend filter.
 """
 
 import numpy as np
@@ -122,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v10"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v11"
 timeframe = "4h"
 leverage = 1.0
