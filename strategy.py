@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + 1w EMA34 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Daily Donchian breakouts capture major trend moves. 1w EMA34 filter ensures alignment with weekly trend to avoid counter-trend trades. Volume confirmation (>2x 20-period volume MA) filters false breakouts. ATR-based stoploss (2x ATR) manages risk. Designed for 1d timeframe targeting 30-100 total trades over 4 years. Works in both bull and bear markets via weekly trend filter and volume confirmation.
+4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Donchian channel breakouts capture strong momentum. 
+1d EMA34 filter ensures alignment with daily trend to avoid counter-trend trades.
+Volume confirmation (>2x 20-period volume MA) reduces false breakouts.
+ATR-based stoploss (2x ATR) manages risk. Designed for 4h timeframe targeting 75-200 total trades over 4 years.
+Works in both bull and bear markets via daily trend filter and volume confirmation to reduce false breakouts.
 """
 
 import numpy as np
@@ -18,29 +22,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:  # Need at least 34 weeks for EMA34
+    # Get 1d data for EMA34 trend (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:  # Need at least 34 days for EMA34
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = pd.Series(df_1w['close'])
-    ema_34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 20-period Donchian channels (1d)
+    # Calculate 20-period Donchian channels (4h)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
         donchian_high[i] = np.max(high[i-19:i+1])
         donchian_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate 20-period volume MA for volume spike confirmation (1d)
+    # Calculate 20-period volume MA for volume spike confirmation (4h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Calculate ATR(14) for stoploss (1d)
+    # Calculate ATR(14) for stoploss (4h)
     atr = np.full(n, np.nan)
     tr = np.zeros(n)
     for i in range(1, n):
@@ -57,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,13 +72,13 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_34_val = ema_34_1w_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         donchian_high_val = donchian_high[i]
         donchian_low_val = donchian_low[i]
         vol_ma = vol_ma_20[i]
         atr_val = atr[i]
         
-        # Trend filter: price relative to 1w EMA34
+        # Trend filter: price relative to 1d EMA34
         uptrend = curr_close > ema_34_val
         downtrend = curr_close < ema_34_val
         
@@ -121,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_Breakout_1wEMA34_Trend_VolumeSpike"
-timeframe = "1d"
+name = "4h_Donchian_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
