@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dATR_Trend_VolumeSp
-Hypothesis: Trade Donchian(20) breakouts on 4h with 1d ATR-based trend filter and volume confirmation.
-Uses 1d ATR to define trend strength (ATR rising = trending market) and reduce false breakouts in choppy/low-vol regimes.
-Volume confirmation ensures breakouts have conviction. Discrete sizing (0.25) limits fee drag.
-Designed to work in both bull and bear markets by filtering for trending conditions via rising ATR.
-Target: 20-50 trades/year per symbol.
+1d_Camarilla_H3L3_Breakout_1wTrendFilter_VolumeConfirm_v1
+Hypothesis: Trade Camarilla H3/L3 breakouts on 1d with 1w EMA34 trend filter and volume confirmation.
+Uses weekly trend to capture major market direction, reducing false breakouts in choppy markets.
+Discrete sizing (0.25) limits fee drag. Designed to work in both bull and bear markets by aligning with 1w trend.
+Target: 7-25 trades/year per symbol (30-100 total over 4 years).
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,58 +21,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter (ATR-based)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for trend filter
+    # Calculate 1w EMA34 for HTF trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Get 1d data for Camarilla pivots (same timeframe as primary)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_vals = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    camarilla_h3 = close_1d_vals + 1.1 * (high_1d - low_1d) / 4
+    camarilla_l3 = close_1d_vals - 1.1 * (high_1d - low_1d) / 4
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Trend filter: ATR rising (current > previous) indicates strengthening trend
-    atr_rising = atr_14_1d > np.roll(atr_14_1d, 1)
-    atr_rising[0] = False  # first bar undefined
-    atr_rising_aligned = align_htf_to_ltf(prices, df_1d, atr_rising)
-    
-    # Calculate Donchian(20) on 4h
-    donchian_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for Donchian(20), volume MA(20), and ATR(14) -> need 20 bars
-    start_idx = 20
+    # Start index: need warmup for EMA34 (34) and volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_rising_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        # Determine 1w HTF trend (bullish = price above EMA34)
+        htf_1w_bullish = close[i] > ema_34_1w_aligned[i]
+        htf_1w_bearish = close[i] < ema_34_1w_aligned[i]
+        
         if position == 0:
-            # Long setup: price breaks above Donchian H + ATR rising (trending up) + volume confirmation
-            long_setup = (close[i] > donchian_h[i]) and atr_rising_aligned[i] and volume_confirm[i]
+            # Long setup: price breaks above H3 + 1w uptrend + volume confirmation
+            long_setup = (close[i] > camarilla_h3_aligned[i]) and htf_1w_bullish and volume_confirm[i]
             
-            # Short setup: price breaks below Donchian L + ATR rising (trending down) + volume confirmation
-            short_setup = (close[i] < donchian_l[i]) and atr_rising_aligned[i] and volume_confirm[i]
+            # Short setup: price breaks below L3 + 1w downtrend + volume confirmation
+            short_setup = (close[i] < camarilla_l3_aligned[i]) and htf_1w_bearish and volume_confirm[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -86,20 +86,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches Donchian L (stop) OR ATR stops rising (trend weakening)
-            if (close[i] <= donchian_l[i]) or (not atr_rising_aligned[i]):
+            # Exit: price touches L3 (stop) OR 1w trend turns bearish
+            if (close[i] <= camarilla_l3_aligned[i]) or (not htf_1w_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches Donchian H (stop) OR ATR stops rising (trend weakening)
-            if (close[i] >= donchian_h[i]) or (not atr_rising_aligned[i]):
+            # Exit: price touches H3 (stop) OR 1w trend turns bullish
+            if (close[i] >= camarilla_h3_aligned[i]) or (htf_1w_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dATR_Trend_VolumeSp"
-timeframe = "4h"
+name = "1d_Camarilla_H3L3_Breakout_1wTrendFilter_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
