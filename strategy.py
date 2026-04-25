@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v2
-Hypothesis: 12h timeframe with Camarilla H3/L3 breakouts, filtered by 1d EMA34 trend and volume spikes (>2.0x 20-bar average).
+4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop
+Hypothesis: 4h timeframe with Camarilla H3/L3 breakouts, filtered by 1d EMA34 trend and volume spikes (>2.0x 20-bar average).
 ATR-based stoploss (3.0x ATR) and minimum 2-bar holding period reduce whipsaw.
-Added volume confirmation refinement: require volume > 1.5x 50-bar average to avoid false breakouts.
-Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag and improve generalization.
+Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag and improve generalization.
 Works in bull markets via breakout continuation and in bear markets via failed breakout reversals.
+BTC/ETH focus with proven Camarilla structure + volume confirmation edge.
 """
 
 import numpy as np
@@ -39,13 +39,13 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 4
     l3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (completed 1d bar)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Volume spike: current volume > 1.5 * 50-period average (stricter threshold to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    # Volume spike: current volume > 2.0 * 20-period average (balanced threshold)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     # ATR for stoploss calculation
     tr0 = np.abs(high - low)
@@ -59,8 +59,8 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    # Start index: need enough for 1d EMA (34), volume MA (50), ATR (14)
-    start_idx = max(34, 50, 14)
+    # Start index: need enough for 1d EMA (34), volume MA (20), ATR (14)
+    start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         bars_since_entry += 1
@@ -102,7 +102,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: minimum holding period + exit conditions
-            if bars_since_entry < 2:  # Minimum 2 bars (24h) holding period
+            if bars_since_entry < 2:  # Minimum 2 bars (8h) holding period
                 signals[i] = 0.25
             else:
                 # Exit when price closes below Camarilla H3 (failed breakout) 
@@ -115,7 +115,7 @@ def generate_signals(prices):
                     signals[i] = 0.25
         elif position == -1:
             # Short position: minimum holding period + exit conditions
-            if bars_since_entry < 2:  # Minimum 2 bars (24h) holding period
+            if bars_since_entry < 2:  # Minimum 2 bars (8h) holding period
                 signals[i] = -0.25
             else:
                 # Exit when price closes above Camarilla L3 (failed breakout) 
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v2"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
