@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Donchian channel breakouts capture multi-day momentum in BTC/ETH. The 1d EMA34 filter ensures alignment with higher timeframe trend, working in both bull/bear markets. Volume confirmation filters false breakouts. 12h timeframe targets 12-37 trades/year to minimize fee drag while capturing significant moves. ATR-based stoploss manages risk.
+4h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Camarilla H3/L3 levels act as key intraday support/resistance where institutional order flow clusters.
+Breaking above H3 with volume and daily uptrend signals bullish momentum; breaking below L3 with volume and daily downtrend signals bearish momentum.
+The 4h timeframe targets 20-50 trades/year to minimize fee drag while capturing multi-day swings. Daily EMA34 filter ensures alignment with higher timeframe trend.
 """
 
 import numpy as np
@@ -29,42 +31,46 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    atr = np.zeros(n)  # ATR for stoploss
     
-    # Calculate ATR(14) for stoploss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    for i in range(14, n):
-        atr[i] = np.nanmean(tr[i-13:i+1])
-    
-    # Start index: need enough for Donchian(20) and ATR(14) warmup
-    start_idx = max(20, 14)
+    # Start index: need enough for EMA34 warmup
+    start_idx = 34
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(atr[i])):
+        # Skip if EMA data not ready
+        if np.isnan(ema_34_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Calculate Camarilla levels from previous day's OHLC
+        # Camarilla uses previous day's range
+        prev_day_idx = i - 1  # previous bar in 4h timeframe
+        if prev_day_idx < 0:
+            continue
+            
+        # For 4h timeframe, we need to aggregate to daily levels
+        # Since we're using 4h bars, we approximate using lookback of 6 bars (24h/4h)
+        lookback = 6
+        if i < lookback:
+            continue
+            
+        # Get daily high/low/close from 4h data (approximate)
+        daily_high = np.max(high[i-lookback:i])
+        daily_low = np.min(low[i-lookback:i])
+        daily_close = close[i-1]  # previous close
+        
+        # Calculate Camarilla levels
+        daily_range = daily_high - daily_low
+        if daily_range <= 0:
+            continue
+            
+        H3 = daily_close + daily_range * 1.1 / 4
+        L3 = daily_close - daily_range * 1.1 / 4
+        
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
         ema_trend = ema_34_aligned[i]
-        atr_val = atr[i]
-        
-        # Donchian(20) channels: highest high and lowest low of last 20 periods
-        if i >= 20:
-            highest_high = np.max(high[i-19:i+1])
-            lowest_low = np.min(low[i-19:i+1])
-        else:
-            highest_high = np.max(high[:i+1])
-            lowest_low = np.min(low[:i+1])
         
         # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
@@ -75,10 +81,10 @@ def generate_signals(prices):
         
         # Breakout signals with trend filter
         if position == 0:
-            # Long: price breaks above Donchian upper channel AND above daily EMA34 (uptrend filter)
-            long_condition = (curr_close > highest_high) and (curr_close > ema_trend) and volume_spike
-            # Short: price breaks below Donchian lower channel AND below daily EMA34 (downtrend filter)
-            short_condition = (curr_close < lowest_low) and (curr_close < ema_trend) and volume_spike
+            # Long: price breaks above H3 AND above daily EMA34 (uptrend filter)
+            long_condition = (curr_close > H3) and (curr_close > ema_trend) and volume_spike
+            # Short: price breaks below L3 AND below daily EMA34 (downtrend filter)
+            short_condition = (curr_close < L3) and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -87,17 +93,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Trail stop: exit if price drops 2*ATR from highest high since entry
-            # Simplified: exit if price closes below Donchian lower channel or trend breaks
-            if curr_close <= lowest_low or curr_close < ema_trend:
+            # Exit long: price returns below L3 or trend breaks
+            if curr_close < L3 or curr_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Trail stop: exit if price rises 2*ATR from lowest low since entry
-            # Simplified: exit if price closes above Donchian upper channel or trend breaks
-            if curr_close >= highest_high or curr_close > ema_trend:
+            # Exit short: price returns above H3 or trend breaks
+            if curr_close > H3 or curr_close > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
