@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-Hypothesis: Donchian channel breakouts capture momentum, weekly pivot (from 1w) provides 
-institutional bias (long above weekly pivot, short below), and volume confirmation filters 
-false breakouts. Works in bull markets (breakouts with long bias) and bear markets 
-(breakouts with short bias). 6h timeframe targets 12-37 trades/year.
+12h Donchian(20) Breakout with 1d EMA34 Trend and Volume Spike
+Hypothesis: Donchian channel breakouts capture strong momentum moves. 
+Combined with 1d EMA34 trend filter and volume confirmation, this strategy
+works in both bull and bear markets by only taking breakouts in the direction
+of the higher timeframe trend. 12h timeframe targets 12-37 trades/year.
 """
 
 import numpy as np
@@ -21,49 +21,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot: (weekly_high + weekly_low + weekly_close) / 3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian channel (20-period) on 6h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    volume_spike = volume > (vol_ma * 2.0)
+    
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 20)  # Donchian, volume MA
+    start_idx = max(20, 34)  # Donchian, 1d EMA alignment
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_volume = volume[i]
         vol_spike = volume_spike[i]
+        
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_aligned[i]
+        downtrend = curr_close < ema_34_aligned[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: break above Donchian high AND price > weekly pivot AND volume spike
-            long_entry = (curr_high > donchian_high[i]) and (curr_close > weekly_pivot_aligned[i]) and vol_spike
-            # Short: break below Donchian low AND price < weekly pivot AND volume spike
-            short_entry = (curr_low < donchian_low[i]) and (curr_close < weekly_pivot_aligned[i]) and vol_spike
+            # Long: break above Donchian upper band AND uptrend AND volume spike
+            long_entry = (curr_high > highest_high[i]) and uptrend and vol_spike
+            # Short: break below Donchian lower band AND downtrend AND volume spike
+            short_entry = (curr_low < lowest_low[i]) and downtrend and vol_spike
             
             if long_entry:
                 signals[i] = 0.25
@@ -75,16 +75,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price breaks below Donchian low (reversal) OR price < weekly pivot (bias change)
-            if (curr_low < donchian_low[i]) or (curr_close < weekly_pivot_aligned[i]):
+            # Exit: price breaks below Donchian lower band OR loss of uptrend
+            if (curr_low < lowest_low[i]) or (curr_close < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price breaks above Donchian high (reversal) OR price > weekly pivot (bias change)
-            if (curr_high > donchian_high[i]) or (curr_close > weekly_pivot_aligned[i]):
+            # Exit: price breaks above Donchian upper band OR loss of downtrend
+            if (curr_high > highest_high[i]) or (curr_close > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_WeeklyPivot_Direction_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
