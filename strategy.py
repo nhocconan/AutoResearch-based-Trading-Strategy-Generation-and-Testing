@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Trade 12h Donchian(20) breakouts with 1d EMA50 trend filter and volume confirmation.
-- Trend filter: price > 1d EMA50 = bullish, price < 1d EMA50 = bearish.
-- In bullish 1d trend: buy breakouts above upper Donchian(20), sell breakdowns below lower Donchian(20).
-- In bearish 1d trend: sell breakdowns below lower Donchian(20), buy breakouts above upper Donchian(20) (continuation logic).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
+- Trend filter: price > 1d EMA34 = bullish, price < 1d EMA34 = bearish.
+- In bullish 1d trend: buy breakouts above R1, sell breakdowns below S1.
+- In bearish 1d trend: sell breakdowns below S1, buy breakouts above R1 (continuation logic).
 - Volume confirmation: require volume > 2.0x 20-period average to avoid false breakouts.
-- Exit on trend reversal or mean reversion to midpoint of Donchian channel.
-- Position size: 0.25. Target: 50-150 total trades over 4 years = 12-37/year.
+- Exit on trend reversal or mean reversion to pivot.
+- Position size: 0.25. Target: 75-200 total trades over 4 years = 19-50/year.
 - Works in both bull and bear: 1d trend filter captures major moves, volume filter reduces noise.
 """
 
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,31 +25,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter
+    # Get 1d data for HTF trend filter and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Donchian(20) channels
-    high_12h = get_htf_data(prices, '12h')['high'].values
-    low_12h = get_htf_data(prices, '12h')['low'].values
+    # Calculate 1d Camarilla pivot levels (using previous 1d bar's OHLC)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close[0] = df_1d['close'].values[0]
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
     
-    # Upper channel: max(high, 20)
-    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower channel: min(low, 20)
-    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    # Midpoint: (upper + lower) / 2
-    midpoint_12h = (upper_12h + lower_12h) / 2.0
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_ = prev_high - prev_low
     
-    # Align Donchian levels to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '12h'), upper_12h)
-    lower_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '12h'), lower_12h)
-    midpoint_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '12h'), midpoint_12h)
+    # Camarilla levels
+    r1 = pivot + (range_ * 1.1 / 12)
+    s1 = pivot - (range_ * 1.1 / 12)
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # Volume spike confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,27 +62,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA(50), Donchian(20), volume MA (20)
-    start_idx = max(50, 20)
+    # Start index: need warmup for EMA(34), volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or
-            np.isnan(lower_aligned[i]) or
-            np.isnan(midpoint_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend using EMA50
-        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
+        # Determine 1d HTF trend using EMA34
+        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
             # Breakout logic: trade in direction of 1d trend with volume confirmation
-            long_setup = (close[i] > upper_aligned[i]) and htf_1d_bullish and volume_spike[i]
-            short_setup = (close[i] < lower_aligned[i]) and htf_1d_bearish and volume_spike[i]
+            long_setup = (close[i] > r1_aligned[i]) and htf_1d_bullish and volume_spike[i]
+            short_setup = (close[i] < s1_aligned[i]) and htf_1d_bearish and volume_spike[i]
             
             if long_setup:
                 signals[i] = 0.25
@@ -91,8 +95,8 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit on trend reversal or mean reversion to midpoint
-            exit_signal = (not htf_1d_bullish) or (close[i] < midpoint_aligned[i])
+            # Exit on trend reversal or mean reversion to pivot
+            exit_signal = (not htf_1d_bullish) or (close[i] < pivot_aligned[i])
             
             if exit_signal:
                 signals[i] = 0.0
@@ -100,8 +104,8 @@ def generate_signals(prices):
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit on trend reversal or mean reversion to midpoint
-            exit_signal = htf_1d_bullish or (close[i] > midpoint_aligned[i])
+            # Exit on trend reversal or mean reversion to pivot
+            exit_signal = htf_1d_bullish or (close[i] > pivot_aligned[i])
             
             if exit_signal:
                 signals[i] = 0.0
@@ -109,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
