@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike_v1
-Hypothesis: 4-hour Camarilla R1/S1 breakout with weekly EMA50 trend filter and volume spike confirmation.
-Targets 19-50 trades/year by requiring: 1) price breaks daily R1/S1 levels (strong breakout),
-2) aligned with weekly EMA50 trend (filters counter-trend noise), 3) volume > 2.0x 20-period average.
-Uses 4h timeframe to balance trade frequency and fee drag while capturing significant moves in both bull and bear markets.
-Weekly EMA50 provides robust trend filter that adapts to multi-year cycles, reducing whipsaw in bear markets.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter and volume spike confirmation.
+Targets 12-37 trades/year by requiring: 1) price breaks daily R1/S1 levels (Camarilla structure),
+2) aligned with 1d EMA34 trend, 3) volume > 2.0x 20-period average. Uses 12h timeframe to minimize
+fee drag while capturing significant moves in both bull and bear markets. Prioritizes BTC/ETH edge.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,23 +25,22 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Weekly data for EMA50 trend filter (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Daily data for Camarilla pivots (loaded ONCE)
+    # 1d data for EMA34 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 1d data for Camarilla pivots (loaded ONCE)
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_range = prev_high - prev_low
     
-    # Camarilla R1 and S1 levels (R1 = C + 1.1*(HL/6), S1 = C - 1.1*(HL/6))
-    R1 = prev_close + 1.1 * prev_range * (1.0/6.0)
-    S1 = prev_close - 1.1 * prev_range * (1.0/6.0)
+    # Camarilla R1 and S1 levels (R1 = C + 1.1*(HL/12), S1 = C - 1.1*(HL/12))
+    R1 = prev_close + 1.1 * prev_range * (1.0/12.0)
+    S1 = prev_close - 1.1 * prev_range * (1.0/12.0)
     
-    # Align 1d levels to 4h timeframe
+    # Align 1d levels to 12h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
@@ -54,8 +52,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for weekly EMA50 (50 weeks) and previous day data (1)
-    start_idx = 51
+    # Start index: need enough for 1d EMA34 (34) and previous day data (1)
+    start_idx = 35
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -65,7 +63,7 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -73,9 +71,9 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to weekly EMA50
-        uptrend = curr_close > ema_50_1w_aligned[i]
-        downtrend = curr_close < ema_50_1w_aligned[i]
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
             # Look for entry signals with volume confirmation, trend alignment
@@ -113,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
