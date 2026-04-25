@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume regime confirmation.
-Long when price breaks above R1 in 1d uptrend (close > 1d EMA50) with volume > 1.5x 20-bar average.
-Short when price breaks below S1 in 1d downtrend (close < 1d EMA50) with volume > 1.5x 20-bar average.
-Exit via ATR trailing stop (2.5*ATR) or re-entry into H3-L3 range.
-Designed for ~15-25 trades/year by requiring R1/S1 breakout (stronger signal than H3/L3) and volume confirmation.
-Works in bull/bear markets via 1d EMA50 filter; avoids whipsaws in ranging markets via volume regime filter.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume spike confirmation.
+Long when price breaks above R1 in 1d uptrend (close > 1d EMA50) with volume > 2.0x 20-bar average.
+Short when price breaks below S1 in 1d downtrend (close < 1d EMA50) with volume > 2.0x 20-bar average.
+Exit via ATR-based trailing stop (2*ATR from extreme) or re-entry into H3-L3 range.
+Designed for moderate trade frequency (~25-40/year) with clear entry conditions and risk control.
+Uses 4h primary timeframe with 1d HTF for trend and pivot levels. Works in bull/bear markets via 1d EMA50 filter.
 """
 
 import numpy as np
@@ -44,7 +44,7 @@ def generate_signals(prices):
     h3 = prev_close + range_hl * 1.1 / 4
     l3 = prev_close - range_hl * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
@@ -54,9 +54,9 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume regime: volume > 1.5x 20-period average (balanced for trade frequency)
+    # Volume regime: volume > 2.0x 20-period average (stricter for fewer trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_regime = volume > (1.5 * vol_ma_20)
+    vol_regime = volume > (2.0 * vol_ma_20)
     
     # ATR for trailing stop (14-period)
     atr_period = 14
@@ -89,10 +89,10 @@ def generate_signals(prices):
         if position == 0:
             # Only trade in trending regimes (1d EMA50 filter)
             if close[i] > ema_trend:  # 1d uptrend regime
-                # Long: break above R1 with volume regime
+                # Long: break above R1 with volume spike
                 long_signal = (close[i] > r1_aligned[i]) and vol_regime[i]
             else:  # 1d downtrend regime
-                # Short: break below S1 with volume regime
+                # Short: break below S1 with volume spike
                 short_signal = (close[i] < s1_aligned[i]) and vol_regime[i]
             
             if 'long_signal' in locals() and long_signal:
@@ -115,7 +115,7 @@ def generate_signals(prices):
             if close[i] > long_high:
                 long_high = close[i]
             # Exit conditions: ATR trailing stop OR re-enter H3-L3 range
-            atr_stop = long_high - 2.5 * atr[i]
+            atr_stop = long_high - 2.0 * atr[i]
             range_exit = (close[i] < h3_aligned[i] and close[i] > l3_aligned[i])
             if close[i] <= atr_stop or range_exit:
                 signals[i] = 0.0
@@ -127,7 +127,7 @@ def generate_signals(prices):
             if close[i] < short_low:
                 short_low = close[i]
             # Exit conditions: ATR trailing stop OR re-enter H3-L3 range
-            atr_stop = short_low + 2.5 * atr[i]
+            atr_stop = short_low + 2.0 * atr[i]
             range_exit = (close[i] > l3_aligned[i] and close[i] < h3_aligned[i])
             if close[i] >= atr_stop or range_exit:
                 signals[i] = 0.0
@@ -135,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
