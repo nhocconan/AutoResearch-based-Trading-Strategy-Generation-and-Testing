@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Weekly Pivot + Daily EMA34 Trend + Volume Spike (Experiment #87364)
-Hypothesis: Weekly pivot levels (PP, R1, S1) act as major support/resistance. 
-Breakouts above R1 or below S1 with daily EMA34 trend alignment and volume spike 
-capture institutional moves. Works in bull markets (breakouts with trend) and 
-bear markets (failed breaks, reversals to pivot levels). 
-Target: 7-25 trades/year (30-100 total over 4 years).
+12h Williams Alligator + Daily EMA34 Trend + Volume Spike
+Hypothesis: Williams Alligator (jaw/teeth/lips) identifies trend absence (all lines intertwined) vs presence (lines diverged). 
+Breakouts above/below the Alligator with daily EMA34 trend alignment and volume spike capture strong moves.
+Works in bull markets (trend continuation) and bear markets (sharp reversals from consolidation).
+Uses daily HTF data loaded ONCE before loop.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -31,35 +31,50 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # Weekly data for pivot points (loaded ONCE)
-    df_1w = get_htf_data(prices, '1w')
-    # Weekly pivot: based on previous week's OHLC
-    prev_week_close = df_1w['close'].shift(1).values
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_open = df_1w['open'].shift(1).values
-    # Standard pivot points
-    weekly_pp = (prev_week_high + prev_week_low + prev_week_close) / 3
-    weekly_r1 = 2 * weekly_pp - prev_week_low
-    weekly_s1 = 2 * weekly_pp - prev_week_high
-    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
     # Daily EMA34 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
+    # Williams Alligator on 12h timeframe (using prices directly as we are on 12h timeframe)
+    # Alligator: Jaw (13-period SMMA, offset 8), Teeth (8-period SMMA, offset 5), Lips (5-period SMMA, offset 3)
+    def smma(source, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(source, np.nan, dtype=float)
+        if len(source) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(source[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CURRENT_VALUE) / PERIOD
+        for i in range(period, len(source)):
+            result[i] = (result[i-1] * (period-1) + source[i]) / period
+        return result
+    
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
+    
+    # Alligator is "sleeping" (no trend) when lines are intertwined
+    # We consider it "awake" (trending) when lips > teeth > jaw (uptrend) or lips < teeth < jaw (downtrend)
+    # For simplicity, we'll use the condition that lips is outside the jaw-teeth range
+    alligator_awake = (lips > jaw) & (lips < teeth) | (lips < jaw) & (lips > teeth)
+    alligator_awake = ~alligator_awake  # True when awake (lines diverged)
+    
+    # Trend direction based on Alligator alignment
+    # Uptrend: lips > teeth > jaw
+    # Downtrend: lips < teeth < jaw
+    alligator_uptrend = (lips > teeth) & (teeth > jaw)
+    alligator_downtrend = (lips < teeth) & (teeth < jaw)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for weekly/daily data and volume MA
-    start_idx = max(35, 20) + 5
+    # Start index: need enough for Alligator (max period 13 + offsets) and EMA/volume
+    start_idx = max(35, 20, 13) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(weekly_pp_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,14 +82,15 @@ def generate_signals(prices):
         curr_close = close[i]
         vol_spike = volume_spike[i]
         
-        # Breakout conditions
-        breakout_long = curr_close > weekly_r1_aligned[i]
-        breakout_short = curr_close < weekly_s1_aligned[i]
+        # Alligator signals
+        awake = alligator_awake[i]
+        uptrend = alligator_uptrend[i]
+        downtrend = alligator_downtrend[i]
         
         if position == 0:
-            # Look for entry signals - require: weekly pivot breakout + volume spike + daily EMA34 trend alignment
-            long_entry = breakout_long and vol_spike and (curr_close > ema_34_1d_aligned[i])
-            short_entry = breakout_short and vol_spike and (curr_close < ema_34_1d_aligned[i])
+            # Look for entry signals - require: Alligator awake + volume spike + daily EMA34 trend alignment
+            long_entry = awake and uptrend and vol_spike and (curr_close > ema_34_1d_aligned[i])
+            short_entry = awake and downtrend and vol_spike and (curr_close < ema_34_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
@@ -85,15 +101,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit on weekly S1 retrace or trend change
-            if curr_close < weekly_s1_aligned[i] or curr_close < ema_34_1d_aligned[i]:
+            # Long position: exit on Alligator sleep (trend weakening) or trend change
+            if not awake or curr_close < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit on weekly R1 retrace or trend change
-            if curr_close > weekly_r1_aligned[i] or curr_close > ema_34_1d_aligned[i]:
+            # Short position: exit on Alligator sleep (trend weakening) or trend change
+            if not awake or curr_close > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
