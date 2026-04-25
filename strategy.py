@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v5
-Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level with 1d uptrend (price > EMA34) and volume spike (>3.0x avg); enter short when price breaks below S1 level with 1d downtrend (price < EMA34) and volume spike. Exit on opposite Camarilla level touch or trend reversal. Uses discrete sizing (0.25) to minimize fee churn. Added stricter volume confirmation (>4.0x) and EMA50 trend filter to reduce overtrading vs v4, targeting 15-30 trades/year. Works in bull/bear via 1d trend filter.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v6
+Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level with 1d uptrend (price > EMA50) and volume spike (>4.0x avg); enter short when price breaks below S1 level with 1d downtrend (price < EMA50) and volume spike. Exit on opposite Camarilla level touch or trend reversal. Uses discrete sizing (0.25) to minimize fee churn. Further tightened volume confirmation (>4.0x) and added EMA50 trend filter to reduce trades to target 15-25/year. Works in bull/bear via 1d trend filter.
 """
 
 import numpy as np
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v5"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v6"
 timeframe = "4h"
 leverage = 1.0
