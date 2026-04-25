@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h timeframe with Camarilla R1/S1 breakout, 1d EMA34 trend filter, and volume confirmation (>1.8x 20-bar avg volume). Long when price breaks above R1 in 1d uptrend with volume spike; short when breaks below S1 in 1d downtrend with volume spike. Exits on opposite level break or trend reversal. Designed for BTC/ETH to work in bull/bear via structure (Camarilla pivots) with trend/volume filters. Target trades: 50-150 total over 4 years (12-37/year).
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 4h timeframe with Camarilla R1/S1 breakout from previous 1d pivot levels, 
+1d EMA34 trend filter, and volume confirmation (>1.8x 20-bar avg volume). 
+Long when price breaks above R1 in 1d uptrend with volume spike; short when breaks below S1 in 1d downtrend with volume spike. 
+Exits on opposite level break or trend reversal. 
+Designed for BTC/ETH to work in bull/bear via structure (Camarilla pivots) with trend/volume filters. 
+Target trades: 75-200 total over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -36,7 +41,7 @@ def generate_signals(prices):
     r1 = pp + (high_1d - low_1d) * 1.1 / 2.0
     s1 = pp - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -101,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
