@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Confluence_Breakout_1dTrend_VolumeConfirm
-Hypothesis: On 6h timeframe, weekly Camarilla pivot breakouts (R4/S4) combined with 1d EMA trend filter and volume confirmation.
-Weekly pivots capture major support/resistance from prior week, reducing false breakouts. 1d EMA ensures alignment with intermediate trend.
-Volume spike confirms institutional participation. Target: 12-30 trades/year (50-150 over 4 years).
-Designed to work in both bull (breakout continuation) and bear (fade at extreme levels) markets via confluence filtering.
+12h_WeeklyCamarilla_H4L4_Breakout_1wTrend_VolumeConfirm
+Hypothesis: On 12h timeframe, weekly Camarilla pivot breakouts (H4/L4 levels) combined with 1w EMA trend filter and volume confirmation.
+Weekly pivots capture major support/resistance from prior week, reducing false breakouts. 1w EMA ensures alignment with long-term trend.
+Volume spike confirms institutional participation. Designed for 12h timeframe to capture fewer, higher-quality trades (12-37/year).
+Works in both bull (breakout continuation) and bear (fade at extreme levels) markets via confluence filtering.
 """
 
 import numpy as np
@@ -27,32 +27,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA trend filter (loaded ONCE)
-    df_1d = get_htf_data(prices, '1d')
-    
-    # 1d EMA34 trend filter
-    ema_34_1d = calculate_ema(df_1d['close'].values, 34)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # 1w data for weekly Camarilla pivots (R4/S4 levels)
+    # 1w data for EMA trend filter (loaded ONCE)
     df_1w = get_htf_data(prices, '1w')
     
+    # 1w EMA34 trend filter
+    ema_34_1w = calculate_ema(df_1w['close'].values, 34)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # 1w data for weekly Camarilla pivots (H4/L4 levels)
     # Weekly Camarilla calculation: based on prior week's OHLC
     prev_week_close = df_1w['close'].shift(1).values
     prev_week_high = df_1w['high'].shift(1).values
     prev_week_low = df_1w['low'].shift(1).values
     
-    weekly_range = 1.1 * (prev_week_high - prev_week_low)
-    r4 = prev_week_close + weekly_range * 0.50  # Weekly R4 (strongest resistance)
-    s4 = prev_week_close - weekly_range * 0.50  # Weekly S4 (strongest support)
+    weekly_range = prev_week_high - prev_week_low
+    h4 = prev_week_close + weekly_range * 0.55  # Weekly H4 (strong resistance)
+    l4 = prev_week_close - weekly_range * 0.55  # Weekly L4 (strong support)
     
-    # Align weekly pivots to 6h timeframe (completed weekly bar)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Align weekly pivots to 12h timeframe (completed weekly bar)
+    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
     
-    # Volume spike: current volume > 2.0 * 20-period average (moderate threshold)
+    # Volume spike: current volume > 2.5 * 20-period average (strict threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,8 +60,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -73,13 +71,13 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals - require: Weekly R4/S4 breakout + volume spike + 1d EMA trend alignment
-            long_breakout = curr_high > r4_aligned[i]
-            short_breakout = curr_low < s4_aligned[i]
+            # Look for entry signals - require: Weekly H4/L4 breakout + volume spike + 1w EMA trend alignment
+            long_breakout = curr_high > h4_aligned[i]
+            short_breakout = curr_low < l4_aligned[i]
             
-            # Trend filter: price must be on correct side of 1d EMA
-            long_trend = curr_close > ema_34_1d_aligned[i]
-            short_trend = curr_close < ema_34_1d_aligned[i]
+            # Trend filter: price must be on correct side of 1w EMA
+            long_trend = curr_close > ema_34_1w_aligned[i]
+            short_trend = curr_close < ema_34_1w_aligned[i]
             
             long_entry = (long_breakout and volume_spike[i] and long_trend)
             short_entry = (short_breakout and volume_spike[i] and short_trend)
@@ -93,15 +91,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below weekly R4 (failed breakout) or trend reverses
-            if curr_close < r4_aligned[i] or curr_close < ema_34_1d_aligned[i]:
+            # Long position: exit when price closes below weekly H4 (failed breakout) or trend reverses
+            if curr_close < h4_aligned[i] or curr_close < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price closes above weekly S4 (failed breakout) or trend reverses
-            if curr_close > s4_aligned[i] or curr_close > ema_34_1d_aligned[i]:
+            # Short position: exit when price closes above weekly L4 (failed breakout) or trend reverses
+            if curr_close > l4_aligned[i] or curr_close > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Confluence_Breakout_1dTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_WeeklyCamarilla_H4L4_Breakout_1wTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
