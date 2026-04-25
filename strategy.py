@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot + Daily Volume Spike + 1d EMA50 Trend Filter
-Hypothesis: Weekly pivot levels (from prior week) act as strong support/resistance. 
-Breakouts above R1 or below S1 with daily volume spike (>2.0x 20-bar vol MA) and 
-1d EMA50 trend alignment capture strong moves. In ranging markets (price between S1/R1), 
-we fade extremes. Designed for BTC/ETH on 6h timeframe with 50-150 trades over 4 years 
-(12-37/year) to minimize fee drag while maintaining edge in both bull and bear regimes.
-Weekly pivots provide structure that works across market cycles.
+4h Donchian Breakout with 1d ATR Regime and Volume Spike Confirmation
+Hypothesis: Donchian(20) breakouts capture strong trends. Use 1d ATR to filter regime - 
+only trade when ATR(1d) > its 20-period MA (high volatility regimes). Add volume confirmation
+(>1.5x 20-bar vol MA) to avoid false breakouts. Designed for BTC/ETH with 15-30 trades/year
+to minimize fee drag while working in both bull (breakouts up) and bear (breakdowns down) markets.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,69 +21,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter and volume MA (call ONCE before loop)
+    # Get 1d data for ATR regime filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need 50 for EMA + 2 for safety
+    if len(df_1d) < 21:  # Need 20 for ATR MA + 1
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'])
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d ATR(14) and its 20-period MA for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period volume MA for volume spike confirmation (using 1d volume)
-    vol_1d = pd.Series(df_1d['volume'])
-    vol_ma_20_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # True Range calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
     
-    # Get 1w data for weekly pivot points (prior week's OHLC)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_14 = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        if i == 14:
+            atr_14[i] = np.nanmean(tr[1:15])  # First ATR is average of first 14 TR
+        else:
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Prior week's high, low, close for weekly pivot calculation
-    prev_week_high = df_1w['high'].shift(1).values  # Shift to get prior week
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_close = df_1w['close'].shift(1).values
+    # 20-period MA of ATR(14)
+    atr_ma_20 = np.full(len(df_1d), np.nan)
+    for i in range(20, len(df_1d)):
+        atr_ma_20[i] = np.mean(atr_14[i-19:i+1])
     
-    # Align to 6h timeframe
-    prev_week_high_6h = align_htf_to_ltf(prices, df_1w, prev_week_high)
-    prev_week_low_6h = align_htf_to_ltf(prices, df_1w, prev_week_low)
-    prev_week_close_6h = align_htf_to_ltf(prices, df_1w, prev_week_close)
+    # Align to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_ma_20_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
     
-    # Calculate weekly pivot points and support/resistance levels
-    # Pivot = (High + Low + Close) / 3
-    # R1 = (2 * Pivot) - Low
-    # S1 = (2 * Pivot) - High
-    # R2 = Pivot + (High - Low)
-    # S2 = Pivot - (High - Low)
-    # R3 = High + 2*(Pivot - Low)
-    # S3 = Low - 2*(High - Pivot)
-    pp = (prev_week_high_6h + prev_week_low_6h + prev_week_close_6h) / 3.0
-    r1 = (2 * pp) - prev_week_low_6h
-    s1 = (2 * pp) - prev_week_high_6h
-    r2 = pp + (prev_week_high_6h - prev_week_low_6h)
-    s2 = pp - (prev_week_high_6h - prev_week_low_6h)
-    r3 = prev_week_high_6h + 2 * (pp - prev_week_low_6h)
-    s3 = prev_week_low_6h - 2 * (prev_week_high_6h - pp)
+    # High volatility regime: ATR(14) > MA(20) of ATR
+    high_vol_regime = atr_14_aligned > atr_ma_20_aligned
+    
+    # Calculate Donchian channels (20-period) on 4h data
+    donchian_h = np.full(n, np.nan)
+    donchian_l = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_h[i] = np.max(high[i-19:i+1])
+        donchian_l[i] = np.min(low[i-19:i+1])
+    
+    # Calculate 20-period volume MA for volume spike confirmation
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA50, volume MA, and weekly pivots
-    start_idx = max(52, 20)  # 52 for EMA50 (50 + 2 for shift), 20 for volume MA
+    # Start index: need enough for Donchian, volume MA, and regime
+    start_idx = max(20, 20)  # 20 for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(r1[i]) or 
-            np.isnan(s1[i]) or
-            np.isnan(r2[i]) or 
-            np.isnan(s2[i]) or
-            np.isnan(r3[i]) or 
-            np.isnan(s3[i]) or
-            np.isnan(pp[i])):
+        if (np.isnan(donchian_h[i]) or 
+            np.isnan(donchian_l[i]) or 
+            np.isnan(vol_ma_20[i]) or 
+            np.isnan(high_vol_regime[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,59 +91,35 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_50_val = ema_50_1d_aligned[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        r1_val = r1[i]
-        s1_val = s1[i]
-        r2_val = r2[i]
-        s2_val = s2[i]
-        r3_val = r3[i]
-        s3_val = s3[i]
-        pp_val = pp[i]
+        h_level = donchian_h[i]
+        l_level = donchian_l[i]
+        vol_ma = vol_ma_20[i]
+        in_high_vol = high_vol_regime[i]
         
-        # Trend filter: price above/below 1d EMA50
-        price_above_ema = curr_close > ema_50_val
-        price_below_ema = curr_close < ema_50_val
-        
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > 2.0 * vol_ma
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        volume_confirm = curr_volume > 1.5 * vol_ma
         
         if position == 0:
-            if price_above_ema:
-                # Uptrend: look for long breakouts above R1/R2/R3
-                long_signal = ((curr_close > r1_val) or (curr_close > r2_val) or (curr_close > r3_val)) and volume_confirm
-            else:
-                # Downtrend: look for short breakdowns below S1/S2/S3
-                short_signal = ((curr_close < s1_val) or (curr_close < s2_val) or (curr_close < s3_val)) and volume_confirm
-            
-            # In ranging markets (price between S1/R1), fade extremes
-            in_range = (curr_close >= s1_val) and (curr_close <= r1_val)
-            if in_range:
-                # Fade extremes: long near S1, short near R1
-                long_signal = (curr_close <= s1_val * 1.002) and volume_confirm  # near S1
-                short_signal = (curr_close >= r1_val * 0.998) and volume_confirm  # near R1
-            
-            if 'long_signal' in locals() and long_signal:
-                signals[i] = 0.25
-                position = 1
-            elif 'short_signal' in locals() and short_signal:
-                signals[i] = -0.25
-                position = -1
-            # Clear signal flags for next iteration
-            if 'long_signal' in locals():
-                del long_signal
-            if 'short_signal' in locals():
-                del short_signal
+            # Look for breakouts with volume confirmation in high volatility regime
+            if in_high_vol and volume_confirm:
+                # Long breakout: price closes above upper Donchian
+                if curr_close > h_level:
+                    signals[i] = 0.25
+                    position = 1
+                # Short breakdown: price closes below lower Donchian
+                elif curr_close < l_level:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 or reverses below EMA
-            if curr_close < s1_val or curr_close < ema_50_val:
+            # Exit long: price closes below lower Donchian or volatility drops
+            if curr_close < l_level or not in_high_vol:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 or reverses above EMA
-            if curr_close > r1_val or curr_close > ema_50_val:
+            # Exit short: price closes above upper Donchian or volatility drops
+            if curr_close > h_level or not in_high_vol:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -155,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_1dATR_Regime_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
