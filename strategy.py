@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA50 trend filter and volume spike confirmation.
-In trending markets (price > 1d EMA50): breakout continuation at R1/S1 levels.
-Position size: 0.25. Target: 75-200 total trades over 4 years = 19-50/year.
+1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1
+Hypothesis: Daily Camarilla R1/S1 breakouts with weekly ADX trend filter and volume spike confirmation.
+In trending markets (weekly ADX > 25): trade breakout continuation in trend direction.
+In ranging markets (weekly ADX <= 25): avoid breakouts to reduce false signals.
+Position size: 0.25. Target: 50-100 total trades over 4 years = 12-25/year.
+Works in bull (trend continuation) and bear (ranging market filter reduces whipsaw).
 """
 
 import numpy as np
@@ -20,21 +22,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter
+    # Get 1d data for HTF trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for HTF trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Get weekly data for regime filter (ADX)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    # Calculate weekly ADX(14) for regime filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     # Calculate daily Camarilla pivot levels (using previous day's OHLC)
-    prev_close = np.roll(close_1d, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
     prev_high = np.roll(df_1d['high'].values, 1)
     prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close[0] = close_1d[0]
+    prev_close[0] = df_1d['close'].values[0]
     prev_high[0] = df_1d['high'].values[0]
     prev_low[0] = df_1d['low'].values[0]
     
@@ -44,38 +80,53 @@ def generate_signals(prices):
     # Camarilla levels
     r1 = pivot + (range_ * 1.1 / 12)
     s1 = pivot - (range_ * 1.1 / 12)
+    r3 = pivot + (range_ * 1.1 / 4)
+    s3 = pivot - (range_ * 1.1 / 4)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to daily timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume confirmation: 4h volume > 1.5 * 20-period average
+    # Calculate volume spike (20-period volume MA)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and volume MA (20)
-    start_idx = 50
+    # Start index: need warmup for ADX (14+14=28) and volume MA (20)
+    start_idx = 28
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend (bullish = price above 1d EMA50)
-        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
+        # Determine weekly regime: trending if ADX > 25, ranging if ADX <= 25
+        weekly_trending = adx_aligned[i] > 25
+        weekly_ranging = adx_aligned[i] <= 25
+        
+        # Volume confirmation: current volume > 1.5 * 20-period MA
+        volume_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Look for breakout with volume confirmation
-            long_setup = (close[i] > r1_aligned[i]) and htf_1d_bullish and volume_spike[i]
-            short_setup = (close[i] < s1_aligned[i]) and htf_1d_bearish and volume_spike[i]
+            if weekly_trending and volume_spike:
+                # Trending market with volume: trade breakout continuation
+                long_setup = (close[i] > r1_aligned[i]) and (close[i] > close[i-1])
+                short_setup = (close[i] < s1_aligned[i]) and (close[i] < close[i-1])
+            else:
+                # In ranging market or no volume spike: avoid breakouts to reduce false signals
+                long_setup = False
+                short_setup = False
             
             if long_setup:
                 signals[i] = 0.25
@@ -88,8 +139,8 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: trend reversal or mean reversion to pivot
-            exit_signal = (not htf_1d_bullish) or (close[i] < pivot[i])
+            # Exit conditions: mean reversion to pivot or opposite S1
+            exit_signal = (close[i] < pivot_aligned[i]) or (close[i] < s1_aligned[i])
             
             if exit_signal:
                 signals[i] = 0.0
@@ -97,8 +148,8 @@ def generate_signals(prices):
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: trend reversal or mean reversion to pivot
-            exit_signal = htf_1d_bullish or (close[i] > pivot[i])
+            # Exit conditions: mean reversion to pivot or opposite R1
+            exit_signal = (close[i] > pivot_aligned[i]) or (close[i] > r1_aligned[i])
             
             if exit_signal:
                 signals[i] = 0.0
@@ -106,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
