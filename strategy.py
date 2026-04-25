@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3L3 Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Camarilla H3/L3 levels from 1d timeframe act as key intraday resistance/support.
-Breakouts above H3 or below L3 with volume confirmation and aligned with 1d EMA34 trend capture
-momentum moves. Designed for 4h timeframe with tight entry conditions to achieve 19-50 trades/year.
-Works in bull (breakouts above H3 in uptrend) and bear (breakouts below L3 in downtrend).
+12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Camarilla H3/L3 levels from daily timeframe act as key support/resistance.
+Breakouts above H3 or below L3 with volume confirmation and aligned with 1d EMA34 trend
+capture momentum moves. Designed for 12h timeframe with tight entry conditions to achieve
+12-37 trades/year (50-150 total over 4 years). Works in bull (breakouts above H3 in uptrend)
+and bear (breakouts below L3 in downtrend). Uses volume spike filter to avoid false breakouts.
 """
 
 import numpy as np
@@ -23,7 +24,7 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla calculation and EMA (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     # Calculate 1d Camarilla levels (H3, L3) from previous day
@@ -35,7 +36,7 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + (1.1 * (high_1d - low_1d) / 6)
     camarilla_l3 = close_1d - (1.1 * (high_1d - low_1d) / 6)
     
-    # Align Camarilla levels to 4h timeframe (no extra delay needed for pivot levels)
+    # Align Camarilla levels to 12h timeframe (no extra delay needed for pivot levels)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -103,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
