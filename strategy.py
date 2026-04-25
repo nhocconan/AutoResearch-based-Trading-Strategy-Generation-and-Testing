@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: 4h timeframe with Camarilla H3/L3 breakout confirmed by 1d EMA34 trend and volume spike.
-Targets 25-40 trades/year on 4h to stay within optimal range, using discrete position sizing (0.30) to minimize fee drag.
-Works in bull/bear via 1d trend filter - only takes breakouts in direction of higher timeframe trend.
+Hypothesis: Camarilla H3/L3 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
+Uses discrete position sizing (0.30) to limit fee drag. Targets 20-40 trades/year.
+Works in bull markets (breakouts with trend) and bear markets (fades from extremes with volume).
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,17 +20,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (H3, L3) from previous day
+    # Get 1d data for Camarilla levels and EMA
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla: H3 = close + (high - low) * 1.1/4, L3 = close - (high - low) * 1.1/4
+    # Camarilla levels: H3/L3
     camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
+    # Align to 4h timeframe (completed 1d bar only)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -38,15 +38,15 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for 1d Camarilla, 1d EMA34, volume MA
-    start_idx = max(1, 34, 20)  # +1 for Camarilla calculation
+    # Start index: need warmup for Camarilla (1 bar), EMA34 (34), volume MA (20)
+    start_idx = max(1, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
