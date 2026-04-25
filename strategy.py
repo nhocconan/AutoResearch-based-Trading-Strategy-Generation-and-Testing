@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_ChopFilter_v1
-Hypothesis: Trade daily KAMA trend direction with RSI momentum filter and Choppiness Index regime filter.
-KAMA adapts to market noise, reducing whipsaws in ranging markets. RSI ensures momentum alignment.
-Choppiness Index > 61.8 filters out strong trends where mean reversion fails, focusing on choppy regimes.
-Only trade in choppy markets (CHOP > 61.8) where KAMA + RSI mean reversion edge exists.
-Uses discrete sizing 0.25 to limit fee drag. Target: 7-25 trades/year to avoid fee drag.
-Weekly trend filter from 1w EMA50 ensures we only trade with higher timeframe momentum.
+6h_ElderRay_Regime_1dTrendFilter_v1
+Hypothesis: Use 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and chop regime filter.
+Elder Ray measures bull/bear power relative to EMA13. In strong trends (ADX>25) with low chop (CHOP<38.2),
+we take trades in direction of 1d trend: long when Bull Power>0, short when Bear Power<0.
+Chop filter avoids whipsaws in ranging markets. Discrete sizing 0.25 limits fee drag.
+Target: 12-37 trades/year to avoid fee drag while maintaining edge in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,103 +17,91 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for HTF filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate KAMA (adaptive moving average)
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Handle volatility calculation correctly for rolling sum
-    volatility_rolling = pd.Series(np.abs(np.diff(close))).rolling(window=10, min_periods=1).sum().values
-    volatility_rolling = np.concatenate([[np.nan] * 9, volatility_rolling[9:]])  # align with change
-    er = np.where(volatility_rolling > 0, change / volatility_rolling, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate 1d chop regime filter (CHOP(14))
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d_arr[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d_arr[:-1]), tr1)
+    tr_1d = np.concatenate([[np.inf], tr2])
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denom = highest_high_1d - lowest_low_1d
+    chop_denom_safe = np.where(chop_denom == 0, 1e-10, chop_denom)
+    chop_1d = 100 * np.log10(atr_1d * np.sqrt(14) / chop_denom_safe)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad first value
-    rsi = np.concatenate([[np.nan], rsi])
+    # Calculate 6h Elder Ray components
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
-    # Calculate Choppiness Index(14)
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with close
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Max/min close over 14 periods
-    max_close = pd.Series(close).rolling(window=14, min_periods=14).max().values
-    min_close = pd.Series(close).rolling(window=14, min_periods=14).min().values
-    chop = np.where((max_close - min_close) != 0, 
-                    100 * np.log10(atr_sum / (max_close - min_close)) / np.log10(14), 
-                    50)
+    # Calculate 6h ADX(14) for trend strength
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.inf], tr])
+    atr_6h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_6h
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_6h
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need warmup for all indicators
-    start_idx = max(50, 30, 14, 14)  # weekly EMA50, KAMA, RSI, CHOP
+    start_idx = max(34, 13, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in choppy markets (CHOP > 61.8)
-        if chop[i] <= 61.8:
+        # Regime filters: only trade in strong trends with low chop
+        if adx[i] <= 25 or chop_1d_aligned[i] >= 38.2:
             signals[i] = 0.0
+            if position != 0:
+                position = 0
             continue
         
-        # Determine weekly trend from EMA50
-        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, close_1w)[i]
-        if np.isnan(weekly_close_aligned):
+        # Determine 1d trend from EMA34
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)[i]
+        if np.isnan(close_1d_aligned):
             signals[i] = 0.0
             continue
             
-        if weekly_close_aligned > ema_50_1w_aligned[i]:
-            weekly_trend = 'bullish'  # bias toward longs
-        elif weekly_close_aligned < ema_50_1w_aligned[i]:
-            weekly_trend = 'bearish'  # bias toward shorts
+        if close_1d_aligned > ema_34_1d_aligned[i]:
+            daily_trend = 'bullish'  # favor longs
+        elif close_1d_aligned < ema_34_1d_aligned[i]:
+            daily_trend = 'bearish'  # favor shorts
         else:
-            weekly_trend = 'neutral'
+            daily_trend = 'neutral'  # no clear trend
         
         if position == 0:
-            # Long setup: price below KAMA (mean reversion long) AND RSI < 40 (oversold) AND weekly trend bullish or neutral
-            long_setup = (close[i] < kama[i]) and (rsi[i] < 40) and (weekly_trend in ['bullish', 'neutral'])
+            # Long setup: Bull Power > 0 AND daily trend bullish
+            long_setup = (bull_power[i] > 0) and (daily_trend == 'bullish')
             
-            # Short setup: price above KAMA (mean reversion short) AND RSI > 60 (overbought) AND weekly trend bearish or neutral
-            short_setup = (close[i] > kama[i]) and (rsi[i] > 60) and (weekly_trend in ['bearish', 'neutral'])
+            # Short setup: Bear Power < 0 AND daily trend bearish
+            short_setup = (bear_power[i] < 0) and (daily_trend == 'bearish')
             
             if long_setup:
                 signals[i] = 0.25
@@ -127,20 +114,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price crosses above KAMA OR RSI > 50 (momentum shift) OR weekly trend turns bearish
-            if (close[i] > kama[i]) or (rsi[i] > 50) or (weekly_trend == 'bearish'):
+            # Exit: Bull Power turns negative OR daily trend turns bearish
+            if (bull_power[i] <= 0) or (daily_trend == 'bearish'):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price crosses below KAMA OR RSI < 50 (momentum shift) OR weekly trend turns bullish
-            if (close[i] < kama[i]) or (rsi[i] < 50) or (weekly_trend == 'bullish'):
+            # Exit: Bear Power turns positive OR daily trend turns bullish
+            if (bear_power[i] >= 0) or (daily_trend == 'bullish'):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_Regime_1dTrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
