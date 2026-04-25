@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_ATR_Volume_Regime_v1
-Hypothesis: Trade Donchian(20) breakouts with ATR-based position sizing (0.25) and volume confirmation (>1.5x 20-bar average). Only trade when choppiness regime indicates trend (CHOP < 38.2) to avoid whipsaws in ranging markets. Uses 1d EMA50 as HTF trend filter for alignment. Designed for low trade frequency (<25/year) to minimize fee drag while capturing strong trending moves. Works in both bull and bear regimes by following HTF trend direction.
+4h_HMA21_Cross_ATR_Volume_Regime_v1
+Hypothesis: Trade HMA(21) crossovers with ATR-based position sizing (0.25) and volume confirmation (>1.5x 20-bar average). Only trade when choppiness regime indicates trend (CHOP < 38.2) to avoid whipsaws in ranging markets. Uses 1d EMA50 as HTF trend filter for alignment. Designed for low trade frequency (<25/year) to minimize fee drag while capturing strong trending moves. Works in both bull and bear regimes by following HTF trend direction.
 """
 
 import numpy as np
@@ -28,9 +28,23 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h HMA(21)
+    def wma(arr, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(arr, weights/weights.sum(), mode='valid')
+    
+    def hma(arr, window):
+        half = window // 2
+        sqrt = int(np.sqrt(window))
+        wma_half = wma(arr, half)
+        wma_full = wma(arr, window)
+        hma_val = 2 * wma_half - wma_full
+        return wma(hma_val, sqrt)
+    
+    hma_21 = hma(close, 21)
+    # Pad the beginning with NaN since HMA reduces array size
+    hma_21_padded = np.full(n, np.nan)
+    hma_21_padded[20:] = hma_21  # HMA(21) needs 21 bars to start
     
     # Calculate 4h ATR(14) for volatility filtering
     tr1 = high - low
@@ -79,13 +93,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need warmup for all indicators
-    start_idx = max(50, 20, 14, 20)  # EMA50 needs 50, Donchian needs 20, ATR needs 14, vol needs 20
+    start_idx = max(50, 21, 14, 20)  # EMA50 needs 50, HMA21 needs 21, ATR needs 14, vol needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(hma_21_padded[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -104,11 +117,16 @@ def generate_signals(prices):
         regime_filter = chop[i] < 38.2
         
         if position == 0:
-            # Long setup: price breaks above Donchian high + 1d uptrend + volume confirmation + trending regime
-            long_setup = (close[i] > donchian_high[i]) and htf_1d_bullish and volume_confirmed and regime_filter
+            # Long setup: HMA crossover bullish + 1d uptrend + volume confirmation + trending regime
+            if i > 0 and not np.isnan(hma_21_padded[i-1]) and not np.isnan(hma_21_padded[i]):
+                hma_cross_bull = close[i] > hma_21_padded[i] and close[i-1] <= hma_21_padded[i-1]
+                hma_cross_bear = close[i] < hma_21_padded[i] and close[i-1] >= hma_21_padded[i-1]
+            else:
+                hma_cross_bull = False
+                hma_cross_bear = False
             
-            # Short setup: price breaks below Donchian low + 1d downtrend + volume confirmation + trending regime
-            short_setup = (close[i] < donchian_low[i]) and htf_1d_bearish and volume_confirmed and regime_filter
+            long_setup = hma_cross_bull and htf_1d_bullish and volume_confirmed and regime_filter
+            short_setup = hma_cross_bear and htf_1d_bearish and volume_confirmed and regime_filter
             
             if long_setup:
                 signals[i] = 0.25
@@ -121,20 +139,28 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches Donchian low (opposite band) OR 1d trend turns bearish
-            if (close[i] <= donchian_low[i]) or (not htf_1d_bullish):
+            # Exit: HMA crossover bearish OR 1d trend turns bearish
+            if i > 0 and not np.isnan(hma_21_padded[i-1]) and not np.isnan(hma_21_padded[i]):
+                hma_cross_bear = close[i] < hma_21_padded[i] and close[i-1] >= hma_21_padded[i-1]
+            else:
+                hma_cross_bear = False
+            if hma_cross_bear or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches Donchian high (opposite band) OR 1d trend turns bullish
-            if (close[i] >= donchian_high[i]) or (htf_1d_bullish):
+            # Exit: HMA crossover bullish OR 1d trend turns bullish
+            if i > 0 and not np.isnan(hma_21_padded[i-1]) and not np.isnan(hma_21_padded[i]):
+                hma_cross_bull = close[i] > hma_21_padded[i] and close[i-1] <= hma_21_padded[i-1]
+            else:
+                hma_cross_bull = False
+            if hma_cross_bull or htf_1d_bullish:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_ATR_Volume_Regime_v1"
+name = "4h_HMA21_Cross_ATR_Volume_Regime_v1"
 timeframe = "4h"
 leverage = 1.0
