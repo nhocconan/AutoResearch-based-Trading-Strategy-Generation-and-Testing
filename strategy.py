@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume confirmation. In bullish 1d trend, buy breakouts above R1; in bearish 1d trend, sell breakdowns below S1. Uses volume spike (2.0x 20-bar avg) to confirm institutional interest. Designed for 4h timeframe with tight entries (~20-40/year) to minimize fee drag while capturing strong directional moves in both bull and bear markets.
+12h_KAMA_Direction_RSI_ChopFilter_v1
+Hypothesis: Trade KAMA directional signals on 12h with RSI momentum filter and Choppiness Index regime filter. 
+Long when KAMA turns up + RSI>50 + CHOP<61.8 (trending market); Short when KAMA turns down + RSI<50 + CHOP<61.8.
+Avoids ranging markets (CHOP>61.8) where trend signals fail. Uses discrete position sizing (0.25) to minimize fee drag.
+Designed for 12h timeframe targeting 12-37 trades/year with strong edge in both bull and bear regimes.
 """
 
 import numpy as np
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,62 +21,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter (EMA34) and Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
-        return np.zeros(n)
+    # Calculate KAMA (Kaufman Adaptive Moving Average) - trend direction
+    # ER = |net change| / sum(|price changes|) over lookback
+    # Smooth = [ER * (fastest - slowest) + slowest]^2
+    # KAMA = prev_KAMA + smooth * (price - prev_KAMA)
+    lookback = 10
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Efficiency Ratio
+    net_change = np.abs(np.diff(close, n=lookback))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if lookback == 1 else \
+                 pd.Series(close).rolling(window=lookback).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=True).values
+    # Handle first lookback bars
+    volatility = np.concatenate([np.full(lookback-1, np.nan), volatility[lookback-1:]])
+    er = np.where(volatility > 0, net_change / volatility, 0)
+    er = np.concatenate([np.full(lookback-1, np.nan), er])
     
-    # Calculate Camarilla levels using previous day's OHLC
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12.0
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12.0
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[lookback-1] = close[lookback-1]  # seed
+    for i in range(lookback, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Align Camarilla levels to 4h timeframe (yesterday's levels available today)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate RSI(14) for momentum filter
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: 2.0x 20-bar average volume
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(14, np.nan), rsi[14:]])  # align with close
+    
+    # Calculate Choppiness Index(14) for regime filter
+    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(lookback)
+    tr1 = np.abs(high[1:] - low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with high/low
+    
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+    chop = np.concatenate([np.full(13, np.nan), chop[13:]])  # align
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for volume MA(20)
-    start_idx = 20
+    # Start index: need warmup for KAMA(10), RSI(14), CHOP(14)
+    start_idx = max(10, 14, 14) + 5  # extra buffer
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend
-        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
+        # Determine KAMA direction (trend)
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
+        
+        # Momentum filter
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        
+        # Regime filter: avoid ranging markets
+        trending_market = chop[i] < 61.8
         
         if position == 0:
-            # Look for Camarilla breakouts with volume confirmation
-            long_breakout = (high[i] > camarilla_r1_aligned[i]) and volume_spike[i]
-            short_breakout = (low[i] < camarilla_s1_aligned[i]) and volume_spike[i]
+            # Look for KAMA turning points with momentum and regime confirmation
+            long_signal = kama_rising and rsi_bullish and trending_market
+            short_signal = kama_falling and rsi_bearish and trending_market
             
-            # Only trade in direction of 1d trend
-            if long_breakout and htf_1d_bullish:
+            if long_signal:
                 signals[i] = 0.25
                 position = 1
-            elif short_breakout and htf_1d_bearish:
+            elif short_signal:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -81,10 +112,8 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when price returns to Camarilla H3/L3 level or trend reverses
-            camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 6.0
-            camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-            exit_signal = (low[i] < camarilla_h3_aligned[i]) or (not htf_1d_bullish)
+            # Exit when KAMA turns down OR momentum fades OR market becomes ranging
+            exit_signal = (not kama_rising) or (rsi[i] < 40) or (chop[i] > 61.8)
             
             if exit_signal:
                 signals[i] = 0.0
@@ -92,10 +121,8 @@ def generate_signals(prices):
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when price returns to Camarilla L3/H3 level or trend reverses
-            camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 6.0
-            camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-            exit_signal = (high[i] > camarilla_l3_aligned[i]) or htf_1d_bullish
+            # Exit when KAMA turns up OR momentum fades OR market becomes ranging
+            exit_signal = (not kama_falling) or (rsi[i] > 60) or (chop[i] > 61.8)
             
             if exit_signal:
                 signals[i] = 0.0
@@ -103,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_KAMA_Direction_RSI_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
