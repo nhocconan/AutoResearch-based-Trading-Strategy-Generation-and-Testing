@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrend_1dVolatilityFilter
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and 1d volatility regime filter.
-Long when price breaks above R1 with 4h EMA50 uptrend and 1d ATR ratio > 0.8 (normal volatility).
-Short when price breaks below S1 with 4h EMA50 downtrend and 1d ATR ratio > 0.8.
-Exit on opposite band touch or trend reversal.
-Uses discrete sizing (0.20) to minimize fee churn. Target: 15-30 trades/year.
-Works in bull via trend-following breakouts, in bear via reduced false breakouts in low volatility.
+6h_Ichimoku_Kumo_Twist_WeeklyTrend_Confirm
+Hypothesis: 6h Ichimoku Kumo twist (Senkou Span A/B cross) with 1w EMA50 trend filter.
+Long when Senkou A crosses above Senkou B with price above cloud and 1w EMA50 uptrend.
+Short when Senkou A crosses below Senkou B with price below cloud and 1w EMA50 downtrend.
+Exit on opposite Kumo cross or trend reversal.
+Uses discrete sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 6h.
+Works in bull via trend-following Kumo breaks, in bear via cloud rejection and trend alignment.
 """
 
 import numpy as np
@@ -18,63 +18,63 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get 4h data for Camarilla calculations and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
+    # Get 6h data for Ichimoku calculations (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 52:  # need 52 for Senkou B
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Calculate Camarilla levels for each 4h bar (based on previous bar)
-    R1_4h = np.full(len(close_4h), np.nan)
-    S1_4h = np.full(len(close_4h), np.nan)
+    # Calculate Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    for i in range(1, len(close_4h)):
-        # Camarilla levels based on previous 4h bar's range
-        high_prev = high_4h[i-1]
-        low_prev = low_4h[i-1]
-        close_prev = close_4h[i-1]
-        range_prev = high_prev - low_prev
-        
-        if range_prev > 0:
-            R1_4h[i] = close_prev + (range_prev * 1.1 / 12)
-            S1_4h[i] = close_prev - (range_prev * 1.1 / 12)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Align Camarilla levels to original timeframe
-    R1_4h_aligned = align_htf_to_ltf(prices, df_4h, R1_4h)
-    S1_4h_aligned = align_htf_to_ltf(prices, df_4h, S1_4h)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Get 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    # Get 1d data for volatility filter (ATR ratio)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Current price vs Kumo (cloud) - we need to align properly
+    # For cloud twist signal, we compare current Senkou A and B (already shifted)
+    # But for price vs cloud, we need current Senkou values (which are plotted 26 periods ahead)
+    # So current cloud is Senkou values from 26 periods ago
+    senkou_a_current = np.roll(senkou_a, 26)
+    senkou_b_current = np.roll(senkou_b, 26)
+    senkou_a_current[:26] = np.nan
+    senkou_b_current[:26] = np.nan
+    
+    # Align Ichimoku components to original timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_6h, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_6h, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_b)
+    senkou_a_current_aligned = align_htf_to_ltf(prices, df_6h, senkou_a_current)
+    senkou_b_current_aligned = align_htf_to_ltf(prices, df_6h, senkou_b_current)
+    
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d ATR(14)
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr_1d = np.concatenate([[np.nan], pd.Series(tr).rolling(window=14, min_periods=14).mean().values])
-    
-    # Calculate 1d ATR ratio (current ATR / 50-period MA of ATR)
-    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_1d / atr_ma_50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,47 +84,67 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_4h_aligned[i]) or np.isnan(S1_4h_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(senkou_a_current_aligned[i]) or np.isnan(senkou_b_current_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility filter: only trade in normal/high volatility (ATR ratio > 0.8)
-        vol_filter = atr_ratio_aligned[i] > 0.8
+        # Kumo twist: Senkou A cross Senkou B
+        # We need previous and current values to detect cross
+        if i == start_idx:
+            prev_senkou_a = senkou_a_aligned[i-1]
+            prev_senkou_b = senkou_b_aligned[i-1]
+        else:
+            prev_senkou_a = senkou_a_aligned[i-1]
+            prev_senkou_b = senkou_b_aligned[i-1]
+        
+        curr_senkou_a = senkou_a_aligned[i]
+        curr_senkou_b = senkou_b_aligned[i]
+        
+        # Bullish twist: Senkou A crosses above Senkou B
+        bullish_twist = (prev_senkou_a <= prev_senkou_b) and (curr_senkou_a > curr_senkou_b)
+        # Bearish twist: Senkou A crosses below Senkou B
+        bearish_twist = (prev_senkou_a >= prev_senkou_b) and (curr_senkou_a < curr_senkou_b)
+        
+        # Price relative to cloud (current Senkou values)
+        price_above_cloud = (close[i] > senkou_a_current_aligned[i]) and (close[i] > senkou_b_current_aligned[i])
+        price_below_cloud = (close[i] < senkou_a_current_aligned[i]) and (close[i] < senkou_b_current_aligned[i])
         
         if position == 0:
-            # Long: price breaks above R1 with uptrend and volume filter
-            long_signal = (close[i] > R1_4h_aligned[i]) and (close[i] > ema_50_4h_aligned[i]) and vol_filter
-            # Short: price breaks below S1 with downtrend and volume filter
-            short_signal = (close[i] < S1_4h_aligned[i]) and (close[i] < ema_50_4h_aligned[i]) and vol_filter
+            # Long: bullish twist + price above cloud + 1w uptrend
+            long_signal = bullish_twist and price_above_cloud and (close[i] > ema_50_1w_aligned[i])
+            # Short: bearish twist + price below cloud + 1w downtrend
+            short_signal = bearish_twist and price_below_cloud and (close[i] < ema_50_1w_aligned[i])
             
             if long_signal:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_signal:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.20
-            # Exit conditions: price touches S1 or trend reverses
-            exit_signal = (close[i] < S1_4h_aligned[i]) or (close[i] < ema_50_4h_aligned[i])
+            signals[i] = 0.25
+            # Exit conditions: bearish twist or price below cloud or trend reverses
+            exit_signal = bearish_twist or (close[i] < senkou_a_current_aligned[i]) or (close[i] < ema_50_1w_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.20
-            # Exit conditions: price touches R1 or trend reverses
-            exit_signal = (close[i] > R1_4h_aligned[i]) or (close[i] > ema_50_4h_aligned[i])
+            signals[i] = -0.25
+            # Exit conditions: bullish twist or price above cloud or trend reverses
+            exit_signal = bullish_twist or (close[i] > senkou_a_current_aligned[i]) or (close[i] > ema_50_1w_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolatilityFilter"
-timeframe = "1h"
+name = "6h_Ichimoku_Kumo_Twist_WeeklyTrend_Confirm"
+timeframe = "6h"
 leverage = 1.0
