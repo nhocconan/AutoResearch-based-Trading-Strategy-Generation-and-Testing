@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Williams Alligator Breakout with 1d EMA34 Trend and Volume Spike
-Hypothesis: Williams Alligator (JAWS/TEETH/LIPS) identifies trend absence/presence. 
-Breakouts occur when Alligator lines converge (sleeping) then diverge (awakening) with price piercing 
-the extreme line (JAWS for longs, LIPS for shorts) with volume confirmation and 1d EMA34 trend alignment.
-Designed for low-moderate trade frequency (19-50/year) on 4h timeframe to work in both bull and bear 
-markets by trading awakening trends with institutional participation confirmation.
+1d Weekly Pivot R1S1 Breakout with 1w EMA34 Trend and Volume Spike
+Hypothesis: Weekly Camarilla pivot levels (R1/S1) act as significant support/resistance on the daily timeframe.
+Breakouts above R1 or below S1 with volume confirmation and aligned 1w EMA34 trend capture institutional moves.
+The 1w EMA34 ensures we trade with higher timeframe momentum, reducing false breakouts. Volume spike confirms
+participation. Designed for low trade frequency (7-25/year) on 1d timeframe to work in both bull and bear markets
+via trend following, with emphasis on BTC and ETH performance.
 """
 
 import numpy as np
@@ -22,48 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for EMA34 trend (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1d close for trend
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
+    # Calculate 34-period EMA on 1w close for trend
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(
         span=34, adjust=False, min_periods=34
     ).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Williams Alligator on 4h: SMAs of median price
-    # Jaw (blue): 13-period SMMA shifted 8 bars
-    # Teeth (red): 8-period SMMA shifted 5 bars
-    # Lips (green): 5-period SMMA shifted 3 bars
-    median_price = (high + low) / 2
+    # Get 1w data for Camarilla pivot calculation (R1, S1 levels)
+    if len(df_1w) < 1:
+        return np.zeros(n)
     
-    # Smoothed Moving Average (SMMA) approximation using EMA with alpha=1/period
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (Prev_SMMA * (period-1) + Current_Price) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate Camarilla pivots for each 1w bar: based on previous week's high, low, close
+    # We need to shift to avoid look-ahead: use previous week's data to calculate current week's levels
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
-    jaw = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
+    # Camarilla formulas for R1 and S1 (tighter bands than R3/S3):
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Shift as per Alligator definition
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # Invalidate shifted values
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
+    # Align to LTF (1d) - no extra delay needed as pivots are based on completed 1w bar
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,15 +60,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Alligator lines and volume MA
-    start_idx = max(13, 20) + 8  # max period + jaw shift
+    # Start index: need enough for EMA, volume MA, and to avoid NaN from shift
+    start_idx = max(34, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or 
-            np.isnan(lips_shifted[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -89,31 +76,17 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        jaw_val = jaw_shifted[i]
-        teeth_val = teeth_shifted[i]
-        lips_val = lips_shifted[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
+        r1_level = camarilla_r1_aligned[i]
+        s1_level = camarilla_s1_aligned[i]
         vol_spike = volume_spike[i]
-        
-        # Alligator sleeping condition: lines intertwined (JAW > TEETH > LIPS for down, LIPS > TEETH > JAW for up)
-        # Actually, sleeping is when they are close together; we'll use convergence
-        # Simpler: trade when price breaks extreme line with alignment
         
         if position == 0:
             # Look for entry signals
-            # Long: price crosses above JAW (upper line) AND Alligator awakening (JAW > TEETH > LIPS) 
-            #        AND volume spike AND price > 1d EMA34 (uptrend)
-            jaw_above_teeth = jaw_val > teeth_val
-            teeth_above_lips = teeth_val > lips_val
-            alligator_long = jaw_above_teeth and teeth_above_lips
-            long_entry = (curr_close > jaw_val) and alligator_long and vol_spike and (curr_close > ema_trend)
-            
-            # Short: price crosses below LIPS (lower line) AND Alligator awakening (LIPS < TEETH < JAW)
-            #        AND volume spike AND price < 1d EMA34 (downtrend)
-            lips_below_teeth = lips_val < teeth_val
-            teeth_below_jaw = teeth_val < jaw_val
-            alligator_short = lips_below_teeth and teeth_below_jaw
-            short_entry = (curr_close < lips_val) and alligator_short and vol_spike and (curr_close < ema_trend)
+            # Long: price breaks above R1 resistance AND volume spike AND price > 1w EMA34 (uptrend)
+            long_entry = (curr_close > r1_level) and vol_spike and (curr_close > ema_trend)
+            # Short: price breaks below S1 support AND volume spike AND price < 1w EMA34 (downtrend)
+            short_entry = (curr_close < s1_level) and vol_spike and (curr_close < ema_trend)
             
             if long_entry:
                 signals[i] = 0.25
@@ -125,16 +98,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below TEETH (middle line) OR price crosses below EMA (trend change)
-            if (curr_close < teeth_val) or (curr_close < ema_trend):
+            # Exit: price crosses below S1 support (broken support) OR price crosses below EMA (trend change)
+            if (curr_close < s1_level) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above TEETH (middle line) OR price crosses above EMA (trend change)
-            if (curr_close > teeth_val) or (curr_close > ema_trend):
+            # Exit: price crosses above R1 resistance (broken resistance) OR price crosses above EMA (trend change)
+            if (curr_close > r1_level) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -142,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1S1_Breakout_1wEMA34_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
