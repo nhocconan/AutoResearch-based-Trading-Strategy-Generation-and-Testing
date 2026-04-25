@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3L3 Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Camarilla H3/L3 levels act as strong intraday support/resistance on 12h timeframe.
-Price breaking above H3 or below L3 with volume spike, aligned with 1d EMA34 trend,
-captures momentum in both bull and bear markets. Uses discrete position sizing (0.0, ±0.25)
-to minimize fee churn. Designed for 12h timeframe targeting 12-37 trades/year.
+4h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike (BTC/ETH focus)
+Hypothesis: Camarilla H3/L3 levels from daily pivot act as strong support/resistance.
+Breaks with volume spike and 1d EMA trend filter capture momentum in bull/bear.
+Designed for 4h timeframe targeting 20-50 trades/year. Uses discrete sizing (0.0, ±0.30)
+to minimize fee churn. Volume confirmation and trend filter reduce false breaks.
 """
 
 import numpy as np
@@ -21,15 +21,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and EMA (call ONCE before loop)
+    # Get 1d data for Camarilla and EMA (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla levels on 1d (based on previous day's high/low/close)
-    # H3 = Close + 1.1 * (High - Low) / 2
-    # L3 = Close - 1.1 * (High - Low) / 2
-    # Using previous day's values to avoid look-ahead
+    # Calculate Camarilla levels on 1d (using previous day's HLC to avoid look-ahead)
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -37,7 +34,7 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 2.0
     camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 2.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -45,14 +42,14 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate volume spike: current volume > 2.0 * 20-period average volume
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA and volume MA
+    # Start after EMA and volume MA warmup
     start_idx = 100
     
     for i in range(start_idx, n):
@@ -79,10 +76,10 @@ def generate_signals(prices):
             short_entry = (curr_close < l3) and vol_spike and (curr_close < ema_trend)
             
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
@@ -93,7 +90,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short position management
             # Exit: price crosses above H3 OR price crosses above EMA
@@ -101,10 +98,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
