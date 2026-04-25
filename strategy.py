@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: On 12h timeframe, Camarilla H3/L3 breakout from prior 1d bar, combined with 1d EMA34 trend filter and volume confirmation.
-H3/L3 are stronger reversal/continuation levels than R1/S1 on higher timeframes. 1d EMA34 ensures alignment with daily trend.
-Volume spike confirms breakout strength. Designed for 12-30 trades/year (50-120 over 4 years) to avoid fee drag.
-Works in bull markets via breakout continuation and bear markets via mean reversion at extreme levels (confluence filters reduce false signals).
+1d_Camarilla_R1S1_Breakout_1wEMA34_Trend_VolumeConfirm
+Hypothesis: On daily timeframe, Camarilla R1/S1 breakout from prior weekly bar, combined with weekly EMA34 trend filter and volume confirmation.
+Uses proven Camarilla structure with higher timeframe (1w) trend alignment to reduce false signals.
+Volume spike confirms breakout strength. Designed for 10-25 trades/year (40-100 over 4 years) to avoid fee drag.
+Works in bull markets via breakout continuation and bear markets via fade at extreme levels.
 """
 
 import numpy as np
@@ -21,26 +21,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA34 trend filter and Camarilla calculation (loaded ONCE)
-    df_1d = get_htf_data(prices, '1d')
+    # 1w data for EMA34 trend filter and Camarilla calculation (loaded ONCE)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA34 trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Prior 1d bar OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Prior 1w bar OHLC for Camarilla calculation
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
-    # Camarilla levels: H3, L3 (stronger levels for 12h timeframe)
+    # Camarilla levels: R1, S1 (most reliable for breakouts)
     camarilla_range = prev_high - prev_low
-    h3 = prev_close + camarilla_range * 1.1 / 4
-    l3 = prev_close - camarilla_range * 1.1 / 4
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # Align Camarilla levels to daily timeframe (completed weekly bar)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -65,13 +65,13 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment
-            long_breakout = curr_high > h3_aligned[i]
-            short_breakout = curr_low < l3_aligned[i]
+            # Look for entry signals - require: Camarilla R1/S1 breakout + volume spike + 1w EMA34 trend alignment
+            long_breakout = curr_high > r1_aligned[i]
+            short_breakout = curr_low < s1_aligned[i]
             
-            # Trend filter: price must be on correct side of 1d EMA34
-            long_trend = curr_close > ema_34_1d_aligned[i]
-            short_trend = curr_close < ema_34_1d_aligned[i]
+            # Trend filter: price must be on correct side of 1w EMA34
+            long_trend = curr_close > ema_34_1w_aligned[i]
+            short_trend = curr_close < ema_34_1w_aligned[i]
             
             long_entry = (long_breakout and volume_spike[i] and long_trend)
             short_entry = (short_breakout and volume_spike[i] and short_trend)
@@ -85,15 +85,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price closes below Camarilla H3 (failed breakout) or trend reverses
-            if curr_close < h3_aligned[i] or curr_close < ema_34_1d_aligned[i]:
+            # Long position: exit when price closes below Camarilla R1 (failed breakout) or trend reverses
+            if curr_close < r1_aligned[i] or curr_close < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price closes above Camarilla L3 (failed breakout) or trend reverses
-            if curr_close > l3_aligned[i] or curr_close > ema_34_1d_aligned[i]:
+            # Short position: exit when price closes above Camarilla S1 (failed breakout) or trend reverses
+            if curr_close > s1_aligned[i] or curr_close > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Camarilla_R1S1_Breakout_1wEMA34_Trend_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
