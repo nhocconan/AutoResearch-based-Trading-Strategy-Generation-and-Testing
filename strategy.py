@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_1wTrend_VolumeFilter
-Hypothesis: Daily Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation.
-In uptrend (close > 1w EMA50): long upper band breakout. In downtrend: short lower band breakout.
-Volume spike (>2.0x 20-day average) confirms breakout strength. Exit on opposite band touch.
-Designed for low trade frequency (~15/year) and robustness in bull/bear markets.
+12h_Donchian20_Breakout_1dTrend_VolumeConfirm
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+Uses discrete sizing (0.30) and strict volume threshold (3.0x) to target ~25 trades/year.
+In uptrend (close > 1d EMA50): long upper band breakout. In downtrend: short lower band breakout.
+Exit on opposite band touch or trend reversal. Designed for low fee drag and robustness in bull/bear.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,76 +21,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for Donchian calculations (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 1w EMA50 for trend direction
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Donchian channels for each 12h bar (based on previous 20 bars)
+    upper_12h = np.full(len(close_12h), np.nan)
+    lower_12h = np.full(len(close_12h), np.nan)
     
-    # Donchian channels (20-day) on daily data
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    for i in range(20, len(close_12h)):
+        # Upper band: highest high of previous 20 bars
+        upper_12h[i] = np.max(high_12h[i-20:i])
+        # Lower band: lowest low of previous 20 bars
+        lower_12h[i] = np.min(low_12h[i-20:i])
     
-    # Volume confirmation: volume > 2.0x 20-day average
+    # Align Donchian levels to original timeframe
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    
+    # Get 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    
+    # 1d EMA50 for trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: volume > 3.0x 20-period average (strict to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
+    vol_spike = volume > (3.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need warmup for calculations
-    start_idx = 20
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_ma_20[i]) or 
-            np.isnan(low_ma_20[i]) or np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
         
-        ema_trend = ema_50_1w_aligned[i]
-        upper_band = high_ma_20[i]
-        lower_band = low_ma_20[i]
+        ema_trend = ema_50_1d_aligned[i]
         
         if position == 0:
             # Regime-based entry logic
             if close[i] > ema_trend:  # Uptrend regime
-                # Long: break above upper band with volume confirmation
-                long_signal = (close[i] > upper_band) and vol_spike[i]
+                # Long: break above upper band with volume spike
+                long_signal = (close[i] > upper_12h_aligned[i]) and vol_spike[i]
+                # Short: break below lower band only if extreme volume spike (counter-trend fade)
+                short_signal = (close[i] < lower_12h_aligned[i]) and vol_spike[i] and (volume[i] > (5.0 * vol_ma_20[i]))
             else:  # Downtrend regime
-                # Short: break below lower band with volume confirmation
-                short_signal = (close[i] < lower_band) and vol_spike[i]
+                # Short: break below lower band with volume spike
+                short_signal = (close[i] < lower_12h_aligned[i]) and vol_spike[i]
+                # Long: break above upper band only if extreme volume spike (counter-trend fade)
+                long_signal = (close[i] > upper_12h_aligned[i]) and vol_spike[i] and (volume[i] > (5.0 * vol_ma_20[i]))
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
-            # Exit: touch or cross below lower band
-            if close[i] < lower_band:
+            signals[i] = 0.30
+            # Exit conditions: touch lower band or trend reversal
+            exit_signal = (close[i] < lower_12h_aligned[i]) or (close[i] < ema_trend * 0.99)
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
-            # Exit: touch or cross above upper band
-            if close[i] > upper_band:
+            signals[i] = -0.30
+            # Exit conditions: touch upper band or trend reversal
+            exit_signal = (close[i] > upper_12h_aligned[i]) or (close[i] > ema_trend * 1.01)
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wTrend_VolumeFilter"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_1dTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
