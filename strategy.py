@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_VolumeSpike_TrendPullback_v1
-Hypothesis: On 1h timeframe, enter long when price pulls back to EMA21 during uptrend (4h EMA50) with volume spike (>2x 20-bar avg), short when price rallies to EMA21 during downtrend with volume spike. Uses 4h for trend direction and 1h for precise entry timing. Targets 15-35 trades/year by requiring confluence of trend, pullback to EMA21, and volume spike. Session filter (08-20 UTC) reduces noise. Position size 0.20.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike confirmation.
+Targets 12-37 trades/year by requiring: 1) price breaks R1/S1 levels with strong momentum (close > open), 
+2) aligned with 1d EMA34 trend, 3) volume > 2.5x 20-period average.
+Uses discrete position sizing (0.25) to minimize fee churn and avoid overtrading.
 """
 
 import numpy as np
@@ -23,24 +26,40 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 4h data for EMA50 trend filter (loaded ONCE)
-    df_4h = get_htf_data(prices, '4h')
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1d data for EMA34 trend filter and Camarilla pivots (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1h EMA21 for pullback entries (calculated on LTF)
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Camarilla R1 and S1 levels
+    R1 = prev_close + 1.1 * prev_range * (1.0/12.0)  # R1 = C + 1.1*(HL/12)
+    S1 = prev_close - 1.1 * prev_range * (1.0/12.0)  # S1 = C - 1.1*(HL/12)
+    
+    # Align 1d data to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Volume confirmation: current volume > 2.5 * 20-period average (stricter spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 2.5)
+    
+    # Momentum filter: close > open for long, close < open for short
+    bullish_momentum = close > open_price
+    bearish_momentum = close < open_price
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 4h EMA50 (50) and 1h EMA21 (21)
-    start_idx = 50
+    # Start index: need enough for 1d EMA34 (34) and 1d pivots (2)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -49,7 +68,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_21[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -57,48 +77,66 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to 4h EMA50
-        uptrend = curr_close > ema_50_4h_aligned[i]
-        downtrend = curr_close < ema_50_4h_aligned[i]
-        
-        # Pullback to EMA21 conditions
-        pullback_long = (curr_low <= ema_21[i] * 1.002) and (curr_high >= ema_21[i] * 0.998)  # within 0.2% of EMA21
-        pullback_short = (curr_high >= ema_21[i] * 0.998) and (curr_low <= ema_21[i] * 1.002)  # same condition
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals: pullback to EMA21 with trend alignment and volume spike
-            long_entry = pullback_long and uptrend and volume_confirm[i]
-            short_entry = pullback_short and downtrend and volume_confirm[i]
+            # Look for entry signals with volume confirmation, trend alignment, and momentum
+            # Long breakout: price breaks above R1 with uptrend, volume confirmation, and bullish momentum
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i] and bullish_momentum[i]
+            # Short breakout: price breaks below S1 with downtrend, volume confirmation, and bearish momentum
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i] and bearish_momentum[i]
             
-            if long_entry:
-                signals[i] = 0.20
+            if long_breakout:
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            elif short_entry:
-                signals[i] = -0.20
+            elif short_breakout:
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Exit if price breaks above EMA21 (trend exhaustion) or trend changes
-            if curr_close > ema_21[i] * 1.01 or not uptrend:
+            # Calculate 12h ATR for stoploss
+            tr1 = high[1:] - low[1:]
+            tr2 = np.abs(high[1:] - close[:-1])
+            tr3 = np.abs(low[1:] - close[:-1])
+            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+            
+            if curr_close < entry_price - 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price breaks below S1 (mean reversion) or trend changes
+            elif curr_close < S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Exit if price breaks below EMA21 (trend exhaustion) or trend changes
-            if curr_close < ema_21[i] * 0.99 or not downtrend:
+            # Calculate 12h ATR (same as above)
+            tr1 = high[1:] - low[1:]
+            tr2 = np.abs(high[1:] - close[:-1])
+            tr3 = np.abs(low[1:] - close[:-1])
+            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+            
+            if curr_close > entry_price + 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price breaks above R1 (mean reversion) or trend changes
+            elif curr_close > R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_VolumeSpike_TrendPullback_v1"
-timeframe = "1h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
