@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-bar avg). 
-Enters long when price breaks above R1 in 1d uptrend with volume spike, short when price breaks below S1 in 1d downtrend with volume spike. 
-Exits on opposite Camarilla level touch (S1 for longs exit, R1 for shorts exit) or trend reversal. 
-Designed for 4h timeframe with ~20-50 trades/year, works in bull/bear by following 1d trend filter and momentum confirmation.
+1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: Daily Camarilla R3/S3 breakout with weekly trend filter (price >/< weekly EMA34) and volume confirmation (>1.8x 20-bar avg).
+Enters long when price breaks above R3 in weekly uptrend with volume spike, short when price breaks below S3 in weekly downtrend with volume spike.
+Exits on opposite Camarilla level touch (S3 for longs exit, R3 for shorts exit) or trend reversal.
+Designed for 1d timeframe with ~10-25 trades/year, works in bull/bear by following weekly trend filter and volatility breakout.
 """
 
 import numpy as np
@@ -21,76 +21,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for HTF trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1d Camarilla pivot levels (based on previous 1d bar)
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    rng_1d = high_1d - low_1d
-    camarilla_R1_1d = close_1d + (1.1 * rng_1d / 12)
-    camarilla_S1_1d = close_1d - (1.1 * rng_1d / 12)
+    # Calculate Camarilla levels from previous day
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
+    # We use previous day's high, low, close to calculate today's levels
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    camarilla_R1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1_1d)
-    camarilla_S1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1_1d)
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + 1.1 * camarilla_range
+    s3 = prev_close - 1.1 * camarilla_range
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need at least 1 bar of previous data and EMA34 warmup
-    start_idx = max(34, 20, 1)
+    start_idx = max(34, 1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_R1_1d_aligned[i]) or 
-            np.isnan(camarilla_S1_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(r3[i]) or 
+            np.isnan(s3[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 in 1d uptrend with volume confirmation
-            long_setup = (close[i] > camarilla_R1_1d_aligned[i]) and (close[i] > ema_34_1d_aligned[i]) and volume_spike[i]
-            # Short: price breaks below S1 in 1d downtrend with volume confirmation
-            short_setup = (close[i] < camarilla_S1_1d_aligned[i]) and (close[i] < ema_34_1d_aligned[i]) and volume_spike[i]
+            # Long: price breaks above R3 in weekly uptrend with volume confirmation
+            long_setup = (close[i] > r3[i]) and (close[i] > ema_34_1w_aligned[i]) and volume_spike[i]
+            # Short: price breaks below S3 in weekly downtrend with volume confirmation
+            short_setup = (close[i] < s3[i]) and (close[i] < ema_34_1w_aligned[i]) and volume_spike[i]
             
             if long_setup:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             elif short_setup:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.30
-            # Exit: price touches S1 (opposite level) OR trend turns down
-            if (close[i] < camarilla_S1_1d_aligned[i]) or (close[i] < ema_34_1d_aligned[i]):
+            signals[i] = 0.25
+            # Exit: price touches S3 (opposite level) OR trend turns down
+            if (close[i] <= s3[i]) or (close[i] < ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.30
-            # Exit: price touches R1 (opposite level) OR trend turns up
-            if (close[i] > camarilla_R1_1d_aligned[i]) or (close[i] > ema_34_1d_aligned[i]):
+            signals[i] = -0.25
+            # Exit: price touches R3 (opposite level) OR trend turns up
+            if (close[i] >= r3[i]) or (close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
