@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v12
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v13
 Hypothesis: Trade 4h Camarilla R1/S1 breakouts aligned with daily EMA34 trend and volume spike (volume > 2.0 * ATR14).
-Uses ATR-scaled volume threshold to reduce noise and overtrading. Discrete sizing 0.25 to limit fee drag.
+Added minimum holding period of 3 bars to reduce churn and overtrading. Discrete sizing 0.25 to limit fee drag.
 Target: 20-40 trades/year to avoid fee drag while maintaining edge. Works in bull/bear via trend filter.
 """
 
@@ -100,25 +100,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             bars_since_entry += 1
-            # Long: hold position
-            signals[i] = 0.25
-            # Exit: price breaks below Camarilla S1 OR daily trend turns bearish
-            if (close[i] < camarilla_s1_aligned[i]) or (daily_trend == 'bearish'):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
+                signals[i] = 0.25
+            else:
+                # Long: hold position
+                signals[i] = 0.25
+                # Exit: price breaks below Camarilla S1 OR daily trend turns bearish
+                if (close[i] < camarilla_s1_aligned[i]) or (daily_trend == 'bearish'):
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
         elif position == -1:
             bars_since_entry += 1
-            # Short: hold position
-            signals[i] = -0.25
-            # Exit: price breaks above Camarilla R1 OR daily trend turns bullish
-            if (close[i] > camarilla_r1_aligned[i]) or (daily_trend == 'bullish'):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
+                signals[i] = -0.25
+            else:
+                # Short: hold position
+                signals[i] = -0.25
+                # Exit: price breaks above Camarilla R1 OR daily trend turns bullish
+                if (close[i] > camarilla_r1_aligned[i]) or (daily_trend == 'bullish'):
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v12"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v13"
 timeframe = "4h"
 leverage = 1.0
