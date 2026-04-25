@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike
-Hypothesis: On 4h timeframe, Camarilla H4/L4 breakouts with 1d ATR-based trend filter and volume spike.
-Uses H4/L4 levels (wider than H3/L3) for fewer, higher-quality breakouts. Volume spike confirms institutional participation.
+12h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike
+Hypothesis: On 12h timeframe, Camarilla H4/L4 breakouts with 1d ATR-based trend filter and volume spike produce fewer, higher-quality trades suitable for slower timeframes.
+Uses H4/L4 levels (wider than H3/L3) to reduce false breakouts. Volume spike confirms institutional participation.
 1d ATR trend filter ensures trades align with strong daily momentum (price > EMA + 0.5*ATR for long, < EMA - 0.5*ATR for short).
-This filters out weak breakouts in choppy markets while capturing strong trending moves. Target: 20-50 trades/year.
+This filters out weak breakouts in choppy markets while capturing strong trending moves. Target: 12-37 trades/year.
 """
 
 import numpy as np
@@ -57,7 +57,7 @@ def generate_signals(prices):
     h4 = prev_close + camarilla_range * 0.50  # H4 level (widest)
     l4 = prev_close - camarilla_range * 0.50  # L4 level (widest)
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar)
+    # Align Camarilla levels to 12h timeframe (completed 1d bar)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
@@ -120,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_H4L4_Breakout_1dATR_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
