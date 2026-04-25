@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Camarilla Pivot H3L3 Breakout + 1d EMA50 Trend + Volume Spike
-Hypothesis: Camarilla H3/L3 levels act as magnet points on 1d timeframe.
+12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Camarilla H3/L3 levels on 1d act as key support/resistance.
 Breakouts above H3 (resistance) or below L3 (support) with volume confirmation
-and aligned with 1d EMA50 trend capture momentum in both bull and bear markets.
-Uses discrete position sizing (0.0, ±0.25) to minimize fee churn.
-Designed for 6h timeframe with tight entry conditions to achieve 12-37 trades/year.
+and aligned with 1d EMA34 trend capture momentum in both bull and bear markets.
+Designed for 12h timeframe with tight entry conditions to achieve 12-37 trades/year.
 """
 
 import numpy as np
@@ -37,13 +36,13 @@ def generate_signals(prices):
     h3 = pivot + range_val * 1.1 / 4.0  # Resistance level 3
     l3 = pivot - range_val * 1.1 / 4.0  # Support level 3
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Calculate EMA50 on 1d close for trend
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate EMA34 on 1d close for trend
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,7 +57,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -66,7 +65,7 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         h3_level = h3_aligned[i]
         l3_level = l3_aligned[i]
@@ -105,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3L3_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
