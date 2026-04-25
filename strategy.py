@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_KeltnerBreakout_VolumeSpike_1dTrend_v1
-Hypothesis: Trade Keltner Channel breakouts with volume spike confirmation and 1d EMA trend filter.
-Long when price breaks above upper Keltner (EMA20 + 2*ATR10) with volume > 1.5x average volume and price > 1d EMA50.
-Short when price breaks below lower Keltner (EMA20 - 2*ATR10) with volume > 1.5x average volume and price < 1d EMA50.
-Exit on opposite Keltner touch or trend reversal.
-Uses 6h timeframe for entries with 1d HTF trend filter.
-Position size: 0.25 to balance drawdown and return.
-Target: 15-30 trades/year to stay well under 300-trade 6h hard max.
-Works in bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets.
+4h_Donchian20_Breakout_VolumeChopFilter_v1
+Hypothesis: Trade Donchian(20) breakouts on 4h with volume spike and chop regime filter.
+Long when price breaks above upper Donchian + volume > 1.5x average + chop > 61.8 (range).
+Short when price breaks below lower Donchian + volume > 1.5x average + chop > 61.8 (range).
+Exit on opposite Donchian touch or chop < 38.2 (trend) to avoid whipsaw.
+Position size: 0.25. Target: 20-50 trades/year to stay under 400 total 4h trades.
+Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+Chop filter avoids false breakouts in strong trends where Donchian alone fails.
 """
 
 import numpy as np
@@ -25,62 +24,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter
+    # Get 1d data for chop regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need sufficient data for EMA50
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for HTF trend filter
+    # Calculate 1d chop regime (EWMA-based for efficiency)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Keltner Channel components on 6h data
-    # EMA20 for middle line
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # ATR10 for channel width
-    tr1 = np.maximum(high - low, 0)
-    tr2 = np.absolute(high - np.roll(close, 1))
-    tr3 = np.absolute(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # ATR(14) using EWMA
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Upper and lower Keltner bands
-    upper_keltner = ema_20 + 2.0 * atr_10
-    lower_keltner = ema_20 - 2.0 * atr_10
+    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(14)
+    # Using rolling window of 14
+    atr_sum = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_raw = 100 * np.log10(atr_sum / (max_high - min_low + 1e-10)) / np.log10(14)
+    chop = np.where((max_high - min_low) > 0, chop_raw, 50.0)  # default to 50 when range=0
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Volume average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Donchian(20) on 4h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Volume spike: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA20 (20) and ATR10 (10) and volume MA (20)
-    start_idx = max(20, 10, 20)
+    # Start index: need warmup for Donchian(20) and volume MA
+    start_idx = lookback
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_20[i]) or np.isnan(atr_10[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1d HTF trend (bullish = price above EMA50)
-        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_spike = volume[i] > 1.5 * vol_ma_20[i]
+        vol_spike = volume_spike[i]
+        current_chop = chop_aligned[i]
         
         if position == 0:
-            # Long setup: price breaks above upper Keltner + volume spike + 1d uptrend
-            long_setup = (close[i] > upper_keltner[i]) and volume_spike and htf_1d_bullish
+            # Long setup: price breaks above upper Donchian + volume spike + chop > 61.8 (range)
+            long_setup = (close[i] > highest_high[i]) and vol_spike and (current_chop > 61.8)
             
-            # Short setup: price breaks below lower Keltner + volume spike + 1d downtrend
-            short_setup = (close[i] < lower_keltner[i]) and volume_spike and htf_1d_bearish
+            # Short setup: price breaks below lower Donchian + volume spike + chop > 61.8 (range)
+            short_setup = (close[i] < lowest_low[i]) and vol_spike and (current_chop > 61.8)
             
             if long_setup:
                 signals[i] = 0.25
@@ -93,20 +96,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches lower Keltner (stop) OR 1d trend turns bearish
-            if (close[i] <= lower_keltner[i]) or (not htf_1d_bullish):
+            # Exit: price touches lower Donchian (stop) OR chop < 38.2 (trend) to avoid whipsaw
+            if (close[i] <= lowest_low[i]) or (current_chop < 38.2):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches upper Keltner (stop) OR 1d trend turns bullish
-            if (close[i] >= upper_keltner[i]) or (htf_1d_bullish):
+            # Exit: price touches upper Donchian (stop) OR chop < 38.2 (trend) to avoid whipsaw
+            if (close[i] >= highest_high[i]) or (current_chop < 38.2):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_KeltnerBreakout_VolumeSpike_1dTrend_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_VolumeChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
