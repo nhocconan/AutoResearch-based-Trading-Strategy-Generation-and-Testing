@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot H3/L3 Breakout with Daily EMA Trend and Volume Spike
+4h Camarilla H3/L3 Breakout with Daily EMA Trend and Volume Spike
 Hypothesis: Camarilla H3/L3 levels act as intraday support/resistance. Breakouts above H3 or below L3 
-with daily EMA trend alignment and volume confirmation capture strong moves. 12h timeframe targets 
-12-37 trades/year, reducing fee drag. Works in bull/bear by trading with daily trend filter.
+with daily EMA trend alignment and volume confirmation capture strong moves. 4h timeframe targets 
+19-50 trades/year, reducing fee drag. Works in bull/bear by trading with daily trend filter.
 """
 
 import numpy as np
@@ -32,7 +32,7 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
     camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Align Camarilla levels to 12h timeframe (no extra delay - pivot levels known at bar open)
+    # Align Camarilla levels to 4h timeframe (no extra delay - pivot levels known at bar open)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -40,7 +40,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h ATR(14) for volatility normalization (optional filter)
+    # 4h ATR(14) for volatility normalization (optional filter)
     tr1 = pd.Series(high).sub(pd.Series(low))
     tr2 = pd.Series(high).sub(pd.Series(close).shift(1)).abs()
     tr3 = pd.Series(low).sub(pd.Series(close).shift(1)).abs()
@@ -108,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
