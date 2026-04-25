@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout + 1d EMA34 trend + volume confirmation
-Hypothesis: Donchian breakouts capture momentum, EMA34 filters trend direction,
-volume confirms breakout validity. Works in bull/bear via trend filter.
-Target: 12-30 trades/year on 12h (50-150 total over 4 years).
+1d Donchian(20) Breakout + Weekly EMA34 Trend + Volume Spike
+Hypothesis: Daily Donchian breakouts capture medium-term trends, filtered by weekly EMA trend direction and volume confirmation. Works in bull/bear via trend filter. Target: 10-25 trades/year on 1d.
 """
 
 import numpy as np
@@ -12,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,29 +18,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF indicators
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Load weekly data ONCE before loop for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA34 for trend direction
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation: current volume > 1.8 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    # Daily Donchian(20) channels
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 2.0 * 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian and EMA
-    start_idx = max(40, 35)
+    # Start index: need enough for Donchian and weekly EMA
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -51,27 +54,16 @@ def generate_signals(prices):
         curr_low = low[i]
         vol_spike = volume_spike[i]
         
-        # Calculate Donchian channels (20-period) using only data up to i-1
-        if i >= 20:
-            # Use data from i-20 to i-1 (previous 20 completed bars)
-            lookback_high = np.max(high[i-20:i])
-            lookback_low = np.min(low[i-20:i])
-        else:
-            lookback_high = np.max(high[:i]) if i > 0 else curr_high
-            lookback_low = np.min(low[:i]) if i > 0 else curr_low
-        
-        # Breakout conditions
-        long_breakout = curr_close > lookback_high
-        short_breakout = curr_close < lookback_low
-        
-        # Trend filter: price above/below EMA34
-        above_ema = curr_close > ema_34_aligned[i]
-        below_ema = curr_close < ema_34_aligned[i]
+        # Trend filter: price above/below weekly EMA34
+        bullish_trend = curr_close > ema_34_1w_aligned[i]
+        bearish_trend = curr_close < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require: breakout + trend filter + volume spike
-            long_entry = long_breakout and above_ema and vol_spike
-            short_entry = short_breakout and below_ema and vol_spike
+            # Look for entry signals - require: Donchian breakout + trend + volume
+            # Long: price breaks above upper Donchian AND bullish trend AND volume spike
+            long_entry = (curr_high > high_roll[i]) and bullish_trend and vol_spike
+            # Short: price breaks below lower Donchian AND bearish trend AND volume spike
+            short_entry = (curr_low < low_roll[i]) and bearish_trend and vol_spike
             
             if long_entry:
                 signals[i] = 0.25
@@ -83,16 +75,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price breaks below Donchian low OR closes below EMA34
-            if curr_close < lookback_low or curr_close < ema_34_aligned[i]:
+            # Exit: price breaks below lower Donchian OR trend changes
+            if (curr_low < low_roll[i]) or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price breaks above Donchian high OR closes above EMA34
-            if curr_close > lookback_high or curr_close > ema_34_aligned[i]:
+            # Exit: price breaks above upper Donchian OR trend changes
+            if (curr_high > high_roll[i]) or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_EMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_WeeklyEMA34_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
