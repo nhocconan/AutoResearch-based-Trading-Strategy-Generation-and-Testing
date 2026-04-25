@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot R3/S3 Breakout + Volume Spike + ATR Filter
-Hypothesis: Camarilla pivot levels act as intraday support/resistance where breakouts indicate institutional participation.
-Volume confirms real money involvement, ATR filter ensures sufficient momentum. Works in bull/bear via breakout logic.
-Target: 20-50 trades/year on 4h.
+1d Donchian(20) Breakout + Weekly EMA34 Trend + Volume Spike + ATR Filter
+Hypothesis: Daily Donchian breakouts capture multi-day momentum. Weekly EMA34 filter ensures
+trading with the higher timeframe trend. Volume spike confirms institutional participation.
+ATR filter avoids low-volatility chop. Works in bull/bear via breakout logic and trend filter.
+Target: 7-25 trades/year on 1d (30-100 total over 4 years).
 """
 
 import numpy as np
@@ -20,26 +21,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop for HTF EMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # Calculate Camarilla pivots from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA34
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Camarilla levels: R3, R2, R1, PP, S1, S2, S3
-    # R4 = close + (high-low)*1.1/2, R3 = close + (high-low)*1.1/4, etc.
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Daily Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -52,27 +48,29 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for all indicators
-    start_idx = max(20, 20, 14, 50) + 1
+    start_idx = max(20, 20, 14, 50, 34) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_filter[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_filter[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         vol_spike = volume_spike[i]
         atr_ok = atr_filter[i]
         
-        # Camarilla breakout conditions
-        breakout_long = curr_close > camarilla_r3_aligned[i-1]  # Break above previous period's R3
-        breakout_short = curr_close < camarilla_s3_aligned[i-1]  # Break below previous period's S3
+        # Donchian breakout conditions (using previous day's levels)
+        breakout_long = curr_high > highest_20[i-1]  # Break above previous period's high
+        breakout_short = curr_low < lowest_20[i-1]   # Break below previous period's low
         
         if position == 0:
-            # Look for entry signals - require: Camarilla breakout + volume + ATR filter
-            long_entry = breakout_long and vol_spike and atr_ok
-            short_entry = breakout_short and vol_spike and atr_ok
+            # Look for entry signals - require: Donchian breakout + weekly trend + volume + ATR filter
+            long_entry = breakout_long and (curr_close > ema_34_1w_aligned[i]) and vol_spike and atr_ok
+            short_entry = breakout_short and (curr_close < ema_34_1w_aligned[i]) and vol_spike and atr_ok
             
             if long_entry:
                 signals[i] = 0.25
@@ -84,16 +82,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price retouches Camarilla S3 level
-            if curr_close < camarilla_s3_aligned[i]:
+            # Exit: price retouches Donchian low or closes below weekly EMA
+            if curr_low < lowest_20[i] or curr_close < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price retouches Camarilla R3 level
-            if curr_close > camarilla_r3_aligned[i]:
+            # Exit: price retouches Donchian high or closes above weekly EMA
+            if curr_high > highest_20[i] or curr_close > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_VolumeSpike_ATRFilter"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_WeeklyEMA34_Trend_VolumeSpike_ATRFilter"
+timeframe = "1d"
 leverage = 1.0
