@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12-hour Camarilla H3/L3 breakout with 1-day EMA34 trend filter and volume spike confirmation.
-Targets 12-37 trades/year by requiring: 1) price breaks daily H3/L3 levels (strong intraday breakout),
-2) aligned with 1d EMA34 trend, 3) volume > 2.0x 20-period average. Uses 12h timeframe to minimize
+1d_Camarilla_H3L3_Breakout_1wTrend_VolumeSpike
+Hypothesis: Daily Camarilla H3/L3 breakout with 1-week EMA34 trend filter and volume spike confirmation.
+Targets 7-25 trades/year by requiring: 1) price breaks daily H3/L3 levels (strong breakout),
+2) aligned with 1w EMA34 trend, 3) volume > 2.0x 20-period average. Uses 1d timeframe to minimize
 fee drag while capturing significant moves in both bull and bear markets. H3/L3 levels provide
-better signal quality than R1/S1 for lower timeframe strategies. Volume confirmation and trend
-filter reduce false breakouts. Exit on mean reversion (opposite level touch) or trend change.
+better signal quality than R1/S1 for daily strategies, reducing false breakouts.
 """
 
 import numpy as np
@@ -27,12 +26,13 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1d data for EMA34 trend filter (loaded ONCE)
-    df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w data for EMA34 trend filter (loaded ONCE)
+    df_1w = get_htf_data(prices, '1w')
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # 1d data for Camarilla pivots (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -42,7 +42,7 @@ def generate_signals(prices):
     H3 = prev_close + 1.1 * prev_range * (1.0/2.0)
     L3 = prev_close - 1.1 * prev_range * (1.0/2.0)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 1d timeframe (identity alignment)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
@@ -54,8 +54,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA34 (34) and previous day data (1)
-    start_idx = 35
+    # Start index: need enough for 1d previous data (1) and 1w EMA34 (34 weeks ~ 238 days)
+    start_idx = 239
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -65,7 +65,7 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1d_aligned[i])):
+            np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -73,9 +73,9 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: price relative to 1w EMA34
+        uptrend = curr_close > ema_34_1w_aligned[i]
+        downtrend = curr_close < ema_34_1w_aligned[i]
         
         if position == 0:
             # Look for entry signals with volume confirmation, trend alignment
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Camarilla_H3L3_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
