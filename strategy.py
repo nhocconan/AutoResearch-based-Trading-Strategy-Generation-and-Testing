@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA trend filter and volume spike confirmation.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA trend filter and volume spike confirmation.
 Only trade breakouts aligned with 1d EMA direction during volume expansion (>1.5x average volume).
-Targets 12-37 trades/year on 12h timeframe, avoiding fee drag while capturing strong momentum moves.
+Targets 20-50 trades/year on 4h timeframe, avoiding fee drag while capturing strong momentum moves.
 Uses discrete sizing (0.25) and ATR-based stoploss (signal→0 when price moves against position by 1.5*ATR).
+Works in both bull and bear markets by requiring volume confirmation and trend alignment.
 """
 
 import numpy as np
@@ -21,25 +22,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla levels - primary timeframe
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for Camarilla levels - primary timeframe
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # Calculate Camarilla levels for R1 and S1
     # R1 = close + (high - low) * 1.1/12
     # S1 = close - (high - low) * 1.1/12
-    camarilla_range = high_12h - low_12h
-    r1_12h = close_12h + camarilla_range * 1.1 / 12
-    s1_12h = close_12h - camarilla_range * 1.1 / 12
+    camarilla_range = high_4h - low_4h
+    r1_4h = close_4h + camarilla_range * 1.1 / 12
+    s1_4h = close_4h - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
     
     # Get 1d data for EMA trend filter - HTF
     df_1d = get_htf_data(prices, '1d')
@@ -51,19 +52,19 @@ def generate_signals(prices):
     # Calculate EMA(34) on 1d
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA to 12h timeframe
+    # Align EMA to 4h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate ATR(14) for stoploss on 12h
+    # Calculate ATR(14) for stoploss on 4h
     # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    atr_12h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    atr_4h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     # Calculate volume average (20-period) for volume spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -80,7 +81,7 @@ def generate_signals(prices):
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
             np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(atr_4h_aligned[i]) or 
             np.isnan(vol_ma[i])):
             # Hold current position or flat
             if position == 0:
@@ -95,7 +96,7 @@ def generate_signals(prices):
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         ema_val = ema_1d_aligned[i]
-        atr_val = atr_12h_aligned[i]
+        atr_val = atr_4h_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_val = volume[i]
         close_val = close[i]
@@ -153,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
