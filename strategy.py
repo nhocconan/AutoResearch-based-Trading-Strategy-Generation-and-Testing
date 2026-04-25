@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Camarilla H3/L3 Breakout + 1w EMA50 Trend + Volume Spike
-Hypothesis: Camarilla H3/L3 levels act as institutional pivot points where price often breaks with volume.
-Trading breakouts above H3 (bullish) or below L3 (bearish) with 1w EMA50 trend filter and volume confirmation
-captures strong moves in both bull and bear markets. 1d timeframe targets 7-25 trades/year to minimize fee drag.
+6h Elder Ray Power + 12h SuperTrend + Volume Spike
+Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures buying/selling pressure.
+Combined with 12h SuperTrend for trend direction and volume spike for confirmation, this captures strong
+momentum moves in both bull and bear markets. 6h timeframe provides sufficient noise reduction while
+catching multi-day trends. Discrete position sizing (0.25) minimizes fee churn.
 """
 
 import numpy as np
@@ -20,52 +21,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get 12h data for SuperTrend trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels on 1d data: H3, L3
-    # Camarilla: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    # Calculate 12h SuperTrend (ATR=10, mult=3.0)
+    hl2 = (df_12h['high'] + df_12h['low']) / 2
+    atr = pd.Series(df_12h['high'] - df_12h['low']).rolling(window=10, min_periods=10).mean()
+    upper_band = hl2 + (3.0 * atr)
+    lower_band = hl2 - (3.0 * atr)
     
-    # Get 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    supertrend = np.full(len(df_12h), np.nan)
+    direction = np.full(len(df_12h), np.nan)  # 1 for uptrend, -1 for downtrend
     
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    for i in range(len(df_12h)):
+        if i == 0:
+            supertrend[i] = upper_band[i]
+            direction[i] = 1
+        else:
+            if supertrend[i-1] == upper_band[i-1]:
+                supertrend[i] = lower_band[i] if close[i] > upper_band[i-1] else upper_band[i]
+                direction[i] = -1 if supertrend[i] == upper_band[i] else 1
+            else:
+                supertrend[i] = upper_band[i] if close[i] < lower_band[i-1] else lower_band[i]
+                direction[i] = 1 if supertrend[i] == lower_band[i] else -1
     
-    # Align Camarilla levels to 1d timeframe (no extra delay needed for pivot points)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    supertrend_direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for 1w EMA50 warmup
-    start_idx = 50
+    # Start index: need enough for Elder Ray EMA13 warmup
+    start_idx = 13
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i])):
+        if (np.isnan(supertrend_aligned[i]) or 
+            np.isnan(supertrend_direction_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
-        ema_trend = ema_50_1w_aligned[i]
-        h3_level = camarilla_h3_aligned[i]
-        l3_level = camarilla_l3_aligned[i]
+        
+        # Elder Ray: EMA13 of close
+        if i >= 13:
+            ema13 = np.mean(close[i-12:i+1])
+        else:
+            ema13 = np.mean(close[:i+1])
+        
+        bull_power = curr_high - ema13
+        bear_power = ema13 - curr_low
         
         # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
@@ -74,12 +86,15 @@ def generate_signals(prices):
             vol_ma_20 = np.mean(volume[:i+1])
         volume_spike = curr_volume > 2.0 * vol_ma_20
         
-        # Breakout signals with trend filter
+        supertrend_val = supertrend_aligned[i]
+        supertrend_dir = supertrend_direction_aligned[i]
+        
+        # Entry logic
         if position == 0:
-            # Long: price breaks above H3 (bullish) AND above weekly EMA50 (uptrend filter)
-            long_condition = (curr_close > h3_level) and (curr_close > ema_trend) and volume_spike
-            # Short: price breaks below L3 (bearish) AND below weekly EMA50 (downtrend filter)
-            short_condition = (curr_close < l3_level) and (curr_close < ema_trend) and volume_spike
+            # Long: Bull Power > 0 (buying pressure) AND price above SuperTrend (uptrend) AND volume spike
+            long_condition = (bull_power > 0) and (curr_close > supertrend_val) and volume_spike
+            # Short: Bear Power > 0 (selling pressure) AND price below SuperTrend (downtrend) AND volume spike
+            short_condition = (bear_power > 0) and (curr_close < supertrend_val) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -88,15 +103,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to L3 or trend breaks
-            if curr_close <= l3_level or curr_close < ema_trend:
+            # Exit long: Bear Power > 0 (selling pressure takes over) OR price breaks below SuperTrend
+            if (bear_power > 0) or (curr_close < supertrend_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to H3 or trend breaks
-            if curr_close >= h3_level or curr_close > ema_trend:
+            # Exit short: Bull Power > 0 (buying pressure takes over) OR price breaks above SuperTrend
+            if (bull_power > 0) or (curr_close > supertrend_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_SuperTrend12h_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
