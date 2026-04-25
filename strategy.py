@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Weekly Pivot R1S1 Breakout with 1w EMA34 Trend and Volume Spike
-Hypothesis: Weekly Camarilla pivot levels (R1/S1) act as strong support/resistance on the daily timeframe. 
-Breakouts above R1 or below S1 with volume confirmation and aligned 1w EMA34 trend capture institutional moves 
-while reducing false breakouts. Designed for very low trade frequency (7-25/year) on 1d timeframe to work in 
-both bull and bear markets via trend following with strict entry conditions.
+6h Ichimoku Cloud Breakout with 1d Trend Filter
+Hypothesis: Ichimoku cloud (Senkou Span A/B) acts as dynamic support/resistance. 
+Tenkan-Kijun cross above/below cloud with 1d EMA50 trend alignment captures strong momentum moves. 
+Cloud acts as natural stop: exit when price re-enters cloud. Works in both bull/bear markets 
+by only taking trades aligned with higher timeframe trend. Target: 12-37 trades/year on 6h.
 """
 
 import numpy as np
@@ -13,79 +13,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for EMA50 trend filter (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1w close for trend
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(
-        span=34, adjust=False, min_periods=34
+    # Calculate 50-period EMA on 1d close for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(
+        span=50, adjust=False, min_periods=50
     ).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 1w data for Camarilla pivot calculation (R1, S1 levels)
-    if len(df_1w) < 1:
-        return np.zeros(n)
+    # Calculate Ichimoku components on 6h data
+    # Conversion Line (Tenkan-sen): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (high_tenkan + low_tenkan) / 2
     
-    # Calculate Camarilla pivots for each 1w bar: based on previous week's high, low, close
-    # We need to shift to avoid look-ahead: use previous week's data to calculate current week's levels
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # Base Line (Kijun-sen): (26-period high + 26-period low)/2
+    period_kijun = 26
+    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (high_kijun + low_kijun) / 2
     
-    # Camarilla formulas for R1/S1 (tighter levels than R3/S3 for more precision):
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Leading Span A (Senkou Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Align to LTF (1d) - no extra delay needed as pivots are based on completed 1w bar
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    # Leading Span B (Senkou Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    period_senkou_b = 52
+    high_senkou = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    low_senkou = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((high_senkou + low_senkou) / 2)
     
-    # Calculate volume spike: current volume > 2.5 * 20-period average volume (stricter for 1d)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    # For cloud calculation, we need to shift Senkou Spans forward by 26 periods
+    # But to avoid look-ahead, we use the values that were available 26 periods ago
+    # So current cloud is based on Senkou A/B calculated 26 periods ago
+    senkou_a_shifted = np.roll(senkou_a, 26)
+    senkou_b_shifted = np.roll(senkou_b, 26)
+    # First 26 values are invalid (rolled from end)
+    senkou_a_shifted[:26] = np.nan
+    senkou_b_shifted[:26] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for EMA, volume MA, and to avoid NaN from shift
-    start_idx = max(34, 20) + 1
+    # Start index: need enough for all calculations + 26 for cloud shift
+    start_idx = max(period_kijun, period_senkou_b) + 26
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a_shifted[i]) or np.isnan(senkou_b_shifted[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume = volume[i]
-        ema_trend = ema_34_1w_aligned[i]
-        r1_level = camarilla_r1_aligned[i]
-        s1_level = camarilla_s1_aligned[i]
-        vol_spike = volume_spike[i]
+        ema_trend = ema_50_1d_aligned[i]
+        
+        # Cloud boundaries: higher Senkou Span is resistance, lower is support
+        cloud_top = max(senkou_a_shifted[i], senkou_b_shifted[i])
+        cloud_bottom = min(senkou_a_shifted[i], senkou_b_shifted[i])
+        
+        # Tenkan-Kijun cross
+        tenkan_kijun_cross = tenkan[i] > kijun[i]
+        tenkan_kijun_cross_down = tenkan[i] < kijun[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above R1 resistance AND volume spike AND price > 1w EMA34 (uptrend)
-            long_entry = (curr_close > r1_level) and vol_spike and (curr_close > ema_trend)
-            # Short: price breaks below S1 support AND volume spike AND price < 1w EMA34 (downtrend)
-            short_entry = (curr_close < s1_level) and vol_spike and (curr_close < ema_trend)
+            # Long: Tenkan crosses above Kijun AND price above cloud AND price > 1d EMA50 (uptrend)
+            long_entry = tenkan_kijun_cross and (curr_close > cloud_top) and (curr_close > ema_trend)
+            # Short: Tenkan crosses below Kijun AND price below cloud AND price < 1d EMA50 (downtrend)
+            short_entry = tenkan_kijun_cross_down and (curr_close < cloud_bottom) and (curr_close < ema_trend)
             
             if long_entry:
                 signals[i] = 0.25
@@ -97,16 +104,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below S1 support (broken support) OR price crosses below EMA (trend change)
-            if (curr_close < s1_level) or (curr_close < ema_trend):
+            # Exit: price re-enters cloud (below cloud top) OR Tenkan crosses below Kijun
+            if (curr_close < cloud_top) or tenkan_kijun_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above R1 resistance (broken resistance) OR price crosses above EMA (trend change)
-            if (curr_close > r1_level) or (curr_close > ema_trend):
+            # Exit: price re-enters cloud (above cloud bottom) OR Tenkan crosses above Kijun
+            if (curr_close > cloud_bottom) or tenkan_kijun_cross:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1S1_Breakout_1wEMA34_Trend_VolumeSpike"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Breakout_1dEMA50_Trend"
+timeframe = "6h"
 leverage = 1.0
