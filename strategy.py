@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + ATR Trail
-Hypothesis: Donchian channel breakouts capture momentum; 1d EMA34 filters trend direction; volume spike confirms strength; ATR trailing stop manages risk. Works in bull (buy upper band breakout in uptrend) and bear (sell lower band breakdown in downtrend). Target 20-50 trades/year on 4h to avoid fee drag.
+4h Donchian(20) breakout + 1d EMA34 trend + volume confirmation + ATR stoploss
+Hypothesis: Donchian breakouts capture strong momentum; 1d EMA34 filters trend direction; volume confirms legitimacy; ATR stop manages risk. Works in bull (buy breakouts above upper band in uptrend) and bear (sell breakdowns below lower band in downtrend) via symmetric logic. Target 20-50 trades/year on 4h to avoid fee drag.
 """
 
 import numpy as np
@@ -46,8 +46,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for EMA34, ATR, volume MA, Donchian
-    start_idx = max(34, 14, 20, 20)  # 20 for Donchian
+    # Start index: need enough for EMA34, ATR, volume MA
+    start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -67,40 +67,52 @@ def generate_signals(prices):
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
         
-        # Donchian(20) channels
-        donchian_high = np.max(high[i-19:i+1])  # 20-period high including current
-        donchian_low = np.min(low[i-19:i+1])    # 20-period low including current
+        # Calculate Donchian channels (20-period)
+        if i >= 20:
+            highest_20 = np.max(high[i-19:i+1])
+            lowest_20 = np.min(low[i-19:i+1])
+        else:
+            highest_20 = np.nan
+            lowest_20 = np.nan
+        
+        if np.isnan(highest_20) or np.isnan(lowest_20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+            continue
         
         # Trend filter: price relative to 1d EMA34
         uptrend = curr_close > ema_34_val
         downtrend = curr_close < ema_34_val
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > 2.0 * vol_ma
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        volume_confirm = curr_volume > 1.5 * vol_ma
         
         if position == 0:
             # Look for breakout signals at Donchian levels
             # Long: price breaks above upper Donchian with volume confirmation in uptrend
-            long_breakout = (curr_close > donchian_high) and volume_confirm and uptrend
+            long_breakout = (curr_close > highest_20) and volume_confirm and uptrend
             # Short: price breaks below lower Donchian with volume confirmation in downtrend
-            short_breakout = (curr_close < donchian_low) and volume_confirm and downtrend
+            short_breakout = (curr_close < lowest_20) and volume_confirm and downtrend
             
             if long_breakout:
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = curr_close
+                highest_since_entry = curr_high
             elif short_breakout:
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = curr_close
+                lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit conditions: price closes below lower Donchian OR 2.5*ATR trailing stop OR EMA34 trend turns down
-            if curr_close < donchian_low or curr_close < (highest_since_entry - 2.5 * atr_val) or curr_close < ema_34_val:
+            # Exit conditions: price closes below lower Donchian OR 2.0*ATR trailing stop OR EMA34 trend turns down
+            if curr_close < lowest_20 or curr_close < (highest_since_entry - 2.0 * atr_val) or curr_close < ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -110,8 +122,8 @@ def generate_signals(prices):
             # Short position management
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit conditions: price closes above upper Donchian OR 2.5*ATR trailing stop OR EMA34 trend turns up
-            if curr_close > donchian_high or curr_close > (lowest_since_entry + 2.5 * atr_val) or curr_close > ema_34_val:
+            # Exit conditions: price closes above upper Donchian OR 2.0*ATR trailing stop OR EMA34 trend turns up
+            if curr_close > highest_20 or curr_close > (lowest_since_entry + 2.0 * atr_val) or curr_close > ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -120,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
