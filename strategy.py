@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power + 12h EMA50 Trend + Volume Confirmation
-Hypothesis: Elder Ray Bull/Bear Power (EMA13-based) measures bull/bear strength relative to trend.
-Combined with 12h EMA50 trend filter and volume confirmation to avoid weak breakouts.
-Works in bull markets via Bull Power > 0 + uptrend, in bear markets via Bear Power < 0 + downtrend.
-Designed for 6h timeframe to target 12-37 trades/year. Uses discrete sizing (0.25) to minimize fee drag.
+4h Camarilla H4/L4 Breakout + 1d EMA50 Trend + Volume Spike + Chop Filter
+Hypothesis: Camarilla H4/L4 levels from 1d chart breakouts with volume confirmation,
+1d EMA50 trend filter for primary trend alignment, and chop filter to avoid false breakouts.
+Designed for 4h timeframe to target 20-50 trades/year. Works in bull markets via breakout
+continuation and in bear markets via mean-reversion from extreme levels when trend aligns.
 """
 
 import numpy as np
@@ -21,25 +21,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for Camarilla pivots and EMA50 trend (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Camarilla pivot levels (H4, L4) from 1d OHLC
+    # Camarilla: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    camarilla_h4 = daily_close + 1.1 * (daily_high - daily_low) / 2
+    camarilla_l4 = daily_close - 1.1 * (daily_high - daily_low) / 2
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Calculate Elder Ray Power on 6h data: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    if len(close) >= 13:
-        ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-        bull_power = high - ema_13
-        bear_power = low - ema_13
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Get 1w data for choppiness regime filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        chop_regime = np.full(n, 50.0)  # Default to neutral if no weekly data
     else:
-        bull_power = np.full(n, np.nan)
-        bear_power = np.full(n, np.nan)
+        # Calculate Choppiness Index (14-period) on weekly data
+        high_1w = df_1w['high'].values
+        low_1w = df_1w['low'].values
+        close_1w = df_1w['close'].values
+        atr_1w = np.full(len(close_1w), np.nan)
+        for i in range(1, len(close_1w)):
+            tr = max(high_1w[i] - low_1w[i], 
+                     abs(high_1w[i] - close_1w[i-1]),
+                     abs(low_1w[i] - close_1w[i-1]))
+            if i >= 1:
+                atr_1w[i] = (atr_1w[i-1] * 13 + tr) / 14 if not np.isnan(atr_1w[i-1]) else tr
+        
+        # Choppiness Index = 100 * log10(sum(ATR))/log10(14) / log10((highest_high - lowest_low)/sum(ATR))
+        chop = np.full(len(close_1w), 50.0)  # Default neutral
+        for i in range(14, len(close_1w)):
+            sum_atr = np.nansum(atr_1w[i-13:i+1])
+            highest_high = np.nanmax(high_1w[i-13:i+1])
+            lowest_low = np.nanmin(low_1w[i-13:i+1])
+            if highest_high > lowest_low and sum_atr > 0:
+                chop[i] = 100 * np.log10(sum_atr) / np.log10(14) / np.log10((highest_high - lowest_low) / sum_atr)
+        chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+        chop_regime = chop_aligned  # We'll use raw value for filtering
     
-    # Calculate 20-period volume MA for volume confirmation
+    # Calculate ATR(14) for stoploss on 4h data
+    if len(close) >= 14:
+        tr1 = np.abs(np.diff(close, prepend=close[0]))
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr2[0] = np.abs(high[0] - close[0])
+        tr3[0] = np.abs(low[0] - close[0])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr = np.zeros(n)
+        atr[:13] = np.nan
+        for i in range(13, n):
+            atr[i] = np.mean(tr[i-13:i+1])
+    else:
+        atr = np.full(n, np.nan)
+    
+    # Calculate 20-period volume MA for volume spike detection
     vol_ma_20 = np.full(n, np.nan)
     for i in range(n):
         start_idx = max(0, i - 19)
@@ -49,13 +93,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA13, EMA50_12h, and volume MA to propagate
-    start_idx = max(13, 50, 20)
+    # Start index: need enough for EMA50_1d, ATR, and volume MA to propagate
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_13[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(atr[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,20 +112,25 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema13_val = ema_13[i]
-        ema50_12h = ema_50_12h_aligned[i]
-        bull_pow = bull_power[i]
-        bear_pow = bear_power[i]
+        ema50_1d = ema_50_1d_aligned[i]
+        h4 = camarilla_h4_aligned[i]
+        l4 = camarilla_l4_aligned[i]
+        atr_val = atr[i]
         vol_ma = vol_ma_20[i]
+        chop_val = chop_regime[i] if len(df_1w) >= 2 else 50.0
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        volume_confirm = curr_volume > 1.5 * vol_ma
+        # Volume spike: current volume > 2.0 * 20-period average
+        volume_spike = curr_volume > 2.0 * vol_ma
+        
+        # Choppiness filter: only trade in trending regime (CHOP < 50) for breakouts
+        # In ranging markets (CHOP > 50), we avoid breakout trades to reduce false signals
+        trending_regime = chop_val < 50.0
         
         if position == 0:
-            # Long: Bull Power > 0 (bulls in control) AND price > 12h EMA50 (uptrend) AND volume confirmation
-            long_condition = (bull_pow > 0) and (curr_close > ema50_12h) and volume_confirm
-            # Short: Bear Power < 0 (bears in control) AND price < 12h EMA50 (downtrend) AND volume confirmation
-            short_condition = (bear_pow < 0) and (curr_close < ema50_12h) and volume_confirm
+            # Long: price breaks above H4 AND uptrend (price > 1d EMA50) AND volume spike AND trending regime
+            long_condition = (curr_close > h4) and (curr_close > ema50_1d) and volume_spike and trending_regime
+            # Short: price breaks below L4 AND downtrend (price < 1d EMA50) AND volume spike AND trending regime
+            short_condition = (curr_close < l4) and (curr_close < ema50_1d) and volume_spike and trending_regime
             
             if long_condition:
                 signals[i] = 0.25
@@ -90,34 +141,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or Bear Power < 0 (trend weakness)
-            # Calculate ATR(14) for stoploss
-            if i >= 14:
-                tr = np.maximum(np.abs(np.diff(close[max(0,i-14):i+1], prepend=close[max(0,i-14)])),
-                                np.maximum(np.abs(high[max(0,i-14):i+1] - np.roll(close[max(0,i-14):i+1], 1)),
-                                           np.abs(low[max(0,i-14):i+1] - np.roll(close[max(0,i-14):i+1], 1))))
-                tr[0] = np.abs(high[max(0,i-14)] - close[max(0,i-14)])
-                atr_val = np.mean(tr)
-            else:
-                atr_val = np.std(close[max(0,i-10):i+1]) if i > 0 else 0.01
-            
-            if curr_close <= entry_price - 2.0 * atr_val or bear_pow < 0:
+            # Exit long: stoploss (2.5*ATR below entry) or price breaks below L4 (reversal signal)
+            if curr_close <= entry_price - 2.5 * atr_val or curr_close < l4:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or Bull Power > 0 (trend weakness)
-            if i >= 14:
-                tr = np.maximum(np.abs(np.diff(close[max(0,i-14):i+1], prepend=close[max(0,i-14)])),
-                                np.maximum(np.abs(high[max(0,i-14):i+1] - np.roll(close[max(0,i-14):i+1], 1)),
-                                           np.abs(low[max(0,i-14):i+1] - np.roll(close[max(0,i-14):i+1], 1))))
-                tr[0] = np.abs(high[max(0,i-14)] - close[max(0,i-14)])
-                atr_val = np.mean(tr)
-            else:
-                atr_val = np.std(close[max(0,i-10):i+1]) if i > 0 else 0.01
-            
-            if curr_close >= entry_price + 2.0 * atr_val or bull_pow > 0:
+            # Exit short: stoploss (2.5*ATR above entry) or price breaks above H4 (reversal signal)
+            if curr_close >= entry_price + 2.5 * atr_val or curr_close > h4:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Power_12hEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_H4_L4_Breakout_1dEMA50_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
