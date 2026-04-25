@@ -1,16 +1,42 @@
 #!/usr/bin/env python3
 """
-12h Camarilla R1S1 Breakout + 1w EMA50 Trend + Volume Spike
-Hypothesis: Camarilla R1/S1 levels on 1w act as significant support/resistance. 
-Break above R1 with volume and 1w EMA>50 (bullish trend) signals bullish momentum.
-Break below S1 with volume and 1w EMA<50 signals bearish momentum.
-Uses 12h timeframe for lower trade frequency. Works in bull/bear via EMA trend filter.
-Volume spike confirms institutional participation. Target: 12-37 trades/year.
+4h Donchian(20) Breakout + HMA(21) Trend + Volume Spike
+Hypothesis: Donchian channel breakouts capture strong momentum. 
+HMA(21) on 4h filters trend direction to avoid counter-trend trades.
+Volume spike confirms institutional participation. Works in bull/bear via HMA slope.
+Target: 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_hma(arr, period):
+    """Hull Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA of half period
+    weights_half = np.arange(1, half_period + 1)
+    wma_half = np.convolve(arr, weights_half, mode='valid') / weights_half.sum()
+    wma_half = np.concatenate([np.full(half_period - 1, np.nan), wma_half])
+    
+    # WMA of full period
+    weights_full = np.arange(1, period + 1)
+    wma_full = np.convolve(arr, weights_full, mode='valid') / weights_full.sum()
+    wma_full = np.concatenate([np.full(period - 1, np.nan), wma_full])
+    
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    
+    # Final WMA of raw HMA with sqrt period
+    weights_sqrt = np.arange(1, sqrt_period + 1)
+    hma = np.convolve(raw_hma, weights_sqrt, mode='valid') / weights_sqrt.sum()
+    hma = np.concatenate([np.full(sqrt_period - 1, np.nan), hma])
+    
+    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,41 +48,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla pivot calculation and EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need sufficient data for EMA and pivot
-        return np.zeros(n)
+    # Calculate HMA(21) on 4h close
+    hma_4h = calculate_hma(close, 21)
+    hma_slope = np.diff(hma_4h, prepend=np.nan)  # slope = change from previous bar
     
-    # Calculate 1w Camarilla pivot levels (based on previous week's OHLC)
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Calculate Donchian(20) channels
+    # Upper channel: highest high over past 20 periods
+    # Lower channel: lowest low over past 20 periods
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
     
-    # Calculate pivot levels using previous week's data
-    range_hl = prev_high - prev_low
-    camarilla_r1 = prev_close + (range_hl * 1.1 / 2)  # R1 level
-    camarilla_s1 = prev_close - (range_hl * 1.1 / 2)  # S1 level
+    for i in range(20, n):
+        upper_channel[i] = np.max(high[i-19:i+1])
+        lower_channel[i] = np.min(low[i-19:i+1])
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    
-    # Calculate 1w EMA50 for trend filter
-    ema_50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Volume spike: current volume > 2.0 * 20-period average
+    volume_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        volume_ma_20[i] = np.mean(volume[i-19:i+1])
+    volume_spike = volume > (2.0 * volume_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start index: need enough for data to propagate
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(hma_4h[i]) or 
+            np.isnan(hma_slope[i]) or 
+            np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or
+            np.isnan(volume_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,26 +89,19 @@ def generate_signals(prices):
         
         curr_close = close[i]
         curr_volume = volume[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        ema_value = ema_50_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_20
-        
-        # Trend filter: price above/below EMA50
-        bullish_trend = close[i] > ema_value
-        bearish_trend = close[i] < ema_value
+        # Determine trend direction from HMA slope
+        # Positive slope = uptrend, Negative slope = downtrend
+        hma_up = hma_slope[i] > 0
+        hma_down = hma_slope[i] < 0
         
         if position == 0:
-            # Long: price breaks above R1 AND volume spike AND bullish trend
-            long_condition = (curr_close > r1_level) and volume_spike and bullish_trend
-            # Short: price breaks below S1 AND volume spike AND bearish trend
-            short_condition = (curr_close < s1_level) and volume_spike and bearish_trend
+            # Long: price breaks above upper channel AND HMA uptrend AND volume spike
+            long_condition = (curr_close > upper_channel[i]) and hma_up and volume_spike[i]
+            # Short: price breaks below lower channel AND HMA downtrend AND volume spike
+            short_condition = (curr_close < lower_channel[i]) and hma_down and volume_spike[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -94,15 +112,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: price returns below S1 or trend turns bearish
-            if curr_close <= s1_level or not bullish_trend:
+            # Exit long: price returns below lower channel or HMA turns down
+            if curr_close < lower_channel[i] or hma_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above R1 or trend turns bullish
-            if curr_close >= r1_level or not bearish_trend:
+            # Exit short: price returns above upper channel or HMA turns up
+            if curr_close > upper_channel[i] or hma_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_HMA21_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
