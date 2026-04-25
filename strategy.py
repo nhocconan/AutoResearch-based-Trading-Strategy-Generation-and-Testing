@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1wTrend_VolumeRegime
-Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-week trend filter (price > 1w EMA50) and volume regime filter (>1.5x 20-period average volume).
-Long when price breaks above R1 in 1-week uptrend with volume confirmation.
-Short when price breaks below S1 in 1-week downtrend with volume confirmation.
-Exit via ATR trailing stop (2.5*ATR from extreme) or opposite Camarilla level (S1 for longs, R1 for shorts).
-Camarilla levels provide precise intraday support/resistance derived from prior day's range.
-Weekly trend filter ensures alignment with higher timeframe bias, reducing counter-trend trades.
-Volume regime confirms breakouts have conviction. Designed for ~75-125 trades over 4 years (19-31/year) via tight breakout conditions.
+4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike
+Hypothesis: 4-hour Camarilla R1/S1 breakout with 12-hour EMA50 trend filter and volume confirmation (>2.0x 20-period average).
+Long when price breaks above R1 in 12h uptrend with volume confirmation.
+Short when price breaks below S1 in 12h downtrend with volume confirmation.
+Exit via opposite Camarilla level (S1 for longs, R1 for shorts) or ATR trailing stop (2.5*ATR from extreme).
+Camarilla levels provide precise intraday support/resistance that works well in ranging and trending markets.
+Volume confirmation ensures breakouts have conviction. 12h trend filter aligns with higher timeframe bias.
+Designed for ~75-150 trades over 4 years (19-38/year) via tight Camarilla breakout conditions.
 """
 
 import numpy as np
@@ -24,24 +24,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation (prior day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Get 12h data for trend filter and Camarilla calculation (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:  # need sufficient data for EMA
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # need 50 for EMA50
-        return np.zeros(n)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h_series = pd.Series(close_12h)
     
-    close_1w = df_1w['close'].values
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Camarilla levels from previous 12h bar
+    # Camarilla: based on previous day's (here: previous 12h bar) range
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), 
+    # R2 = close + 0.55*(high-low), R1 = close + 0.275*(high-low)
+    # PP = (high+low+close)/3
+    # S1 = close - 0.275*(high-low), S2 = close - 0.55*(high-low)
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
     
-    # Calculate ATR for stoploss (14-period)
-    atr_period = 14
+    # Shift to get previous bar's OHLC
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close = np.roll(close_12h, 1)
+    prev_high[0] = high_12h[0]  # first bar
+    prev_low[0] = low_12h[0]
+    prev_close[0] = close_12h[0]
+    
+    # Calculate Camarilla levels for each 12h bar
+    camarilla_r1 = prev_close + 0.275 * (prev_high - prev_low)
+    camarilla_s1 = prev_close - 0.275 * (prev_high - prev_low)
+    camarilla_r2 = prev_close + 0.55 * (prev_high - prev_low)
+    camarilla_s2 = prev_close - 0.55 * (prev_high - prev_low)
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
+    r2_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r2)
+    s2_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s2)
+    
+    # ATR for stoploss (20-period)
+    atr_period = 20
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -49,9 +75,9 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # first period
     atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Volume regime: volume > 1.5x 20-period average
+    # Volume regime: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_regime = volume > (1.5 * vol_ma_20)
+    vol_regime = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,50 +89,23 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_50_1w_aligned[i]
-        
-        # Calculate Camarilla levels using prior 1d bar (i-1 in 1d timeframe)
-        # We need the 1d bar that completed before current 12h bar
-        # Since we're on 12h timeframe, we look back 2 12h bars to get prior day
-        # But safer: use the 1d data directly with proper alignment
-        if i >= 2:  # need at least 2 bars to have prior completed 1d bar
-            # Get the 1d index that corresponds to the prior completed day
-            # We'll use the 1d bar that ended before the current 12h bar started
-            # Since 12h bars are half of 1d bars, we can use integer division
-            idx_1d = i // 2
-            if idx_1d > 0 and idx_1d < len(df_1d):
-                # Prior completed 1d bar
-                high_1d = df_1d['high'].values[idx_1d - 1]
-                low_1d = df_1d['low'].values[idx_1d - 1]
-                close_1d = df_1d['close'].values[idx_1d - 1]
-                
-                # Calculate Camarilla levels
-                range_1d = high_1d - low_1d
-                if range_1d > 0:
-                    r1 = close_1d + (range_1d * 1.1 / 12)
-                    s1 = close_1d - (range_1d * 1.1 / 12)
-                    r3 = close_1d + (range_1d * 1.1 / 4)
-                    s3 = close_1d - (range_1d * 1.1 / 4)
-                else:
-                    r1 = s1 = r3 = s3 = close_1d
-            else:
-                # Not enough 1d data yet
-                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-                continue
-        else:
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
+        ema_trend = ema_50_12h_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        r2 = r2_aligned[i]
+        s2 = s2_aligned[i]
         
         if position == 0:
-            # Only trade in trending regimes (1w EMA50 filter)
-            if close[i] > ema_trend:  # 1w uptrend regime
+            # Only trade in trending regimes (12h EMA50 filter)
+            if close[i] > ema_trend:  # 12h uptrend regime
                 # Long: break above R1 with volume confirmation
                 long_signal = (close[i] > r1) and vol_regime[i]
-            else:  # 1w downtrend regime
+            else:  # 12h downtrend regime
                 # Short: break below S1 with volume confirmation
                 short_signal = (close[i] < s1) and vol_regime[i]
             
@@ -152,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
