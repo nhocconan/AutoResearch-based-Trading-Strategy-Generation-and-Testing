@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power + 1d EMA34 Trend + Volume Spike
-Hypothesis: Elder Ray Bull Power (high-EMA13) and Bear Power (low-EMA13) measure buying/selling pressure.
-In strong trends (1d EMA34), extreme power readings with volume spike indicate exhaustion and reversal.
-Works in bull/bear via trend filter: long when bear power extreme + uptrend, short when bull power extreme + downtrend.
-Target: 12-37 trades/year on 6h.
+12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Stoploss
+Hypothesis: Camarilla H3/L3 levels from 1d act as stronger support/resistance on 12h timeframe.
+Breakouts beyond these levels with volume confirmation and 1d EMA34 trend filter
+capture institutional flow with fewer false signals. Works in bull/bear via trend filter.
+Target: 12-37 trades/year on 12h.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,48 +21,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for Camarilla pivots and EMA34 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    
+    if len(df_1d) < 50:
         return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels (H3, L3) from 1d OHLC
+    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_h3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 4
+    camarilla_l3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 4
+    
+    # Align Camarilla levels (no extra delay needed - pivots are based on completed 1d bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3.values)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3.values)
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 for Elder Ray (on 6h data)
-    if len(close) >= 13:
-        ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate ATR(14) for stoploss
+    if len(close) >= 14:
+        tr1 = pd.Series(high).diff().abs()
+        tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
+        tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=14, min_periods=14).mean().values
     else:
-        ema_13 = np.full(n, np.nan)
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Buying pressure
-    bear_power = low - ema_13   # Selling pressure
+        atr = np.full(n, 0.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start index: need enough for data to propagate
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
         ema_34 = ema_34_1d_aligned[i]
-        bp = bull_power[i]
-        br = bear_power[i]
+        atr_val = atr[i]
         
         # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
@@ -76,12 +89,10 @@ def generate_signals(prices):
         downtrend = curr_close < ema_34
         
         if position == 0:
-            # Long: extreme bear power (selling exhaustion) AND volume spike AND uptrend
-            # Bear power is negative; more negative = stronger selling
-            long_condition = (br < -np.std(br[max(0, i-50):i+1]) * 1.5) and volume_spike and uptrend
-            # Short: extreme bull power (buying exhaustion) AND volume spike AND downtrend
-            # Bull power is positive; more positive = stronger buying
-            short_condition = (bp > np.std(bp[max(0, i-50):i+1]) * 1.5) and volume_spike and downtrend
+            # Long: price breaks above H3 AND volume spike AND uptrend
+            long_condition = (curr_high > h3) and volume_spike and uptrend
+            # Short: price breaks below L3 AND volume spike AND downtrend
+            short_condition = (curr_low < l3) and volume_spike and downtrend
             
             if long_condition:
                 signals[i] = 0.25
@@ -92,19 +103,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss or trend reversal or power normalization
-            if (curr_close <= entry_price - 2.0 * np.std(close[max(0, i-20):i+1]) or 
-                not uptrend or 
-                br > -np.std(br[max(0, i-20):i+1]) * 0.5):  # selling pressure normalized
+            # Exit long: stoploss (2.5*ATR below entry) or trend reversal
+            if curr_close <= entry_price - 2.5 * atr_val or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss or trend reversal or power normalization
-            if (curr_close >= entry_price + 2.0 * np.std(close[max(0, i-20):i+1]) or 
-                not downtrend or 
-                bp < np.std(bp[max(0, i-20):i+1]) * 0.5):  # buying pressure normalized
+            # Exit short: stoploss (2.5*ATR above entry) or trend reversal
+            if curr_close >= entry_price + 2.5 * atr_val or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Power_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
