@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume spike confirmation. Uses 1d HTF for stable trend alignment, reducing whipsaw. Discrete sizing (0.25) limits fee drag. Target: 12-37 trades/year per symbol. Works in bull/bear via 1d trend filter and volume confirmation for high-probability entries.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v3
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike confirmation. Uses 1d HTF for stronger trend filter to reduce whipsaw in bear markets. Discrete sizing (0.25) limits fee drag. Target: 20-40 trades/year per symbol. Works in bull/bear via HTF trend alignment.
 """
 
 import numpy as np
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
