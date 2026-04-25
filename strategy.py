@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 12h timeframe with 1-day EMA50 trend filter and volume confirmation. 
-In bull markets: buy when price breaks above Camarilla R1 and price > daily EMA50. 
-In bear markets: sell when price breaks below Camarilla S1 and price < daily EMA50. 
-Requires volume > 1.5x 20-period average for confirmation. 
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h timeframe with 1-day EMA34 trend filter and volume spike confirmation. 
+In bull markets: buy when price breaks above Camarilla R1 and price > daily EMA34. 
+In bear markets: sell when price breaks below Camarilla S1 and price < daily EMA34. 
+Requires volume > 2.0x 24-period average for confirmation (tighter than 1.5x to reduce trades). 
 Exit on opposite Camarilla level touch or trend reversal. 
-Position size: 0.25 to limit drawdown. 
-Target: 50-150 total trades over 4 years = 12-37/year. 
+Position size: 0.28 to limit drawdown while maintaining sufficient edge. 
+Target: 80-180 total trades over 4 years = 20-45/year. 
 Works in bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets.
+Camarilla R1/S1 levels are calculated as: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12.
 """
 
 import numpy as np
@@ -27,18 +28,19 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient data for volume average
+    if len(df_1d) < 34:  # Need sufficient data for EMA34
         return np.zeros(n)
     
-    # Calculate daily EMA50 for HTF trend filter
+    # Calculate daily EMA34 for HTF trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 20-period average volume for confirmation
+    # Calculate 24-period average volume for confirmation (using 1d volume, but checking per 4h bar)
+    # We'll use the 1d volume MA as a proxy for institutional interest
     volume_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    vol_ma_24 = pd.Series(volume_1d).rolling(window=24, min_periods=24).mean().values
+    vol_ma_24_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_24)
     
     # Calculate Camarilla levels for each 1d bar
     high_1d = df_1d['high'].values
@@ -56,24 +58,24 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and volume MA (20)
-    start_idx = 50
+    # Start index: need warmup for EMA34 (34) and volume MA (24)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_24_aligned[i]) or
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.28 if position == 1 else -0.28)
             continue
         
-        # Determine 1d HTF trend (bullish = price above daily EMA50)
-        htf_1d_bullish = close[i] > ema_50_1d_aligned[i]
-        htf_1d_bearish = close[i] < ema_50_1d_aligned[i]
+        # Determine 1d HTF trend (bullish = price above daily EMA34)
+        htf_1d_bullish = close[i] > ema_34_1d_aligned[i]
+        htf_1d_bearish = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume[i] > 1.5 * vol_ma_20_aligned[i]
+        # Volume confirmation: current volume > 2.0x 24-period average (tighter threshold)
+        volume_confirm = volume[i] > 2.0 * vol_ma_24_aligned[i]
         
         if position == 0:
             # Long setup: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
@@ -83,23 +85,23 @@ def generate_signals(prices):
             short_setup = (close[i] < s1_aligned[i]) and htf_1d_bearish and volume_confirm
             
             if long_setup:
-                signals[i] = 0.25
+                signals[i] = 0.28
                 position = 1
             elif short_setup:
-                signals[i] = -0.25
+                signals[i] = -0.28
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
+            signals[i] = 0.28
             # Exit: price touches Camarilla S1 (stop) OR 1d trend turns bearish
             if (close[i] <= s1_aligned[i]) or (not htf_1d_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
+            signals[i] = -0.28
             # Exit: price touches Camarilla R1 (stop) OR 1d trend turns bullish
             if (close[i] >= r1_aligned[i]) or (htf_1d_bullish):
                 signals[i] = 0.0
@@ -107,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
