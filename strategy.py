@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout + 12h EMA50 trend + volume spike + ATR stoploss
-Hypothesis: Donchian breakouts capture strong momentum. 12h EMA50 filters trend direction.
+1d Donchian(20) breakout + 1w EMA50 trend + volume spike + ATR stoploss
+Hypothesis: Daily Donchian breakouts capture strong momentum with lower frequency than 4h.
+Weekly EMA50 filters the major trend direction to avoid counter-trend trades.
 Volume spike confirms institutional participation. ATR-based stoploss manages risk.
-Works in bull/bear via trend filter and volatility-based position sizing.
-Target: 20-50 trades/year on 4h timeframe.
+Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years).
 """
 
 import numpy as np
@@ -21,14 +21,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR(14) for stoploss and volatility filter
     if len(close) >= 14:
@@ -117,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_EMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
