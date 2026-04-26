@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_TrendFilter_v2
-Hypothesis: Camarilla R3/S3 breakouts on 12h with 1d EMA34 trend filter and volume spike (>2x average volume).
-Long when price breaks above R3 with 1d uptrend (close > EMA34) and volume confirmation.
-Short when price breaks below S3 with 1d downtrend (close < EMA34) and volume confirmation.
-Exit on trend reversal (close crosses EMA34) or opposite breakout.
-Uses discrete position sizing (0.30) to minimize fee churn. Target: 50-150 trades over 4 years (12-37/year) on 12h timeframe.
-Adds stricter volume confirmation (2.5x) and requires both BTC and ETH trend alignment for robustness.
+1d_KAMA_Trend_Volume_Spice
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a trend filter that whipsaws less in chop. 
+On 1d timeframe: long when price > KAMA and volume > 1.5x 20-day average volume; short when price < KAMA and volume > 1.5x average volume.
+Uses 1-week EMA50 as higher timeframe trend filter to avoid counter-trend trades. Discrete position sizing (0.25) to limit fee drag.
+Target: 20-80 trades over 4 years (5-20/year) on 1d timeframe. Works in both bull (trend following) and bear (avoids false breaks via 1w trend filter).
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need warmup for EMA
+    if n < 50:  # Need warmup for KAMA and EMA
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,66 +21,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for HTF trend filter
+    # Load 1d and 1w data for HTF filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 10 or len(df_1w) < 5:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # --- 1d KAMA (Kaufman Adaptive Moving Average) ---
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=1)  # sum of |close[t] - close[t-1]| over 10 periods
+    # Avoid division by zero
+    er = np.divide(change, volatility, out=np.zeros_like(change, dtype=float), where=volatility!=0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2  # smoothed sc
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan, dtype=float)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate average volume for confirmation (20-period SMA)
+    # --- 1d 20-period average volume for confirmation ---
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # --- 1w EMA50 for trend filter ---
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.30
+    base_size = 0.25
     
-    # Start after warmup (need 1 for Camarilla calculation, 34 for EMA)
-    start_idx = max(1, 34)
+    # Start after warmup (need 10 for KAMA, 20 for avg volume, 50 for 1w EMA)
+    start_idx = max(10, 20, 50)
     
     for i in range(start_idx, n):
-        # Calculate Camarilla levels using previous day's OHLC
-        # For 12h timeframe, previous day = previous 2 bars
-        prev_1d_idx = i - 2
-        if prev_1d_idx < 0:
-            # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
-            continue
-            
-        prev_high = high[prev_1d_idx]
-        prev_low = low[prev_1d_idx]
-        prev_close = close[prev_1d_idx]
-        
-        # Calculate Camarilla levels
-        range_val = prev_high - prev_low
-        if range_val <= 0:
-            # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
-            continue
-            
-        # Camarilla R3 and S3 levels
-        R3 = prev_close + (range_val * 1.1 / 4)
-        S3 = prev_close - (range_val * 1.1 / 4)
-        
         close_val = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_34_1d_aligned[i]
+        kama_val = kama[i]
+        ema_1w_val = ema_50_1w_aligned[i]
         
         # Skip if any data not ready
-        if np.isnan(R3) or np.isnan(S3) or np.isnan(ema_val) or np.isnan(avg_vol):
+        if np.isnan(kama_val) or np.isnan(ema_1w_val) or np.isnan(avg_vol):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -92,17 +75,17 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2.5x average volume (stricter)
-        volume_confirmed = vol > 2.5 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = vol > 1.5 * avg_vol
         
-        # Long logic: price breaks above R3 with 1d uptrend and volume confirmation
-        long_condition = (close_val > R3) and (close_val > ema_val) and volume_confirmed
-        # Short logic: price breaks below S3 with 1d downtrend and volume confirmation
-        short_condition = (close_val < S3) and (close_val < ema_val) and volume_confirmed
+        # Long logic: price > KAMA with 1w uptrend and volume confirmation
+        long_condition = (close_val > kama_val) and (close_val > ema_1w_val) and volume_confirmed
+        # Short logic: price < KAMA with 1w downtrend and volume confirmation
+        short_condition = (close_val < kama_val) and (close_val < ema_1w_val) and volume_confirmed
         
-        # Exit logic: trend reversal or opposite breakout
-        exit_long = (close_val < ema_val) or (close_val < S3)
-        exit_short = (close_val > ema_val) or (close_val > R3)
+        # Exit logic: trend reversal or loss of volume confirmation
+        exit_long = (close_val < kama_val) or (close_val < ema_1w_val)
+        exit_short = (close_val > kama_val) or (close_val > ema_1w_val)
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -127,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_TrendFilter_v2"
-timeframe = "12h"
+name = "1d_KAMA_Trend_Volume_Spice"
+timeframe = "1d"
 leverage = 1.0
