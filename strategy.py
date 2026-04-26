@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: For 12h timeframe, Camarilla R1/S1 breakouts from prior 1d with 1d EMA34 trend filter and volume spike (>2.0x 20-period average) provide high-conviction entries with low trade frequency suitable for 12h. ATR-based trailing stop (2.5x) and regime filter using Bollinger Band width to avoid low volatility environments. Designed to work in both bull and bear markets by requiring strong volume confirmation and trend alignment, reducing false breakouts during ranging periods.
+4h_Camarilla_R1S1_Breakout_12hTrend_VolumeSpike_v4
+Hypothesis: Camarilla R1/S1 breakouts from prior 1d with 12h EMA50 trend filter and volume confirmation (>2.0x 20-period average). Uses ATR(14) trailing stop (2.5x) and Bollinger Band width regime filter to avoid low-volatility whipsaws. Discrete sizing 0.25 targets ~25 trades/year (100 total) to minimize fee drag. Designed for both bull and bear markets: trend filter adapts to 12h momentum, volume confirmation ensures conviction, and regime filter avoids chop.
 """
 
 import numpy as np
@@ -23,24 +23,29 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # ATR(14) on 12h for breakout confirmation and trailing stop
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # ATR(14) on 4h for breakout confirmation and trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Bollinger Band width (20,2) on 12h for regime filter - avoids low volatility whipsaws
+    # Bollinger Band width (20,2) on 4h for regime filter - avoids low volatility whipsaws
     bb_ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
     bb_upper = bb_ma + 2 * bb_std
@@ -63,7 +68,7 @@ def generate_signals(prices):
         camarilla_r1 = np.concatenate([[np.nan], camarilla_r1])
         camarilla_s1 = np.concatenate([[np.nan], camarilla_s1])
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -76,12 +81,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup: max of volume MA (20), 1d EMA (34), ATR (14), BB width MA (20)
-    start_idx = max(20, 34, 14, 20)
+    # Warmup: max of volume MA (20), 12h EMA (50), ATR (14), BB width MA (20)
+    start_idx = max(20, 50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready or outside session or low volatility regime
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_ma[i]) or
@@ -99,7 +104,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        ema_34_1d_val = ema_34_1d_aligned[i]
+        ema_50_12h_val = ema_50_12h_aligned[i]
         r1_val = camarilla_r1_aligned[i]
         s1_val = camarilla_s1_aligned[i]
         vol_ma_val = vol_ma[i]
@@ -109,16 +114,16 @@ def generate_signals(prices):
         low_val = low[i]
         atr_val = atr[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average (strict for low frequency)
+        # Volume confirmation: current volume > 2.0x 20-period average (strict for quality)
         volume_confirmed = vol_val > 2.0 * vol_ma_val
         # Breakout threshold: price must close beyond Camarilla level by 2.0*ATR (strict)
         breakout_threshold = 2.0 * atr_val
         
         if position == 0:
-            # Long: close above R1 + threshold, uptrend (close > EMA34_1d), volume confirmation
-            long_signal = (close_val > r1_val + breakout_threshold) and (close_val > ema_34_1d_val) and volume_confirmed
-            # Short: close below S1 - threshold, downtrend (close < EMA34_1d), volume confirmation
-            short_signal = (close_val < s1_val - breakout_threshold) and (close_val < ema_34_1d_val) and volume_confirmed
+            # Long: close above R1 + threshold, uptrend (close > EMA50_12h), volume confirmation
+            long_signal = (close_val > r1_val + breakout_threshold) and (close_val > ema_50_12h_val) and volume_confirmed
+            # Short: close below S1 - threshold, downtrend (close < EMA50_12h), volume confirmation
+            short_signal = (close_val < s1_val - breakout_threshold) and (close_val < ema_50_12h_val) and volume_confirmed
             
             if long_signal:
                 signals[i] = 0.25
@@ -136,7 +141,7 @@ def generate_signals(prices):
             # Hold long
             signals[i] = 0.25
             highest_since_entry = max(highest_since_entry, high_val)
-            # ATR trailing stop: exit if price drops 2.5*ATR from high (wider stop for 12h)
+            # ATR trailing stop: exit if price drops 2.5*ATR from high (wider stop for trend)
             if close_val < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
@@ -148,8 +153,8 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
                 highest_since_entry = 0.0
-            # Exit: trend reversal (close below EMA34_1d)
-            elif close_val < ema_34_1d_val:
+            # Exit: trend reversal (close below EMA50_12h)
+            elif close_val < ema_50_12h_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -170,8 +175,8 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
                 lowest_since_entry = 0.0
-            # Exit: trend reversal (close above EMA34_1d)
-            elif close_val > ema_34_1d_val:
+            # Exit: trend reversal (close above EMA50_12h)
+            elif close_val > ema_50_12h_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -179,6 +184,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_12hTrend_VolumeSpike_v4"
+timeframe = "4h"
 leverage = 1.0
