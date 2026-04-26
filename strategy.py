@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1-week EMA50 trend filter and volume confirmation (2.0x median). Only trade in direction of 1w EMA50 trend to reduce whipsaws. Uses fixed ATR(24) trailing stop (1.5x ATR). Target: 12-37 trades/year on 12h. Works in bull/bear by adapting to weekly trend and volatility regime.
+1d_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike_v1
+Hypothesis: Trade daily Camarilla R1/S1 breakouts with weekly EMA50 trend filter and volume confirmation (2.0x median). Only trade in direction of weekly EMA50 trend to reduce whipsaws. Uses ATR trailing stop (1.5x ATR) on daily timeframe. Target: 10-25 trades/year on 1d. Works in bull/bear by adapting to trend and volatility regime.
 """
 
 import numpy as np
@@ -39,18 +39,18 @@ def generate_signals(prices):
     camarilla_r1 = prev_close_1d + 1.000/6 * (prev_high_1d - prev_low_1d)
     camarilla_s1 = prev_close_1d - 1.000/6 * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to daily timeframe
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume confirmation: 2.0x median volume (24-period) for signal
-    vol_median = pd.Series(volume).rolling(window=24, min_periods=24).median().values
+    # Volume confirmation: 2.0x median volume (20-period) for signal
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # ATR(24) for trailing stop
+    # ATR(14) for volatility-based stops (daily ATR)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=24, adjust=False, min_periods=24).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,8 +58,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup: max of EMA(50) 1w, volume median (24), ATR (24)
-    start_idx = max(50, 24, 24)
+    # Warmup: max of EMA(50) 1w, volume median (20), ATR (14) 1d
+    start_idx = max(50, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
