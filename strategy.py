@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike (>2x average) captures institutional moves while avoiding counter-trend whipsaws. Designed for 12h to target 12-37 trades/year with discrete sizing (0.25). Works in bull/bear via daily trend alignment.
+1d_KAMA_Regime_VolumeBreakout_v2
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) trend direction + volume spike + Bollinger Band squeeze regime filter captures strong momentum moves while avoiding whipsaws in ranging markets. Works in bull/bear via KAMA's adaptive nature and regime filter. Designed for 1d to target 7-25 trades/year with discrete sizing (0.25).
 """
 
 import numpy as np
@@ -18,86 +18,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels and trend
+    # Load 1d data ONCE before loop for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # KAMA parameters
+    fast = 2
+    slow = 30
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # 10-period volatility
+    # Fix: volatility needs rolling sum
+    volatility_series = pd.Series(np.abs(np.diff(close))).rolling(window=10, min_periods=1).sum().values
+    volatility_series = np.concatenate([[np.nan], volatility_series])  # align with change
+    er = np.where(volatility_series > 0, change / volatility_series, 0)
     
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Smoothing Constant (SC)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
     
-    # Align to 1d (wait for completed 1d bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # ATR(14) for volatility (used in volume spike threshold)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align KAMA to 1d (wait for completed 1d bar)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Average volume for confirmation (24-period SMA = 12h * 2 = 1d)
+    # Bollinger Bands (20, 2) for regime filter
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std * std_dev)
+    lower_band = sma - (bb_std * std_dev)
+    bb_width = (upper_band - lower_band) / sma
+    
+    # Bollinger Band Width percentile (50-period) for squeeze detection
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    
+    # Average volume for confirmation (24-period SMA = 24 * 1h = 1d equivalent)
     avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     base_size = 0.25
     
-    # Warmup: max of EMA(34), volume(24)
-    start_idx = max(34, 24)
+    # Warmup: max of KAMA(10), BB(20,50), volume(24)
+    start_idx = max(30, 50, 24)  # KAMA needs ~30 for stability
     
     for i in range(start_idx, n):
         close_val = close[i]
         vol = volume[i]
+        kama_val = kama_aligned[i]
+        bb_width_pct = bb_width_percentile[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_34_1d_aligned[i]
-        r1_val = camarilla_r1_aligned[i]
-        s1_val = camarilla_s1_aligned[i]
         
         # Skip if any data not ready
-        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r1_val) or 
-            np.isnan(s1_val)):
+        if (np.isnan(kama_val) or np.isnan(bb_width_pct) or np.isnan(avg_vol)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume
-        volume_confirmed = vol > 2.0 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = vol > 1.5 * avg_vol
         
-        # Trend filter: price vs daily EMA34
-        uptrend = close_val > ema_val
-        downtrend = close_val < ema_val
+        # Regime filter: Bollinger Band Width < 30th percentile = squeeze (low volatility)
+        # We want to trade breakouts FROM squeeze, so we require recent squeeze
+        squeeze_condition = bb_width_pct < 0.3
         
-        # Long: price CLOSES above R1 with daily uptrend and volume
-        long_condition = (close_val > r1_val) and uptrend and volume_confirmed
-        # Short: price CLOSES below S1 with daily downtrend and volume
-        short_condition = (close_val < s1_val) and downtrend and volume_confirmed
+        # Trend filter: price vs KAMA
+        uptrend = close_val > kama_val
+        downtrend = close_val < kama_val
         
-        # Exit: price retests broken level
-        long_exit = (position == 1 and close_val <= r1_val)
-        short_exit = (position == -1 and close_val >= s1_val)
+        # Long: price above KAMA with volume confirmation and recent squeeze
+        long_condition = uptrend and volume_confirmed and squeeze_condition
+        # Short: price below KAMA with volume confirmation and recent squeeze
+        short_condition = downtrend and volume_confirmed and squeeze_condition
+        
+        # Exit: price crosses KAMA in opposite direction
+        long_exit = position == 1 and close_val < kama_val
+        short_exit = position == -1 and close_val > kama_val
         
         if long_condition and position != 1:
             signals[i] = base_size
             position = 1
-            entry_price = close_val
         elif short_condition and position != -1:
             signals[i] = -base_size
             position = -1
-            entry_price = close_val
         elif long_exit:
             signals[i] = 0.0
             position = 0
@@ -110,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_KAMA_Regime_VolumeBreakout_v2"
+timeframe = "1d"
 leverage = 1.0
