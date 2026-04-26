@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_RegimeFilter
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1d EMA34 trend filter, volume confirmation (>2x average volume), and choppiness regime filter (CHOP < 50 for trending markets). Designed for fewer trades (target 12-37/year) to minimize fee drift while capturing strong directional moves in both bull and bear markets via 1d trend alignment and regime filtering to avoid whipsaws in ranging markets.
+4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter
+Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter, volume confirmation (>2x average volume), and choppiness regime filter (CHOP < 50 for trending markets). Uses discrete position sizing (0.25) to minimize fee churn. Designed to work in both bull and bear markets via 1d trend alignment and regime filtering to avoid whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -168,6 +168,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_RegimeFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
