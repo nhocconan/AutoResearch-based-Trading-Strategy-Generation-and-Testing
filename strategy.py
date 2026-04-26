@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyDonchianBreakout_1dTrendFilter_VolumeSpike_v1
-Hypothesis: 6h Donchian breakout with weekly trend filter and 1d volume spike confirmation.
-- Uses weekly Donchian(20) for breakout direction (structure from higher timeframe)
-- 1d EMA50 filter ensures trades align with daily trend (bull/bear agnostic)
-- 1d volume spike (>1.5x 20-period average) confirms breakout strength
-- Long when price breaks above weekly Donchian high AND close > 1d EMA50 AND volume spike
-- Short when price breaks below weekly Donchian low AND close < 1d EMA50 AND volume spike
-- Designed for 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
-- Works in bull/bear markets by trading with the daily trend and using weekly structure for breakouts
+4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeSpike_v1
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Long when price breaks above R1 (camarilla resistance) AND price > 1d EMA34 AND volume > 1.5x 20-period average volume
+- Short when price breaks below S1 (camarilla support) AND price < 1d EMA34 AND volume > 1.5x 20-period average volume
+- Exit on opposite Camarilla level touch (R1 for shorts, S1 for longs) or trend reversal
+- Position size: 0.25 (25% of capital) to balance return and drawdown
+- Uses 1d timeframe for HTF trend filter to reduce whipsaw and align with higher timeframe direction
+- Volume spike filter ensures breakouts have conviction, reducing false signals
+- Designed for ~20-50 trades/year on 4h timeframe to minimize fee drag (<5% annual fee drag at 100 trades/year)
+- Works in bull/bear markets by trading with the 1d trend and using Camarilla levels for precise entries
 """
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need enough data for calculations
+    if n < 50:  # Need enough data for calculations
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,42 +26,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for Donchian calculation
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
-    
-    # Load daily data ONCE before loop for trend filter and volume spike
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily volume spike (>1.5x 20-period average)
-    volume_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    volume_spike = volume_1d > (vol_ma20_1d * 1.5)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    # Calculate 20-period average volume for volume spike filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 for Donchian, 50 for EMA)
-    start_idx = 50
+    # Start after warmup (need 20 for volume MA)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -70,24 +56,62 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        # Calculate Camarilla levels for today (using previous day's OHLC)
+        # Need to get previous day's OHLC from 1d data
+        # Find index of previous completed 1d bar
+        # Since we're on 4h timeframe, we need to map to 1d bars
+        # Use the aligned arrays to get previous day's values
         
-        # Daily trend filter
-        daily_uptrend = close[i] > ema50_1d_aligned[i]
-        daily_downtrend = close[i] < ema50_1d_aligned[i]
+        # Get previous day's OHLC from 1d data (already aligned)
+        # We need to access df_1d values but we don't have them aligned per bar
+        # Instead, we'll calculate Camarilla levels using the same method as before
+        # but we need to ensure we're using completed daily bars
         
-        # Volume confirmation
-        vol_confirmed = volume_spike_aligned[i] > 0.5  # Boolean as float
+        # Simpler approach: calculate Camarilla levels on 4h data using 24-bar lookback
+        # Since 24 * 4h = 96h = 4 days, we'll use 6 bars (1.5 days) for more responsiveness
+        # But proper Camarilla uses previous day's OHLC, so we need to access daily data
+        
+        # Let's use a rolling window of 6*4h = 24h approximation for OHLC
+        # This is not perfect but avoids look-ahead and uses available data
+        if i >= 6:  # Need at least 6 bars (24h) for approximate OHLC
+            # Approximate previous day's OHLC using last 6 4h bars (24h period)
+            lookback = 6
+            prev_high = np.max(high[i-lookback:i])
+            prev_low = np.min(low[i-lookback:i])
+            prev_close = close[i-1]  # Previous bar's close
+            
+            # Calculate Camarilla levels
+            range_val = prev_high - prev_low
+            if range_val > 0:
+                r1 = prev_close + range_val * 1.1 / 12
+                s1 = prev_close - range_val * 1.1 / 12
+            else:
+                r1 = prev_close
+                s1 = prev_close
+        else:
+            # Not enough data yet
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
+            continue
+        
+        # Volume spike condition
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
+        
+        # Trend filter
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
         
         if position == 0:
-            # Long: breakout above weekly Donchian high AND daily uptrend AND volume spike
-            if breakout_up and daily_uptrend and vol_confirmed:
+            # Long: price breaks above R1 AND uptrend AND volume spike
+            if close[i] > r1 and uptrend and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below weekly Donchian low AND daily downtrend AND volume spike
-            elif breakout_down and daily_downtrend and vol_confirmed:
+            # Short: price breaks below S1 AND downtrend AND volume spike
+            elif close[i] < s1 and downtrend and volume_spike:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -95,20 +119,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price falls below weekly Donchian low OR daily trend turns down
-            if close[i] < donchian_low_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: price falls below S1 (opposite level) OR trend reverses
+            if close[i] < s1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price rises above weekly Donchian high OR daily trend turns up
-            if close[i] > donchian_high_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: price rises above R1 (opposite level) OR trend reverses
+            if close[i] > r1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyDonchianBreakout_1dTrendFilter_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
