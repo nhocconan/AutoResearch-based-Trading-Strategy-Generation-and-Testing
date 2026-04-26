@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike (>2x average volume). 
-In bull markets: price breaks above R1 with 1d uptrend and high volume → long. 
-In bear markets: price breaks below S1 with 1d downtrend and high volume → short. 
-Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-200 trades over 4 years (19-50/year) on 4h timeframe.
+4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts on 4h with 1d EMA34 trend filter and volume spike (>2x average volume). 
+In bull markets: price breaks above R3 with 1d uptrend and high volume → long. 
+In bear markets: price breaks below S3 with 1d downtrend and high volume → short. 
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 100-200 trades over 4 years (25-50/year) on 4h timeframe.
 Requires BTC/ETH edge via 1d trend and volume filters; avoids SOL-only bias by requiring trend alignment.
 """
 
@@ -71,9 +71,9 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
             
-        # Camarilla R1 and S1 levels
-        R1 = prev_close + (range_val * 1.1 / 12)
-        S1 = prev_close - (range_val * 1.1 / 12)
+        # Camarilla R3 and S3 levels
+        R3 = prev_close + (range_val * 1.1 / 4)
+        S3 = prev_close - (range_val * 1.1 / 4)
         
         close_val = close[i]
         vol = volume[i]
@@ -81,7 +81,7 @@ def generate_signals(prices):
         ema_val = ema_34_1d_aligned[i]
         
         # Skip if any data not ready
-        if np.isnan(R1) or np.isnan(S1) or np.isnan(ema_val) or np.isnan(avg_vol):
+        if np.isnan(R3) or np.isnan(S3) or np.isnan(ema_val) or np.isnan(avg_vol):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -94,14 +94,14 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 2.0x average volume
         volume_confirmed = vol > 2.0 * avg_vol
         
-        # Long logic: price breaks above R1 with 1d uptrend and volume confirmation
-        long_condition = (close_val > R1) and (close_val > ema_val) and volume_confirmed
-        # Short logic: price breaks below S1 with 1d downtrend and volume confirmation
-        short_condition = (close_val < S1) and (close_val < ema_val) and volume_confirmed
+        # Long logic: price breaks above R3 with 1d uptrend and volume confirmation
+        long_condition = (close_val > R3) and (close_val > ema_val) and volume_confirmed
+        # Short logic: price breaks below S3 with 1d downtrend and volume confirmation
+        short_condition = (close_val < S3) and (close_val < ema_val) and volume_confirmed
         
         # Exit logic: trend reversal or opposite breakout
-        exit_long = (close_val < ema_val) or (close_val < S1)
-        exit_short = (close_val > ema_val) or (close_val > R1)
+        exit_long = (close_val < ema_val) or (close_val < S3)
+        exit_short = (close_val > ema_val) or (close_val > R3)
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
