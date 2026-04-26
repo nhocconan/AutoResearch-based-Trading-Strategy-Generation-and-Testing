@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_WeeklyPivotDirection_v1
-Hypothesis: Donchian(20) breakout on 6h with weekly pivot direction filter (price > weekly pivot = long bias, < weekly pivot = short bias) and volume confirmation.
-Works in both bull and bear markets by using weekly pivot as regime filter (above pivot = bullish bias, below = bearish bias) and Donchian breakouts for momentum entries.
-Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.0, ±0.25) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above R1 (bullish) with price > 1d EMA34 and volume spike.
+Short when price breaks below S1 (bearish) with price < 1d EMA34 and volume spike.
+Uses discrete position sizing (±0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
+Camarilla pivot levels provide institutional support/resistance; EMA34 filter ensures trend alignment;
+volume spike confirms institutional participation. Works in bull/bear by combining mean-reversion
+structure (Camarilla) with trend and volume filters.
 """
 
 import numpy as np
@@ -20,17 +24,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Camarilla levels from prior day (1d timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Load weekly data for pivot points (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    # Calculate weekly pivot: (H + L + C) / 3
-    weekly_pivot = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    weekly_pivot_vals = weekly_pivot.values
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_vals)
+    # Typical price for pivot calculation
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    camarilla_r1 = close_1d + (range_1d * 1.1 / 12.0)  # R1 = C + ((H-L)*1.1/12)
+    camarilla_s1 = close_1d - (range_1d * 1.1 / 12.0)  # S1 = C - ((H-L)*1.1/12)
+    
+    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: volume > 1.5 * 20-period EMA volume
     avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -39,13 +53,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(lookback, 20) + 1
+    # Start after warmup (need 34 for EMA, 20 for volume EMA)
+    start_idx = max(34, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -58,25 +72,25 @@ def generate_signals(prices):
         # Discrete position sizing
         base_size = 0.25
         
-        # Long logic: price breaks above Donchian upper + price > weekly pivot (bullish bias) + volume spike
-        if close[i] > highest_high[i] and close[i] > weekly_pivot_aligned[i] and volume_spike[i]:
+        # Long logic: price breaks above R1 (bullish breakout) + price > 1d EMA34 (uptrend) + volume spike
+        if close[i] > camarilla_r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: price breaks below Donchian lower + price < weekly pivot (bearish bias) + volume spike
-        elif close[i] < lowest_low[i] and close[i] < weekly_pivot_aligned[i] and volume_spike[i]:
+        # Short logic: price breaks below S1 (bearish breakout) + price < 1d EMA34 (downtrend) + volume spike
+        elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
-        # Exit conditions: price returns to weekly pivot or loss of volume confirmation
-        elif position == 1 and (close[i] <= weekly_pivot_aligned[i] or not volume_spike[i]):
+        # Exit conditions: price returns to mean (typical price) or loss of volume confirmation
+        elif position == 1 and (close[i] < typical_price[-1] if i < len(typical_price) else close[i] < close_1d[-1] or not volume_spike[i]):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] >= weekly_pivot_aligned[i] or not volume_spike[i]):
+        elif position == -1 and (close[i] > typical_price[-1] if i < len(typical_price) else close[i] > close_1d[-1] or not volume_spike[i]):
             signals[i] = 0.0
             position = 0
         else:
@@ -90,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_WeeklyPivotDirection_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
