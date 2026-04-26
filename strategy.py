@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R3/S3 breakout on 6h timeframe with 1d EMA34 trend filter and volume spike (>2x median) to capture strong momentum moves with tighter entry. Works in bull/bear markets by only trading with the 1d trend and avoiding low-volume, choppy conditions. Targets 12-30 trades/year via tight entry conditions requiring confluence of breakout, trend, and volume.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 4h timeframe with 1d EMA34 trend filter and volume spike (>2x median) to capture strong momentum moves with tighter entry. Works in bull/bear markets by only trading with the 1d trend and avoiding low-volume, choppy conditions. Targets 15-35 trades/year via tight entry conditions requiring confluence of breakout, trend, and volume.
 """
 
 import numpy as np
@@ -32,13 +32,13 @@ def generate_signals(prices):
     prev_high_1d = df_1d['high'].shift(1).values
     prev_low_1d = df_1d['low'].shift(1).values
     
-    camarilla_r3 = prev_close_1d + (3.0/4) * (prev_high_1d - prev_low_1d)
-    camarilla_s3 = prev_close_1d - (3.0/4) * (prev_high_1d - prev_low_1d)
+    camarilla_r1 = prev_close_1d + (1.0/4) * (prev_high_1d - prev_low_1d)
+    camarilla_s1 = prev_close_1d - (1.0/4) * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 6h timeframe
+    # Align HTF indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume spike filter: volume > 2x median volume (20-period) for conviction
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
@@ -61,8 +61,8 @@ def generate_signals(prices):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_median[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(atr[i])):
             # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
@@ -84,13 +84,13 @@ def generate_signals(prices):
         volume_spike = volume_val > 2.0 * vol_median_val
         
         if position == 0:
-            # Long: break above R3 with volume spike, and uptrend
-            long_signal = (close_val > camarilla_r3_aligned[i]) and \
+            # Long: break above R1 with volume spike, and uptrend
+            long_signal = (close_val > camarilla_r1_aligned[i]) and \
                           volume_spike and \
                           uptrend
             
-            # Short: break below S3 with volume spike, and downtrend
-            short_signal = (close_val < camarilla_s3_aligned[i]) and \
+            # Short: break below S1 with volume spike, and downtrend
+            short_signal = (close_val < camarilla_s1_aligned[i]) and \
                            volume_spike and \
                            downtrend
             
@@ -125,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
