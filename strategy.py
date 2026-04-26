@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ATRStop
-Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter and volume confirmation (>2x average volume). 
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: Camarilla R3/S3 breakout on 12h with 1d EMA34 trend filter and volume confirmation (>2x average volume). 
 ATR-based stoploss to manage risk and reduce whipsaws. R3/S3 are stronger Camarilla levels for fewer, higher-quality trades. 
 Long when price breaks above R3 with 1d uptrend and volume spike. Short when price breaks below S3 with 1d downtrend and volume spike. 
 Exit on trend reversal (close crosses 1d EMA34) or ATR stoploss hit. Uses discrete position sizing (0.25) to minimize fee churn. 
-Target: 50-100 trades over 4 years (12-25/year) on 4h timeframe. Designed to work in both bull and bear markets via 1d trend alignment.
+Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe. Designed to work in both bull and bear markets via 1d trend alignment.
 """
 
 import numpy as np
@@ -152,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
