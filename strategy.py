@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation (>1.8x median) to capture multi-day momentum. Designed for lower trade frequency (target: 12-30/year) to minimize fee drag while working in both bull/bear markets via trend alignment. Uses discrete position sizing (0.25) and ATR trailing stop.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime_v3
+Hypothesis: Further refinement of Camarilla R1/S1 breakout with EMA34 trend filter and stricter volume confirmation (volume > 2.5x median) to target 15-25 trades/year. Uses ATR-based trailing stops (2.0x ATR) for risk management. Designed to work in both bull and bear markets by aligning with 1d trend while avoiding overtrading via tight entry conditions.
 """
 
 import numpy as np
@@ -31,15 +31,15 @@ def generate_signals(prices):
     prev_high_1d = df_1d['high'].shift(1).values
     prev_low_1d = df_1d['low'].shift(1).values
     
-    camarilla_r1 = prev_close_1d + 1.000/6 * (prev_high_1d - prev_low_1d)
-    camarilla_s1 = prev_close_1d - 1.000/6 * (prev_high_1d - prev_low_1d)
+    camarilla_r1 = prev_close_1d + (1.0/6) * (prev_high_1d - prev_low_1d)
+    camarilla_s1 = prev_close_1d - (1.0/6) * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume regime: volume > 1.8x median volume (50-period) for confirmation
+    # Volume regime: volume > 2.5x median volume (50-period) for stricter signal validation
     vol_median = pd.Series(volume).rolling(window=50, min_periods=50).median().values
     
     # ATR(14) for volatility-based stops
@@ -79,8 +79,8 @@ def generate_signals(prices):
         uptrend = close_val > ema_34_1d_val
         downtrend = close_val < ema_34_1d_val
         
-        # Volume regime filter: only trade in high volume environments
-        volume_regime = volume_val > 1.8 * vol_median_val
+        # Volume regime filter: only trade in very high volume environments (stricter)
+        volume_regime = volume_val > 2.5 * vol_median_val
         
         if position == 0:
             # Long: break above R1 with volume regime, and uptrend
@@ -124,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime_v3"
+timeframe = "4h"
 leverage = 1.0
