@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_ChopRegime
-Hypothesis: TRIX momentum with volume confirmation and choppiness regime filter on 4h timeframe.
-TRIX (12,20) filters noise and identifies sustainable momentum. Volume spike ensures institutional participation.
-Choppiness regime (CHOP > 61.8) enables mean-reversion logic in ranging markets, while (CHOP < 38.2) enables trend-following.
-Works in bull/bear markets by adapting to regime: trend-follow in strong trends, mean-revert in chop.
-Targets 75-200 total trades over 4 years via disciplined entry requiring TRIX crossover, volume confirmation, and regime alignment.
+6h_Donchian20_Breakout_WeeklyTrend_VolumeConfirmation
+Hypothesis: Donchian(20) breakouts on 6h with weekly EMA50 trend filter and volume confirmation. 
+Weekly trend provides robust bias for both bull and bear markets. Volume confirmation reduces false breakouts.
+Targets 50-150 total trades over 4 years by requiring confluence of weekly trend, volume spike, and Donchian breakout.
+Uses discrete position sizing (0.25) to minimize fee churn and control drawdown.
 """
 
 import numpy as np
@@ -22,31 +21,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter (regime proxy)
-    close_1d = df_1d['close'].values
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    close_1w_series = pd.Series(close_1w)
+    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate TRIX(12,20) on close
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) then ROC of 20 periods
-    close_series = pd.Series(close)
-    ema1 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix_raw = 100 * (ema3.pct_change(periods=20))
-    trix = trix_raw.values
-    
-    # Calculate TRIX signal line (9-period EMA of TRIX)
-    trix_series = pd.Series(trix)
-    trix_signal = trix_series.ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # Calculate ATR(14) for stoploss and volatility filter
+    # Calculate 6h ATR(14) for stoploss
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -54,23 +40,16 @@ def generate_signals(prices):
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume spike: volume > 1.8x 20-period median volume
+    # Volume spike: volume > 1.5x 20-period median volume
     volume_series = pd.Series(volume)
     vol_median_20 = volume_series.rolling(window=20, min_periods=20).median().values
-    volume_spike = volume > (1.8 * vol_median_20)
+    volume_spike = volume > (1.5 * vol_median_20)
     
-    # Choppiness Index on 4h (primary timeframe)
-    # CHOP = 100 * log10(sum(ATR(14)) / (n * (highest_high - lowest_low))) / log10(n)
-    # where n = 14 periods
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_hl = highest_high - lowest_low
-    # Avoid division by zero
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = 100 * (np.log10(atr_sum / range_hl) / np.log10(14))
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Reduced fixed position size to control trade frequency and drawdown
     fixed_size = 0.25
@@ -79,54 +58,31 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need 12+12+12+20=56 for TRIX, 14 for ATR/CHOP, 20 for volume median
-    start_idx = max(56, 14, 20)
+    # Warmup: need 50 for weekly EMA, 20 for Donchian, 20 for volume median
+    start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or
-            np.isnan(atr[i]) or np.isnan(chop[i]) or
-            np.isnan(vol_median_20[i]) or
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(atr_14[i]) or
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        trix_val = trix[i]
-        trix_signal_val = trix_signal[i]
-        atr_val = atr[i]
-        chop_val = chop[i]
+        ema_50_val = ema_50_1w_aligned[i]
+        atr_val = atr_14[i]
         vol_spike = volume_spike[i]
         size = fixed_size
-        ema_34_val = ema_34_1d_aligned[i]
         
         if position == 0:
             # Flat - look for entry
-            # Regime logic: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (trend follow)
-            if chop_val > 61.8:
-                # Ranging market: mean reversion at extremes
-                # Long: TRIX crosses above signal from below AND volume spike AND price below 1d EMA34 (oversold in downtrend)
-                long_entry = (trix_val > trix_signal_val and 
-                             trix[i-1] <= trix_signal[i-1] and  # crossed up
-                             vol_spike and 
-                             close_val < ema_34_val)
-                # Short: TRIX crosses below signal from above AND volume spike AND price above 1d EMA34 (overbought in uptrend)
-                short_entry = (trix_val < trix_signal_val and 
-                              trix[i-1] >= trix_signal[i-1] and  # crossed down
-                              vol_spike and 
-                              close_val > ema_34_val)
-            else:
-                # Trending market: trend following
-                # Long: TRIX crosses above signal from below AND volume spike AND price above 1d EMA34
-                long_entry = (trix_val > trix_signal_val and 
-                             trix[i-1] <= trix_signal[i-1] and  # crossed up
-                             vol_spike and 
-                             close_val > ema_34_val)
-                # Short: TRIX crosses below signal from above AND volume spike AND price below 1d EMA34
-                short_entry = (trix_val < trix_signal_val and 
-                              trix[i-1] >= trix_signal[i-1] and  # crossed down
-                              vol_spike and 
-                              close_val < ema_34_val)
+            # Long: price breaks above Donchian high with volume spike and weekly uptrend
+            long_entry = (high[i] > donchian_high[i]) and vol_spike and (close_val > ema_50_val)
+            # Short: price breaks below Donchian low with volume spike and weekly downtrend
+            short_entry = (low[i] < donchian_low[i]) and vol_spike and (close_val < ema_50_val)
             
             if long_entry:
                 signals[i] = size
@@ -139,22 +95,18 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on TRIX cross down, ATR stoploss, or regime change to extreme chop
-            stop_price = entry_price - 2.5 * atr_val
-            if (trix_val < trix_signal_val and trix[i-1] >= trix_signal[i-1]) or \
-               close_val < stop_price or \
-               chop_val > 70.0:  # extreme chop - exit mean reversion
+            # Long - exit on trend reversal, ATR stoploss, or Donchian mean reversion
+            stop_price = entry_price - 2.0 * atr_val
+            if close_val < ema_50_val or close_val < stop_price or close_val < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on TRIX cross up, ATR stoploss, or regime change to extreme chop
-            stop_price = entry_price + 2.5 * atr_val
-            if (trix_val > trix_signal_val and trix[i-1] <= trix_signal[i-1]) or \
-               close_val > stop_price or \
-               chop_val > 70.0:  # extreme chop - exit mean reversion
+            # Short - exit on trend reversal, ATR stoploss, or Donchian mean reversion
+            stop_price = entry_price + 2.0 * atr_val
+            if close_val > ema_50_val or close_val > stop_price or close_val > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -163,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_ChopRegime"
-timeframe = "4h"
+name = "6h_Donchian20_Breakout_WeeklyTrend_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
