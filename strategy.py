@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike
-Hypothesis: Daily Camarilla R1/S1 levels act as strong intraday support/resistance. 
-Breakout above R1 with volume spike and weekly uptrend = long. Breakdown below S1 with volume spike and weekly downtrend = short.
-Uses weekly EMA34 trend filter to work in both bull/bear markets (only long in weekly uptrend, short in downtrend).
-Volume spike filter ensures conviction. Target: 15-30 trades/year per symbol to minimize fee drag.
-Timeframe: 1d, HTF: 1w
+6h_RSI_Trend_Confluence
+Hypothesis: On 6h timeframe, RSI(14) combined with 1d EMA trend filter and volume confirmation creates high-probability entries.
+Long: RSI crosses above 40 in 1d uptrend with volume spike. Short: RSI crosses below 60 in 1d downtrend with volume spike.
+Uses 1d EMA34 for trend alignment to work in both bull/bear markets. Volume spike ensures conviction.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag.
+Timeframe: 6h, HTF: 1d
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,31 +22,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from weekly OHLC (use previous completed weekly bar)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_shift = df_1w['close'].shift(1).values  # Previous bar close
+    # Calculate RSI(14) on 6h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Calculate Camarilla levels for each weekly bar
-    rng = high_1w - low_1w
-    camarilla_r1 = close_1w_shift + 1.1 * rng / 2  # R1 = Close + 1.1*(High-Low)/2
-    camarilla_s1 = close_1w_shift - 1.1 * rng / 2  # S1 = Close - 1.1*(High-Low)/2
-    
-    # Align Camarilla levels to daily timeframe (with proper delay for completed bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    
-    # Volume spike detector (20-bar volume MA on daily)
+    # Volume spike detector (20-bar volume MA on 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -54,12 +50,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -69,17 +65,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Trend filter from weekly EMA34
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # Trend filter from daily EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
+        
+        # RSI edge detection
+        rsi_above_40 = rsi_values[i] > 40 and rsi_values[i-1] <= 40
+        rsi_below_60 = rsi_values[i] < 60 and rsi_values[i-1] >= 60
         
         if position == 0:
-            # Long: Break above R1 with volume spike and weekly uptrend
-            if close[i] > camarilla_r1_aligned[i] and volume_spike[i] and uptrend:
+            # Long: RSI crosses above 40 in 1d uptrend with volume spike
+            if rsi_above_40 and uptrend and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume spike and weekly downtrend
-            elif close[i] < camarilla_s1_aligned[i] and volume_spike[i] and downtrend:
+            # Short: RSI crosses below 60 in 1d downtrend with volume spike
+            elif rsi_below_60 and downtrend and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -87,20 +87,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Close below R1 (failed breakout) OR weekly trend change to downtrend
-            if close[i] < camarilla_r1_aligned[i] or not uptrend:
+            # Exit: RSI crosses below 40 OR trend change to downtrend
+            if rsi_values[i] < 40 or not uptrend:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Close above S1 (failed breakdown) OR weekly trend change to uptrend
-            if close[i] > camarilla_s1_aligned[i] or not downtrend:
+            # Exit: RSI crosses above 60 OR trend change to uptrend
+            if rsi_values[i] > 60 or not downtrend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_RSI_Trend_Confluence"
+timeframe = "6h"
 leverage = 1.0
