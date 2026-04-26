@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation.
-Uses higher timeframe structure (12h) with daily trend alignment to reduce whipsaw in bear markets.
-Volume spike ensures institutional participation. Designed for 12-37 trades/year (50-150 total over 4 years).
-Works in bull markets via breakouts with trend, and in bear markets via short breakdowns with trend filter.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmed_v1
+Hypothesis: Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation produce high-probability trades aligned with daily trend. Works in both bull and bear markets via trend filter. Target: 100-180 total trades over 4 years (25-45/year).
 """
 
 import numpy as np
@@ -36,25 +33,25 @@ def generate_signals(prices):
     camarilla_R1 = close_1d + 1.1 * (high_1d - low_1d) / 4
     camarilla_S1 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bars only)
+    # Align Camarilla levels to 4h timeframe (completed 1d bars only)
     R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    # 12h volume confirmation: volume > 2.0x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # 4h volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for EMA, 30 for volume MA)
-    start_idx = max(34, 30)
+    # Start after warmup (need 34 for EMA, 20 for volume MA)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(R1_aligned[i]) or
             np.isnan(S1_aligned[i]) or
-            np.isnan(vol_ma_30[i])):
+            np.isnan(vol_ma_20[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -64,8 +61,8 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition
-        volume_spike = volume[i] > 2.0 * vol_ma_30[i]
+        # Volume spike condition (stricter threshold)
+        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         # Camarilla R1/S1 breakout conditions
         breakout_up = close[i] > R1_aligned[i]   # Price breaks above R1
@@ -100,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmed_v1"
+timeframe = "4h"
 leverage = 1.0
