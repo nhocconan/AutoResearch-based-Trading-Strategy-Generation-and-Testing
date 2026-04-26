@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_4hEMA50_VolumeSpike
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 4h EMA50 trend filter and volume spike (>2.0x 20-bar avg) capture institutional breakouts. Uses 4h EMA50 for tighter alignment with primary timeframe vs 12h EMA in prior version. Targets 20-50 trades/year to minimize fee drag while maintaining edge in bull/bear regimes via trend filter.
+1d_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike
+Hypothesis: On 1d timeframe, Camarilla R1/S1 breakouts with 1w EMA50 trend filter and volume spike (>2.0x 20-bar avg) capture institutional breakouts. Uses 1w EMA50 for tighter alignment with primary timeframe vs lower timeframes. Targets 7-25 trades/year to minimize fee drag while maintaining edge in bull/bear regimes via trend filter.
 """
 
 import numpy as np
@@ -18,18 +18,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for HTF trend (aligned with primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for HTF trend (aligned with primary timeframe)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA50 on 4h for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate EMA50 on 1w for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for Camarilla levels (more stable than lower timeframes)
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -47,7 +47,7 @@ def generate_signals(prices):
     r1 = prev_close + 1.1 * camarilla_range * 1.0 / 4  # R1 level
     s1 = prev_close - 1.1 * camarilla_range * 1.0 / 4  # S1 level
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1d timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_4hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
