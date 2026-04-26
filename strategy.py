@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike
-Hypothesis: On 1d timeframe, price breaking Camarilla R1/S1 levels in the direction of 1w EMA50 trend with volume confirmation (>1.5x 20-period MA) captures high-probability trend continuation moves. The 1w EMA50 acts as a dynamic trend filter, while Camarilla levels provide precise entry/exit zones. Volume spike confirms institutional participation. Designed for 7-25 trades/year with discrete sizing (±0.30) and ATR-based trailing stop (2.0x) to minimize fee drag and work in both bull/bear markets with BTC/ETH edge.
+6h_ElderRay_BullBearPower_Regime_ADX
+Hypothesis: On 6h timeframe, Elder Ray Bull Power (high - EMA13) and Bear Power (low - EMA13) combined with ADX regime filter captures sustainable trends while avoiding whipsaws. Long when Bull Power > 0, ADX > 25, and +DI > -DI; Short when Bear Power < 0, ADX > 25, and -DI > +DI. Uses 1d EMA50 as higher-timeframe trend filter to avoid counter-trend trades. Designed for 12-37 trades/year with discrete sizing (±0.25) and close-based stops to minimize fee drag and work in both bull/bear markets with BTC/ETH edge.
 """
 
 import numpy as np
@@ -16,130 +16,106 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla calculation
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA50 for higher-timeframe trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla levels: based on previous day's range
-    daily_range = high_1d - low_1d
-    camarilla_r1 = close_1d + daily_range * 1.1 / 12
-    camarilla_s1 = close_1d - daily_range * 1.1 / 12
+    # Calculate EMA13 for Elder Ray (6h)
+    close_series = pd.Series(close)
+    ema_13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align Camarilla levels to 1d timeframe (wait for completed 1d bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power: high - EMA
+    bear_power = low - ema_13   # Bear Power: low - EMA
     
-    # Load 1w data ONCE before loop for EMA trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # 1w EMA50 for trend filter
-    close_series_1w = pd.Series(df_1w['close'].values)
-    ema_50 = close_series_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    
-    # 1d ATR(20) for trailing stop
+    # ADX calculation (6h)
+    # True Range
     tr1 = pd.Series(high).diff().abs()
     tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
     tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.ewm(span=20, adjust=False, min_periods=20).mean()
-    atr_1d_values = atr_1d.values
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume spike filter: volume > 1.5 * 20-period MA on 1d
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Directional Movement
+    up_move = pd.Series(high).diff()
+    down_move = -(pd.Series(low).diff())  # negative of low diff
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM and TR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.30
-    highest_since_long = 0.0
-    lowest_since_short = 0.0
+    base_size = 0.25
     
-    # Warmup: max of EMA (50), ATR (20), volume MA (20) + time for 1d/1w alignment
-    start_idx = max(50, 20, 20) + 1  # +1 to ensure 1d bar completion
+    # Warmup: max of EMA13 (13), ADX (14*2=28 for smoothing), 1d EMA50 alignment
+    start_idx = max(13, 28) + 4  # +4 to ensure 1d bar completion (6h -> 1d: 4 bars per day)
     
     for i in range(start_idx, n):
-        close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        vol = volume[i]
-        r1_val = camarilla_r1_aligned[i]
-        s1_val = camarilla_s1_aligned[i]
-        ema_val = ema_50_aligned[i]
-        vol_spike = volume_spike[i]
-        atr_val = atr_1d_values[i]
-        
         # Skip if any data not ready (NaN from alignment or calculation)
-        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema_val) or 
-            np.isnan(atr_val) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Trend filter: bullish when price > EMA50, bearish when price < EMA50
-        trend_bullish = close_val > ema_val
-        trend_bearish = close_val < ema_val
+        bp = bull_power[i]
+        br = bear_power[i]
+        adx_val = adx[i]
+        pdi = plus_di[i]
+        mdi = minus_di[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        close_val = close[i]
         
-        # Camarilla breakout conditions: price breaks R1/S1 with trend alignment + volume spike
-        long_breakout = close_val > r1_val
-        short_breakout = close_val < s1_val
+        # Regime conditions: ADX > 25 for trending market
+        strong_trend = adx_val > 25
         
-        long_entry = trend_bullish and long_breakout and vol_spike
-        short_entry = trend_bearish and short_breakout and vol_spike
+        # Entry conditions
+        long_entry = (bp > 0) and strong_trend and (pdi > mdi) and (close_val > ema_50_val)
+        short_entry = (br < 0) and strong_trend and (mdi > pdi) and (close_val < ema_50_val)
         
-        # Update highest/lowest for trailing stop (ATR-based)
-        if position == 1:
-            highest_since_long = max(highest_since_long, high_val)
-        elif position == -1:
-            lowest_since_short = min(lowest_since_short, low_val)
-        elif position == 0:
-            highest_since_long = 0.0
-            lowest_since_short = 0.0
-        
-        # Exit conditions: ATR-based trailing stoploss
-        long_exit = False
-        short_exit = False
-        if position == 1:
-            # Long trailing stop: highest since entry - 2.0 * ATR
-            stop_price = highest_since_long - 2.0 * atr_val
-            long_exit = close_val < stop_price
-        elif position == -1:
-            # Short trailing stop: lowest since entry + 2.0 * ATR
-            stop_price = lowest_since_short + 2.0 * atr_val
-            short_exit = close_val > stop_price
+        # Exit conditions: reverse signal or trend deterioration
+        long_exit = (bp <= 0) or (adx_val < 20) or (mdi > pdi) or (close_val < ema_50_val)
+        short_exit = (br >= 0) or (adx_val < 20) or (pdi > mdi) or (close_val > ema_50_val)
         
         if long_entry and position != 1:
             signals[i] = base_size
             position = 1
-            highest_since_long = high_val
         elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
-            lowest_since_short = low_val
-        elif long_exit:
+        elif long_exit and position == 1:
             signals[i] = 0.0
             position = 0
-            highest_since_long = 0.0
-        elif short_exit:
+        elif short_exit and position == -1:
             signals[i] = 0.0
             position = 0
-            lowest_since_short = 0.0
         else:
             # Hold position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_Regime_ADX"
+timeframe = "6h"
 leverage = 1.0
