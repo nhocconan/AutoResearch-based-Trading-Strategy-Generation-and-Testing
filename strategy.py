@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation captures strong momentum moves while avoiding false breakouts in chop. Works in bull/bear via 1d trend alignment. Designed for 4h to target 20-50 trades/year with discrete sizing (0.25).
+4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike captures strong momentum moves while avoiding false breakouts in chop. Works in bull/bear via 1d trend alignment. Designed for 4h to target 20-50 trades/year with discrete sizing (0.30).
 """
 
 import numpy as np
@@ -27,30 +27,46 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Previous day's Camarilla levels (using 1d OHLC)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Volume spike: volume > 1.5 * 20-period average volume
+    # Camarilla calculations
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.25
+    base_size = 0.30
     
-    # Warmup: max of Donchian calculations
-    start_idx = 20
+    # Warmup: max of EMA34 (34) and volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         close_val = close[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
         ema_val = ema_34_1d_aligned[i]
+        r3_val = R3_aligned[i]
+        s3_val = S3_aligned[i]
+        r4_val = R4_aligned[i]
+        s4_val = S4_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any data not ready
-        if (np.isnan(donchian_high_val) or np.isnan(donchian_low_val) or np.isnan(ema_val)):
+        if (np.isnan(ema_val) or np.isnan(r3_val) or np.isnan(s3_val) or 
+            np.isnan(r4_val) or np.isnan(s4_val)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
@@ -59,14 +75,14 @@ def generate_signals(prices):
         uptrend = close_val > ema_val
         downtrend = close_val < ema_val
         
-        # Long: price breaks ABOVE Donchian high with 1d uptrend and volume spike
-        long_condition = (close_val > donchian_high_val) and uptrend and vol_spike
-        # Short: price breaks BELOW Donchian low with 1d downtrend and volume spike
-        short_condition = (close_val < donchian_low_val) and downtrend and vol_spike
+        # Long: price breaks above R3 with 1d uptrend and volume spike
+        long_condition = (close_val > r3_val) and uptrend and vol_spike
+        # Short: price breaks below S3 with 1d downtrend and volume spike
+        short_condition = (close_val < s3_val) and downtrend and vol_spike
         
-        # Exit: price re-enters Donchian channel
-        long_exit = (position == 1 and close_val <= donchian_high_val)
-        short_exit = (position == -1 and close_val >= donchian_low_val)
+        # Exit: price re-enters R3-S3 range
+        long_exit = (position == 1 and close_val < r3_val)
+        short_exit = (position == -1 and close_val > s3_val)
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -86,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
