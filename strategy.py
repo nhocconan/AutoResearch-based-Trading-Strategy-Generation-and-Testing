@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_ChopFilter_v2
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and choppiness regime filter.
-- Long when price breaks above Donchian(20) high AND 1d EMA50 uptrend AND chop < 61.8 (trending regime)
-- Short when price breaks below Donchian(20) low AND 1d EMA50 downtrend AND chop < 61.8 (trending regime)
-- Uses choppiness index to avoid false breakouts in ranging markets
+1d_Donchian20_Breakout_WeeklyTrend_VolumeSpike_v1
+Hypothesis: Daily Donchian(20) breakout with weekly EMA50 trend filter and volume spike confirmation.
+- Long when price breaks above 20-day high AND weekly EMA50 uptrend AND volume > 2.0 * volume_ma(20)
+- Short when price breaks below 20-day low AND weekly EMA50 downtrend AND volume > 2.0 * volume_ma(20)
+- Uses Donchian channels for structure-based breakouts that work in both trending and ranging markets
+- Weekly EMA50 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws
+- Volume spike (2.0x) confirms institutional participation and reduces false breakouts
 - Exit on opposite Donchian level or trend reversal
-- Designed for moderate frequency (target 20-50 trades/year on 4h) to minimize fee drag
-- Novelty: Adding choppiness regime filter to Donchian breakout reduces whipsaws in bear markets
+- Designed for low frequency (target 7-25 trades/year on 1d) to minimize fee drag
+- Novelty: Donchian breakout with weekly trend filter on daily timeframe - avoids saturated Camarilla family
 """
 
 import numpy as np
@@ -22,60 +24,38 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA50 for trend filter (needs completed 1d candle)
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA50 for trend filter (needs completed weekly candle)
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     # Trend: 1 = uptrend (close > EMA50), -1 = downtrend (close < EMA50), 0 = neutral/invalid
-    trend_1d = np.where(ema_50_1d_aligned > 0, 
-                        np.where(close > ema_50_1d_aligned, 1, -1), 
+    trend_1w = np.where(ema_50_1w_aligned > 0, 
+                        np.where(close > ema_50_1w_aligned, 1, -1), 
                         0)
     
-    # Calculate choppiness index on primary timeframe (4h)
-    # Chop = 100 * log10(sum(ATR(14)) / log10(range(period))) / log10(period)
-    # Simplified: Chop = 100 * log10(sum(True Range over period) / (max(high) - min(low))) / log10(period)
-    period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate Donchian channels on daily chart (primary timeframe)
+    # Using 20-period lookback for breakout levels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    max_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    min_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    range_hl = max_high - min_low
-    
-    # Avoid division by zero
-    chop = np.zeros(n)
-    mask = (range_hl > 0) & (~np.isnan(atr_sum)) & (~np.isnan(range_hl))
-    chop[mask] = 100 * np.log10(atr_sum[mask] / range_hl[mask]) / np.log10(period)
-    # For invalid values, set to 50 (neutral)
-    chop[~mask] = 50.0
-    
-    # Chop < 61.8 indicates trending regime (good for breakouts)
-    trending_regime = chop < 61.8
-    
-    # Calculate Donchian channels on primary timeframe (4h)
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate volume filter: volume > 2.0 * volume_ma(20) for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for 1d EMA, 20 for Donchian, 14 for chop)
-    start_idx = max(50, donchian_period, period)
+    # Start after warmup (need 50 for weekly EMA, 20 for Donchian/volume)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(trend_1d[i]) or np.isnan(trending_regime[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(trend_1w[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -85,14 +65,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Donchian breakout conditions with trend and regime filter
+        # Donchian breakout conditions with trend and volume spike filter
         if position == 0:
-            # Long: Price breaks above Donchian high AND 1d uptrend AND trending regime
-            if close[i] > donchian_high[i] and trend_1d[i] == 1 and trending_regime[i]:
+            # Long: Price breaks above 20-day high AND weekly uptrend AND volume spike
+            if close[i] > high_20[i] and trend_1w[i] == 1 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low AND 1d downtrend AND trending regime
-            elif close[i] < donchian_low[i] and trend_1d[i] == -1 and trending_regime[i]:
+            # Short: Price breaks below 20-day low AND weekly downtrend AND volume spike
+            elif close[i] < low_20[i] and trend_1w[i] == -1 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -100,20 +80,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Price falls below Donchian low OR 1d trend turns down
-            if close[i] < donchian_low[i] or trend_1d[i] == -1:
+            # Exit: Price falls below 20-day low OR weekly trend turns down
+            if close[i] < low_20[i] or trend_1w[i] == -1:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Price rises above Donchian high OR 1d trend turns up
-            if close[i] > donchian_high[i] or trend_1d[i] == 1:
+            # Exit: Price rises above 20-day high OR weekly trend turns up
+            if close[i] > high_20[i] or trend_1w[i] == 1:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dTrend_ChopFilter_v2"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_WeeklyTrend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
