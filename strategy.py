@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Use 4h timeframe with Camarilla R3/S3 breakout confirmed by 1d EMA34 trend and volume spike. Targets 20-40 trades/year to minimize fee drag. Works in bull/bear markets by using 1d EMA34 for trend direction and volume confirmation to filter false breakouts. Includes ATR-based stoploss to manage risk.
+1d_KAMA_Direction_RSI_ChopFilter_v1
+Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction, combined with RSI for momentum confirmation and Choppiness Index for regime filtering. Enter long when KAMA turns up, RSI > 50, and market is trending (CHOP < 38.2). Enter short when KAMA turns down, RSI < 50, and market is trending. Exit on opposite KAMA signal. This strategy targets 7-25 trades/year to minimize fee drag while capturing sustained trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,97 +13,118 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels (R3, S3) on 4h
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
-    camarilla_r3 = close + 1.1 * (high - low) / 2
-    camarilla_s3 = close - 1.1 * (high - low) / 2
+    # === KAMA Calculation (ER=10, Fast=2, Slow=30) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period sum of absolute changes
+    # Pad volatility to match change length
+    volatility = np.concatenate([np.full(9, np.nan), volatility[9:]]) if len(volatility) > 9 else np.full_like(change, np.nan)
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # Seed
+    for i in range(10, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # === RSI(14) ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Prepend NaN for first element
+    rsi = np.concatenate([[np.nan], rsi])
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_avg)
-    
-    # ATR for stoploss (14-period)
+    # === Choppiness Index (CHOP, 14-period) ===
+    # True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Sum of TR over 14 periods
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # CHOP formula
+    chop = 100 * np.log10(sum_tr / (hh - ll)) / np.log10(14)
+    # Avoid division by zero or invalid values
+    chop = np.where((hh - ll) > 0, chop, 50.0)
     
+    # === Weekly Trend Filter (HTF: 1w) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # === Signals ===
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
+    size = 0.25  # 25% position size
     
-    # Warmup: need 34 for 1d EMA, 20 for volume avg, 14 for ATR
-    start_idx = max(34, 20, 14)
+    # Warmup: need sufficient data for all indicators
+    start_idx = max(10, 14, 14, 50)  # KAMA seed, RSI, CHOP, 1w EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama[i-1]) or
+            np.isnan(rsi[i]) or np.isnan(chop[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        atr_val = atr[i]
-        size = 0.25  # 25% position size
+        # Regime filter: only trade in trending markets (CHOP < 38.2)
+        is_trending = chop[i] < 38.2
         
         if position == 0:
-            # Flat - look for breakout with trend and volume confirmation
-            # Long: break above Camarilla R3 + 1d EMA34 uptrend + volume spike
-            long_entry = (close_val > camarilla_r3[i]) and \
-                       (ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]) and \
-                       volume_spike[i]
-            # Short: break below Camarilla S3 + 1d EMA34 downtrend + volume spike
-            short_entry = (close_val < camarilla_s3[i]) and \
-                        (ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]) and \
-                       volume_spike[i]
+            # Flat - look for KAMA turn with RSI confirmation and weekly trend alignment
+            kama_up = kama[i] > kama[i-1]
+            kama_down = kama[i] < kama[i-1]
+            rsi_bullish = rsi[i] > 50
+            rsi_bearish = rsi[i] < 50
+            weekly_uptrend = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
+            weekly_downtrend = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]
             
-            if long_entry:
+            # Long: KAMA turning up, RSI > 50, weekly uptrend, and trending market
+            if kama_up and rsi_bullish and weekly_uptrend and is_trending:
                 signals[i] = size
                 position = 1
-                entry_price = close_val
-            elif short_entry:
+            # Short: KAMA turning down, RSI < 50, weekly downtrend, and trending market
+            elif kama_down and rsi_bearish and weekly_downtrend and is_trending:
                 signals[i] = -size
                 position = -1
-                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on Camarilla S3 break or ATR stoploss
-            exit_condition = (close_val < camarilla_s3[i]) or \
-                           (close_val < entry_price - 2.5 * atr_val)
-            if exit_condition:
+            # Long - exit when KAMA turns down (trend change)
+            if kama[i] < kama[i-1]:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on Camarilla R3 break or ATR stoploss
-            exit_condition = (close_val > camarilla_r3[i]) or \
-                           (close_val > entry_price + 2.5 * atr_val)
-            if exit_condition:
+            # Short - exit when KAMA turns up (trend change)
+            if kama[i] > kama[i-1]:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
