@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_v1
-Hypothesis: 12h Camarilla R1/S1 breakout with 1-week EMA trend filter and volume spike confirmation.
-Long: price breaks above R1 + above 1w EMA50 + volume spike.
-Short: price breaks below S1 + below 1w EMA50 + volume spike.
-Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year).
-Uses discrete position sizing (0.25) to limit fee drag. Works in bull/bear via weekly trend filter.
+1d_Camarilla_R1_S1_Breakout_1wTrend_Filtered_v1
+Hypothesis: Daily Camarilla R1/S1 breakout with 1-week EMA50 trend filter and volume confirmation.
+Works in bull/bear markets by using the weekly trend as regime filter: only take longs in weekly uptrend, shorts in weekly downtrend.
+Volume spike confirms breakout authenticity. Target: 30-100 trades over 4 years (7-25/year).
+Uses discrete position sizing (0.25) to limit fee drag.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -40,17 +39,17 @@ def generate_signals(prices):
     camarilla_R1 = close_1d + 1.09 * (high_1d - low_1d)
     camarilla_S1 = close_1d - 1.09 * (high_1d - low_1d)
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bars only)
+    # Align Camarilla levels to 1d timeframe (completed 1d bars only)
     R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    # 12h volume confirmation: volume > 2.0x 20-period average
+    # 1d volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for 1w EMA, 20 for volume MA)
+    # Start after warmup (need 50 for weekly EMA, 20 for volume MA)
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
@@ -80,14 +79,14 @@ def generate_signals(prices):
         downtrend = close[i] < ema_50_1w_aligned[i]
         
         if breakout_up and uptrend and volume_spike:
-            # Long signal: break above R1 + uptrend + volume spike
+            # Long signal: break above R1 + weekly uptrend + volume spike
             if position != 1:
                 signals[i] = 0.25
                 position = 1
             else:
                 signals[i] = 0.25
         elif breakout_down and downtrend and volume_spike:
-            # Short signal: break below S1 + downtrend + volume spike
+            # Short signal: break below S1 + weekly downtrend + volume spike
             if position != -1:
                 signals[i] = -0.25
                 position = -1
@@ -104,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Filtered_v1"
+timeframe = "1d"
 leverage = 1.0
