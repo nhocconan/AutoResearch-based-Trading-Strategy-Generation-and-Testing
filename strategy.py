@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v3
 Hypothesis: Trade Camarilla pivot (R1/S1) breakouts on 4h with 1d EMA34 trend filter and volume spike confirmation.
 Uses 1d EMA34 for slower trend adaptation to reduce whipsaws, and 2.0x volume spike for confirmation.
-Only trade in trending markets (ADX > 20) to avoid chop. Designed for 15-30 trades/year.
-Works in bull/bear markets by following 1d EMA34 trend and filtering ranging regimes via ADX.
-Optimized for fewer trades and better risk control with dynamic position sizing and ATR-based stops.
+Only trade in trending markets (ADX > 20) to avoid chop. ATR-based stoploss (2.0) and profit target (3.0*ATR).
+Designed for 15-30 trades/year. Works in bull/bear markets by following 1d EMA34 trend and filtering ranging regimes via ADX.
 """
 
 import numpy as np
@@ -137,10 +136,12 @@ def generate_signals(prices):
             # 2. Trend changes (close < 1d EMA34)
             # 3. Regime changes (ADX < 15)
             # 4. ATR-based stop loss (2.0 * ATR below entry)
+            # 5. Profit target (3.0 * ATR above entry)
             if (close_val < camarilla_s1_aligned[i]) or \
                (close_val < ema_34_1d_val) or \
                (adx_val < 15) or \
-               (close_val < entry_price - 2.0 * atr_val):
+               (close_val < entry_price - 2.0 * atr_val) or \
+               (close_val > entry_price + 3.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
@@ -151,15 +152,17 @@ def generate_signals(prices):
             # 2. Trend changes (close > 1d EMA34)
             # 3. Regime changes (ADX < 15)
             # 4. ATR-based stop loss (2.0 * ATR above entry)
+            # 5. Profit target (3.0 * ATR below entry)
             if (close_val > camarilla_r1_aligned[i]) or \
                (close_val > ema_34_1d_val) or \
                (adx_val < 15) or \
-               (close_val > entry_price + 2.0 * atr_val):
+               (close_val > entry_price + 2.0 * atr_val) or \
+               (close_val < entry_price - 3.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v3"
 timeframe = "4h"
 leverage = 1.0
