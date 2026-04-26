@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1dRegime_VolumeConfirm_v1
-Hypothesis: Elder Ray (Bull/Bear Power) with 1d regime filter (ADX>25 for trend, ADX<20 for range) and volume confirmation captures strong directional moves while avoiding chop. Works in bull/bear by adapting logic per regime. Targets 12-37 trades/year on 6h with discrete sizing (0.25).
+4h_Camarilla_R1S1_Breakout_1dADX_Regime_VolumeConfirm_v1
+Hypothesis: Camarilla R1/S1 breakout with 1d ADX regime filter (trend: ADX>25, range: ADX<20) and volume confirmation. In trend, trade breakout direction; in range, fade extremes. Uses discrete sizing (0.25) to minimize fee churn. Targets 20-50 trades/year on 4h.
 """
 
 import numpy as np
@@ -18,16 +18,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for regime and Elder Ray
+    # Load 1d data ONCE before loop for Camarilla levels, ADX regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA13 for Elder Ray (Bull/Bear Power)
-    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema13_1d
-    bear_power = df_1d['low'].values - ema13_1d
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low),
+    #            R2 = close + 0.75*(high-low), R1 = close + 0.5*(high-low),
+    #            S1 = close - 0.5*(high-low), S2 = close - 0.75*(high-low),
+    #            S3 = close - 1.125*(high-low), S4 = close - 1.5*(high-low)
+    # We only need R1 and S1 for breakout/fade
+    camarilla_range = df_1d['high'] - df_1d['low']
+    camarilla_R1 = df_1d['close'] + 0.5 * camarilla_range
+    camarilla_S1 = df_1d['close'] - 0.5 * camarilla_range
     
     # 1d ADX(14) for regime filter
     # True Range
@@ -50,9 +54,9 @@ def generate_signals(prices):
     dx_14 = 100 * abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
     adx_14 = pd.Series(dx_14).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align to 4h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1.values)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1.values)
     adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
@@ -63,18 +67,18 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Warmup: max of EMA13 (13), ADX (14*3 for smoothing), volume MA (20)
-    start_idx = max(13, 14*3, 20)
+    # Warmup: max of ADX (14*3 for smoothing), volume MA (20)
+    start_idx = max(14*3, 20)
     
     for i in range(start_idx, n):
         close_val = close[i]
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
+        r1_val = camarilla_R1_aligned[i]
+        s1_val = camarilla_S1_aligned[i]
         adx_val = adx_14_aligned[i]
         vol_conf = volume_confirm[i]
         
         # Skip if any data not ready
-        if (np.isnan(bull_val) or np.isnan(bear_val) or np.isnan(adx_val)):
+        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(adx_val)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
@@ -83,22 +87,22 @@ def generate_signals(prices):
         is_trend = adx_val > 25
         is_range = adx_val < 20
         
-        # Trend regime: Elder Ray confirms momentum
-        # Long: Bull Power > 0 and rising (momentum building)
-        # Short: Bear Power < 0 and falling (momentum building down)
+        # Trend regime: breakout of R1/S1
+        # Long: price breaks above R1 with volume
+        # Short: price breaks below S1 with volume
         if is_trend:
-            long_condition = (bull_val > 0) and (bull_val > bull_power_aligned[i-1]) and vol_conf
-            short_condition = (bear_val < 0) and (bear_val < bear_power_aligned[i-1]) and vol_conf
-        # Range regime: Elder Ray shows exhaustion at extremes
-        # Long: Bear Power < 0 but improving (selling exhaustion)
-        # Short: Bull Power > 0 but deteriorating (buying exhaustion)
+            long_condition = (close_val > r1_val) and vol_conf
+            short_condition = (close_val < s1_val) and vol_conf
+        # Range regime: fade extremes (mean reversion at S1/R1)
+        # Long: price touches S1 and holds (bounce)
+        # Short: price touches R1 and holds (rejection)
         else:
-            long_condition = (bear_val < 0) and (bear_val > bear_power_aligned[i-1]) and vol_conf
-            short_condition = (bull_val > 0) and (bull_val < bull_power_aligned[i-1]) and vol_conf
+            long_condition = (close_val <= s1_val) and (close[i-1] > s1_val) and vol_conf
+            short_condition = (close_val >= r1_val) and (close[i-1] < r1_val) and vol_conf
         
-        # Exit: opposite Elder Ray signal or loss of momentum
-        long_exit = (position == 1 and ((bull_val <= 0) or (bull_val < bull_power_aligned[i-1])))
-        short_exit = (position == -1 and ((bear_val >= 0) or (bear_val > bear_power_aligned[i-1])))
+        # Exit: opposite condition or loss of regime
+        long_exit = (position == 1 and ((is_trend and close_val < s1_val) or (is_range and close_val > r1_val)))
+        short_exit = (position == -1 and ((is_trend and close_val > r1_val) or (is_range and close_val < s1_val)))
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -118,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1dRegime_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dADX_Regime_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
