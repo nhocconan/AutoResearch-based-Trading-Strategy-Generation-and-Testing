@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Daily Camarilla R1/S1 breakout with weekly EMA34 trend filter and volume spike (>1.8x median). Targets key intraday pivot levels with institutional volume confirmation in the weekly trend direction. Uses ATR trailing stop (2.0x) for risk management. Designed for BTC/ETH with tight entry conditions (~10-20 trades/year) to minimize fee drag and work in both bull/bear markets by only trading with weekly trend direction.
+6h_ElderRay_ZeroCross_12hTrend_VolumeSpike_v1
+Hypothesis: 6h Elder Ray (Bull/Bear Power) zero-cross with 12h EMA50 trend filter and volume spike (>1.8x median). 
+Bull Power = Close - EMA13, Bear Power = EMA13 - Close. 
+Long when Bull Power crosses above zero (bullish momentum) in uptrend with volume confirmation.
+Short when Bear Power crosses above zero (bearish momentum) in downtrend with volume confirmation.
+Uses 12h timeframe for HTF trend to reduce noise and avoid overtrading (~25-40 trades/year).
+Designed to work in both bull and bear markets by only trading with the 12h trend direction.
 """
 
 import numpy as np
@@ -18,120 +23,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend (EMA34)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for HTF trend (EMA50)
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 34:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1w EMA(34) for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla levels from previous day (HLC of prior 1d)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate EMA13 for Elder Ray (using 6h data)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    cam_high = pd.Series(df_1d['high'].values).shift(1).values
-    cam_low = pd.Series(df_1d['low'].values).shift(1).values
-    cam_close = pd.Series(df_1d['close'].values).shift(1).values
+    # Elder Ray components
+    bull_power = close - ema_13  # Bull Power: Close - EMA13
+    bear_power = ema_13 - close  # Bear Power: EMA13 - Close
     
-    # Camarilla R1, S1 levels (core breakout levels)
-    R1 = cam_close + (cam_high - cam_low) * 1.1 / 12
-    S1 = cam_close - (cam_high - cam_low) * 1.1 / 12
+    # Zero-cross signals: previous value <= 0, current value > 0
+    bull_power_prev = np.roll(bull_power, 1)
+    bear_power_prev = np.roll(bear_power, 1)
+    bull_power_prev[0] = -np.inf  # Ensure no false signal on first bar
+    bear_power_prev[0] = -np.inf
     
-    # Volume spike filter: volume > 1.8x median volume (20-period) for high conviction
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    bull_zero_cross = (bull_power_prev <= 0) & (bull_power > 0)
+    bear_zero_cross = (bear_power_prev <= 0) & (bear_power > 0)
     
-    # ATR(14) for volatility-based stops
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Volume spike filter: volume > 1.8x median volume (30-period)
+    vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median().values
     
-    # Align HTF indicators to 1d timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align HTF indicators to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Warmup: max of EMA(34) 1w, Camarilla (need 2 bars for shift), volume median (20), ATR (14)
-    start_idx = max(34, 2, 20, 14) + 1
+    # Warmup: max of EMA(50) 12h, EMA(13), Bull/Bear Power, volume median (30)
+    start_idx = max(50, 13, 30) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or
-            np.isnan(S1_aligned[i]) or
-            np.isnan(vol_median[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(ema_13[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(vol_median[i])):
             # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_34_1w_val = ema_34_1w_aligned[i]
+        ema_50_12h_val = ema_50_12h_aligned[i]
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
+        bull_power_val = bull_power[i]
+        bear_power_val = bear_power[i]
         volume_val = volume[i]
         vol_median_val = vol_median[i]
-        atr_val = atr[i]
-        r1_val = R1_aligned[i]
-        s1_val = S1_aligned[i]
+        bull_cross = bull_zero_cross[i]
+        bear_cross = bear_zero_cross[i]
         
-        # Trend filter: price > EMA34 (uptrend) or < EMA34 (downtrend)
-        uptrend = close_val > ema_34_1w_val
-        downtrend = close_val < ema_34_1w_val
+        # Trend filter: price > EMA50 (uptrend) or < EMA50 (downtrend)
+        uptrend = close_val > ema_50_12h_val
+        downtrend = close_val < ema_50_12h_val
         
-        # Volume spike filter: only trade in high-volume environments
+        # Volume confirmation
         volume_spike = volume_val > 1.8 * vol_median_val
         
         if position == 0:
-            # Long: break above R1 with volume spike, and uptrend
-            long_signal = (close_val > r1_val) and \
+            # Long: Bull Power crosses above zero with volume spike, and uptrend
+            long_signal = bull_cross and \
                           volume_spike and \
                           uptrend
             
-            # Short: break below S1 with volume spike, and downtrend
-            short_signal = (close_val < s1_val) and \
+            # Short: Bear Power crosses above zero with volume spike, and downtrend
+            short_signal = bear_cross and \
                            volume_spike and \
                            downtrend
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            highest_since_entry = max(highest_since_entry, high_val)
-            # ATR trailing stop (tight stop to protect profits)
-            if close_val < highest_since_entry - 2.0 * atr_val:
+            # Exit when Bull Power crosses below zero (momentum loss) OR trend change
+            if bull_power_val <= 0 or not uptrend:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR trailing stop (tight stop to protect profits)
-            if close_val > lowest_since_entry + 2.0 * atr_val:
+            # Exit when Bear Power crosses below zero (momentum loss) OR trend change
+            if bear_power_val <= 0 or not downtrend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_ZeroCross_12hTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
