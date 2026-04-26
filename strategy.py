@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation.
-In bull markets: breakouts with trend and volume capture momentum.
-In bear markets: mean reversion at extremes with trend filter and volume spike avoids false breakouts.
-Volume spike ensures participation, reducing whipsaws. ATR stoploss manages risk.
-Target: 75-200 total trades over 4 years (19-50/year) to stay within fee-efficient range.
+6h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
+Hypothesis: Trade 6h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
+Designed for moderate trade frequency (6h timeframe) to balance opportunity and fee drag.
+Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes with trend filter).
+Volume spike confirms institutional participation, reducing false breakouts.
+Target: 50-150 total trades over 4 years (12-37/year) to stay within fee-efficient range.
 """
 
 import numpy as np
@@ -42,7 +42,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate volume spike: volume > 1.5 * 20-period MA
+    # Calculate volume spike filter: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
@@ -62,7 +62,7 @@ def generate_signals(prices):
     r1 = pivot + (range_hl * 1.1 / 12.0)
     s1 = pivot - (range_hl * 1.1 / 12.0)
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 6h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -70,7 +70,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of 1d EMA(34), ATR(14), volume MA(20)
+    # Warmup: max of 1d EMA(34), ATR(14), volume MA
     start_idx = max(34, 14, 20) + 1
     
     for i in range(start_idx, n):
@@ -128,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "6h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
