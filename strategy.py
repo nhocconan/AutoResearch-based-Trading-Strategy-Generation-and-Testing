@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_ZeroCross_12hTrend_VolumeFilter
-Hypothesis: Use 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) zero-cross signals filtered by 12h trend (close > EMA50) and volume (>1.5x 20-period average). Elder Ray captures momentum shifts; 12h trend ensures alignment with higher timeframe direction; volume filter confirms institutional interest. Works in bull/bear by following trend. Target: 12-35 trades/year (50-150 over 4 years). Discrete sizing: ±0.25.
+4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1
+Hypothesis: On 4h timeframe, use Camarilla R1/S1 from 1d pivot points for breakout entries with 1d trend filter (close > 1d EMA34) and volume confirmation (>2.0x 20-period average). Add choppiness regime filter (CHOP > 61.8 = range, only mean-revert at extremes) to avoid whipsaws in bear markets. Target: 19-50 trades/year. Uses R1/S1 levels (proven edge) with volume/trend confirmation to reduce false breakouts while maintaining edge in both bull and bear regimes.
 """
 
 import numpy as np
@@ -18,44 +18,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:  # Need at least 50 periods for EMA50
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:  # Need at least 34 periods for EMA34
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d OHLC for Camarilla pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    close_series = pd.Series(close)
-    ema_13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate Camarilla levels R1/S1 (based on previous 1d bar's range)
+    # Camarilla R1 = close + 1.1*(high - low)/4
+    # Camarilla S1 = close - 1.1*(high - low)/4
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
     
-    # Zero-cross signals: Bull Power crosses above 0 (long), Bear Power crosses below 0 (short)
-    bull_cross_up = (bull_power[1:] > 0) & (bull_power[:-1] <= 0)
-    bear_cross_down = (bear_power[1:] < 0) & (bear_power[:-1] >= 0)
-    # Prepend False for first bar
-    bull_cross_up = np.concatenate([[False], bull_cross_up])
-    bear_cross_down = np.concatenate([[False], bear_cross_down])
+    # Set first value to NaN (no previous bar)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    camarilla_r1 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 4
+    camarilla_s1 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 4
+    
+    # Calculate 1d EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align Camarilla levels and EMA to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
     volume_series = pd.Series(volume)
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 1.5
+    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 2.0
+    
+    # Choppiness regime filter: CHOP(14) > 61.8 = range (mean revert), CHOP < 38.2 = trending
+    def choppiness_index(high, low, close, window=14):
+        # True range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # prepend NaN for first bar
+        
+        # ATR = smoothed TR (using Wilder's smoothing = EMA with alpha=1/window)
+        atr = pd.Series(tr).ewm(alpha=1/window, adjust=False, min_periods=window).mean().values
+        
+        # Max(high) - Min(low) over window
+        max_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
+        min_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        hh_ll = max_high - min_low
+        
+        # CHOP = 100 * log10(sum(atr)/hh_ll) / log10(window)
+        sum_atr = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
+        chop = 100 * np.log10(sum_atr / np.maximum(hh_ll, 1e-10)) / np.log10(window)
+        return chop
+    
+    chop = choppiness_index(high, low, close, 14)
+    chop_range = chop > 61.8  # range regime
+    chop_trend = chop < 38.2  # trending regime
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA13, EMA50_12h, volume MA
-    start_idx = max(13, 50, 20)
+    # Warmup: need Camarilla (1d EMA34) + volume MA + chop warmup
+    start_idx = max(34, 20, 14)  # 34 for EMA34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma[i]):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(chop[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -65,16 +102,19 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 12h trend alignment
-        trend_12h_uptrend = close[i] > ema_50_12h_aligned[i]
-        trend_12h_downtrend = close[i] < ema_50_12h_aligned[i]
+        # 1d trend alignment
+        trend_1d_uptrend = close[i] > ema_34_1d_aligned[i]
+        trend_1d_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: Bull Power crosses above 0 + 12h uptrend + volume spike
-            long_signal = bull_cross_up[i] and trend_12h_uptrend and volume_spike[i]
+            # Long: price breaks above R1 + 1d uptrend + volume spike + NOT in strong range (avoid false breakouts)
+            # Require confirmation: price outside bands for 2 consecutive bars
+            long_breakout = (close[i] > camarilla_r1_aligned[i]) and (close[i-1] > camarilla_r1_aligned[i-1])
+            long_signal = long_breakout and trend_1d_uptrend and volume_spike[i] and not chop_range[i]
             
-            # Short: Bear Power crosses below 0 + 12h downtrend + volume spike
-            short_signal = bear_cross_down[i] and trend_12h_downtrend and volume_spike[i]
+            # Short: price breaks below S1 + 1d downtrend + volume spike + NOT in strong range
+            short_breakout = (close[i] < camarilla_s1_aligned[i]) and (close[i-1] < camarilla_s1_aligned[i-1])
+            short_signal = short_breakout and trend_1d_downtrend and volume_spike[i] and not chop_range[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -87,20 +127,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Bull Power crosses below 0 OR 12h trend turns down
-            if bull_power[i] < 0 or not trend_12h_uptrend:
+            # Exit: price touches S1 OR 1d trend turns down OR chop becomes strong range (revert to mean)
+            if (close[i] < camarilla_s1_aligned[i] or not trend_1d_uptrend or chop_range[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Bear Power crosses above 0 OR 12h trend turns up
-            if bear_power[i] > 0 or not trend_12h_downtrend:
+            # Exit: price touches R1 OR 1d trend turns up OR chop becomes strong range
+            if (close[i] > camarilla_r1_aligned[i] or not trend_1d_downtrend or chop_range[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ElderRay_ZeroCross_12hTrend_VolumeFilter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
