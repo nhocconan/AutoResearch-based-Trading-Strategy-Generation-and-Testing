@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Regime_VolumeBreakout_v1
-Hypothesis: 1d KAMA trend + Bollinger Band squeeze breakout with volume confirmation captures institutional accumulation/distribution phases. Works in bull/bear by using KAMA's adaptive smoothing to avoid whipsaws and BB squeeze to identify low-volatility compression before expansion. Targets 7-25 trades/year with discrete sizing (0.25).
+6h_Ichimoku_TK_Cross_CloudFilter_1dTrend
+Hypothesis: Ichimoku TK cross (Tenkan/Kijun) with 1d cloud filter and volume confirmation captures trend continuations on 6h while avoiding false signals in ranging markets. Works in bull/bear via 1d trend alignment (price vs cloud). Designed for 6h to target 12-30 trades/year with discrete sizing (0.25).
 """
 
 import numpy as np
@@ -18,79 +18,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    fast_ema = 2
-    slow_ema = 30
+    # Load 1d data ONCE before loop for Ichimoku and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # need 52 for Senkou Span B
+        return np.zeros(n)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # 10-period sum of absolute changes
-    # Handle edge case for first 10 values
-    change_padded = np.concatenate([np.full(10, np.nan), change])
-    volatility_padded = np.concatenate([np.full(10, np.nan), volatility])
+    # Ichimoku components on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Vectorized ER calculation
-    er = np.where(volatility_padded != 0, change_padded / volatility_padded, 0)
-    er = np.nan_to_num(er, nan=0.0)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + bb_std * bb_stddev
-    lower_band = sma - bb_std * bb_stddev
-    bb_width = (upper_band - lower_band) / sma  # Normalized width
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    # Bollinger Band squeeze: width < 20th percentile of lookback
-    bb_width_lookback = pd.Series(bb_width).rolling(window=50, min_periods=20).mean().values
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).quantile(0.2).values
-    squeeze = bb_width < bb_width_percentile
+    # Align Ichimoku components to 6h (wait for completed 1d bar + 26-period shift handled by align_htf_to_ltf)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a, additional_delay_bars=26)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b, additional_delay_bars=26)
     
-    # Volume confirmation: 2x average volume (48-period for 2-day average)
-    avg_volume = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
-    volume_confirmed = volume > 2.0 * avg_volume
+    # 1d trend filter: price vs cloud (Senkou Span A/B)
+    # Cloud top = max(Senkou A, Senkou B), Cloud bottom = min(Senkou A, Senkou B)
+    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
+    
+    # ATR(14) for volatility (used in volume spike threshold)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Average volume for confirmation (24-period SMA = 4h * 1 = 4h on 6h chart)
+    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Warmup: max of KAMA initialization, BB period, volume average
-    start_idx = max(bb_period, 48) + 10  # +10 for ER lookback
+    # Warmup: max of Ichimoku calculations (52) and volume (24)
+    start_idx = max(52, 24)
     
     for i in range(start_idx, n):
-        kama_val = kama[i]
         close_val = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        sqz = squeeze[i]
-        vol_conf = volume_confirmed[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
+        tenkan_val = tenkan_aligned[i]
+        kijun_val = kijun_aligned[i]
+        cloud_top_val = cloud_top[i]
+        cloud_bottom_val = cloud_bottom[i]
         
         # Skip if any data not ready
-        if (np.isnan(kama_val) or np.isnan(avg_vol) or np.isnan(sqz) or 
-            np.isnan(vol_conf) or np.isnan(upper) or np.isnan(lower)):
+        if (np.isnan(tenkan_val) or np.isnan(kijun_val) or np.isnan(cloud_top_val) or 
+            np.isnan(cloud_bottom_val) or np.isnan(avg_vol)):
+            # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Long: price closes above upper band after squeeze with volume
-        long_condition = (close_val > upper) and sqz and vol_conf
-        # Short: price closes below lower band after squeeze with volume
-        short_condition = (close_val < lower) and sqz and vol_conf
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = vol > 1.5 * avg_vol
         
-        # Exit: price returns to middle (SMA)
-        long_exit = (position == 1 and close_val <= sma[i])
-        short_exit = (position == -1 and close_val >= sma[i])
+        # TK Cross: Tenkan crosses above/below Kijun
+        tk_cross_up = tenkan_val > kijun_val
+        tk_cross_down = tenkan_val < kijun_val
+        
+        # Long: TK cross up + price above cloud + volume confirmation
+        long_condition = tk_cross_up and price_above_cloud[i] and volume_confirmed
+        # Short: TK cross down + price below cloud + volume confirmation
+        short_condition = tk_cross_down and price_below_cloud[i] and volume_confirmed
+        
+        # Exit: TK cross in opposite direction
+        long_exit = tk_cross_down and position == 1
+        short_exit = tk_cross_up and position == -1
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -110,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Regime_VolumeBreakout_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend"
+timeframe = "6h"
 leverage = 1.0
