@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_HTFVolumeSpike_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts aligned with 1-week trend (EMA34) and 1-week volume spike (volume > 2.0x 20-period EMA) capture strong multi-day trends while avoiding whipsaws. The 1-week HTF filter ensures we only trade in the direction of the primary trend, reducing false breakouts in choppy markets. Volume confirmation adds conviction. Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag and work in both bull and bear markets.
+4h_Camarilla_R1_S1_Breakout_1dTRIX_Trend_VolumeSpike_v1
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts aligned with 1d TRIX trend filter and volume confirmation capture strong trends while avoiding whipsaws. TRIX (triple-smoothed EMA) filters noise and identifies sustained momentum. Volume conviction ensures breakouts have follow-through. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -18,47 +18,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HTF trend filter (EMA34) and volume confirmation
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for HTF trend filter (TRIX) and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Calculate 1w EMA20 of volume for volume spike filter
-    volume_1w = df_1w['volume'].values
-    vol_ema_1w = pd.Series(volume_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ema_1w)
+    # Calculate 1d TRIX for trend filter (triple-smoothed EMA)
+    close_1d = df_1d['close'].values
+    # First EMA
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Second EMA
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Third EMA (TRIX)
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX = percentage change in third EMA
+    trix = np.full_like(close_1d, np.nan)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
     # Calculate 1d Camarilla levels (R1, S1) using previous 1d's OHLC
-    df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_shifted = np.concatenate([[np.nan], close_1d[:-1]])  # previous 1d close
     
-    # Previous 1d close for Camarilla calculation
-    close_1d_prev = np.concatenate([[np.nan], close_1d[:-1]])
     camarilla_range = high_1d - low_1d
-    r1 = close_1d_prev + 1.1 * camarilla_range / 12
-    s1 = close_1d_prev - 1.1 * camarilla_range / 12
+    r1 = close_1d_shifted + 1.1 * camarilla_range / 12
+    s1 = close_1d_shifted - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 4h volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need sufficient data for EMA and Camarilla)
-    start_idx = max(40, 34)
+    # Start after warmup (need sufficient data for TRIX and volume MA)
+    start_idx = max(35, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(vol_ema_1w_aligned[i]) or
+        if (np.isnan(trix_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+            np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -68,12 +71,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1w trend filter (EMA34)
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # 1d trend filter (TRIX)
+        uptrend = trix_aligned[i] > 0
+        downtrend = trix_aligned[i] < 0
         
-        # 1w volume confirmation: volume > 2.0x EMA20 of volume
-        volume_spike = volume[i] > 2.0 * vol_ema_1w_aligned[i]
+        # Volume confirmation
+        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         # Camarilla breakout conditions
         breakout_r1 = close[i] > r1_aligned[i]
@@ -111,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_HTFVolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTRIX_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
