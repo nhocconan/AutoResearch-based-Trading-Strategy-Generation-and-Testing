@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_ChopRegime
-Hypothesis: Camarilla R3/S3 breakouts filtered by 1d EMA34 trend and choppiness regime (CHOP > 61.8 = range, < 38.2 = trend). In trending regimes (CHOP < 38.2), trade breakouts in trend direction. In ranging regimes (CHOP > 61.8), fade moves at R3/S3 levels. Volume confirmation (>1.5x 20-bar MA) reduces false signals. Designed for 4h timeframe to balance trade frequency and edge. Works in bull/bear markets by adapting to regime: trend-following in trends, mean-reversion in ranges. Target: 20-40 trades/year (80-160 total over 4 years).
+4h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-bar MA). Uses ATR-based stoploss (2.5x ATR) for risk control. Designed for 4h timeframe to achieve ~20-50 trades/year. Works in bull/bear markets by following 1d trend while using Donchian structure for breakouts. Volume spike filter reduces false breakouts. ATR stoploss manages risk during volatile periods.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,158 +18,120 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF filters
+    # Load 1d data ONCE before loop for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Previous day's OHLC for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Donchian channels (20-period) on 4h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate Camarilla levels: R3, S3
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d_vals + (rng * 1.1 / 4)  # R3 level
-    camarilla_s3 = close_1d_vals - (rng * 1.1 / 4)  # S3 level
+    # ATR for volatility and stoploss (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Choppiness Index: CHOP > 61.8 = range, CHOP < 38.2 = trend
-    # CHOP = 100 * LOG10(SUM(ATR(1), 14) / (MAXHIGH(14) - MINLOW(14))) / LOG10(14)
-    atr_list = []
-    for i in range(n):
-        if i == 0:
-            tr = high[i] - low[i]
-        else:
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr_list.append(tr)
-    atr = np.array(atr_list)
-    
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * (np.log10(atr_sum / (max_high - min_low)) / np.log10(14))
-    chop = np.where((max_high - min_low) == 0, 50, chop)  # avoid division by zero
-    chop = np.where(np.isnan(chop), 50, chop)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     base_size = 0.25  # Position size (25% of capital)
     
-    # Warmup: max of calculations (20 for vol, 34 for 1d EMA, 14 for chop)
-    start_idx = max(20, 34, 14)
+    # Warmup: max of calculations (20 for Donchian/vol, 50 for 1d EMA, 14 for ATR)
+    start_idx = max(lookback, 50, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(chop[i])):
-            signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i])):
+            # Hold current position
+            if position == 1:
+                signals[i] = base_size
+            elif position == -1:
+                signals[i] = -base_size
+            else:
+                signals[i] = 0.0
             continue
         
         close_val = close[i]
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        ema_34_val = ema_34_1d_aligned[i]
+        highest_high_val = highest_high[i]
+        lowest_low_val = lowest_low[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        atr_val = atr[i]
         vol_spike = volume_spike[i]
-        chop_val = chop[i]
         
-        # Determine regime: trending if CHOP < 38.2, ranging if CHOP > 61.8, neutral otherwise
-        trending_regime = chop_val < 38.2
-        ranging_regime = chop_val > 61.8
-        
-        # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
-        bullish_1d = close_val > ema_34_val
-        bearish_1d = close_val < ema_34_val
+        # Determine 1d trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_1d = close_val > ema_50_val
+        bearish_1d = close_val < ema_50_val
         
         if position == 0:
-            # Flat - look for entry
-            if trending_regime:
-                # Trend-following: breakout in trend direction
-                long_entry = (close_val > camarilla_r3_val) and bullish_1d and vol_spike
-                short_entry = (close_val < camarilla_s3_val) and bearish_1d and vol_spike
-                if long_entry:
-                    signals[i] = base_size
-                    position = 1
-                elif short_entry:
-                    signals[i] = -base_size
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif ranging_regime:
-                # Mean-reversion: fade at extremes
-                long_entry = (close_val < camarilla_s3_val) and vol_spike  # buy at support
-                short_entry = (close_val > camarilla_r3_val) and vol_spike  # sell at resistance
-                if long_entry:
-                    signals[i] = base_size
-                    position = 1
-                elif short_entry:
-                    signals[i] = -base_size
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Flat - look for Donchian breakout in trend direction with volume spike
+            long_entry = (close_val > highest_high_val) and bullish_1d and vol_spike
+            short_entry = (close_val < lowest_low_val) and bearish_1d and vol_spike
+            
+            if long_entry:
+                signals[i] = base_size
+                position = 1
+                entry_price = close_val
+            elif short_entry:
+                signals[i] = -base_size
+                position = -1
+                entry_price = close_val
             else:
-                # Neutral regime - no trade
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit conditions
-            if trending_regime:
-                # Exit on trend reversal or mean reversion to mid-point
-                mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
-                if close_val < mid_point or not bullish_1d:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = base_size
-            elif ranging_regime:
-                # Exit on reversion to mid-point or opposite extreme
-                mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
-                if close_val > mid_point:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = base_size
-            else:
-                # Neutral - hold
-                signals[i] = base_size
+            # Long position - check for exit conditions
+            signals[i] = base_size
+            
+            # Exit on Donchian reversal (close below lowest low of lookback period)
+            if close_val < lowest_low_val:
+                signals[i] = 0.0
+                position = 0
+            # Exit on trend change
+            elif not bullish_1d:
+                signals[i] = 0.0
+                position = 0
+            # ATR-based stoploss
+            elif close_val < entry_price - (2.5 * atr_val):
+                signals[i] = 0.0
+                position = 0
         elif position == -1:
-            # Short - exit conditions
-            if trending_regime:
-                # Exit on trend reversal or mean reversion to mid-point
-                mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
-                if close_val > mid_point or not bearish_1d:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -base_size
-            elif ranging_regime:
-                # Exit on reversion to mid-point or opposite extreme
-                mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
-                if close_val < mid_point:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -base_size
-            else:
-                # Neutral - hold
-                signals[i] = -base_size
+            # Short position - check for exit conditions
+            signals[i] = -base_size
+            
+            # Exit on Donchian reversal (close above highest high of lookback period)
+            if close_val > highest_high_val:
+                signals[i] = 0.0
+                position = 0
+            # Exit on trend change
+            elif not bearish_1d:
+                signals[i] = 0.0
+                position = 0
+            # ATR-based stoploss
+            elif close_val > entry_price + (2.5 * atr_val):
+                signals[i] = 0.0
+                position = 0
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_ChopRegime"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop"
 timeframe = "4h"
 leverage = 1.0
