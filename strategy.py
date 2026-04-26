@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
-Hypothesis: 4h Camarilla R1/S1 breakout with 1w trend filter (price > EMA50) and volume confirmation (>1.8x EMA20 volume).
-Enters long when price breaks above R1 with bullish 1w trend and volume spike.
-Enters short when price breaks below S1 with bearish 1w trend and volume spike.
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
+Hypothesis: Daily Camarilla R1/S1 breakout with weekly trend filter (price > EMA50) and volume confirmation (>1.8x EMA20 volume).
+Enters long when price breaks above R1 with bullish weekly trend and volume spike.
+Enters short when price breaks below S1 with bearish weekly trend and volume spike.
 Exits when price reverts to opposite Camarilla level (S1 for longs, R1 for shorts).
-Designed for 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
-Uses discrete position sizing (0.25) to minimize churn. Works in both bull and bear markets by following 1w trend.
+Designed for 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
+Uses discrete position sizing (0.25) to minimize churn. Works in both bull and bear markets by following weekly trend.
 """
 
 import numpy as np
@@ -43,14 +43,15 @@ def generate_signals(prices):
     r1 = pivot + range_hl * 1.1 / 4.0
     s1 = pivot - range_hl * 1.1 / 4.0
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 1d timeframe (identity since primary is 1d)
+    r1_aligned = r1  # Already at 1d frequency
+    s1_aligned = s1  # Already at 1d frequency
     
     # Load 1w data for trend filter (EMA50)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align weekly EMA to daily timeframe
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: volume > 1.8 * 20-period EMA volume
@@ -109,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
