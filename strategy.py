@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation capture institutional moves with lower trade frequency. 
-The 12h timeframe naturally reduces trades vs 4h, targeting 12-37 trades/year. Uses volume > 1.5x 20-period average for confirmation and only trades during high-volume sessions (UTC 8-20). 
-Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes during low volatility). Designed to avoid overtrading while maintaining edge.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_Filtered
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation capture institutional moves. 
+Further reduces trade frequency by requiring volume > 2.5x average and only trading during peak liquidity hours (UTC 9-15). 
+Targets 15-30 trades/year to minimize fee drag while maintaining edge via trend filter and volume confirmation.
+Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes during low volatility).
 """
 
 import numpy as np
@@ -21,9 +22,9 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Pre-compute session filter (UTC 8-20)
+    # Pre-compute session filter (UTC 9-15) - peak liquidity hours
     hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    in_session = (hours >= 9) & (hours <= 15)
     
     # Get 1d data for HTF trend and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
@@ -49,11 +50,11 @@ def generate_signals(prices):
         camarilla_r1 = np.concatenate([[np.nan], camarilla_r1])
         camarilla_s1 = np.concatenate([[np.nan], camarilla_s1])
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume average (20-period = ~10 days on 12h) for volume confirmation
+    # Volume average (20-period = ~3.3 days on 4h) for volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -89,8 +90,8 @@ def generate_signals(prices):
         high_val = high[i]
         low_val = low[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average (balanced for 12h)
-        volume_confirmed = vol_val > 1.5 * vol_ma_val
+        # Volume confirmation: current volume > 2.5x 20-period average (stricter)
+        volume_confirmed = vol_val > 2.5 * vol_ma_val
         
         if position == 0:
             # Long: price breaks above R1 with uptrend (close > EMA34) and volume confirmation
@@ -139,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_Filtered"
+timeframe = "4h"
 leverage = 1.0
