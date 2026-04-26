@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_ChopFilter
-Hypothesis: Daily KAMA direction + RSI(14) extremes + Choppiness Index regime filter.
-Long when KAMA trending up, RSI < 30 (oversold) and CHOP > 61.8 (choppy market favors mean reversion).
-Short when KAMA trending down, RSI > 70 (overbought) and CHOP > 61.8.
-Uses 1w EMA50 as higher timeframe trend filter to avoid counter-trend trades.
-Designed for low trade frequency (target: 7-25/year) with discrete sizing (0.25) to minimize fee drag.
-Works in both bull and bear markets by combining trend (KAMA/1wEMA) with mean reversion (RSI extremes) in choppy regimes.
+6h_ADX_DMI_Cross_1dTrend_Filter
+Hypothesis: 6h ADX with DMI crossover signals filtered by 1d EMA50 trend. Long when +DI crosses above -DI in 1d uptrend with ADX>25. Short when -DI crosses above +DI in 1d downtrend with ADX>25. Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year. Works in both bull and bear markets by following 1d trend, avoiding counter-trend whipsaws.
 """
 
 import numpy as np
@@ -18,70 +13,108 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get 1d data for indicators
+    # Get 1d data for ADX/DMI and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 30:  # need enough for ADX calculation
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # === 1d Indicators ===
-    # KAMA (Kaufman Adaptive Moving Average) - ER=10, Fast=2, Slow=30
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Calculate ADX and DMI on 1d data
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    # Choppiness Index (CHOP) - 14 period
-    atr_raw = np.maximum(high - low, np.absolute(high - np.roll(close_1d, 1)), np.absolute(low - np.roll(close_1d, 1)))
-    atr_raw[0] = high[0] - low[0]
-    atr_sum = pd.Series(atr_raw).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
     
-    # === 1w Trend Filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    uptrend_1w = close > ema_50_1w_aligned
-    downtrend_1w = close < ema_50_1w_aligned
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        """Wilder's smoothing (EMA with alpha=1/period)"""
+        alpha = 1.0 / period
+        result = np.full_like(data, np.nan)
+        # Find first valid index
+        valid_start = np.where(~np.isnan(data))[0]
+        if len(valid_start) == 0:
+            return result
+        first_idx = valid_start[0]
+        result[first_idx] = data[first_idx]
+        for i in range(first_idx + 1, len(data)):
+            if np.isnan(data[i]):
+                result[i] = result[i-1]
+            else:
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    period = 14
+    tr_smooth = wilders_smoothing(tr, period)
+    plus_dm_smooth = wilders_smoothing(plus_dm, period)
+    minus_dm_smooth = wilders_smoothing(minus_dm, period)
+    
+    # Calculate +DI and -DI
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, period)
+    
+    # Align to 6h timeframe
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    uptrend_1d = close_1d > ema_50_1d_aligned  # using 1d close for trend, will be aligned
+    downtrend_1d = close_1d < ema_50_1d_aligned
+    # Note: uptrend_1d/downtrend_1d are 1d arrays, need to align them
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
+    uptrend_1d_bool = uptrend_1d_aligned > 0.5
+    downtrend_1d_bool = downtrend_1d_aligned > 0.5
+    
+    # Crossover signals: +DI crosses above -DI (long), -DI crosses above +DI (short)
+    # We need previous values to detect crossover
+    plus_di_prev = np.roll(plus_di_aligned, 1)
+    minus_di_prev = np.roll(minus_di_aligned, 1)
+    plus_di_prev[0] = np.nan
+    minus_di_prev[0] = np.nan
+    
+    long_signal = (plus_di_aligned > minus_di_aligned) & (plus_di_prev <= minus_di_prev)
+    short_signal = (minus_di_aligned > plus_di_aligned) & (minus_di_prev <= plus_di_prev)
+    
+    # ADX filter: only take signals when ADX > 25 (strong trend)
+    strong_trend = adx_aligned > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 30 for KAMA/RSI/CHOP)
-    start_idx = 30
+    # Start after warmup
+    start_idx = max(30, period*2)  # need enough for ADX calculation
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(uptrend_1d_aligned[i]) or 
+            np.isnan(downtrend_1d_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -92,18 +125,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: KAMA up, RSI oversold, choppy market
-            if (close[i] > kama_aligned[i] and 
-                rsi_aligned[i] < 30 and 
-                chop_aligned[i] > 61.8 and
-                uptrend_1w[i]):
+            # Long: +DI crosses above -DI in 1d uptrend with ADX>25
+            if long_signal[i] and uptrend_1d_bool[i] and strong_trend[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down, RSI overbought, choppy market
-            elif (close[i] < kama_aligned[i] and 
-                  rsi_aligned[i] > 70 and 
-                  chop_aligned[i] > 61.8 and
-                  downtrend_1w[i]):
+            # Short: -DI crosses above +DI in 1d downtrend with ADX>25
+            elif short_signal[i] and downtrend_1d_bool[i] and strong_trend[i]:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -111,24 +138,24 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: KAMA turns down OR RSI > 50 (mean reversion complete) OR 1w trend changes
-            if (close[i] < kama_aligned[i] or 
-                rsi_aligned[i] > 50 or 
-                not uptrend_1w[i]):
+            # Exit: +DI crosses below -DI OR 1d trend changes to downtrend OR ADX falls below 20
+            if (minus_di_aligned[i] > plus_di_aligned[i] or 
+                not uptrend_1d_bool[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: KAMA turns up OR RSI < 50 (mean reversion complete) OR 1w trend changes
-            if (close[i] > kama_aligned[i] or 
-                rsi_aligned[i] < 50 or 
-                not downtrend_1w[i]):
+            # Exit: -DI crosses below +DI OR 1d trend changes to uptrend OR ADX falls below 20
+            if (plus_di_aligned[i] > minus_di_aligned[i] or 
+                not downtrend_1d_bool[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_ChopFilter"
-timeframe = "1d"
+name = "6h_ADX_DMI_Cross_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
