@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_VolumeSpike_DailyTrend
-Hypothesis: Camarilla R1/S1 breakouts with volume spike (top 20%) aligned to daily EMA34 trend. Uses wider R1/S1 levels for fewer, higher-quality breakouts. Volume spike filters for institutional interest. Daily trend filter avoids counter-trend trades. Fixed size 0.25 limits trade frequency. Target: 20-30 trades/year for BTC/ETH/SOL.
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
+Hypothesis: Daily Camarilla R1/S1 breakouts with volume spike and weekly EMA34 trend filter. Targets 15-25 trades/year. Uses tighter R1/S1 levels for stronger breakouts. Volume spike ensures institutional participation. Weekly trend filter avoids counter-trend whipsaws. Fixed size 0.25 to control trade frequency. Designed to work in both bull and bear markets by trading with the weekly trend.
 """
 
 import numpy as np
@@ -18,34 +18,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for HTF filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Previous daily bar's OHLC for Camarilla levels (R1/S1 = standard breakout levels)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Previous weekly bar's OHLC for Camarilla levels (R1/S1 = stronger breakout levels)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w_vals = df_1w['close'].values
     
-    # Calculate Camarilla levels: R1, S1 (standard breakout levels)
-    rng = high_1d - low_1d
-    camarilla_r1 = close_1d_vals + (rng * 1.1 / 2)   # R1 level
-    camarilla_s1 = close_1d_vals - (rng * 1.1 / 2)   # S1 level
+    # Calculate Camarilla levels: R1, S1 (stronger breakout levels)
+    rng = high_1w - low_1w
+    camarilla_r1 = close_1w_vals + (rng * 1.1 / 12)   # R1 level
+    camarilla_s1 = close_1w_vals - (rng * 1.1 / 12)   # S1 level
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to daily timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d_vals)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA34 for trend filter
+    close_1w_series = pd.Series(close_1w_vals)
+    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume spike: volume > 80th percentile of 50-period lookback (high volume days only)
+    # Volume spike: volume > 70th percentile of 20-period lookback (moderate volume filter)
     vol_series = pd.Series(volume)
-    vol_percentile_80 = vol_series.rolling(window=50, min_periods=50).quantile(0.80).values
-    volume_spike = volume > vol_percentile_80
+    vol_percentile_70 = vol_series.rolling(window=20, min_periods=20).quantile(0.70).values
+    volume_spike = volume > vol_percentile_70
     
     # Fixed position size to control trade frequency
     fixed_size = 0.25
@@ -53,26 +53,26 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of calculations (50 for EMA and volume percentile)
-    start_idx = 50
+    # Warmup: max of calculations (34 for EMA, 20 for volume percentile)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_percentile_80[i])):
+            np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_percentile_70[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         camarilla_r1_val = camarilla_r1_aligned[i]
         camarilla_s1_val = camarilla_s1_aligned[i]
-        ema_34_val = ema_34_1d_aligned[i]
+        ema_34_val = ema_34_1w_aligned[i]
         vol_spike = volume_spike[i]
         size = fixed_size
         
-        # Entry conditions: breakout of Camarilla R1/S1 with volume spike AND aligned with daily EMA34 trend
+        # Entry conditions: breakout of Camarilla R1/S1 with volume spike AND aligned with weekly EMA34 trend
         long_entry = (close_val > camarilla_r1_val) and vol_spike and (close_val > ema_34_val)
         short_entry = (close_val < camarilla_s1_val) and vol_spike and (close_val < ema_34_val)
         
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_VolumeSpike_DailyTrend"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
