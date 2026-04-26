@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: Tighten entry conditions to reduce trades and avoid fee drag. Use Camarilla R1/S1 breakouts on 4h with:
-- Strict 1d EMA34 trend filter (price must be >1.5% above/below EMA to avoid whipsaw)
-- Volume spike >2.5x 20-period average (higher threshold to filter noise)
-- Discrete position sizing (0.25) to minimize fee changes
-- Exit on trend reversal (close crosses EMA) or opposite Camarilla level break
-Target: 75-150 trades over 4 years (~19-38/year) to stay within proven working range.
+12h_Camarilla_Pivot_Trend_Volume_Confirm
+Hypothesis: Camarilla R3/S3 breakouts on 12h with 1d EMA34 trend filter and volume confirmation (>2x average volume). 
+In bull markets: price breaks above R3 with 1d uptrend and high volume → long. 
+In bear markets: price breaks below S3 with 1d downtrend and high volume → short. 
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+Requires BTC/ETH edge via 1d trend and volume filters; avoids SOL-only bias by requiring trend alignment.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need warmup for calculations
+    if n < 50:  # Need warmup for EMA
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,7 +24,7 @@ def generate_signals(prices):
     
     # Load 1d data for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:  # Need enough for EMA34
+    if len(df_1d) < 5:
         return np.zeros(n)
     
     # 1d EMA34 for trend filter
@@ -39,16 +38,21 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 20 for volume, 34 for EMA alignment)
+    # Start after warmup (need 20 for volume average, 34 for EMA)
     start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Calculate Camarilla levels using previous day's OHLC
-        # For 4h timeframe, 1 day = 6 bars
-        prev_day_idx = i - 6
+        # For 12h timeframe, 1 day = 2 bars
+        prev_day_idx = i - 2
         if prev_day_idx < 0:
-            # Hold current position until we have enough data
-            signals[i] = base_size * position
+            # Hold current position
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = base_size
+            else:
+                signals[i] = -base_size
             continue
             
         prev_high = high[prev_day_idx]
@@ -59,12 +63,17 @@ def generate_signals(prices):
         range_val = prev_high - prev_low
         if range_val <= 0:
             # Hold current position
-            signals[i] = base_size * position
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = base_size
+            else:
+                signals[i] = -base_size
             continue
             
-        # Camarilla R1 and S1 levels
-        R1 = prev_close + (range_val * 1.1 / 12)
-        S1 = prev_close - (range_val * 1.1 / 12)
+        # Camarilla R3 and S3 levels (more extreme than R1/S1)
+        R3 = prev_close + (range_val * 1.1 / 4)
+        S3 = prev_close - (range_val * 1.1 / 4)
         
         close_val = close[i]
         vol = volume[i]
@@ -72,25 +81,27 @@ def generate_signals(prices):
         ema_val = ema_34_1d_aligned[i]
         
         # Skip if any data not ready
-        if np.isnan(R1) or np.isnan(S1) or np.isnan(ema_val) or np.isnan(avg_vol):
-            signals[i] = base_size * position
+        if np.isnan(R3) or np.isnan(S3) or np.isnan(ema_val) or np.isnan(avg_vol):
+            # Hold current position
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = base_size
+            else:
+                signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2.5x average volume (stricter to reduce trades)
-        volume_confirmed = vol > 2.5 * avg_vol
+        # Volume confirmation: current volume > 2.0x average volume
+        volume_confirmed = vol > 2.0 * avg_vol
         
-        # Trend filter: price must be significantly above/below EMA to avoid whipsaw
-        trend_long = close_val > ema_val * 1.015  # 1.5% above EMA
-        trend_short = close_val < ema_val * 0.985  # 1.5% below EMA
+        # Long logic: price breaks above R3 with 1d uptrend and volume confirmation
+        long_condition = (close_val > R3) and (close_val > ema_val) and volume_confirmed
+        # Short logic: price breaks below S3 with 1d downtrend and volume confirmation
+        short_condition = (close_val < S3) and (close_val < ema_val) and volume_confirmed
         
-        # Long logic: price breaks above R1 with 1d uptrend and volume confirmation
-        long_condition = (close_val > R1) and trend_long and volume_confirmed
-        # Short logic: price breaks below S1 with 1d downtrend and volume confirmation
-        short_condition = (close_val < S1) and trend_short and volume_confirmed
-        
-        # Exit logic: trend reversal (price crosses EMA) or opposite Camarilla level break
-        exit_long = (close_val < ema_val) or (close_val < S1)
-        exit_short = (close_val > ema_val) or (close_val > R1)
+        # Exit logic: trend reversal
+        exit_long = close_val < ema_val
+        exit_short = close_val > ema_val
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -106,10 +117,15 @@ def generate_signals(prices):
             position = 0
         else:
             # Hold current position
-            signals[i] = base_size * position
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = base_size
+            else:
+                signals[i] = -base_size
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_Trend_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
