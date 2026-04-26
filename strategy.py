@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation (ATR ratio > 1.3). Camarilla levels provide strong intraday support/resistance; breakout above R1 or below S1 with volume and 1d trend alignment captures momentum moves. Discrete sizing 0.25 limits trades to ~15-35/year. Works in bull/bear via 1d trend filter. Uses 12h primary timeframe as requested.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeRegime
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation (ATR ratio > 1.2). Camarilla levels provide intraday support/resistance; breakout above R3 or below S3 with volume and 1d trend alignment captures strong momentum moves. Discrete sizing 0.25 limits trades to ~20-50/year. Works in bull/bear via 1d trend filter.
 """
 
 import numpy as np
@@ -23,11 +23,11 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate ATR(14) for volume regime
     atr_period = 14
@@ -48,12 +48,12 @@ def generate_signals(prices):
     
     # Avoid look-ahead: use previous day's data to compute today's levels
     range_prev = high_prev - low_prev
-    camarilla_r1 = close_prev + range_prev * 1.1 / 12
-    camarilla_s1 = close_prev - range_prev * 1.1 / 12
+    camarilla_r3 = close_prev + range_prev * 1.1 / 4
+    camarilla_s3 = close_prev - range_prev * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (1d -> 12h)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to 4h timeframe (1d -> 4h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Fixed position size to control trade frequency
     fixed_size = 0.25
@@ -66,25 +66,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(atr_ratio[i]) or
-            np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i])):
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_34_val = ema_34_1d_aligned[i]
-        vol_spike = atr_ratio[i] > 1.3  # volume regime
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        vol_spike = atr_ratio[i] > 1.2  # volume regime
+        camarilla_r3_val = camarilla_r3_aligned[i]
+        camarilla_s3_val = camarilla_s3_aligned[i]
         size = fixed_size
         
-        # Entry conditions: Camarilla R1/S1 breakout with volume spike AND aligned with 1d EMA34 trend
-        # Long: price breaks above R1 (bullish breakout)
-        # Short: price breaks below S1 (bearish breakout)
-        long_entry = (close_val > camarilla_r1_val) and vol_spike and (close_val > ema_34_val)
-        short_entry = (close_val < camarilla_s1_val) and vol_spike and (close_val < ema_34_val)
+        # Entry conditions: Camarilla R3/S3 breakout with volume spike AND aligned with 1d EMA50 trend
+        # Long: price breaks above R3 (bullish breakout)
+        # Short: price breaks below S3 (bearish breakout)
+        long_entry = (close_val > camarilla_r3_val) and vol_spike and (close_val > ema_50_val)
+        short_entry = (close_val < camarilla_s3_val) and vol_spike and (close_val < ema_50_val)
         
         if position == 0:
             # Flat - look for entry
@@ -107,7 +107,7 @@ def generate_signals(prices):
             h3_val = camarilla_h3_aligned[i]
             l3_val = camarilla_l3_aligned[i]
             
-            if (close_val < h3_val and close_val > l3_val) or close_val < ema_34_val:  # back inside H3-L3 or trend reversal
+            if (close_val < h3_val and close_val > l3_val) or close_val < ema_50_val:  # back inside H3-L3 or trend reversal
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,7 +122,7 @@ def generate_signals(prices):
             h3_val = camarilla_h3_aligned[i]
             l3_val = camarilla_l3_aligned[i]
             
-            if (close_val > l3_val and close_val < h3_val) or close_val > ema_34_val:  # back inside H3-L3 or trend reversal
+            if (close_val > l3_val and close_val < h3_val) or close_val > ema_50_val:  # back inside H3-L3 or trend reversal
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_VolumeSpike_HTFTrend"
+timeframe = "4h"
 leverage = 1.0
