@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wEMA50_VolumeSpike_ChopFilter
-Hypothesis: Camarilla R1/S1 breakout on 12h timeframe with weekly EMA50 trend filter and volume confirmation.
-Uses choppiness index to avoid false breakouts in ranging markets. Designed to work in both bull and bear
-markets by only taking breakouts aligned with weekly trend and filtering low-probability ranging conditions.
-Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeConfirm
+Hypothesis: For 1h timeframe, use 4h Camarilla R1/S1 breakouts with volume confirmation and 4h trend filter.
+Only take breakouts in direction of 4h trend (close > 4h EMA20 for long, close < 4h EMA20 for short).
+Uses discrete sizing (0.20) to minimize fee drag. Target: 60-150 total trades over 4 years (15-37/year).
+Session filter 08-20 UTC to avoid low-liquidity hours. Works in bull via breakouts, in bear via short breakdowns.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,7 +21,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for 12h (based on previous bar's range)
+    # Calculate Camarilla levels for 1h (based on previous bar's range)
     prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
@@ -33,47 +33,37 @@ def generate_signals(prices):
     r1 = prev_close + range_hl * 1.1 / 12
     s1 = prev_close - range_hl * 1.1 / 12
     
-    # Volume confirmation: volume > 1.8x 20-period median (robust to outliers)
+    # Volume confirmation: volume > 1.5x 20-period median
     vol_series = pd.Series(volume)
     vol_median = vol_series.rolling(window=20, min_periods=20).median().values
-    volume_confirm = volume > (vol_median * 1.8)
+    volume_confirm = volume > (vol_median * 1.5)
     
-    # Load weekly data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 4h data for HTF trend filter and Camarilla context
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_4h = df_4h['close'].values
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 4h EMA20 for trend filter
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Choppiness Index regime filter (14-period) on 12h data
-    # CHOP > 61.8 = ranging (avoid breakout trades), CHOP < 38.2 = trending
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # first bar
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    chop = np.where(atr14 > 0, 100 * np.log10((max_high - min_low) / atr14) / np.log10(14), 50)
-    chop[np.isnan(chop)] = 50
-    
-    # Regime filter: only take breakouts when market is not too choppy (CHOP <= 61.8)
-    regime_filter = chop <= 61.8
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.25
+    base_size = 0.20
     
-    # Start after warmup (need 20-period for volume median, 14 for chop, 50 for weekly EMA)
-    start_idx = max(20, 14, 50)
+    # Start after warmup (need 20-period for volume median)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_confirm[i]) or 
-            np.isnan(regime_filter[i])):
+            np.isnan(ema_20_4h_aligned[i]) or np.isnan(volume_confirm[i]) or 
+            np.isnan(session_filter[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -83,14 +73,20 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long logic: break above R1 with volume confirmation, weekly uptrend, and favorable regime
-        long_condition = (close[i] > r1[i]) and volume_confirm[i] and (close[i] > ema_50_1w_aligned[i]) and regime_filter[i]
-        # Short logic: break below S1 with volume confirmation, weekly downtrend, and favorable regime
-        short_condition = (close[i] < s1[i]) and volume_confirm[i] and (close[i] < ema_50_1w_aligned[i]) and regime_filter[i]
+        # Only trade during session
+        if not session_filter[i]:
+            signals[i] = 0.0
+            position = 0
+            continue
         
-        # Exit logic: opposite Camarilla level touch or trend reversal
-        exit_long = (close[i] < s1[i]) or (close[i] < ema_50_1w_aligned[i])
-        exit_short = (close[i] > r1[i]) or (close[i] > ema_50_1w_aligned[i])
+        # Long logic: break above R1 with volume confirmation and 4h uptrend
+        long_condition = (close[i] > r1[i]) and volume_confirm[i] and (close[i] > ema_20_4h_aligned[i])
+        # Short logic: break below S1 with volume confirmation and 4h downtrend
+        short_condition = (close[i] < s1[i]) and volume_confirm[i] and (close[i] < ema_20_4h_aligned[i])
+        
+        # Exit logic: opposite Camarilla level touch
+        exit_long = (close[i] < s1[i])
+        exit_short = (close[i] > r1[i])
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -115,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wEMA50_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeConfirm"
+timeframe = "1h"
 leverage = 1.0
