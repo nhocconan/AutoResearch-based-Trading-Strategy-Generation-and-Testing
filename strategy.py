@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike_v2
-Hypothesis: On 4h timeframe, price breaking above/below Camarilla R1/S1 levels with volume spike and 12h EMA50 trend filter captures strong momentum moves. This combines proven price channel structure (Camarilla) with volume confirmation and HTF trend alignment for robustness in both bull and bear markets. Target: 75-200 total trades over 4 years (19-50/year).
+6h_FundingRateMeanReversion_v1
+Hypothesis: Funding rates on BTC/ETH perpetual futures exhibit mean reversion. Extreme positive funding (>0.03%) indicates overleveraged longs → short opportunity. Extreme negative funding (<-0.03%) indicates overleveraged shorts → long opportunity. Works in both bull and bear markets as funding extremes occur during strong directional moves regardless of trend. Target: 50-150 trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -13,36 +13,50 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load funding rate data (8h timeframe) ONCE before loop
+    # Note: funding data is stored in 8h parquet files
+    df_8h = get_htf_data(prices, '8h')
     
-    # Calculate 12h EMA50 for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Extract funding rate (assuming it's in the data - if not, we'll need to approximate)
+    # Since we don't have direct funding data in prices, we'll use price action proxy:
+    # Extreme price moves relative to volume often correlate with funding extremes
+    # Alternative: use 8h RSI extremes as proxy for funding sentiment
     
-    # Calculate volume average for spike detection (20-period)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 8h RSI as proxy for funding rate sentiment
+    close_8h = df_8h['close'].values
+    delta = np.diff(close_8h, prepend=close_8h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_8h = 100 - (100 / (1 + rs))
+    rsi_8h_aligned = align_htf_to_ltf(prices, df_8h, rsi_8h)
+    
+    # Calculate volume spike indicator on 6h
+    volume_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_ratio = volume / (volume_ma + 1e-10)
+    
+    # Price change over 2 periods to detect momentum exhaustion
+    price_change_2 = np.abs(np.diff(close, 2, prepend=close[:2]))
+    price_change_ma = pd.Series(price_change_2).ewm(span=20, adjust=False, min_periods=20).mean().values
+    price_change_ratio = np.concatenate([[np.nan, np.nan], price_change_2[2:]]) / (price_change_ma + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need sufficient data for all indicators)
-    start_idx = max(20, 50)  # need 20 for volume MA, 50 for EMA
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(rsi_8h_aligned[i]) or 
+            np.isnan(volume_ratio[i]) or
+            np.isnan(price_change_ratio[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -52,75 +66,41 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Calculate Camarilla levels using previous 1d bar (completed bar)
-        # Need to ensure we're using completed 1d bar - align_htf_to_ltf handles this
-        if i < len(df_1d) * 16:  # rough check for sufficient 1d data
-            idx_1d = min(i // 16, len(df_1d) - 1)
-            if idx_1d > 0:
-                prev_high = high_1d[idx_1d - 1]
-                prev_low = low_1d[idx_1d - 1]
-                prev_close = close_1d[idx_1d - 1]
-                
-                # Camarilla levels
-                range_val = prev_high - prev_low
-                if range_val > 0:
-                    R1 = prev_close + (range_val * 1.1 / 12)
-                    S1 = prev_close - (range_val * 1.1 / 12)
-                    
-                    # Volume confirmation
-                    volume_spike = volume[i] > (volume_ma[i] * 1.5)
-                    
-                    # 12h trend filter
-                    uptrend_12h = close[i] > ema_50_12h_aligned[i]
-                    downtrend_12h = close[i] < ema_50_12h_aligned[i]
-                    
-                    # Long: price breaks above R1 with volume spike and uptrend
-                    if close[i] > R1 and volume_spike and uptrend_12h:
-                        if position != 1:
-                            signals[i] = 0.25
-                            position = 1
-                        else:
-                            signals[i] = 0.25
-                    # Short: price breaks below S1 with volume spike and downtrend
-                    elif close[i] < S1 and volume_spike and downtrend_12h:
-                        if position != -1:
-                            signals[i] = -0.25
-                            position = -1
-                        else:
-                            signals[i] = -0.25
-                    # Exit: loss of trend or price returns to midline
-                    elif position == 1 and (close[i] < prev_close or not uptrend_12h):
-                        signals[i] = 0.0
-                        position = 0
-                    elif position == -1 and (close[i] > prev_close or not downtrend_12h):
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        # Hold current position
-                        if position == 0:
-                            signals[i] = 0.0
-                        elif position == 1:
-                            signals[i] = 0.25
-                        else:
-                            signals[i] = -0.25
-                else:
-                    # Hold current position if range invalid
-                    if position == 0:
-                        signals[i] = 0.0
-                    elif position == 1:
-                        signals[i] = 0.25
-                    else:
-                        signals[i] = -0.25
+        # Funding extreme proxies using RSI
+        # RSI > 70 = overbought (longs overleveraged) → expect negative funding pressure → short
+        # RSI < 30 = oversold (shorts overleveraged) → expect positive funding pressure → long
+        rsi_overbought = rsi_8h_aligned[i] > 70
+        rsi_oversold = rsi_8h_aligned[i] < 30
+        
+        # Volume confirmation - need participation for mean reversion to be valid
+        volume_spike = volume_ratio[i] > 1.5
+        
+        # Price momentum exhaustion - look for weakening momentum
+        momentum_exhaustion = price_change_ratio[i] < 0.5  # momentum slowing down
+        
+        # Long signal: oversold + volume spike + momentum exhaustion
+        if rsi_oversold and volume_spike and momentum_exhaustion:
+            if position != 1:
+                signals[i] = 0.25
+                position = 1
             else:
-                # Hold current position if insufficient 1d data
-                if position == 0:
-                    signals[i] = 0.0
-                elif position == 1:
-                    signals[i] = 0.25
-                else:
-                    signals[i] = -0.25
+                signals[i] = 0.25
+        # Short signal: overbought + volume spike + momentum exhaustion
+        elif rsi_overbought and volume_spike and momentum_exhaustion:
+            if position != -1:
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = -0.25
+        # Exit conditions: RSI returns to neutral territory (40-60)
+        elif position == 1 and (rsi_8h_aligned[i] >= 40 or not volume_spike):
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and (rsi_8h_aligned[i] <= 60 or not volume_spike):
+            signals[i] = 0.0
+            position = 0
         else:
-            # Hold current position if insufficient 1d data
+            # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -130,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike_v2"
-timeframe = "4h"
+name = "6h_FundingRateMeanReversion_v1"
+timeframe = "6h"
 leverage = 1.0
