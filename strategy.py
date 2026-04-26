@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_FundingFilter_v2
-Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1-day trend filter and funding rate mean-reversion filter.
-Only trade breakouts in direction of 1-day EMA34 trend when funding rate is extreme (contrarian signal).
-Funding rate > 0.05% → short bias, < -0.05% → long bias. Avoids crowded trades and reduces fee drift.
-Designed for 12-37 trades/year (50-150 over 4 years) by requiring confluence of breakout, trend, and funding extreme.
-Works in bull/bear via 1-day trend filter: only takes long breakouts in uptrend, short in downtrend.
-Uses discrete position sizing (0.25) to minimize fee churn.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1-day EMA34 trend filter and volume spike confirmation.
+Only trade breakouts in direction of 1-day trend with volume confirmation to avoid false breakouts.
+Designed for 20-50 trades/year (75-200 over 4 years) by requiring confluence of breakout, trend, and volume.
+Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear via 1-day trend filter.
 """
 
 import numpy as np
@@ -36,25 +34,11 @@ def generate_signals(prices):
     R1_1d = typical_price_1d + (1.1/12) * (df_1d['high'] - df_1d['low'])  # R1 level
     S1_1d = typical_price_1d - (1.1/12) * (df_1d['high'] - df_1d['low'])  # S1 level
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d.values)
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d.values)
     
-    # Load funding rate data (8h) and align to 12h
-    try:
-        df_8h = get_htf_data(prices, '8h')
-        # Funding rate is typically in the data as 'funding_rate' column
-        if 'funding_rate' in df_8h.columns:
-            funding_rate = df_8h['funding_rate'].values
-        else:
-            # Fallback: use zero if funding rate not available (should not happen on Binance)
-            funding_rate = np.zeros(len(df_8h))
-        funding_rate_aligned = align_htf_to_ltf(prices, df_8h, funding_rate)
-    except:
-        # If funding rate data not available, disable filter (neutral)
-        funding_rate_aligned = np.zeros(n)
-    
-    # Volume confirmation: volume > 1.5x 20-period average (tighter than before)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -66,8 +50,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or
-            np.isnan(funding_rate_aligned[i])):
+            np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -77,25 +60,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (tighter: 1.5x average)
+        # Volume spike condition (1.5x average)
         volume_spike = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Funding rate extreme condition (contrarian signal)
-        funding_long_bias = funding_rate_aligned[i] < -0.0005  # < -0.05%
-        funding_short_bias = funding_rate_aligned[i] > 0.0005   # > +0.05%
-        funding_neutral = abs(funding_rate_aligned[i]) <= 0.0005
-        
-        # Breakout conditions with trend filter and funding filter
+        # Breakout conditions with trend filter
         if htf_trend[i] == 1:  # Uptrend on 1d
-            # Long breakout above R1 with volume spike, funding long bias or neutral
-            if close[i] > R1_1d_aligned[i] and volume_spike and (funding_long_bias or funding_neutral):
+            # Long breakout above R1 with volume spike
+            if close[i] > R1_1d_aligned[i] and volume_spike:
                 if position != 1:
                     signals[i] = 0.25
                     position = 1
                 else:
                     signals[i] = 0.25
-            # Exit long if price falls below S1 (reversal signal) or funding turns extremely short
-            elif position == 1 and (close[i] < S1_1d_aligned[i] or funding_short_bias):
+            # Exit long if price falls below S1 (reversal signal)
+            elif position == 1 and close[i] < S1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,15 +85,15 @@ def generate_signals(prices):
                 else:
                     signals[i] = -0.25
         elif htf_trend[i] == -1:  # Downtrend on 1d
-            # Short breakdown below S1 with volume spike, funding short bias or neutral
-            if close[i] < S1_1d_aligned[i] and volume_spike and (funding_short_bias or funding_neutral):
+            # Short breakdown below S1 with volume spike
+            if close[i] < S1_1d_aligned[i] and volume_spike:
                 if position != -1:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = -0.25
-            # Exit short if price rises above R1 (reversal signal) or funding turns extremely long
-            elif position == -1 and (close[i] > R1_1d_aligned[i] or funding_long_bias):
+            # Exit short if price rises above R1 (reversal signal)
+            elif position == -1 and close[i] > R1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_FundingFilter_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
