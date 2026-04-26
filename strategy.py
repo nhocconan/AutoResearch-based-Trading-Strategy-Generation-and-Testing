@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v8
-Hypothesis: Increase edge by tightening volume confirmation to >2.5x average, adding 4h EMA50 trend filter alongside 1d EMA34, and reducing position size to 0.20 to lower fee impact. Target 10-20 trades/year. Uses HTF 1d for Camarilla levels and trend, with 4h EMA for additional confirmation.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike confirmation (>2.0x 20-period average). Uses discrete sizing 0.25. Designed for low trade frequency (12-37/year) to minimize fee drag while capturing breakouts in both bull and bear markets via trend filter. HTF 1d used for trend and Camarilla levels to avoid look-ahead.
 """
 
 import numpy as np
@@ -33,10 +33,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h EMA50 for additional trend confirmation
-    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # ATR(14) on 4h for breakout confirmation and trailing stop
+    # ATR(14) on 12h for breakout confirmation and volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -57,7 +54,7 @@ def generate_signals(prices):
         camarilla_r1 = np.concatenate([[np.nan], camarilla_r1])
         camarilla_s1 = np.concatenate([[np.nan], camarilla_s1])
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 12h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -66,17 +63,13 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Warmup: max of volume MA (20), 1d EMA (34), 4h EMA (50), ATR (14)
-    start_idx = max(20, 34, 50, 14)
+    # Warmup: max of volume MA (20), 1d EMA (34), ATR (14)
+    start_idx = max(20, 34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready or outside session
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(ema_50_4h[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_ma[i]) or
@@ -86,13 +79,12 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
         ema_34_1d_val = ema_34_1d_aligned[i]
-        ema_50_4h_val = ema_50_4h[i]
         r1_val = camarilla_r1_aligned[i]
         s1_val = camarilla_s1_aligned[i]
         vol_ma_val = vol_ma[i]
@@ -102,76 +94,50 @@ def generate_signals(prices):
         low_val = low[i]
         atr_val = atr[i]
         
-        # Volume confirmation: current volume > 2.5x 20-period average (tighter)
-        volume_confirmed = vol_val > 2.5 * vol_ma_val
-        # Breakout threshold: price must close beyond Camarilla level by 2.0*ATR (tighter)
-        breakout_threshold = 2.0 * atr_val
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirmed = vol_val > 2.0 * vol_ma_val
+        # Breakout threshold: price must close beyond Camarilla level by 1.0*ATR
+        breakout_threshold = 1.0 * atr_val
         
         if position == 0:
-            # Long: close above R1 + threshold, uptrend (close > both EMAs), volume confirmation
-            long_signal = (close_val > r1_val + breakout_threshold) and (close_val > ema_34_1d_val) and (close_val > ema_50_4h_val) and volume_confirmed
-            # Short: close below S1 - threshold, downtrend (close < both EMAs), volume confirmation
-            short_signal = (close_val < s1_val - breakout_threshold) and (close_val < ema_34_1d_val) and (close_val < ema_50_4h_val) and volume_confirmed
+            # Long: close above R1 + threshold, uptrend (close > EMA34), volume confirmation
+            long_signal = (close_val > r1_val + breakout_threshold) and (close_val > ema_34_1d_val) and volume_confirmed
+            # Short: close below S1 - threshold, downtrend (close < EMA34), volume confirmation
+            short_signal = (close_val < s1_val - breakout_threshold) and (close_val < ema_34_1d_val) and volume_confirmed
             
             if long_signal:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                highest_since_entry = close_val
             elif short_signal:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.20
-            highest_since_entry = max(highest_since_entry, high_val)
-            # ATR trailing stop: exit if price drops 2.5*ATR from high (wider stop)
-            if close_val < highest_since_entry - 2.5 * atr_val:
+            signals[i] = 0.25
+            # Exit: price closes below S1 (reversion to mean)
+            if close_val < s1_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-            # Exit: price closes below S1
-            elif close_val < s1_val:
+            # Exit: trend reversal (close below EMA34)
+            elif close_val < ema_34_1d_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-            # Exit: trend reversal (close below 4h EMA50)
-            elif close_val < ema_50_4h_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
         elif position == -1:
             # Hold short
-            signals[i] = -0.20
-            lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR trailing stop: exit if price rises 2.5*ATR from low (wider stop)
-            if close_val > lowest_since_entry + 2.5 * atr_val:
+            signals[i] = -0.25
+            # Exit: price closes above R1 (reversion to mean)
+            if close_val > r1_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                lowest_since_entry = 0.0
-            # Exit: price closes above R1
-            elif close_val > r1_val:
+            # Exit: trend reversal (close above EMA34)
+            elif close_val > ema_34_1d_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                lowest_since_entry = 0.0
-            # Exit: trend reversal (close above 4h EMA50)
-            elif close_val > ema_50_4h_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                lowest_since_entry = 0.0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v8"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
