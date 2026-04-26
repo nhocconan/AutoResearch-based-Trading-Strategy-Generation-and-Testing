@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v2
 Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>1.5x median).
 Enters long when price breaks above R1 with volume confirmation and bullish 1d trend (price > EMA50).
 Enters short when price breaks below S1 with volume confirmation and bearish 1d trend (price < EMA50).
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v2"
 timeframe = "12h"
 leverage = 1.0
