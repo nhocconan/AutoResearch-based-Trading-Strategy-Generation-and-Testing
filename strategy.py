@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation (>2.0x average) produce fewer trades (~15-25/year) with edge in both bull and bear markets. Uses ATR-based trailing stop (2.5x ATR) and discrete sizing (0.25) to manage drawdown. Primary TF: 12h, HTF: 1d.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v7
+Hypothesis: Tighten entry conditions further by requiring volume > 3.0x average and price close beyond Camarilla level by 2.5*ATR. Keep 1d EMA34 trend filter and ATR trailing stop (2.0x ATR). Discrete sizing: 0.25. Target: 5-15 trades/year to minimize fee drag while maintaining edge via confluence of breakout, volume, and trend. Uses 1d HTF for Camarilla levels and trend.
 """
 
 import numpy as np
@@ -33,7 +33,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) on 12h for breakout confirmation and trailing stop
+    # Calculate ATR(14) on 4h for breakout confirmation and trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -54,11 +54,11 @@ def generate_signals(prices):
         camarilla_r1 = np.concatenate([[np.nan], camarilla_r1])
         camarilla_s1 = np.concatenate([[np.nan], camarilla_s1])
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume average (20-period) for volume confirmation
+    # Volume average (20-period = ~3.3 days on 4h) for volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -98,15 +98,15 @@ def generate_signals(prices):
         low_val = low[i]
         atr_val = atr[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = vol_val > 2.0 * vol_ma_val
-        # Breakout confirmation: price must close beyond Camarilla level by at least 1.5*ATR
-        breakout_threshold = 1.5 * atr_val
+        # Volume confirmation: current volume > 3.0x 20-period average
+        volume_confirmed = vol_val > 3.0 * vol_ma_val
+        # Breakout confirmation: price must close beyond Camarilla level by at least 2.5*ATR
+        breakout_threshold = 2.5 * atr_val
         
         if position == 0:
-            # Long: price closes above R1 + 1.5*ATR with uptrend (close > EMA34) and volume confirmation
+            # Long: price closes above R1 + 2.5*ATR with uptrend (close > EMA34) and volume confirmation
             long_signal = (close_val > r1_val + breakout_threshold) and (close_val > ema_34_1d_val) and volume_confirmed
-            # Short: price closes below S1 - 1.5*ATR with downtrend (close < EMA34) and volume confirmation
+            # Short: price closes below S1 - 2.5*ATR with downtrend (close < EMA34) and volume confirmation
             short_signal = (close_val < s1_val - breakout_threshold) and (close_val < ema_34_1d_val) and volume_confirmed
             
             if long_signal:
@@ -126,8 +126,8 @@ def generate_signals(prices):
             signals[i] = 0.25
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, high_val)
-            # ATR-based trailing stop: exit if price drops 2.5*ATR from high
-            if close_val < highest_since_entry - 2.5 * atr_val:
+            # ATR-based trailing stop: exit if price drops 2.0*ATR from high
+            if close_val < highest_since_entry - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -150,8 +150,8 @@ def generate_signals(prices):
             signals[i] = -0.25
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR-based trailing stop: exit if price rises 2.5*ATR from low
-            if close_val > lowest_since_entry + 2.5 * atr_val:
+            # ATR-based trailing stop: exit if price rises 2.0*ATR from low
+            if close_val > lowest_since_entry + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -172,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v7"
+timeframe = "4h"
 leverage = 1.0
