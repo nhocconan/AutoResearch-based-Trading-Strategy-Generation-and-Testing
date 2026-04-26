@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_v1
-Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above R4/S4 (using R1/S1 levels for tighter stops) AND 1d close > EMA(34) AND volume spike.
-Short when price breaks below S4/S1 AND 1d close < EMA(34) AND volume spike.
-Targets 50-150 total trades over 4 years. Works in bull (breakouts continue) and bear (breakdowns continue) via 1d trend filter.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation.
+Long when price breaks above R1 AND 1d close > EMA(34) AND volume spike (>2.0x 20-period MA).
+Short when price breaks below S1 AND 1d close < EMA(34) AND volume spike.
+Exit on price retracing to pivot level or trend reversal.
+Targets 75-200 total trades over 4 years (19-50/year). Works in bull (breakouts continue) and bear (breakdowns continue) via 1d trend filter.
+Volume spike ensures momentum confirmation, reducing false breakouts.
 """
 
 import numpy as np
@@ -49,11 +51,12 @@ def generate_signals(prices):
     r1 = pivot + (range_hl * 1.1 / 12.0)
     s1 = pivot - (range_hl * 1.1 / 12.0)
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (stricter for lower frequency)
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_ma)
     
@@ -68,7 +71,8 @@ def generate_signals(prices):
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+            np.isnan(s1_aligned[i]) or
+            np.isnan(pivot_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -101,20 +105,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price drops below S1 (failed breakout) OR 1d trend flips down
-            if (close_val < s1_aligned[i]) or (not trend_up):
+            # Exit: price retreats to pivot level (profit taking) OR 1d trend flips down
+            if (close_val < pivot_aligned[i]) or (not trend_up):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price rises above R1 (failed breakdown) OR 1d trend flips up
-            if (close_val > r1_aligned[i]) or (not trend_down):
+            # Exit: price rallies to pivot level (profit taking) OR 1d trend flips up
+            if (close_val > pivot_aligned[i]) or (not trend_down):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
