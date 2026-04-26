@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeRegime_v1
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1-week EMA50 trend filter, volume confirmation (>1.8x 20-bar MA), and choppiness regime filter (CHOP<40) produce high-quality trades. The 1w trend filter captures major bull/bear regimes while avoiding whipsaws. Chop filter ensures breakouts occur only in strong trending conditions. Target: 100-180 total trades over 4 years (25-45/year) with discrete sizing 0.25 to minimize fee churn.
+1d_KAMA_Direction_RSI_ChopFilter_v1
+Hypothesis: On daily timeframe, Kaufman Adaptive Moving Average (KAMA) trend direction combined with RSI extremes and choppiness regime filter captures sustained moves in both bull and bear markets while avoiding whipsaws in choppy conditions. KAMA adapts to market noise, reducing false signals. Target: 30-80 total trades over 4 years (7-20/year).
 """
 
 import numpy as np
@@ -10,39 +10,47 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HTF trend filter (EMA50) and Camarilla levels
+    # Load 1w data ONCE before loop for HTF trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w EMA50 for trend filter
+    # Calculate 1w EMA50 for HTF trend filter
     close_1w = df_1w['close'].values
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1w Camarilla levels (R1, S1) using previous 1w's OHLC
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_shifted = np.concatenate([[np.nan], close_1w[:-1]])  # previous 1w close
+    # Calculate KAMA on primary timeframe (1d)
+    # KAMA parameters: ER period=10, Fast EMA=2, Slow EMA=30
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])).reshape(-1, 1), axis=1)  # placeholder, will compute properly below
     
-    camarilla_range = high_1w - low_1w
-    r1 = close_1w_shifted + 1.1 * camarilla_range / 12
-    s1 = close_1w_shifted - 1.1 * camarilla_range / 12
+    # Proper efficiency ratio calculation
+    price_change = np.abs(np.diff(close, n=10, prepend=close[:10]))
+    volatility_sum = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility_sum > 0, price_change / volatility_sum, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # smoothing constant
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 4h volume confirmation: volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # 4h choppiness index: CHOP < 40 = strong trending (favor breakouts)
+    # Calculate Choppiness Index (CHOP) on 1d
     tr1 = np.maximum(high - low, np.absolute(high - np.concatenate([[np.nan], close[:-1]])))
     tr2 = np.maximum(tr1, np.absolute(low - np.concatenate([[np.nan], close[:-1]])))
     atr14 = pd.Series(tr2).rolling(window=14, min_periods=14).mean().values
@@ -55,15 +63,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for EMA, 20 for volume MA, 14*2 for chop)
-    start_idx = max(50, 20, 28)
+    # Start after warmup (need 50 for 1w EMA, 30 for KAMA, 14 for RSI/CHOP)
+    start_idx = max(50, 30, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or
+            np.isnan(kama[i]) or
+            np.isnan(rsi[i]) or
             np.isnan(chop[i])):
             # Hold current position
             if position == 0:
@@ -78,35 +85,36 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1w_aligned[i]
         downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Volume confirmation
-        volume_spike = volume[i] > 1.8 * vol_ma_20[i]
+        # KAMA direction: price above/below KAMA
+        kama_up = close[i] > kama[i]
+        kama_down = close[i] < kama[i]
         
-        # Choppiness regime: only take breakouts when CHOP < 40 (strong trending)
-        regime_ok = chop[i] < 40.0
+        # RSI extremes: RSI < 30 (oversold) or RSI > 70 (overbought)
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Camarilla breakout conditions
-        breakout_r1 = close[i] > r1_aligned[i]
-        breakout_s1 = close[i] < s1_aligned[i]
+        # Choppiness regime: only take signals when CHOP < 50 (less choppy/more trending)
+        regime_ok = chop[i] < 50.0
         
-        # Long logic: breakout above R1 in uptrend with volume and strong regime
-        if uptrend and volume_spike and breakout_r1 and regime_ok:
+        # Long logic: KAMA up in uptrend with RSI oversold and good regime
+        if uptrend and kama_up and rsi_oversold and regime_ok:
             if position != 1:
                 signals[i] = 0.25
                 position = 1
             else:
                 signals[i] = 0.25
-        # Short logic: breakout below S1 in downtrend with volume and strong regime
-        elif downtrend and volume_spike and breakout_s1 and regime_ok:
+        # Short logic: KAMA down in downtrend with RSI overbought and good regime
+        elif downtrend and kama_down and rsi_overbought and regime_ok:
             if position != -1:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = -0.25
-        # Exit conditions: loss of trend OR regime becomes too choppy (CHOP >= 61.8)
-        elif position == 1 and (not uptrend or chop[i] >= 61.8):
+        # Exit conditions: loss of trend OR regime becomes too choppy OR RSI returns to neutral
+        elif position == 1 and (not uptrend or not kama_up or chop[i] >= 61.8 or rsi[i] > 50):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (not downtrend or chop[i] >= 61.8):
+        elif position == -1 and (not downtrend or not kama_down or chop[i] >= 61.8 or rsi[i] < 50):
             signals[i] = 0.0
             position = 0
         else:
@@ -120,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeRegime_v1"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
