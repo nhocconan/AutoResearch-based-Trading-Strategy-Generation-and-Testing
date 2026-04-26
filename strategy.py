@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 6h Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume spike confirmation produce high-quality trades by aligning intraday momentum with daily trend. Works in both bull and bear via trend filter. Target: 80-150 total trades over 4 years (20-37/year).
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: On 12h timeframe, Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume spike confirmation produce fewer, higher-quality trades by capturing strong directional moves while avoiding whipsaws. Works in both bull and bear markets via trend filter. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -33,11 +33,11 @@ def generate_signals(prices):
     camarilla_R3 = close_1d + 1.5 * (high_1d - low_1d)
     camarilla_S3 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Align Camarilla levels to 6h timeframe (completed 1d bars only)
+    # Align Camarilla levels to 12h timeframe (completed 1d bars only)
     R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
     
-    # 6h volume confirmation: volume > 2.0x 20-period average
+    # 12h volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -56,9 +56,9 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
             continue
         
         # Volume spike condition
@@ -75,28 +75,28 @@ def generate_signals(prices):
         if breakout_up and uptrend and volume_spike:
             # Long signal: break above R3 + uptrend + volume spike
             if position != 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif breakout_down and downtrend and volume_spike:
             # Short signal: break below S3 + downtrend + volume spike
             if position != -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
