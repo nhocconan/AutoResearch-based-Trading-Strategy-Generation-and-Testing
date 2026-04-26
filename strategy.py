@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_1wEMA34_Trend_VolumeSpike_v1
-Hypothesis: Daily Donchian(20) breakout with weekly EMA34 trend filter and volume spike (>2.0x median). Captures strong trending moves on higher timeframe with volume confirmation. Uses discrete position sizing (0.30) to minimize fee churn and ATR trailing stop (2.0x) for risk management. Designed for BTC/ETH with very tight entry conditions (~10-20 trades/year) to avoid overtrading and fee drag. Works in bull/bear by only trading with weekly trend direction.
+6h_WilliamsVixFix_ExtremeReversion_1dTrendFilter_v1
+Hypothesis: Williams Vix Fix (WVF) identifies extreme fear/greed on 6h. When WVF > 0.8 (extreme fear) during 1d uptrend → long reversal; when WVF < 0.2 (extreme greed) during 1d downtrend → short reversal. Uses 1d EMA50 as trend filter to ensure reversals align with higher timeframe momentum. Targets 15-25 trades/year with discrete sizing (0.25) to minimize fee drag. Designed for mean reversion in extended moves, works in both bull/bear by only trading counter-trend extreme reversals with trend alignment.
 """
 
 import numpy as np
@@ -10,117 +10,97 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for HTF trend (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 34:
+    # Get 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA(34) for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily Donchian(20) channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Vix Fix: measures market fear (0-1, higher = more fear)
+    # WVF = ((Highest Close in Period - Low) / (Highest Close in Period - Lowest Close in Period)) * 100
+    lookback = 22  # Standard WVF lookback
+    highest_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume spike filter: volume > 2.0x median volume (30-period)
-    vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median().values
+    # Avoid division by zero
+    denominator = highest_close - lowest_close
+    denominator = np.where(denominator == 0, 1e-10, denominator)
     
-    # ATR(14) for volatility-based stops
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    wvf = ((highest_close - low) / denominator) * 100
+    # Normalize to 0-1 scale (typical WVF ranges 0-100+)
+    wvf_normalized = np.clip(wfv / 100.0, 0, 1) if 'wfv' in locals() else np.clip(wvf / 100.0, 0, 1)
+    wvf_normalized = np.clip(wvf / 100.0, 0, 1)
     
-    # Align HTF indicators to daily timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align HTF indicators to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    wvf_aligned = align_htf_to_ltf(prices, df_1d, wvf_normalized)  # WVF uses same lookback, so 1d alignment
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Warmup: max of EMA(34) 1w, Donchian(20), volume median (30), ATR (14)
-    start_idx = max(34, 20, 30, 14) + 1
+    # Warmup: max of EMA(50) 1d, WVF lookback (22)
+    start_idx = max(50, lookback) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or
-            np.isnan(vol_median[i]) or
-            np.isnan(atr[i])):
-            # Hold current position
-            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(wvf_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_34_1w_val = ema_34_1w_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        volume_val = volume[i]
-        vol_median_val = vol_median[i]
-        atr_val = atr[i]
-        upper_channel = highest_20[i]
-        lower_channel = lowest_20[i]
+        wvf_val = wvf_aligned[i]
         
-        # Trend filter: price > EMA34 (uptrend) or < EMA34 (downtrend)
-        uptrend = close_val > ema_34_1w_val
-        downtrend = close_val < ema_34_1w_val
+        # Trend filter: 1d EMA50 direction
+        uptrend = close_val > ema_50_1d_val
+        downtrend = close_val < ema_50_1d_val
         
-        # Volume spike filter: only trade in high-volume environments
-        volume_spike = volume_val > 2.0 * vol_median_val
+        # Extreme fear/greed thresholds
+        extreme_fear = wvf_val > 0.80   # WVF > 80 = extreme fear
+        extreme_greed = wvf_val < 0.20  # WVF < 20 = extreme greed
         
         if position == 0:
-            # Long: break above upper Donchian with volume spike, and uptrend
-            long_signal = (close_val > upper_channel) and \
-                          volume_spike and \
-                          uptrend
+            # Long reversal: extreme fear during 1d uptrend (buy panic dips in uptrend)
+            long_signal = extreme_fear and uptrend
             
-            # Short: break below lower Donchian with volume spike, and downtrend
-            short_signal = (close_val < lower_channel) and \
-                           volume_spike and \
-                           downtrend
+            # Short reversal: extreme greed during 1d downtrend (sell euphoric rallies in downtrend)
+            short_signal = extreme_greed and downtrend
             
             if long_signal:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                highest_since_entry = close_val
             elif short_signal:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Hold long
-            signals[i] = 0.30
-            highest_since_entry = max(highest_since_entry, high_val)
-            # ATR trailing stop
-            if close_val < highest_since_entry - 2.0 * atr_val:
+            # Hold long: exit when fear subsides or trend breaks
+            signals[i] = 0.25
+            # Exit conditions: fear reduced OR price breaks below 1d EMA50
+            if wvf_val < 0.50 or close_val < ema_50_1d_val:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Hold short
-            signals[i] = -0.30
-            lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR trailing stop
-            if close_val > lowest_since_entry + 2.0 * atr_val:
+            # Hold short: exit when greed subsides or trend breaks
+            signals[i] = -0.25
+            # Exit conditions: greed reduced OR price breaks above 1d EMA50
+            if wvf_val > 0.50 or close_val > ema_50_1d_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_WilliamsVixFix_ExtremeReversion_1dTrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
