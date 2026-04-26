@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v4
-Hypothesis: Use 1d ATR-based trend filter (price vs ATR-weighted close) with Camarilla R1/S1 breakouts to adapt to volatility regimes. Volume confirmation ensures institutional participation. Designed for low trade frequency (<50/year) to minimize fee drag while maintaining edge in both bull/bear regimes via volatility-adaptive trend filter.
+4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v5
+Hypothesis: Camarilla R1/S1 breakouts with 1d ATR-based trend filter (price > EMA + 0.5*ATR = uptrend) and volume spike confirmation. Uses ATR trailing stop and trend reversal exit. Designed for low trade frequency (<50/year) to minimize fee drag while maintaining edge in both bull/bear regimes via volatility-adaptive trend filter. Tightened volume threshold to 2.5x average to reduce trades and avoid overtrading.
 """
 
 import numpy as np
@@ -53,7 +53,7 @@ def generate_signals(prices):
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: 2.0x average volume (tighter to reduce trades)
+    # Volume confirmation: 2.5x average volume (tighter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for stop (14-period on 4h)
@@ -102,9 +102,9 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: break above R1, uptrend (close > trend_filter), volume spike
-            long_signal = (high_val > R1_val) and (close_val > trend_filter_1d_val) and (volume_val > 2.0 * vol_ma_val)
+            long_signal = (high_val > R1_val) and (close_val > trend_filter_1d_val) and (volume_val > 2.5 * vol_ma_val)
             # Short: break below S1, downtrend (close < trend_filter), volume spike
-            short_signal = (low_val < S1_val) and (close_val < trend_filter_1d_val) and (volume_val > 2.0 * vol_ma_val)
+            short_signal = (low_val < S1_val) and (close_val < trend_filter_1d_val) and (volume_val > 2.5 * vol_ma_val)
             
             if long_signal:
                 signals[i] = 0.30
@@ -139,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v4"
+name = "4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v5"
 timeframe = "4h"
 leverage = 1.0
