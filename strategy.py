@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_ATRStop_v1
-Hypothesis: On 6h timeframe, trade long when price breaks above Camarilla R3 level and short when breaks below S3 level, 
+12h_Camarilla_R3S3_Breakout_1dTrend_ATRStop_v1
+Hypothesis: On 12h timeframe, trade long when price breaks above Camarilla R3 level and short when breaks below S3 level, 
 filtered by 1d EMA34 trend and ATR-based stoploss. Camarilla R3/S3 levels represent stronger support/resistance than R1/S1, 
 reducing false breakouts. The 1d EMA34 trend filter ensures trades align with higher-timeframe direction, improving performance 
 in both bull and bear markets. ATR stoploss manages risk. Targeting 50-150 total trades over 4 years (12-37/year) with 
@@ -48,12 +48,12 @@ def generate_signals(prices):
     r3_1d = close_1d + 1.1666 * hl_range_1d  # R3 level
     s3_1d = close_1d - 1.1666 * hl_range_1d  # S3 level
     
-    # Align HTF indicators to 6h timeframe
+    # Align HTF indicators to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # ATR for stoploss calculation (6h ATR)
+    # ATR for stoploss calculation (12h ATR)
     atr_period = 14
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]  # first bar
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
