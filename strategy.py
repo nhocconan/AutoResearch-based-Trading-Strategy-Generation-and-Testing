@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_WeeklyTrend_VolumeSpike_v2
-Hypothesis: Camarilla R1/S1 breakouts on 1d aligned with weekly trend (price vs weekly EMA50) and volume spike (>2x average) captures strong institutional moves. Added tighter volume confirmation (3x avg volume) and required weekly trend alignment to reduce false signals and overtrading. Designed for 1d to target 7-25 trades/year with discrete sizing (0.25).
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Daily trend filter (price vs daily EMA50) + Camarilla R1/S1 breakouts from 12h with volume spike (>2x average) captures strong institutional moves while avoiding counter-trend whipsaws. Works in bull/bear via daily trend alignment. Designed for 12h to target 12-37 trades/year with discrete sizing (0.25).
 """
 
 import numpy as np
@@ -18,21 +18,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels
+    # Load 1d data ONCE before loop for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate Camarilla levels from previous 1d bar
+    # Calculate Camarilla levels from previous 1d bar (use 1d data)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -53,22 +48,22 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Average volume for confirmation (48-period SMA = 1d * 2 = 2d)
-    avg_volume = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    # Average volume for confirmation (24-period SMA = 1d on 12h timeframe = 24 bars)
+    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     base_size = 0.25
     
-    # Warmup: max of EMA(50), volume(48)
-    start_idx = max(50, 48)
+    # Warmup: max of EMA(50), volume(24)
+    start_idx = max(50, 24)
     
     for i in range(start_idx, n):
         close_val = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_50_1w_aligned[i]
+        ema_val = ema_50_1d_aligned[i]
         r1_val = camarilla_r1_aligned[i]
         s1_val = camarilla_s1_aligned[i]
         
@@ -79,16 +74,16 @@ def generate_signals(prices):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Volume confirmation: current volume > 3.0x average volume (tighter than before)
-        volume_confirmed = vol > 3.0 * avg_vol
+        # Volume confirmation: current volume > 2.0x average volume
+        volume_confirmed = vol > 2.0 * avg_vol
         
-        # Trend filter: price vs weekly EMA50
+        # Trend filter: price vs daily EMA50
         uptrend = close_val > ema_val
         downtrend = close_val < ema_val
         
-        # Long: price CLOSES above R1 with weekly uptrend and volume
+        # Long: price CLOSES above R1 with daily uptrend and volume
         long_condition = (close_val > r1_val) and uptrend and volume_confirmed
-        # Short: price CLOSES below S1 with weekly downtrend and volume
+        # Short: price CLOSES below S1 with daily downtrend and volume
         short_condition = (close_val < s1_val) and downtrend and volume_confirmed
         
         # Exit: price retests broken level
@@ -115,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_WeeklyTrend_VolumeSpike_v2"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
