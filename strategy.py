@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Uses 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-- Long when price breaks above Camarilla R1 level AND 1d uptrend AND volume spike
-- Short when price breaks below Camarilla S1 level AND 1d downtrend AND volume spike
-- Camarilla levels provide intraday support/resistance based on prior day's range
-- 1d EMA34 trend filter reduces whipsaw in bear markets and captures major moves
-- Volume spike (2.0x 20-period average) confirms institutional participation
-- Designed for lower frequency with proven edge on BTC/ETH from Camarilla's structure
+6h_Ichimoku_Cloud_Filter_1dTrend_v1
+Hypothesis: 6h Ichimoku system with 1d trend filter for BTC/ETH.
+- Uses 6h timeframe targeting 50-150 total trades over 4 years (12-37/year)
+- Long when: Tenkan > Kijun, price > Cloud (Senkou Span A/B), and 1d uptrend (price > 1d EMA50)
+- Short when: Tenkan < Kijun, price < Cloud, and 1d downtrend (price < 1d EMA50)
+- Ichimoku provides multiple confluence factors (trend, momentum, support/resistance)
+- 1d EMA50 filter ensures alignment with higher timeframe trend to avoid counter-trend whipsaws
+- Designed for lower frequency with proven Ichimoku edge in crypto markets
 """
 
 import numpy as np
@@ -17,56 +16,56 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for calculations
+    if n < 100:  # Need enough data for Ichimoku calculations
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels (prior day's range)
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Load 12h data ONCE before loop for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate Camarilla levels from prior 1d bar
-    # Camarilla: R1 = close + 1.1*(high-low)*1.1/12, S1 = close - 1.1*(high-low)*1.1/12
-    prior_1d_high = np.roll(df_1d['high'].values, 1)
-    prior_1d_low = np.roll(df_1d['low'].values, 1)
-    prior_1d_close = np.roll(df_1d['close'].values, 1)
-    # First value is invalid due to roll
-    prior_1d_high[0] = np.nan
-    prior_1d_low[0] = np.nan
-    prior_1d_close[0] = np.nan
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    cam_r1 = prior_1d_close + 1.1 * (prior_1d_high - prior_1d_low) * 1.1 / 12
-    cam_s1 = prior_1d_close - 1.1 * (prior_1d_high - prior_1d_low) * 1.1 / 12
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Align Camarilla levels to 12h timeframe
-    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
-    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align Ichimoku components to 6h timeframe (they're already calculated on 6h)
+    tenkan_aligned = tenkan  # Already on 6h
+    kijun_aligned = kijun    # Already on 6h
+    senkou_a_aligned = senkou_a  # Already on 6h
+    senkou_b_aligned = senkou_b  # Already on 6h
     
-    # Calculate volume spike (20-period volume average on 12h)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 2.0)  # Volume at least 2.0x average
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 for volume MA, 1 for prior day)
-    start_idx = max(20, 1)
+    # Start after warmup (need 52 for Senkou B)
+    start_idx = 52
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(cam_r1_aligned[i]) or np.isnan(cam_s1_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -76,14 +75,22 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Camarilla R1/S1 breakout conditions with volume confirmation and trend filter
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        
+        # Ichimoku entry conditions with 1d trend filter
         if position == 0:
-            # Long: Price breaks above Camarilla R1 AND 1d uptrend AND volume spike
-            if close[i] > cam_r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+            # Long: Tenkan > Kijun AND price > Cloud AND 1d uptrend
+            if (tenkan_aligned[i] > kijun_aligned[i] and 
+                close[i] > cloud_top and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S1 AND 1d downtrend AND volume spike
-            elif close[i] < cam_s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+            # Short: Tenkan < Kijun AND price < Cloud AND 1d downtrend
+            elif (tenkan_aligned[i] < kijun_aligned[i] and 
+                  close[i] < cloud_bottom and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
@@ -91,20 +98,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Price falls below Camarilla S1 OR 1d trend turns down
-            if close[i] < cam_s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit: Tenkan < Kijun OR price < Cloud
+            if tenkan_aligned[i] < kijun_aligned[i] or close[i] < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Price rises above Camarilla R1 OR 1d trend turns up
-            if close[i] > cam_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit: Tenkan > Kijun OR price > Cloud
+            if tenkan_aligned[i] > kijun_aligned[i] or close[i] > cloud_top:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_Ichimoku_Cloud_Filter_1dTrend_v1"
+timeframe = "6h"
 leverage = 1.0
