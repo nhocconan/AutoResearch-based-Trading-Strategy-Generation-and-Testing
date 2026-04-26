@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
-Hypothesis: On daily timeframe, Camarilla R1/S1 breakouts with volume confirmation (top 30%) and 1-week EMA50 trend filter. Only trade breakouts aligned with weekly trend to avoid counter-trend whipsaws. Uses discrete position sizing (0.25) to limit trades. Target: 15-25 trades/year. Designed to work in both bull (trend continuation) and bear (mean reversion to weekly mean) markets via trend filter and midpoint exit.
+6h_Donchian20_Breakout_WeeklyTrend_VolumeRegime
+Hypothesis: 6h Donchian(20) breakout with 1w EMA50 trend filter and volume regime (ATR ratio > 1.2 = expansion). Only trade breakouts aligned with weekly trend during volatility expansion to capture strong moves while avoiding chop. Uses discrete sizing 0.25 to limit trades (~25/year). Volume regime ensures institutional participation.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,58 +23,56 @@ def generate_signals(prices):
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Previous 1w bar's OHLC for Camarilla levels (R1/S1 = standard breakout levels)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_vals = df_1w['close'].values
-    
-    # Calculate Camarilla levels: R1, S1 (standard breakout levels)
-    rng = high_1w - low_1w
-    camarilla_r1 = close_1w_vals + (rng * 1.1 / 12)   # R1 level
-    camarilla_s1 = close_1w_vals - (rng * 1.1 / 12)   # S1 level
-    
-    # Align Camarilla levels to 1d timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    
-    # 1w EMA50 for trend filter
-    close_1w_series = pd.Series(close_1w_vals)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    close_1w_series = pd.Series(close_1w)
     ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter: volume > 70th percentile of 50-period lookback (avoid low-volume breakouts)
-    vol_series = pd.Series(volume)
-    vol_percentile_70 = vol_series.rolling(window=50, min_periods=50).quantile(0.70).values
-    volume_filter = volume > vol_percentile_70
+    # Calculate ATR(20) for Donchian and volume regime
+    atr_period = 20
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Discrete position size to control trade frequency and fees
+    # Calculate ATR ratio (current ATR / 50-period ATR) for volume regime
+    atr_ratio = atr / pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    
+    # Calculate Donchian channels (20-period)
+    donchian_period = 20
+    upper_channel = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_channel = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    
+    # Fixed position size to control trade frequency
     fixed_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of calculations (50 for EMA and volume percentile)
+    # Warmup: max of calculations (50 for ATR ratio and EMA)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or 
             np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_percentile_70[i])):
+            np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
+        upper_val = upper_channel[i]
+        lower_val = lower_channel[i]
         ema_50_val = ema_50_1w_aligned[i]
-        vol_filt = volume_filter[i]
+        vol_regime = atr_ratio[i] > 1.2  # volatility expansion
         size = fixed_size
         
-        # Entry conditions: breakout of Camarilla R1/S1 with volume filter AND aligned with 1w EMA50 trend
-        long_entry = (close_val > camarilla_r1_val) and vol_filt and (close_val > ema_50_val)
-        short_entry = (close_val < camarilla_s1_val) and vol_filt and (close_val < ema_50_val)
+        # Entry conditions: Donchian breakout with volume regime AND aligned with 1w EMA50 trend
+        long_entry = (close_val > upper_val) and vol_regime and (close_val > ema_50_val)
+        short_entry = (close_val < lower_val) and vol_regime and (close_val < ema_50_val)
         
         if position == 0:
             # Flat - look for entry
@@ -87,17 +85,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on mean reversion to Camarilla midpoint (center)
-            mid_point = (camarilla_r1_val + camarilla_s1_val) / 2
-            if close_val < mid_point:
+            # Long - exit on Donchian middle line or trend reversal
+            mid_channel = (upper_val + lower_val) / 2
+            if close_val < mid_channel or close_val < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on mean reversion to Camarilla midpoint (center)
-            mid_point = (camarilla_r1_val + camarilla_s1_val) / 2
-            if close_val > mid_point:
+            # Short - exit on Donchian middle line or trend reversal
+            mid_channel = (upper_val + lower_val) / 2
+            if close_val > mid_channel or close_val > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_WeeklyTrend_VolumeRegime"
+timeframe = "6h"
 leverage = 1.0
