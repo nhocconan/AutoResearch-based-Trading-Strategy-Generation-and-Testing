@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v4
-Hypothesis: Tighten entry further by requiring price to close beyond Camarilla level by 1.0*ATR(14) (instead of 0.5*ATR) and increase volume confirmation threshold to 2.5x average. This should reduce trade count to target range (15-30/year) while maintaining edge. Uses 1d EMA34 for trend filter (more stable than 12h EMA50) and ATR-based trailing stop (2.0x ATR). Discrete position sizing: 0.25.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v5
+Hypothesis: Further tighten entry by requiring volume > 2.0x average AND price close beyond Camarilla level by 1.5*ATR(14). Use 1d EMA34 for trend filter and ATR-based trailing stop (2.5x ATR). Discrete position sizing: 0.25. Target: reduce trades to 15-25/year while maintaining edge in bull/bear via trend filter and volatility-adjusted breakout.
 """
 
 import numpy as np
@@ -98,15 +98,15 @@ def generate_signals(prices):
         low_val = low[i]
         atr_val = atr[i]
         
-        # Volume confirmation: current volume > 2.5x 20-period average
-        volume_confirmed = vol_val > 2.5 * vol_ma_val
-        # Breakout confirmation: price must close beyond Camarilla level by at least 1.0*ATR
-        breakout_threshold = 1.0 * atr_val
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirmed = vol_val > 2.0 * vol_ma_val
+        # Breakout confirmation: price must close beyond Camarilla level by at least 1.5*ATR
+        breakout_threshold = 1.5 * atr_val
         
         if position == 0:
-            # Long: price closes above R1 + 1.0*ATR with uptrend (close > EMA34) and volume confirmation
+            # Long: price closes above R1 + 1.5*ATR with uptrend (close > EMA34) and volume confirmation
             long_signal = (close_val > r1_val + breakout_threshold) and (close_val > ema_34_1d_val) and volume_confirmed
-            # Short: price closes below S1 - 1.0*ATR with downtrend (close < EMA34) and volume confirmation
+            # Short: price closes below S1 - 1.5*ATR with downtrend (close < EMA34) and volume confirmation
             short_signal = (close_val < s1_val - breakout_threshold) and (close_val < ema_34_1d_val) and volume_confirmed
             
             if long_signal:
@@ -126,8 +126,8 @@ def generate_signals(prices):
             signals[i] = 0.25
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, high_val)
-            # ATR-based trailing stop: exit if price drops 2.0*ATR from high
-            if close_val < highest_since_entry - 2.0 * atr_val:
+            # ATR-based trailing stop: exit if price drops 2.5*ATR from high
+            if close_val < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -150,8 +150,8 @@ def generate_signals(prices):
             signals[i] = -0.25
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR-based trailing stop: exit if price rises 2.0*ATR from low
-            if close_val > lowest_since_entry + 2.0 * atr_val:
+            # ATR-based trailing stop: exit if price rises 2.5*ATR from low
+            if close_val > lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -172,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v4"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v5"
 timeframe = "4h"
 leverage = 1.0
