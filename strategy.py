@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v16
-Hypothesis: On 4h timeframe, trade Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation. Daily trend filter provides medium-term directional bias to reduce false breakouts. Volume spike confirms institutional participation. Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing (0.25) to minimize fee drag. Works in bull/bear markets via daily trend filter.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v14
+Hypothesis: On 12h timeframe, trade Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation. Reduced trade frequency by tightening volume spike threshold (3.0x instead of 2.0x) and requiring both breakout and trend alignment. Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25) to minimize fee drag. Works in bull/bear markets via daily trend filter.
 """
 
 import numpy as np
@@ -42,11 +42,11 @@ def generate_signals(prices):
     r4 = typical_price + range_hl * 1.1
     s4 = typical_price - range_hl * 1.1
     
-    # Volume spike: current volume > 2.0 * 20-period average volume
+    # Volume spike: current volume > 3.0 * 20-period average volume (tighter threshold)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (3.0 * vol_ma)
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -91,13 +91,13 @@ def generate_signals(prices):
         downtrend = close_val < ema_34_1d_val
         
         if position == 0:
-            # Long: break above R3 with uptrend and volume spike (continuation)
+            # Long: break above R3 with uptrend AND volume spike (both required)
             # OR break above R4 with volume spike (strong breakout)
-            long_signal = ((high_val > r3_val and uptrend) or (high_val > r4_val)) and vol_spike
+            long_signal = ((high_val > r3_val and uptrend and vol_spike) or (high_val > r4_val and vol_spike))
             
-            # Short: break below S3 with downtrend and volume spike (continuation)
+            # Short: break below S3 with downtrend AND volume spike (both required)
             # OR break below S4 with volume spike (strong breakout)
-            short_signal = ((low_val < s3_val and downtrend) or (low_val < s4_val)) and vol_spike
+            short_signal = ((low_val < s3_val and downtrend and vol_spike) or (low_val < s4_val and vol_spike))
             
             if long_signal:
                 signals[i] = 0.25
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v16"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v14"
+timeframe = "12h"
 leverage = 1.0
