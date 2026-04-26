@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v1
-Hypothesis: 4h Camarilla pivot breakout with 1d trend filter (EMA34) and ADX regime filter to avoid whipsaws in ranging markets.
-- Uses 4h timeframe targeting 75-200 total trades over 4 years (19-50/year)
-- Camarilla R1/S1 from previous 1d bar (more stable than lower timeframes)
-- Long when price breaks above R1 with volume spike, 1d uptrend, and ADX > 25 (trending market)
-- Short when price breaks below S1 with volume spike, 1d downtrend, and ADX > 25
-- ADX filter avoids ranging markets where breakouts fail, improving win rate in both bull and bear
-- Discrete position sizing (0.25) to minimize fee churn
+12h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_v1
+Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and choppiness regime to avoid whipsaws.
+- Uses 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
+- Camarilla R1/S1 from previous 1d bar (more stable than 12h)
+- Long when price breaks above R1 with volume spike, 1d uptrend, and low chop (trending market)
+- Short when price breaks below S1 with volume spike, 1d downtrend, and low chop
+- Choppiness filter avoids ranging markets where breakouts fail
+- Designed for low trade frequency to minimize fee drag while maintaining edge in bull/bear
 """
 
 import numpy as np
@@ -42,7 +42,7 @@ def generate_signals(prices):
     r1_1d = close_1d_arr + camarilla_range
     s1_1d = close_1d_arr - camarilla_range
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -50,54 +50,35 @@ def generate_signals(prices):
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma20 * 2.0)  # Volume at least 2x average
     
-    # Calculate ADX on 1d for regime filtering (trending vs ranging)
-    # ADX calculation: +DI, -DI, DX, then smoothed ADX
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Choppiness Index on 1d to filter ranging markets
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (highest_high - lowest_low)))
+    # Simplified: use rolling max/min and ATR
+    tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.maximum(np.absolute(low_1d - np.roll(close_1d, 1)), tr1)
+    tr1[0] = high_1d[0] - low_1d[0]  # First TR
+    atr14 = pd.Series(tr2).rolling(window=14, min_periods=14).mean().values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_1d[0] - low_1d[0]  # First TR
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     # Avoid division by zero
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    hl_range_14 = highest_high_14 - lowest_low_14
+    hl_range_14 = np.where(hl_range_14 == 0, 1e-10, hl_range_14)
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    chop_1d = 100 * np.log10(atr14 * 14 / np.log10(14) / hl_range_14) / np.log10(100)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 for volume MA, 34 for EMA, 14 for ADX/TR)
+    # Start after warmup (need 20 for volume MA, 34 for EMA, 14 for ATR)
     start_idx = max(20, 34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+            np.isnan(chop_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -115,8 +96,8 @@ def generate_signals(prices):
         trend_up = close[i] > ema34_1d_aligned[i]
         trend_down = close[i] < ema34_1d_aligned[i]
         
-        # ADX filter: only trade when market is trending (ADX > 25)
-        trending_market = adx_aligned[i] > 25
+        # Choppiness filter: only trade when market is trending (CHOP < 38.2)
+        trending_market = chop_aligned[i] < 38.2
         
         if position == 0:
             # Long: price breaks above R1 AND volume spike AND 1d uptrend AND trending market
@@ -132,20 +113,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price falls below S1 OR 1d trend turns down OR market becomes ranging (ADX < 20)
-            if price_below_s1 or not trend_up or adx_aligned[i] < 20:
+            # Exit: price falls below S1 OR 1d trend turns down OR market becomes choppy
+            if price_below_s1 or not trend_up or not trending_market:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price rises above R1 OR 1d trend turns up OR market becomes ranging (ADX < 20)
-            if price_above_r1 or not trend_down or adx_aligned[i] < 20:
+            # Exit: price rises above R1 OR 1d trend turns up OR market becomes choppy
+            if price_above_r1 or not trend_down or not trending_market:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
