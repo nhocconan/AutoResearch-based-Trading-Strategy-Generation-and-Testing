@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ChopRegime
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (2.0x), and choppiness regime (<38.2) for strong trending markets only.
-Designed for low overtrading (12-37 trades/year) by tightening volume and regime filters. Works in bull/bear via 1d trend alignment.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ChopRegime_v3
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (2.5x), and choppiness regime (<38.2) for strong trending markets only. 
+Designed for low overtrading (<30 trades/year) by tightening volume and regime filters. Works in bull/bear via 1d trend alignment.
 """
 
 import numpy as np
@@ -41,9 +41,9 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume filter: volume > 2.0 * volume_ma(20) for stricter confirmation
+    # Volume filter: volume > 2.5 * volume_ma(20) for stricter confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    volume_spike = volume > (2.5 * volume_ma)
     
     # Choppiness index (14-period): < 38.2 = strong trending regime (tighter than 61.8)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
@@ -76,11 +76,11 @@ def generate_signals(prices):
         
         # Camarilla R3/S3 breakout conditions with tight filters
         if position == 0:
-            # Long: Price breaks above Camarilla R3 AND 1d uptrend AND volume spike (2.0x) AND strong trend (chop < 38.2)
+            # Long: Price breaks above Camarilla R3 AND 1d uptrend AND volume spike (2.5x) AND strong trend (chop < 38.2)
             if close[i] > camarilla_r3_aligned[i] and trend_1d[i] == 1 and volume_spike[i] and chop_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S3 AND 1d downtrend AND volume spike (2.0x) AND strong trend (chop < 38.2)
+            # Short: Price breaks below Camarilla S3 AND 1d downtrend AND volume spike (2.5x) AND strong trend (chop < 38.2)
             elif close[i] < camarilla_s3_aligned[i] and trend_1d[i] == -1 and volume_spike[i] and chop_filter[i]:
                 signals[i] = -0.25
                 position = -1
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ChopRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ChopRegime_v3"
+timeframe = "4h"
 leverage = 1.0
