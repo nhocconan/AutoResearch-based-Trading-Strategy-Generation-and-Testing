@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
 Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
 - Uses 12h timeframe to capture medium-term swings with lower trade frequency
 - Camarilla R1/S1 levels from 1d provide precise support/resistance from prior day
@@ -8,6 +8,7 @@ Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume s
 - Volume spike (2.0x 20-period average) confirms institutional participation
 - Designed for 12-30 trades/year (48-120 total over 4 years) to minimize fee drag
 - Works in bull/bear markets by trading with the 1d trend and using volume/ADX to filter false breakouts
+- FIXED: Proper Wilder smoothing for ADX and correct Camarilla level calculations
 """
 
 import numpy as np
@@ -52,7 +53,7 @@ def generate_signals(prices):
     plus_dm = np.concatenate([[np.nan], plus_dm])
     minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Smoothed values (Wilder's smoothing)
+    # Wilder's smoothing
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) >= period:
@@ -80,10 +81,14 @@ def generate_signals(prices):
     # Calculate Camarilla levels from previous 1d bar
     camarilla_r1 = close_1d + (1.0/12) * (high_1d - low_1d)
     camarilla_s1 = close_1d - (1.0/12) * (high_1d - low_1d)
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
     
     # Align Camarilla levels to 12h timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Volume spike: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -114,12 +119,7 @@ def generate_signals(prices):
         breakout_long = close[i] > camarilla_r1_aligned[i]
         breakout_short = close[i] < camarilla_s1_aligned[i]
         
-        # Re-entry conditions (price back inside Camarilla H3-L3 range)
-        # Calculate Camarilla H3/L3 for the day: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
-        camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
-        camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
-        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+        # Price in range condition (between H3 and L3)
         price_in_range = (close[i] > camarilla_l3_aligned[i]) and (close[i] < camarilla_h3_aligned[i])
         
         if position == 0:
@@ -150,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "12h"
 leverage = 1.0
