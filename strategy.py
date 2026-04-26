@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (>2.0x 20-bar MA). Uses proven Camarilla structure from DB top performers, with 1d HTF trend to avoid counter-trend trades and volume confirmation to reduce false breakouts. Designed for 12-37 trades/year (50-150 total over 4 years) to minimize fee drag. Works in bull/bear markets by following 1d trend while using Camarilla levels for precise structure-based entries.
+1h_HTF4h1d_Trend_Pullback_Entry
+Hypothesis: Use 4h trend (EMA50) and 1d structure (previous day high/low) to define bias, then enter on 1h pullbacks to EMA20 in trend direction with volume confirmation. Designed for low trade frequency (15-30/year) by requiring strong 4h trend alignment and 1d structure respect. Works in bull/bear markets by following 4h trend while using 1d levels for institutional reference and 1h for precise entry timing.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,72 +18,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Previous day's OHLC for Camarilla levels (using 1d data)
+    # Load 1d data ONCE before loop for structure levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for structure levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d + (rng * 1.1 / 4)
-    camarilla_s3 = close_1d - (rng * 1.1 / 4)
+    # Align 1d levels to 1h timeframe (they change only at daily boundaries)
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Align Camarilla levels to 12h timeframe (they change only at 1d boundaries)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # 1h EMA20 for dynamic pullback entry
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume confirmation: volume > 2.0x 20-period average (tighter than 1.5x)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
-    base_size = 0.25  # Position size
+    base_size = 0.20  # Position size (20%)
     
-    # Warmup: max of calculations (20 for vol, 34 for ema, 1 for camarilla)
-    start_idx = max(20, 34)
+    # Warmup: max of calculations (50 for 4h EMA, 20 for 1h EMA/volume)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(high_1d_aligned[i]) or 
+            np.isnan(low_1d_aligned[i]) or 
+            np.isnan(ema_20[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             bars_since_entry += 1 if position != 0 else 0
             continue
         
         close_val = close[i]
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        ema_34_val = ema_34_1d_aligned[i]
+        ema_50_4h_val = ema_50_4h_aligned[i]
+        high_1d_val = high_1d_aligned[i]
+        low_1d_val = low_1d_aligned[i]
+        ema_20_val = ema_20[i]
         vol_spike = volume_spike[i]
         
-        # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
-        bullish_1d = close_val > ema_34_val
-        bearish_1d = close_val < ema_34_val
+        # Determine 4h trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_4h = close_val > ema_50_4h_val
+        bearish_4h = close_val < ema_50_4h_val
         
-        # Entry conditions: breakout of Camarilla R3/S3 in trend direction with volume spike
-        long_entry = (close_val > camarilla_r3_val) and bullish_1d and vol_spike
-        short_entry = (close_val < camarilla_s3_val) and bearish_1d and vol_spike
+        # Determine position relative to 1d structure
+        above_yesterday_high = close_val > high_1d_val
+        below_yesterday_low = close_val < low_1d_val
+        within_yesterday_range = not above_yesterday_high and not below_yesterday_low
         
-        # Exit conditions: opposite Camarilla level touch (S3 for long, R3 for short)
-        exit_long = close_val < camarilla_s3_val
-        exit_short = close_val > camarilla_r3_val
+        # Entry conditions: pullback to EMA20 in 4h trend direction with volume confirmation
+        # Long: 4h bullish + price near/yesterday low + pullback to EMA20 + volume
+        long_entry = bullish_4h and below_yesterday_low and (close_val <= ema_20_val * 1.001) and vol_spike
+        # Short: 4h bearish + price near/yesterday high + pullback to EMA20 + volume
+        short_entry = bearish_4h and above_yesterday_high and (close_val >= ema_20_val * 0.999) and vol_spike
         
-        # Minimum holding period: 4 bars (to avoid whipsaw)
-        min_hold = 4
+        # Exit conditions: opposite 1d structure break (break below yesterday low for long, break above yesterday high for short)
+        exit_long = below_yesterday_low
+        exit_short = above_yesterday_high
+        
+        # Minimum holding period: 6 bars (to avoid whipsaw)
+        min_hold = 6
         
         if position == 0:
             # Flat - look for entry
@@ -119,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1h_HTF4h1d_Trend_Pullback_Entry"
+timeframe = "1h"
 leverage = 1.0
