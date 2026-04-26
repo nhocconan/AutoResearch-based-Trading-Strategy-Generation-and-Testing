@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_VolumeSpike_HTFTrend_Regime
-Hypothesis: Donchian(20) breakout with volume spike confirmation and 1d EMA34 trend filter.
-Long when: price breaks above Donchian(20) high + volume > 1.5*avg_volume(20) + close > 1d EMA34.
-Short when: price breaks below Donchian(20) low + volume > 1.5*avg_volume(20) + close < 1d EMA34.
-Exit: opposite Donchian breakout or volume drops below average.
-Uses 4h timeframe with discrete 0.25 position size. Designed for BTC/ETH:
-- Captures strong trending moves with volume confirmation
-- 1d EMA34 filter avoids counter-trend trades in bear markets
-- Volume spike reduces false breakouts
-- Targets 20-40 trades/year for optimal risk/reward.
+1d_WeeklyDonchian20_Breakout_1wTrend_VolumeSpike
+Hypothesis: Daily Donchian(20) breakouts in the direction of weekly trend with volume confirmation.
+Long when: price breaks above daily Donchian(20) high + weekly close > weekly EMA(50) + volume > 1.5x avg volume(20).
+Short when: price breaks below daily Donchian(20) low + weekly close < weekly EMA(50) + volume > 1.5x avg volume(20).
+Exit when: price reverts to daily Donchian midpoint or weekly trend flips.
+Designed for BTC/ETH: captures strong momentum moves in both bull and bear markets while avoiding chop.
+Target: 15-25 trades/year for low fee drag and strong test generalization.
 """
 
 import numpy as np
@@ -26,20 +23,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20)
+    # Load weekly HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
+    
+    # Weekly EMA(50) for trend filter
+    weekly_close = df_1w['close'].values
+    ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    
+    # Daily Donchian(20)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_high = high_series.rolling(window=20, min_periods=20).max().values
     donch_low = low_series.rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
-    # Volume spike: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # 1d EMA34 trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_avg = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)
     
     # Fixed position size
     fixed_size = 0.25
@@ -47,43 +51,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 20 for Donchian/volume, 34 for EMA
-    start_idx = max(20, 34)
+    # Warmup: need 20 for Donchian/volume, 50 for weekly EMA
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_34_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        vol_spike = volume_spike[i]
         size = fixed_size
         
         if position == 0:
-            # Flat - look for breakout with volume spike and HTF trend alignment
-            long_breakout = close_val > donch_high[i]
-            short_breakout = close_val < donch_low[i]
-            
-            if long_breakout and vol_spike and (close_val > ema_34_aligned[i]):
-                signals[i] = size
-                position = 1
-            elif short_breakout and vol_spike and (close_val < ema_34_aligned[i]):
-                signals[i] = -size
-                position = -1
+            # Flat - look for breakout in direction of weekly trend with volume spike
+            if vol_spike[i]:
+                # Long: break above Donchian high + weekly close above EMA(50)
+                long_entry = (close_val > donch_high[i]) and (weekly_close[-1] > ema_50[-1]) if len(weekly_close) > 0 else False
+                # Short: break below Donchian low + weekly close below EMA(50)
+                short_entry = (close_val < donch_low[i]) and (weekly_close[-1] < ema_50[-1]) if len(weekly_close) > 0 else False
+                
+                if long_entry:
+                    signals[i] = size
+                    position = 1
+                elif short_entry:
+                    signals[i] = -size
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on opposite breakout or volume drops below average
-            if close_val < donch_low[i] or not vol_spike:
+            # Long - exit when price reverts to midpoint or weekly trend flips down
+            if close_val < donch_mid[i] or (len(weekly_close) > 0 and weekly_close[-1] < ema_50[-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on opposite breakout or volume drops below average
-            if close_val > donch_high[i] or not vol_spike:
+            # Short - exit when price reverts to midpoint or weekly trend flips up
+            if close_val > donch_mid[i] or (len(weekly_close) > 0 and weekly_close[-1] > ema_50[-1]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_VolumeSpike_HTFTrend_Regime"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
