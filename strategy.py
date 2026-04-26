@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dEMA34_RegimeFilter_VolumeSpike_ATRStop
-Hypothesis: 12h timeframe with Camarilla R3/S3 breakout, 1d EMA34 trend filter, volume spike confirmation, choppiness regime filter, and ATR-based stoploss. Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing strong trending moves. Uses discrete position sizing (0.25) to reduce churn. Designed to work in both bull and bear markets via regime adaptation.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_RegimeFilter_VolumeSpike_ATRStop_v3
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike confirmation, choppiness regime filter, and ATR-based stoploss. Designed for low trade frequency (<50/year) to avoid fee drag while capturing strong trending moves in both bull and bear markets. Uses discrete position sizing (0.25) to minimize fee churn. Improved version with stricter volume confirmation (3.0x) and tighter ATR stop (2.0x) to reduce trades and improve win rate.
 """
 
 import numpy as np
@@ -41,7 +41,7 @@ def generate_signals(prices):
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume confirmation: 2.0x average volume (stricter to reduce trades)
+    # Volume confirmation: 3.0x average volume (stricter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for stoploss (using 14-period ATR)
@@ -101,14 +101,14 @@ def generate_signals(prices):
             # In ranging regime: mean reversion at extremes
             if is_trending:
                 # Long: price breaks above R3 with volume confirmation and uptrend
-                long_signal = (high_val > R3_val) and (volume_val > 2.0 * vol_ma_val) and (close_val > ema_34_1d_val)
+                long_signal = (high_val > R3_val) and (volume_val > 3.0 * vol_ma_val) and (close_val > ema_34_1d_val)
                 # Short: price breaks below S3 with volume confirmation and downtrend
-                short_signal = (low_val < S3_val) and (volume_val > 2.0 * vol_ma_val) and (close_val < ema_34_1d_val)
+                short_signal = (low_val < S3_val) and (volume_val > 3.0 * vol_ma_val) and (close_val < ema_34_1d_val)
             else:  # ranging regime
                 # Long: price rejects below S3 (mean reversion up) with volume confirmation
-                long_signal = (low_val < S3_val) and (close_val > S3_val) and (volume_val > 2.0 * vol_ma_val)
+                long_signal = (low_val < S3_val) and (close_val > S3_val) and (volume_val > 3.0 * vol_ma_val)
                 # Short: price rejects above R3 (mean reversion down) with volume confirmation
-                short_signal = (high_val > R3_val) and (close_val < R3_val) and (volume_val > 2.0 * vol_ma_val)
+                short_signal = (high_val > R3_val) and (close_val < R3_val) and (volume_val > 3.0 * vol_ma_val)
             
             if long_signal:
                 signals[i] = 0.25
@@ -124,7 +124,7 @@ def generate_signals(prices):
             # Hold long
             signals[i] = 0.25
             # Exit: ATR stoploss or trend reversal or ranging regime exit signal
-            if (close_val < entry_price - 2.5 * atr_val or 
+            if (close_val < entry_price - 2.0 * atr_val or 
                 close_val < ema_34_1d_val or
                 (is_ranging and close_val < (R3_val + S3_val) / 2)):  # exit at midpoint in ranging
                 signals[i] = 0.0
@@ -133,7 +133,7 @@ def generate_signals(prices):
             # Hold short
             signals[i] = -0.25
             # Exit: ATR stoploss or trend reversal or ranging regime exit signal
-            if (close_val > entry_price + 2.5 * atr_val or 
+            if (close_val > entry_price + 2.0 * atr_val or 
                 close_val > ema_34_1d_val or
                 (is_ranging and close_val > (R3_val + S3_val) / 2)):  # exit at midpoint in ranging
                 signals[i] = 0.0
@@ -141,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_RegimeFilter_VolumeSpike_ATRStop"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_RegimeFilter_VolumeSpike_ATRStop_v3"
+timeframe = "4h"
 leverage = 1.0
