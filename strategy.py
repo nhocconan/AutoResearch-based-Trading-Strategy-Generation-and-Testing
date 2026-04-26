@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_Dyn_v1
-Hypothesis: Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation. 
-Only long when price > EMA50(12h), short when price < EMA50(12h). Uses dynamic position sizing 
-based on ATR volatility (0.25 in low vol, 0.35 in high vol). Targets 100-180 total trades over 4 years.
-Designed to work in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes.
+1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolumeConfirm_v1
+Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and 1d volume spike confirmation.
+Only long when price > 4h EMA50, short when price < 4h EMA50. Volume confirmation from 1d ensures institutional participation.
+Designed for 1h timeframe with tight entries (target: 60-150 trades over 4 years) to avoid fee drag.
+Uses session filter (08-20 UTC) to reduce noise. Fixed position size 0.20 to minimize churn.
 """
 
 import numpy as np
@@ -21,114 +21,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # Using daily data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous 1h bar (using 1h data for pivot)
+    # Camarilla uses typical price and range from previous bar
+    df_1h = get_htf_data(prices, '1h')
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
     
-    # Typical price for Camarilla calculation
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    typical_price = (high_1h + low_1h + close_1h) / 3
+    range_1h = high_1h - low_1h
     
-    # Camarilla levels: R3, R2, R1, PP, S1, S2, S3
-    # R4 = close + range * 1.1/2, R3 = close + range * 1.1/4, etc.
     camarilla_multiplier = 1.1 / 4
-    r3 = close_1d + range_1d * camarilla_multiplier * 3
-    r2 = close_1d + range_1d * camarilla_multiplier * 2
-    r1 = close_1d + range_1d * camarilla_multiplier
+    r3 = close_1h + range_1h * camarilla_multiplier * 3
+    r2 = close_1h + range_1h * camarilla_multiplier * 2
+    r1 = close_1h + range_1h * camarilla_multiplier
     pp = typical_price
-    s1 = close_1d - range_1d * camarilla_multiplier
-    s2 = close_1d - range_1d * camarilla_multiplier * 2
-    s3 = close_1d - range_1d * camarilla_multiplier * 3
+    s1 = close_1h - range_1h * camarilla_multiplier
+    s2 = close_1h - range_1h * camarilla_multiplier * 2
+    s3 = close_1h - range_1h * camarilla_multiplier * 3
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 1h timeframe (already 1h, but using helper for consistency)
+    r3_aligned = align_htf_to_ltf(prices, df_1h, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1h, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1h, r1)
+    pp_aligned = align_htf_to_ltf(prices, df_1h, pp)
+    s1_aligned = align_htf_to_ltf(prices, df_1h, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1h, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1h, s3)
     
-    # Load 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Load 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # ATR for volatility-based position sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Load 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    avg_volume_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (1.5 * avg_volume_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Volume confirmation: volume > 1.5 * 20-period EMA volume
-    avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_volume)
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(50, 20, 14) + 1
+    start_idx = max(50, 20) + 1
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
+        # Skip if any data not ready or outside session
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_spike_1d_aligned[i]) or
+            not in_session[i]):
             # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = 0.25
-            else:
-                signals[i] = -0.25
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Dynamic position sizing based on ATR volatility
-        atr_ratio = atr[i] / (np.mean(atr[max(0, i-50):i+1]) + 1e-10)
-        if atr_ratio > 1.2:  # High volatility
-            base_size = 0.35
-        elif atr_ratio < 0.8:  # Low volatility
-            base_size = 0.25
-        else:  # Normal volatility
-            base_size = 0.30
-        
-        # Long logic: price breaks above R3 with volume spike and above 12h EMA50
-        if close[i] > r3_aligned[i] and volume_spike[i] and close[i] > ema_50_12h_aligned[i]:
+        # Long logic: price breaks above R3 with 1d volume spike and above 4h EMA50
+        if close[i] > r3_aligned[i] and volume_spike_1d_aligned[i] and close[i] > ema_50_4h_aligned[i]:
             if position != 1:
-                signals[i] = base_size
+                signals[i] = 0.20
                 position = 1
             else:
-                signals[i] = base_size
-        # Short logic: price breaks below S3 with volume spike and below 12h EMA50
-        elif close[i] < s3_aligned[i] and volume_spike[i] and close[i] < ema_50_12h_aligned[i]:
+                signals[i] = 0.20
+        # Short logic: price breaks below S3 with 1d volume spike and below 4h EMA50
+        elif close[i] < s3_aligned[i] and volume_spike_1d_aligned[i] and close[i] < ema_50_4h_aligned[i]:
             if position != -1:
-                signals[i] = -base_size
+                signals[i] = -0.20
                 position = -1
             else:
-                signals[i] = -base_size
-        # Exit conditions: price returns to pivot point or opposite breakout
-        elif position == 1 and (close[i] < pp_aligned[i] or close[i] < s3_aligned[i]):
+                signals[i] = -0.20
+        # Exit conditions: price returns to pivot point
+        elif position == 1 and close[i] < pp_aligned[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] > pp_aligned[i] or close[i] > r3_aligned[i]):
+        elif position == -1 and close[i] > pp_aligned[i]:
             signals[i] = 0.0
             position = 0
         else:
             # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_Dyn_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
