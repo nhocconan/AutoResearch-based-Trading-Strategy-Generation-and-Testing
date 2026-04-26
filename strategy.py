@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_WilliamsVixFix_MeanReversion
-Hypothesis: Williams Vix Fix (WVF) identifies extreme fear/greed on 6b timeframe. 
-Long when WVF > 0.8 (extreme fear) and price < 6h VWAP (oversold + below fair value).
-Short when WVF < 0.2 (extreme greed) and price > 6h VWAP (overbought + above fair value).
-Exit when WVF returns to neutral range (0.4-0.6) or price crosses VWAP.
-Works in bull/bear markets by fading extremes while respecting intraday value area.
-Uses 1d trend filter to avoid counter-trend extremes in strong moves.
-Target: 15-25 trades/year (60-100 total over 4 years).
+12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts with 1-week EMA34 trend filter and volume confirmation (>1.8x 20-bar MA). R3/S3 levels provide strong breakout signals while 1w trend filter ensures we trade with the dominant weekly momentum. Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years). Works in bull/bear markets by following 1w trend while using Camarilla structure for precise entries. Volume spike filter reduces false breakouts. Position size 0.25 to balance return and drawdown.
 """
 
 import numpy as np
@@ -16,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,64 +18,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Vix Fix: measures market fear (0-1, >0.8 = extreme fear)
-    # WVF = ((Highest Close in Period - Low) / (Highest Close in Period)) * 100
-    # We normalize to 0-1 range
-    lookback = 22
-    highest_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).max().values
-    wvf = ((highest_close - low) / highest_close) * 100
-    wvf = wvf / 100  # normalize to 0-1
-    
-    # 6h VWAP (volume weighted average price)
-    typical_price = (high + low + close) / 3
-    vwap_numerator = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
-    vwap_denominator = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vwap = vwap_numerator / vwap_denominator
-    
-    # Load 1d data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter (avoid counter-trend extremes)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Previous day's OHLC for Camarilla levels (using 1d for structure)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
+    
+    # Calculate Camarilla levels: R3, S3 (strong breakout levels)
+    rng = high_1d - low_1d
+    camarilla_r3 = close_1d_vals + (rng * 1.1 / 4)  # R3 level
+    camarilla_s3 = close_1d_vals - (rng * 1.1 / 4)  # S3 level
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: volume > 1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size (25% of capital)
     
-    # Warmup: max of calculations (22 for WVF, 20 for VWAP, 50 for 1d EMA)
-    start_idx = max(22, 20, 50)
+    # Warmup: max of calculations (20 for vol, 34 for 1w EMA, 1 for camarilla)
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(wvf[i]) or 
-            np.isnan(vwap[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        wvf_val = wvf[i]
-        vwap_val = vwap[i]
-        ema_50_val = ema_50_1d_aligned[i]
+        camarilla_r3_val = camarilla_r3_aligned[i]
+        camarilla_s3_val = camarilla_s3_aligned[i]
+        ema_34_val = ema_34_1w_aligned[i]
+        vol_spike = volume_spike[i]
         
-        # Determine 1d trend
-        bullish_1d = close_val > ema_50_val
-        bearish_1d = close_val < ema_50_val
+        # Determine 1w trend: bullish if price > EMA34, bearish if price < EMA34
+        bullish_1w = close_val > ema_34_val
+        bearish_1w = close_val < ema_34_val
         
-        # Entry conditions: extreme WVF + price deviation from VWAP, aligned with 1d trend
-        # Long: extreme fear (WVF > 0.8) + price below VWAP (oversold) in bullish 1d regime
-        long_entry = (wvf_val > 0.8) and (close_val < vwap_val) and bullish_1d
-        
-        # Short: extreme greed (WVF < 0.2) + price above VWAP (overbought) in bearish 1d regime
-        short_entry = (wvf_val < 0.2) and (close_val > vwap_val) and bearish_1d
-        
-        # Exit conditions: WVF returns to neutral OR price crosses VWAP
-        wvf_neutral = (wvf_val >= 0.4) and (wvf_val <= 0.6)
-        price_at_vwap = abs(close_val - vwap_val) < (vwap_val * 0.001)  # within 0.1% of VWAP
+        # Entry conditions: breakout of Camarilla R3/S3 in trend direction with volume spike
+        long_entry = (close_val > camarilla_r3_val) and bullish_1w and vol_spike
+        short_entry = (close_val < camarilla_s3_val) and bearish_1w and vol_spike
         
         if position == 0:
             # Flat - look for entry
@@ -94,15 +91,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on mean reversion
-            if wvf_neutral or price_at_vwap or not bullish_1d:
+            # Long - exit on mean reversion to mid-point or trend change
+            mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
+            if close_val < mid_point or not bullish_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = base_size
         elif position == -1:
-            # Short - exit on mean reversion
-            if wvf_neutral or price_at_vwap or not bearish_1d:
+            # Short - exit on mean reversion to mid-point or trend change
+            mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
+            if close_val > mid_point or not bearish_1w:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsVixFix_MeanReversion"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
