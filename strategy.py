@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation produce high-quality trades. The 4h timeframe targets 75-200 trades over 4 years (19-50/year) to minimize fee drag. Volume confirmation reduces false breakouts. Works in both bull (breakouts with trend) and bear (breakouts against trend filtered out) markets.
+12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter_v1
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1-week EMA50 trend filter and volume confirmation produce fewer, higher-quality trades. Using 1-week trend avoids whipsaws during 2022 bear market while capturing major trends. Volume filter ensures breakout conviction. Target: 50-120 total trades over 4 years (12-30/year).
 """
 
 import numpy as np
@@ -18,39 +18,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend filter (EMA34) and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop for HTF trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Load 1d data ONCE before loop for Camarilla levels (R1, S1)
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d Camarilla levels (R1, S1) using previous 1d's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     close_1d_shifted = np.concatenate([[np.nan], close_1d[:-1]])  # previous 1d close
     
     camarilla_range = high_1d - low_1d
     r1 = close_1d_shifted + 1.1 * camarilla_range / 12
     s1 = close_1d_shifted - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 4h volume confirmation: volume > 2.0x 20-period average
+    # 12h volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for EMA, 20 for volume MA)
-    start_idx = max(34, 20)
+    # Start after warmup (need 50 for 1w EMA, 20 for volume MA)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma_20[i])):
@@ -63,12 +67,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1d trend filter (EMA34)
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # 1w trend filter (EMA50)
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Volume confirmation
-        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
+        volume_spike = volume[i] > 1.8 * vol_ma_20[i]
         
         # Camarilla breakout conditions
         breakout_r1 = close[i] > r1_aligned[i]
@@ -106,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
