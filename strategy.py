@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
-Hypothesis: 12h Camarilla R3/S3 breakouts with volume spike and 1w EMA34 trend filter. Primary timeframe 12h targets 12-37 trades/year. Uses tighter R3/S3 levels for stronger breakouts confirmed by weekly trend and institutional volume participation. Fixed size 0.25 to limit trades and manage drawdown in both bull and bear markets.
+4h_Camarilla_R3_S3_Breakout_VolumeSpike_HTFTrend_ADXFilter
+Hypothesis: Camarilla R3/S3 breakouts with volume spike (top 20%) and 12h EMA50 trend filter, plus ADX(14)>25 to ensure trending markets and avoid chop. Only trade breakouts aligned with higher timeframe trend to avoid counter-trend whipsaws. Uses tighter R3/S3 levels for stronger breakouts. Volume spike ensures institutional participation. ADX filter reduces false signals in ranging markets. Fixed size 0.25 to limit trades. Target: 20-30 trades/year.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,12 +18,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Load 12h data ONCE before loop for Camarilla levels
+    # Load 12h data ONCE before loop for HTF filters
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 50:
         return np.zeros(n)
@@ -38,48 +33,80 @@ def generate_signals(prices):
     camarilla_r3 = close_12h_vals + (rng * 1.1 / 4)   # R3 level
     camarilla_s3 = close_12h_vals - (rng * 1.1 / 4)   # S3 level
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
     
-    # 1w EMA34 for trend filter
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 12h EMA50 for trend filter
+    close_12h_series = pd.Series(close_12h_vals)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume spike: volume > 85th percentile of 30-period lookback (high volume days only)
+    # Volume spike: volume > 80th percentile of 50-period lookback (high volume days only)
     vol_series = pd.Series(volume)
-    vol_percentile_85 = vol_series.rolling(window=30, min_periods=30).quantile(0.85).values
-    volume_spike = volume > vol_percentile_85
+    vol_percentile_80 = vol_series.rolling(window=50, min_periods=50).quantile(0.80).values
+    volume_spike = volume > vol_percentile_80
     
-    # Fixed position size to control trade frequency (0.25 = 25%)
+    # ADX(14) filter for trending markets
+    # ADX calculation: +DI, -DI, DX, then smoothed ADX
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    close_series = pd.Series(close)
+    
+    # True Range
+    tr1 = high_series - low_series
+    tr2 = abs(high_series - close_series.shift(1))
+    tr3 = abs(low_series - close_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    # Directional Movement
+    up_move = high_series - high_series.shift(1)
+    down_move = low_series.shift(1) - low_series
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM and TR
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    adx_values = adx.values
+    adx_filter = adx_values > 25  # Only trade when ADX > 25 (trending market)
+    
+    # Fixed position size to control trade frequency
     fixed_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of calculations (50 for 12h data, 34 for 1w EMA, 30 for volume percentile)
-    start_idx = 50
+    # Warmup: max of calculations (50 for EMA and volume percentile, 14*3 for ADX)
+    start_idx = max(50, 14*3)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_percentile_85[i])):
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_percentile_80[i]) or 
+            np.isnan(adx_filter[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         camarilla_r3_val = camarilla_r3_aligned[i]
         camarilla_s3_val = camarilla_s3_aligned[i]
-        ema_34_val = ema_34_1w_aligned[i]
+        ema_50_val = ema_50_12h_aligned[i]
         vol_spike = volume_spike[i]
+        adx_ok = adx_filter[i]
         size = fixed_size
         
-        # Entry conditions: breakout of Camarilla R3/S3 with volume spike AND aligned with 1w EMA34 trend
-        long_entry = (close_val > camarilla_r3_val) and vol_spike and (close_val > ema_34_val)
-        short_entry = (close_val < camarilla_s3_val) and vol_spike and (close_val < ema_34_val)
+        # Entry conditions: breakout of Camarilla R3/S3 with volume spike AND aligned with 12h EMA50 trend AND ADX>25
+        long_entry = (close_val > camarilla_r3_val) and vol_spike and (close_val > ema_50_val) and adx_ok
+        short_entry = (close_val < camarilla_s3_val) and vol_spike and (close_val < ema_50_val) and adx_ok
         
         if position == 0:
             # Flat - look for entry
@@ -110,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_VolumeSpike_HTFTrend_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
