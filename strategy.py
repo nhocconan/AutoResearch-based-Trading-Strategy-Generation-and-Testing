@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Use 1d timeframe with Camarilla R1/S1 breakout confirmed by 1w EMA34 trend and volume spike. Targets 7-25 trades/year to minimize fee drag. Works in bull/bear markets by using 1w EMA34 for trend direction and volume confirmation to filter false breakouts. Includes ATR-based stoploss to manage risk. Focus on BTC/ETH as primary targets.
+6h_IBS_Regime_Donchian_Breakout_v1
+Hypothesis: Use 6h timeframe with IBS (Internal Bar Strength) to identify oversold/overbought conditions within the daily trend, combined with 1d EMA34 trend filter and volume confirmation. IBS = (close-low)/(high-low) captures intraday mean reversion tendency that works in both bull and bear markets when aligned with higher timeframe trend. Targets 12-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,30 +18,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (based on previous day)
-    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    # We need previous day's high, low, close
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate IBS (Internal Bar Strength): (close-low)/(high-low)
+    # Values near 0 = strong close (bearish), near 1 = strong close (bullish)
+    ibs = (close - low) / (high - low + 1e-10)  # avoid division by zero
     
-    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_avg)
+    volume_spike = volume > (1.5 * vol_avg)
     
     # ATR for stoploss (14-period)
     tr1 = high[1:] - low[1:]
@@ -54,13 +45,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need 1 for Camarilla (uses prev bar), 34 for 1w EMA, 20 for volume avg, 14 for ATR
-    start_idx = max(1, 34, 20, 14)
+    # Warmup: need enough for IBS calculation and indicators
+    start_idx = max(20, 34, 20, 14)  # vol avg, 1d EMA, volume avg, ATR
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(ibs[i]) or np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -69,14 +60,14 @@ def generate_signals(prices):
         size = 0.25  # 25% position size
         
         if position == 0:
-            # Flat - look for breakout with trend and volume confirmation
-            # Long: break above Camarilla R1 + 1w EMA34 uptrend + volume spike
-            long_entry = (close_val > camarilla_r1[i]) and \
-                       (ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]) and \
+            # Flat - look for mean reversion entries aligned with 1d trend
+            # Long: IBS < 0.3 (oversold) + 1d EMA34 uptrend + volume spike
+            long_entry = (ibs[i] < 0.3) and \
+                       (ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]) and \
                        volume_spike[i]
-            # Short: break below Camarilla S1 + 1w EMA34 downtrend + volume spike
-            short_entry = (close_val < camarilla_s1[i]) and \
-                        (ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1]) and \
+            # Short: IBS > 0.7 (overbought) + 1d EMA34 downtrend + volume spike
+            short_entry = (ibs[i] > 0.7) and \
+                        (ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]) and \
                         volume_spike[i]
             
             if long_entry:
@@ -90,9 +81,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on Camarilla S1 break or ATR stoploss
-            exit_condition = (close_val < camarilla_s1[i]) or \
-                           (close_val < entry_price - 2.5 * atr_val)
+            # Long - exit when IBS > 0.7 (overbought) or ATR stoploss
+            exit_condition = (ibs[i] > 0.7) or \
+                           (close_val < entry_price - 2.0 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -100,9 +91,9 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on Camarilla R1 break or ATR stoploss
-            exit_condition = (close_val > camarilla_r1[i]) or \
-                           (close_val > entry_price + 2.5 * atr_val)
+            # Short - exit when IBS < 0.3 (oversold) or ATR stoploss
+            exit_condition = (ibs[i] < 0.3) or \
+                           (close_val > entry_price + 2.0 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -112,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_IBS_Regime_Donchian_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
