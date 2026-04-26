@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ChopFilter
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter, volume spike (>2x average), and chop regime filter (CHOP > 61.8 = range, mean reversion). 
-In range markets: price breaks above R1 with 1d uptrend and volume → long; breaks below S1 with 1d downtrend and volume → short. 
-Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 trades over 4 years (12-37/year) on 4h timeframe.
-Requires BTC/ETH edge via 1d trend, volume, and regime filters; avoids SOL-only bias by requiring multi-factor confluence.
+1d_FundingRateMeanReversion_Zscore_30d
+Hypothesis: Funding rate mean reversion on 1d timeframe using 30-day z-score.
+When funding rate is extremely negative (< -2.0 z-score), go long expecting positive funding reversion.
+When funding rate is extremely positive (> +2.0 z-score), go short expecting negative funding reversion.
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 30-100 trades over 4 years (7-25/year) on 1d timeframe.
+Incorporates 1w trend filter to avoid fighting the major trend. Only takes longs in 1w uptrend, shorts in 1w downtrend.
+Adds volume confirmation (>1.5x average volume) to ensure participation.
+Works in both bull and bear markets because funding extremes occur in all regimes and mean reversion is statistically robust.
 """
 
 import numpy as np
@@ -13,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need warmup for indicators
+    if n < 50:  # Need warmup for calculations
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,42 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for HTF trend filter and chop regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load funding rate data (assuming it's available in prices DataFrame)
+    # If not available, we'll skip this strategy (but it should be available per instructions)
+    if 'funding_rate' not in prices.columns:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    funding = prices['funding_rate'].values
     
-    # Calculate Chopiness Index on 1d (14-period)
-    def calculate_chop(high_arr, low_arr, close_arr, period=14):
-        atr_sum = np.zeros(len(close_arr))
-        true_range = np.zeros(len(close_arr))
-        for i in range(1, len(close_arr)):
-            hl = high_arr[i] - low_arr[i]
-            hc = abs(high_arr[i] - close_arr[i-1])
-            lc = abs(low_arr[i] - close_arr[i-1])
-            true_range[i] = max(hl, hc, lc)
-        
-        # ATR calculation with smoothing
-        atr_sum[period-1] = np.sum(true_range[1:period]) if period <= len(true_range) else 0
-        for i in range(period, len(close_arr)):
-            atr_sum[i] = (atr_sum[i-1] * (period-1) + true_range[i]) / period
-        
-        # Chop calculation: 100 * log10(ATR_sum / (max_high - min_low)) / log10(period)
-        chop = np.full(len(close_arr), 50.0)  # default neutral
-        for i in range(period, len(close_arr)):
-            if atr_sum[i] > 0:
-                max_high = np.max(high_arr[i-period+1:i+1])
-                min_low = np.min(low_arr[i-period+1:i+1])
-                if max_high > min_low:
-                    chop[i] = 100 * np.log10(atr_sum[i] * period / (max_high - min_low)) / np.log10(period)
-        return chop
+    # Load 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    chop_1d = calculate_chop(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # 1w EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Calculate 30-day z-score of funding rate
+    funding_series = pd.Series(funding)
+    funding_mean = funding_series.rolling(window=30, min_periods=30).mean().values
+    funding_std = funding_series.rolling(window=30, min_periods=30).std().values
+    
+    # Avoid division by zero
+    funding_std = np.where(funding_std == 0, 1e-10, funding_std)
+    funding_zscore = (funding - funding_mean) / funding_std
     
     # Calculate average volume for confirmation (20-period SMA)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,51 +56,17 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 1 for Camarilla calculation, 34 for EMA, 14 for chop, 20 for volume)
-    start_idx = max(1, 34, 14, 20)
+    # Start after warmup (need 30 for z-score, 20 for EMA and volume)
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        # Calculate Camarilla levels using previous day's OHLC
-        # For 4h timeframe, previous day = previous 6 bars
-        prev_1d_idx = i - 6
-        if prev_1d_idx < 0:
-            # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
-            continue
-            
-        prev_high = high[prev_1d_idx]
-        prev_low = low[prev_1d_idx]
-        prev_close = close[prev_1d_idx]
-        
-        # Calculate Camarilla levels
-        range_val = prev_high - prev_low
-        if range_val <= 0:
-            # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
-            continue
-            
-        # Camarilla R1 and S1 levels
-        R1 = prev_close + (range_val * 1.1 / 12)
-        S1 = prev_close - (range_val * 1.1 / 12)
-        
-        close_val = close[i]
+        zscore = funding_zscore[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_34_1d_aligned[i]
-        chop_val = chop_1d_aligned[i]
+        ema_val = ema_20_1w_aligned[i]
         
         # Skip if any data not ready
-        if np.isnan(R1) or np.isnan(S1) or np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(chop_val):
+        if np.isnan(zscore) or np.isnan(ema_val) or np.isnan(avg_vol):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -119,20 +76,17 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume
-        volume_confirmed = vol > 2.0 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = vol > 1.5 * avg_vol
         
-        # Chop regime filter: only trade in range markets (CHOP > 61.8)
-        chop_filter = chop_val > 61.8
+        # Long logic: extremely negative funding + 1w uptrend + volume confirmation
+        long_condition = (zscore < -2.0) and (close[i] > ema_val) and volume_confirmed
+        # Short logic: extremely positive funding + 1w downtrend + volume confirmation
+        short_condition = (zscore > 2.0) and (close[i] < ema_val) and volume_confirmed
         
-        # Long logic: price breaks above R1 with 1d uptrend, volume confirmation, and chop filter
-        long_condition = (close_val > R1) and (close_val > ema_val) and volume_confirmed and chop_filter
-        # Short logic: price breaks below S1 with 1d downtrend, volume confirmation, and chop filter
-        short_condition = (close_val < S1) and (close_val < ema_val) and volume_confirmed and chop_filter
-        
-        # Exit logic: trend reversal or opposite breakout
-        exit_long = (close_val < ema_val) or (close_val < S1)
-        exit_short = (close_val > ema_val) or (close_val > R1)
+        # Exit logic: funding returns to normal or trend reversal
+        exit_long = (zscore > -0.5) or (close[i] < ema_val)
+        exit_short = (zscore < 0.5) or (close[i] > ema_val)
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -157,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "1d_FundingRateMeanReversion_Zscore_30d"
+timeframe = "1d"
 leverage = 1.0
