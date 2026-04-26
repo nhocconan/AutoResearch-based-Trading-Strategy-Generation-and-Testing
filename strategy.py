@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime_v1
-Hypothesis: Camarilla R1/S1 breakout on 12h timeframe with 1d EMA34 trend filter and volume spike confirmation.
-Only long when price > EMA34(1d), short when price < EMA34(1d). Uses fixed position sizing (0.25) to minimize fee churn
-and includes a choppiness regime filter to avoid whipsaws in sideways markets.
-Designed for 50-150 total trades over 4 years (12-37/year) with strong performance in both bull and bear regimes.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_DynamicSL_v2
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume spike confirmation, and dynamic ATR-based stoploss. 
+Only long when price > EMA34(1d), short when price < EMA34(1d). Uses discrete position sizing (0.0, ±0.25, ±0.30) to minimize fee churn.
+Designed for 75-150 total trades over 4 years (19-38/year) with strong performance in both bull and bear regimes.
 """
 
 import numpy as np
@@ -37,7 +36,7 @@ def generate_signals(prices):
     pp = typical_price
     s1 = close_1d - range_1d * camarilla_multiplier
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -45,6 +44,13 @@ def generate_signals(prices):
     # Load 1d data for EMA34 trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # ATR for volatility-based position sizing and stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Volume confirmation: volume > 1.5 * 20-period EMA volume
     avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -69,7 +75,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(chop[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -89,8 +95,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Fixed position sizing (0.25) to minimize fee churn
-        base_size = 0.25
+        # Discrete ATR-based position sizing (0.25 or 0.30)
+        atr_ratio = atr[i] / (np.mean(atr[max(0, i-50):i+1]) + 1e-10)
+        if atr_ratio > 1.3:  # High volatility
+            base_size = 0.30
+        else:  # Normal to low volatility
+            base_size = 0.25
         
         # Long logic: price breaks above R1 with volume spike and above 1d EMA34
         if close[i] > r1_aligned[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
@@ -124,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_DynamicSL_v2"
+timeframe = "4h"
 leverage = 1.0
