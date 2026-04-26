@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation. 
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v3
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
 Long: price breaks above R1 + above 1d EMA34 + volume spike.
 Short: price breaks below S1 + below 1d EMA34 + volume spike.
-Uses tighter R1/S1 levels for more frequent but still filtered signals. Target: 100-180 total trades over 4 years (25-45/year).
-Uses discrete position sizing (0.30) to limit fee drag. Works in bull/bear via trend filter.
+Uses discrete position sizing (0.25) and stricter volume confirmation (2.5x) to reduce trade frequency.
+Targets 80-150 total trades over 4 years (20-38/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -43,7 +43,7 @@ def generate_signals(prices):
     R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    # 4h volume confirmation: volume > 2.0x 20-period average
+    # 4h volume confirmation: volume > 2.5x 20-period average (stricter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -62,13 +62,13 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
             continue
         
-        # Volume spike condition
-        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume spike condition (stricter: 2.5x average)
+        volume_spike = volume[i] > 2.5 * vol_ma_20[i]
         
         # Camarilla breakout conditions
         breakout_up = close[i] > R1_aligned[i]   # Price breaks above R1
@@ -81,28 +81,28 @@ def generate_signals(prices):
         if breakout_up and uptrend and volume_spike:
             # Long signal: break above R1 + uptrend + volume spike
             if position != 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif breakout_down and downtrend and volume_spike:
             # Short signal: break below S1 + downtrend + volume spike
             if position != -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
