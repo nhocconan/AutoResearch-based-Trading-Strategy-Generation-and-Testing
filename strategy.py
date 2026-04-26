@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_ZeroCross_12hTrend_VolumeFilter_v1
-Hypothesis: Elder Ray (Bull/Bear Power) zero-cross signals filtered by 12h EMA50 trend and volume spike. Works in bull/bear via trend filter; Elder Ray measures bull/bear strength relative to EMA13. Discrete size 0.25 limits fee drag. Target 12-30 trades/year.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3
+Hypothesis: Trade 4h breakouts from Camarilla R3/S3 levels with 1d EMA34 trend filter and volume confirmation. Reduced false signals by requiring price to close beyond level for 2 consecutive bars and using tighter volume spike threshold (3.0x). Position size 0.25 balances risk and return. Target 15-40 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -18,45 +18,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla pivot levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray (primary timeframe)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Camarilla pivot levels (R3, S3) from previous 1d bar
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan
     
-    # Zero-cross signals: Bull Power crosses above 0 (long), Bear Power crosses below 0 (short)
-    bull_cross_up = (bull_power > 0) & (np.roll(bull_power, 1) <= 0)
-    bear_cross_down = (bear_power < 0) & (np.roll(bear_power, 1) >= 0)
-    bull_cross_up[0] = False
-    bear_cross_down[0] = False
+    # Calculate Camarilla R3 and S3 for previous 1d bar
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 4
     
-    # 12h EMA50 trend filter
-    close_12h = df_12h['close'].values
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA34 trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume confirmation: volume > 1.8x 30-period average
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 1.8
+    # Align all 1d data to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: volume > 3.0x 20-period average on 4h (tighter threshold)
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 3.0
+    
+    # Require close to stay beyond level for 2 consecutive bars to reduce false breakouts
+    close_above_r3 = close > camarilla_r3_aligned
+    close_below_s3 = close < camarilla_s3_aligned
+    close_above_r3_2bar = close_above_r3 & np.roll(close_above_r3, 1)
+    close_below_s3_2bar = close_below_s3 & np.roll(close_below_s3, 1)
+    close_above_r3_2bar[0] = False
+    close_below_s3_2bar[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA13 (13), 12h EMA50 (50), volume MA (30)
-    start_idx = max(13, 50, 30)
+    # Warmup: need EMA34 (34), volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -66,16 +78,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 12h trend alignment
-        trend_12h_uptrend = close[i] > ema_50_12h_aligned[i]
-        trend_12h_downtrend = close[i] < ema_50_12h_aligned[i]
+        # 1d trend alignment
+        trend_1d_uptrend = close[i] > ema_34_1d_aligned[i]
+        trend_1d_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: Bull Power crosses above 0 + volume spike + 12h uptrend
-            long_signal = bull_cross_up[i] and volume_spike[i] and trend_12h_uptrend
+            # Long: price breaks above R3 + volume spike + 1d uptrend + 2-bar confirmation
+            long_breakout = close_above_r3_2bar[i]
+            long_signal = long_breakout and volume_spike[i] and trend_1d_uptrend
             
-            # Short: Bear Power crosses below 0 + volume spike + 12h downtrend
-            short_signal = bear_cross_down[i] and volume_spike[i] and trend_12h_downtrend
+            # Short: price breaks below S3 + volume spike + 1d downtrend + 2-bar confirmation
+            short_breakout = close_below_s3_2bar[i]
+            short_signal = short_breakout and volume_spike[i] and trend_1d_downtrend
             
             if long_signal:
                 signals[i] = 0.25
@@ -88,20 +102,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Bear Power crosses below 0 OR 12h trend turns down
-            if bear_cross_down[i] or not trend_12h_uptrend:
+            # Exit: price touches S3 level OR 1d trend turns down
+            if (close[i] < camarilla_s3_aligned[i] or not trend_1d_uptrend):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Bull Power crosses above 0 OR 12h trend turns up
-            if bull_cross_up[i] or not trend_12h_downtrend:
+            # Exit: price touches R3 level OR 1d trend turns up
+            if (close[i] > camarilla_r3_aligned[i] or not trend_1d_downtrend):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ElderRay_ZeroCross_12hTrend_VolumeFilter_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
