@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla H4/H5 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Enters long when price breaks above H4 (close + 1.0*(high-low)) AND close > 1d EMA34 AND volume > 1.5 * 20-period average volume.
-Enters short when price breaks below H5 (close - 1.0*(high-low)) AND close < 1d EMA34 AND volume > 1.5 * 20-period average volume.
-Exits on opposite Camarilla level touch (H5 for long, H4 for short) or when price re-enters the Camarilla H-L range.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Enters long when price breaks above R1 (close + 1.1*(high-low)) AND close > 1d EMA34 AND volume > 1.5 * 20-period average volume.
+Enters short when price breaks below S1 (close - 1.1*(high-low)) AND close < 1d EMA34 AND volume > 1.5 * 20-period average volume.
+Exits on opposite Camarilla level touch (S1 for long, R1 for short) or when price re-enters the Camarilla H3-L3 range.
 Uses 1d EMA34 for higher timeframe trend alignment to avoid counter-trend trades.
 Volume spike confirms institutional participation. Camarilla levels provide mathematically derived support/resistance.
-Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years).
+Designed for 4h timeframe to target 20-50 trades/year (75-200 total over 4 years).
 Works in bull/bear markets by trading with the 1d trend and using volume to filter false breakouts.
 """
 
@@ -38,14 +38,20 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: H4 = close + 1.0*(high-low), H5 = close - 1.0*(high-low)
-    # We use H4/H5 as breakout levels (more conservative than R3/S3)
-    camarilla_h4 = close_1d + 1.0 * (high_1d - low_1d)
-    camarilla_h5 = close_1d - 1.0 * (high_1d - low_1d)
+    # Camarilla levels: R1 = close + 1.1*(high-low), S1 = close - 1.1*(high-low)
+    # R3/S3 are too wide; R1/S1 provide tighter, more frequent breakouts
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d)
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)  # Same as R1
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)  # Same as S1
+    # Actually, H3/L3 are R1/S1, H4/L4 are R2/S2, H5/L5 are R3/S3
+    # For re-entry, we use H3/L3 (R1/S1) as the range boundaries
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_h3_aligned = camarilla_r1_aligned  # H3 = R1
+    camarilla_l3_aligned = camarilla_s1_aligned  # L3 = S1
     
     # Volume spike: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,7 +66,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_h5_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
@@ -72,23 +78,18 @@ def generate_signals(prices):
             continue
         
         # Breakout conditions
-        breakout_long = close[i] > camarilla_h4_aligned[i]
-        breakout_short = close[i] < camarilla_h5_aligned[i]
+        breakout_long = close[i] > camarilla_r1_aligned[i]
+        breakout_short = close[i] < camarilla_s1_aligned[i]
         
-        # Re-entry conditions (price back inside Camarilla H-L range)
-        # Calculate Camarilla H-L for the day: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
-        camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
-        camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
-        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+        # Re-entry conditions (price back inside Camarilla H3-L3 range)
         price_in_range = (close[i] > camarilla_l3_aligned[i]) and (close[i] < camarilla_h3_aligned[i])
         
         if position == 0:
-            # Long: breakout above H4 AND close > 1d EMA34 AND volume spike
+            # Long: breakout above R1 AND close > 1d EMA34 AND volume spike
             if breakout_long and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below H5 AND close < 1d EMA34 AND volume spike
+            # Short: breakout below S1 AND close < 1d EMA34 AND volume spike
             elif breakout_short and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
@@ -97,20 +98,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: breakout below H5 OR price re-enters Camarilla H3-L3 range
+            # Exit: breakout below S1 OR price re-enters Camarilla H3-L3 range
             if breakout_short or price_in_range:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: breakout above H4 OR price re-enters Camarilla H3-L3 range
+            # Exit: breakout above R1 OR price re-enters Camarilla H3-L3 range
             if breakout_long or price_in_range:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
