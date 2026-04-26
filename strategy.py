@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-1h_Contrarian_RSI_With_Volume_Spike_And_HTF_Trend_Filter
-Hypothesis: On 1h timeframe, enter contrarian RSI mean-reversion trades (RSI<30 long, RSI>70 short) only when aligned with 4h trend (EMA50) and confirmed by volume spike (>1.5x 20-bar median). Exit on RSI mean-reversion (RSI>50 for longs, RSI<50 for shorts) or ATR-based stoploss (2x ATR). Uses 1h for entry timing, 4h for trend filter. Designed to work in both bull and bear markets via trend filter and mean-reversion logic. Targets 15-35 trades/year (~60-140 over 4 years) by requiring confluence of RSI extreme, volume spike, and HTF trend alignment.
+6h_WilliamsFractal_Breakout_1dTrend_VolumeSpike
+Hypothesis: Williams fractal breakouts on 6h with 1d EMA50 trend filter and volume confirmation. 
+Fractals require 2-bar confirmation (aligned with extra delay) to avoid look-ahead. 
+Targets 50-150 total trades over 4 years by requiring confluence of trend, volume, and fractal breakout. 
+Works in bull/bear markets via 1d trend filter (EMA50). 
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,83 +21,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for HTF trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data ONCE before loop for HTF trend filter and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    close_4h_series = pd.Series(close_4h)
-    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h ATR(14) for stoploss
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    tr1 = np.abs(high_4h - low_4h)
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    # Calculate 1d ATR(14) for stoploss
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Williams fractals on 1d (requires 2 extra bars for confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Align with 2-bar delay for fractal confirmation (needs 2 future 1d bars)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
     # Volume spike: volume > 1.5x 20-period median volume
     volume_series = pd.Series(volume)
     vol_median_20 = volume_series.rolling(window=20, min_periods=20).median().values
     volume_spike = volume > (1.5 * vol_median_20)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
     # Reduced fixed position size to control trade frequency and drawdown
-    fixed_size = 0.20
+    fixed_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need 34 for RSI stability, 20 for volume median, 50 for 4h EMA/ATR
-    start_idx = max(34, 20, 50)
+    # Warmup: need 50 for 1d EMA, 14 for ATR, 20 for volume median
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(atr_14_4h_aligned[i]) or
-            np.isnan(rsi_values[i]) or
-            np.isnan(vol_median_20[i]) or
-            not in_session[i]):
+        # Skip if any data not ready
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or
+            np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_50_val = ema_50_4h_aligned[i]
-        atr_val = atr_14_4h_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        atr_val = atr_14_1d_aligned[i]
         vol_spike = volume_spike[i]
-        rsi_val = rsi_values[i]
         size = fixed_size
         
         if position == 0:
             # Flat - look for entry
-            # Long: RSI < 30 (oversold), volume spike, and uptrend (close > 4h EMA50)
-            long_entry = (rsi_val < 30) and vol_spike and (close_val > ema_50_val)
-            # Short: RSI > 70 (overbought), volume spike, and downtrend (close < 4h EMA50)
-            short_entry = (rsi_val > 70) and vol_spike and (close_val < ema_50_val)
+            # Bullish fractal breakout: high > bullish_fractal and volume spike, in uptrend (close > EMA50_1d)
+            long_entry = (high[i] > bullish_fractal_aligned[i]) and vol_spike and (close_val > ema_50_val)
+            # Bearish fractal breakout: low < bearish_fractal and volume spike, in downtrend (close < EMA50_1d)
+            short_entry = (low[i] < bearish_fractal_aligned[i]) and vol_spike and (close_val < ema_50_val)
             
             if long_entry:
                 signals[i] = size
@@ -107,18 +108,18 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on RSI mean-reversion (RSI>50), ATR stoploss, or trend reversal
+            # Long - exit on trend reversal, ATR stoploss, or at bearish fractal (take profit)
             stop_price = entry_price - 2.0 * atr_val
-            if (rsi_val > 50) or (close_val < stop_price) or (close_val < ema_50_val):
+            if close_val < ema_50_val or close_val < stop_price or low[i] < bearish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on RSI mean-reversion (RSI<50), ATR stoploss, or trend reversal
+            # Short - exit on trend reversal, ATR stoploss, or at bullish fractal (take profit)
             stop_price = entry_price + 2.0 * atr_val
-            if (rsi_val < 50) or (close_val > stop_price) or (close_val > ema_50_val):
+            if close_val > ema_50_val or close_val > stop_price or high[i] > bullish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -127,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Contrarian_RSI_With_Volume_Spike_And_HTF_Trend_Filter"
-timeframe = "1h"
+name = "6h_WilliamsFractal_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
