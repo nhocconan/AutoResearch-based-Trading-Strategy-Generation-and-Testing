@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_IBS_Regime_Donchian_Breakout_v1
-Hypothesis: Use 6h timeframe with IBS (Internal Bar Strength) to identify oversold/overbought conditions within the daily trend, combined with 1d EMA34 trend filter and volume confirmation. IBS = (close-low)/(high-low) captures intraday mean reversion tendency that works in both bull and bear markets when aligned with higher timeframe trend. Targets 12-30 trades/year to minimize fee drag.
+12h_Donchian20_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Use 12h timeframe with Donchian(20) breakout confirmed by 1d EMA50 trend and volume spike. Targets 12-37 trades/year to minimize fee drag. Works in bull/bear markets by using 1d EMA50 for trend direction and volume confirmation to filter false breakouts. Includes ATR-based stoploss to manage risk. Primary timeframe: 12h, HTF: 1d.
 """
 
 import numpy as np
@@ -18,21 +18,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate IBS (Internal Bar Strength): (close-low)/(high-low)
-    # Values near 0 = strong close (bearish), near 1 = strong close (bullish)
-    ibs = (close - low) / (high - low + 1e-10)  # avoid division by zero
+    # Calculate Donchian channels (20-period) on 12h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_avg)
+    volume_spike = volume > (2.0 * vol_avg)
     
     # ATR for stoploss (14-period)
     tr1 = high[1:] - low[1:]
@@ -45,13 +45,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need enough for IBS calculation and indicators
-    start_idx = max(20, 34, 20, 14)  # vol avg, 1d EMA, volume avg, ATR
+    # Warmup: need 20 for Donchian, 50 for 1d EMA, 20 for volume avg, 14 for ATR
+    start_idx = max(20, 50, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ibs[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -60,15 +60,15 @@ def generate_signals(prices):
         size = 0.25  # 25% position size
         
         if position == 0:
-            # Flat - look for mean reversion entries aligned with 1d trend
-            # Long: IBS < 0.3 (oversold) + 1d EMA34 uptrend + volume spike
-            long_entry = (ibs[i] < 0.3) and \
-                       (ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]) and \
+            # Flat - look for breakout with trend and volume confirmation
+            # Long: break above Donchian high + 1d EMA50 uptrend + volume spike
+            long_entry = (close_val > donchian_high[i]) and \
+                       (ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]) and \
                        volume_spike[i]
-            # Short: IBS > 0.7 (overbought) + 1d EMA34 downtrend + volume spike
-            short_entry = (ibs[i] > 0.7) and \
-                        (ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]) and \
-                        volume_spike[i]
+            # Short: break below Donchian low + 1d EMA50 downtrend + volume spike
+            short_entry = (close_val < donchian_low[i]) and \
+                        (ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]) and \
+                       volume_spike[i]
             
             if long_entry:
                 signals[i] = size
@@ -81,9 +81,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit when IBS > 0.7 (overbought) or ATR stoploss
-            exit_condition = (ibs[i] > 0.7) or \
-                           (close_val < entry_price - 2.0 * atr_val)
+            # Long - exit on Donchian low break or ATR stoploss
+            exit_condition = (close_val < donchian_low[i]) or \
+                           (close_val < entry_price - 2.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -91,9 +91,9 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when IBS < 0.3 (oversold) or ATR stoploss
-            exit_condition = (ibs[i] < 0.3) or \
-                           (close_val > entry_price + 2.0 * atr_val)
+            # Short - exit on Donchian high break or ATR stoploss
+            exit_condition = (close_val > donchian_high[i]) or \
+                           (close_val > entry_price + 2.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IBS_Regime_Donchian_Breakout_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
