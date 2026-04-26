@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1wTrend_v1
-Hypothesis: 6h Ichimoku cloud breakout with weekly trend filter for BTC/ETH.
-- Long when price breaks above Ichimoku cloud (Senkou Span A/B) AND weekly trend is up
-- Short when price breaks below Ichimoku cloud AND weekly trend is down
-- Uses Ichimoku calculated on 6h chart for entry signals
-- Weekly trend filter (price vs weekly EMA20) avoids counter-trend trades in bear markets
-- Designed for lower frequency (target 12-37 trades/year on 6h) to minimize fee drag
-- Novelty: Ichimoku cloud breakout on 6h with weekly trend filter avoids whipsaws
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Long when price breaks above Camarilla R3 level AND 1d EMA34 uptrend AND volume > 2.0 * volume_ma(20)
+- Short when price breaks below Camarilla S3 level AND 1d EMA34 downtrend AND volume > 2.0 * volume_ma(20)
+- Uses Camarilla pivot levels from 12h chart for structure-based breakouts
+- 1d EMA34 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws
+- Volume spike (2.0x) confirms institutional participation and reduces false breakouts
+- Exit on opposite Camarilla level (S3 for longs, R3 for shorts) or trend reversal
+- Designed for low frequency (target 12-37 trades/year on 12h) to minimize fee drag
+- Novelty: Applying proven Camarilla R3/S3 breakout logic to 12h timeframe with 1d trend filter
 """
 
 import numpy as np
@@ -22,59 +24,51 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA20 for trend filter (needs completed weekly candle)
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    # Weekly trend: 1 = uptrend (close > EMA20), -1 = downtrend (close < EMA20), 0 = invalid
-    trend_1w = np.where(ema_20_1w_aligned > 0, 
-                        np.where(close > ema_20_1w_aligned, 1, -1), 
+    # Calculate 1d EMA34 for trend filter (needs completed 1d candle)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Trend: 1 = uptrend (close > EMA34), -1 = downtrend (close < EMA34), 0 = neutral/invalid
+    trend_1d = np.where(ema_34_1d_aligned > 0, 
+                        np.where(close > ema_34_1d_aligned, 1, -1), 
                         0)
     
-    # Calculate Ichimoku components on 6h chart (primary timeframe)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2.0
+    # Calculate Camarilla pivot levels on 12h chart (primary timeframe)
+    # Using previous bar's OHLC for Camarilla calculation
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # first bar uses current values
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2.0
+    # Camarilla calculations
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2.0)
+    # Resistance levels
+    R3 = pivot + (range_hl * 1.1 / 4.0)
+    # Support levels
+    S3 = pivot - (range_hl * 1.1 / 4.0)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2.0)
-    
-    # The actual cloud boundaries for current period (shifted back 26 periods)
-    # We need to align the Senkou spans properly - they are plotted 26 periods ahead
-    senkou_a_lagged = np.roll(senkou_a, 26)
-    senkou_b_lagged = np.roll(senkou_b, 26)
-    # First 26 values are invalid due to roll
-    senkou_a_lagged[:26] = np.nan
-    senkou_b_lagged[:26] = np.nan
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_lagged, senkou_b_lagged)
-    cloud_bottom = np.minimum(senkou_a_lagged, senkou_b_lagged)
+    # Calculate volume filter: volume > 2.0 * volume_ma(20) for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 52 for Senkou B, 26 for shift)
-    start_idx = 52 + 26  # 78 bars to ensure all Ichimoku components are valid
+    # Start after warmup (need 34 for 1d EMA, 20 for volume MA)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(trend_1w[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or
+            np.isnan(trend_1d[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -84,14 +78,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Ichimoku cloud breakout conditions with weekly trend filter
+        # Camarilla R3/S3 breakout conditions with trend and volume spike filter
         if position == 0:
-            # Long: Price breaks above cloud AND weekly uptrend
-            if close[i] > cloud_top[i] and trend_1w[i] == 1:
+            # Long: Price breaks above Camarilla R3 AND 1d uptrend AND volume spike
+            if close[i] > R3[i] and trend_1d[i] == 1 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below cloud AND weekly downtrend
-            elif close[i] < cloud_bottom[i] and trend_1w[i] == -1:
+            # Short: Price breaks below Camarilla S3 AND 1d downtrend AND volume spike
+            elif close[i] < S3[i] and trend_1d[i] == -1 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -99,20 +93,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Price falls below cloud bottom OR weekly trend turns down
-            if close[i] < cloud_bottom[i] or trend_1w[i] == -1:
+            # Exit: Price falls below Camarilla S3 OR 1d trend turns down
+            if close[i] < S3[i] or trend_1d[i] == -1:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Price rises above cloud top OR weekly trend turns up
-            if close[i] > cloud_top[i] or trend_1w[i] == 1:
+            # Exit: Price rises above Camarilla R3 OR 1d trend turns up
+            if close[i] > R3[i] or trend_1d[i] == 1:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1wTrend_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
