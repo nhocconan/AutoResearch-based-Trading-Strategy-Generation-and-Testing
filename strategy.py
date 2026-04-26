@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_1dTrend_ATRFilter_v2
-Hypothesis: 6h Donchian(20) breakout with 1d EMA50 trend filter and ATR-based volatility filter.
-- Long when price breaks above 20-period high AND 1d EMA50 uptrend AND ATR(14) > ATR_ma(50) (high volatility regime)
-- Short when price breaks below 20-period low AND 1d EMA50 downtrend AND ATR(14) > ATR_ma(50)
-- Uses 6h chart for Donchian channels and entry timing
-- 1d EMA50 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws
-- ATR volatility filter ensures we only trade during sufficient volatility (avoids low-vol chop)
-- Designed for low frequency (target 12-30 trades/year on 6h) to minimize fee drag
-- Novelty: Combines Donchian breakout with volatility regime filter (trade only when ATR > its MA) to avoid false breakouts in low-vol environments
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume confirmation, and ATR-based stoploss.
+- Long when price breaks above Camarilla R1 level AND 1d EMA34 uptrend AND volume > 1.8 * volume_ma(20)
+- Short when price breaks below Camarilla S1 level AND 1d EMA34 downtrend AND volume > 1.8 * volume_ma(20)
+- Uses Camarilla pivot levels from 12h chart for structure-based breakouts
+- 1d EMA34 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws in bear markets
+- Volume spike (1.8x) confirms institutional participation and reduces false breakouts
+- ATR-based stoploss: exit long if price < highest_high_since_entry - 2.5 * ATR(14)
+- ATR-based stoploss: exit short if price > lowest_low_since_entry + 2.5 * ATR(14)
+- Designed for low frequency (target 12-37 trades/year on 12h) to minimize fee drag
+- Novelty: Combines proven Camarilla R1/S1 breakout logic with ATR trailing stop for better risk management
+- Timeframe: 12h (primary), HTF: 1d for trend filter
 """
 
 import numpy as np
@@ -28,15 +31,15 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50 for trend filter (needs completed 1d candle)
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    # Trend: 1 = uptrend (close > EMA50), -1 = downtrend (close < EMA50), 0 = neutral/invalid
-    trend_1d = np.where(ema_50_1d_aligned > 0, 
-                        np.where(close > ema_50_1d_aligned, 1, -1), 
+    # Calculate 1d EMA34 for trend filter (needs completed 1d candle)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Trend: 1 = uptrend (close > EMA34), -1 = downtrend (close < EMA34), 0 = neutral/invalid
+    trend_1d = np.where(ema_34_1d_aligned > 0, 
+                        np.where(close > ema_34_1d_aligned, 1, -1), 
                         0)
     
-    # Calculate ATR(14) for volatility filter
+    # Calculate ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -45,26 +48,44 @@ def generate_signals(prices):
     tr3[0] = np.abs(low[0] - close[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR moving average for volatility regime filter
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    # Volatility filter: 1 = high volatility (ATR > ATR_MA), 0 = low volatility
-    vol_filter = np.where(atr > atr_ma, 1, 0)
     
-    # Calculate Donchian channels on 6h chart (primary timeframe)
-    # Using 20-period lookback
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels on 12h chart (primary timeframe)
+    # Using previous bar's OHLC for Camarilla calculation
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # first bar uses current values
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    
+    # Camarilla calculations
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    
+    # Resistance levels (R1, R3)
+    R1 = pivot + (range_hl * 1.1 / 12.0)
+    R3 = pivot + (range_hl * 1.1 / 4.0)
+    # Support levels (S1, S3)
+    S1 = pivot - (range_hl * 1.1 / 12.0)
+    S3 = pivot - (range_hl * 1.1 / 4.0)
+    
+    # Calculate volume filter: volume > 1.8 * volume_ma(20) for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    # Track highest high since entry for longs, lowest low since entry for shorts
+    highest_since_entry = np.zeros(n)
+    lowest_since_entry = np.zeros(n)
     
-    # Start after warmup (need 50 for 1d EMA, 50 for ATR MA, 20 for Donchian)
-    start_idx = max(50, 50, 20)
+    # Start after warmup (need 34 for 1d EMA, 20 for volume MA, 14 for ATR)
+    start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(trend_1d[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or
+            np.isnan(trend_1d[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -72,37 +93,75 @@ def generate_signals(prices):
                 signals[i] = 0.25
             else:
                 signals[i] = -0.25
+            # Update tracking variables
+            if position == 1:
+                highest_since_entry[i] = max(high[i], highest_since_entry[i-1]) if i > 0 else high[i]
+                lowest_since_entry[i] = lowest_since_entry[i-1] if i > 0 else low[i]
+            elif position == -1:
+                lowest_since_entry[i] = min(low[i], lowest_since_entry[i-1]) if i > 0 else low[i]
+                highest_since_entry[i] = highest_since_entry[i-1] if i > 0 else high[i]
+            else:
+                highest_since_entry[i] = highest_since_entry[i-1] if i > 0 else high[i]
+                lowest_since_entry[i] = lowest_since_entry[i-1] if i > 0 else low[i]
             continue
         
-        # Donchian breakout conditions with trend and volatility filter
+        # Initialize tracking variables for current bar
+        if i == start_idx:
+            highest_since_entry[i] = high[i]
+            lowest_since_entry[i] = low[i]
+        else:
+            highest_since_entry[i] = highest_since_entry[i-1]
+            lowest_since_entry[i] = lowest_since_entry[i-1]
+        
+        # Update tracking variables based on position
+        if position == 1:
+            highest_since_entry[i] = max(high[i], highest_since_entry[i-1])
+            lowest_since_entry[i] = lowest_since_entry[i-1]
+        elif position == -1:
+            lowest_since_entry[i] = min(low[i], lowest_since_entry[i-1])
+            highest_since_entry[i] = highest_since_entry[i-1]
+        
+        # ATR-based stoploss conditions
+        stop_long = False
+        stop_short = False
+        if position == 1 and highest_since_entry[i] > 0:
+            stop_long = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+        elif position == -1 and lowest_since_entry[i] > 0:
+            stop_short = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+        
+        # Camarilla R1/S1 breakout conditions with trend and volume spike filter
         if position == 0:
-            # Long: Price breaks above Donchian high AND 1d uptrend AND high volatility regime
-            if close[i] > donchian_high[i] and trend_1d[i] == 1 and vol_filter[i] == 1:
+            # Long: Price breaks above Camarilla R1 AND 1d uptrend AND volume spike
+            if close[i] > R1[i] and trend_1d[i] == 1 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low AND 1d downtrend AND high volatility regime
-            elif close[i] < donchian_low[i] and trend_1d[i] == -1 and vol_filter[i] == 1:
+                highest_since_entry[i] = high[i]
+                lowest_since_entry[i] = low[i]
+            # Short: Price breaks below Camarilla S1 AND 1d downtrend AND volume spike
+            elif close[i] < S1[i] and trend_1d[i] == -1 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
+                highest_since_entry[i] = high[i]
+                lowest_since_entry[i] = low[i]
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Price falls below Donchian low OR 1d trend turns down
-            if close[i] < donchian_low[i] or trend_1d[i] == -1:
+            # Exit: Price falls below Camarilla S3 OR 1d trend turns down OR ATR stoploss hit
+            if close[i] < S3[i] or trend_1d[i] == -1 or stop_long:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Price rises above Donchian high OR 1d trend turns up
-            if close[i] > donchian_high[i] or trend_1d[i] == 1:
+            # Exit: Price rises above Camarilla R3 OR 1d trend turns up OR ATR stoploss hit
+            if close[i] > R3[i] or trend_1d[i] == 1 or stop_short:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dTrend_ATRFilter_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
