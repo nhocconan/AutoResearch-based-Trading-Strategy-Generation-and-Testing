@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume spike capture swing points in both bull and bear markets. R1/S1 are tighter support/resistance than R3/S3, reducing trade frequency while maintaining edge. Volume spike confirms breakout validity. 1d EMA34 ensures alignment with daily trend. Target: 50-150 total trades over 4 years (12-37/year).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1
+Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike capture swing continuations in both bull and bear markets. R1/S1 represent strong intraday support/resistance; breaks indicate momentum acceleration. Volume spike confirms validity. 1d EMA34 ensures alignment with daily trend. Target: 100-180 total trades over 4 years (25-45/year).
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate Camarilla pivot levels on 1d data (using previous day's OHLC)
-    # Camarilla: R1 = C + ((H-L)*1.1/6), S1 = C - ((H-L)*1.1/6)
+    # Camarilla: R1 = C + ((H-L)*1.1/12), S1 = C - ((H-L)*1.1/12)
     if len(df_1d) < 2:
         return np.zeros(n)
     
@@ -35,18 +35,17 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla R1/S1 levels
     camarilla_range = prev_high - prev_low
-    r1 = prev_close + (camarilla_range * 1.1 / 6)
-    s1 = prev_close - (camarilla_range * 1.1 / 6)
+    r1 = prev_close + (camarilla_range * 1.1 / 12)
+    s1 = prev_close - (camarilla_range * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike detection on 12h (volume > 2.0x 20-period EMA)
+    # Volume spike detection on 4h (volume > 1.8x 20-period EMA)
     volume_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (volume_ema * 2.0)
+    volume_spike = volume > (volume_ema * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -104,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
