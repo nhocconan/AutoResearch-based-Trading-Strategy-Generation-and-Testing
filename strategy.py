@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_Breakout_12hTrend_VolumeConfirm
-Hypothesis: 6h Elder Ray (Bull/Bear Power) breakout with 12h EMA50 trend filter and volume confirmation (>1.8x median). Enters long when Bull Power turns positive with price above 12h EMA50 and volume spike. Enters short when Bear Power turns negative with price below 12h EMA50 and volume spike. Uses discrete sizing (0.25) to minimize churn. Target: 50-150 trades over 4 years. Works in bull/bear via 12h trend filter and volume confirmation to avoid false breakouts.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x median). Enters long when price breaks above R1 with volume confirmation and bullish 1d trend. Enters short when price breaks below S1 with volume confirmation and bearish 1d trend. Exits on opposite breakout. Uses discrete position sizing (0.25) to minimize churn. Target: 75-200 trades over 4 years. Works in both bull and bear markets by following 1d trend filter.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,36 +18,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Load 12h data for HTF trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Calculate Camarilla levels for 4h (based on previous 4h bar)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    h_4h = df_4h['high'].values
+    l_4h = df_4h['low'].values
+    c_4h = df_4h['close'].values
     
-    # Volume confirmation: volume > 1.8x 50-period median
+    # Previous bar's values for level calculation (to avoid look-ahead)
+    h_4h_prev = np.roll(h_4h, 1)
+    l_4h_prev = np.roll(l_4h, 1)
+    c_4h_prev = np.roll(c_4h, 1)
+    h_4h_prev[0] = np.nan
+    l_4h_prev[0] = np.nan
+    c_4h_prev[0] = np.nan
+    
+    # Calculate Camarilla R1 and S1 levels
+    rng_4h = h_4h_prev - l_4h_prev
+    r1_4h = c_4h_prev + (rng_4h * 1.1 / 12)
+    s1_4h = c_4h_prev - (rng_4h * 1.1 / 12)
+    
+    # Align to 4h primary timeframe
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    
+    # Volume confirmation: volume > 1.5x 20-period median
     volume_series = pd.Series(volume)
-    vol_median = volume_series.rolling(window=50, min_periods=50).median().values
-    volume_confirm = volume > (1.8 * vol_median)
+    vol_median = volume_series.rolling(window=20, min_periods=20).median().values
+    volume_confirm = volume > (1.5 * vol_median)
+    
+    # Load 1d data for HTF trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 13-period EMA, 50-period EMA, 50-period volume median)
-    start_idx = 50
+    # Start after warmup (need 20-period volume median, 34-period EMA)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_median[i])):
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(vol_median[i]) or np.isnan(ema_34_1d_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -57,33 +77,25 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long logic: Bull Power turns positive + price above 12h EMA50 + volume confirmation
-        long_signal = (bull_power[i] > 0 and bull_power[i-1] <= 0) and \
-                      (close[i] > ema_50_12h_aligned[i]) and \
-                      volume_confirm[i]
-        
-        # Short logic: Bear Power turns negative + price below 12h EMA50 + volume confirmation
-        short_signal = (bear_power[i] < 0 and bear_power[i-1] >= 0) and \
-                       (close[i] < ema_50_12h_aligned[i]) and \
-                       volume_confirm[i]
-        
-        # Exit logic: opposite Elder Ray signal
-        exit_long = position == 1 and (bear_power[i] < 0 and bear_power[i-1] >= 0)
-        exit_short = position == -1 and (bull_power[i] > 0 and bull_power[i-1] <= 0)
-        
-        if long_signal:
+        # Long logic: price breaks above R1 + volume confirmation + bullish 1d trend
+        if close[i] > r1_4h_aligned[i] and volume_confirm[i] and close[i] > ema_34_1d_aligned[i]:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        elif short_signal:
+        # Short logic: price breaks below S1 + volume confirmation + bearish 1d trend
+        elif close[i] < s1_4h_aligned[i] and volume_confirm[i] and close[i] < ema_34_1d_aligned[i]:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
-        elif exit_long or exit_short:
+        # Exit: opposite breakout (price returns to the other level)
+        elif position == 1 and close[i] < s1_4h_aligned[i]:
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and close[i] > r1_4h_aligned[i]:
             signals[i] = 0.0
             position = 0
         else:
@@ -97,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Breakout_12hTrend_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
