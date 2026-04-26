@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolumeRegime
-Hypothesis: Use 4h for primary trend (EMA50) and 1d for volume regime (top 30% volume days), then 1h for precise entry timing on Camarilla R3/S3 breakouts. This combines HTF directional alignment with volume confirmation while using lower timeframe only for entry precision to minimize trades. Fixed size 0.20 to control fees. Designed to work in both bull (trend filters) and bear (mean reversion exits) markets.
+6h_WilliamsAlligator_RegimeBreakout
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) defines trend regime on 1d HTF; trade 6h breakouts of Donchian(20) only when price is outside Alligator mouth (trending) and aligned with Alligator direction. Uses volume confirmation to avoid false breakouts. Designed for low-frequency, high-conviction entries in both bull and bear markets by filtering chop via Alligator convergence.
 """
 
 import numpy as np
@@ -18,104 +18,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Load 1d data ONCE for volume regime
+    # Load 1d data ONCE before loop for HTF Alligator and Donchian context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous 4h bar's OHLC for Camarilla levels (R3/S3 = stronger breakout levels)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_vals = df_4h['close'].values
+    # Williams Alligator on 1d: SMAs of median price (typical price)
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    jaw = pd.Series(typical_price_1d).rolling(window=13, min_periods=13).mean().shift(8).values  # Jaw: 13-period, 8-shift
+    teeth = pd.Series(typical_price_1d).rolling(window=8, min_periods=8).mean().shift(5).values   # Teeth: 8-period, 5-shift
+    lips = pd.Series(typical_price_1d).rolling(window=5, min_periods=5).mean().shift(3).values    # Lips: 5-period, 3-shift
     
-    # Calculate Camarilla levels: R3, S3 (stronger breakout levels)
-    rng_4h = high_4h - low_4h
-    camarilla_r3_4h = close_4h_vals + (rng_4h * 1.1 / 4)   # R3 level
-    camarilla_s3_4h = close_4h_vals - (rng_4h * 1.1 / 4)   # S3 level
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3_4h)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3_4h)
+    # Donchian(20) on 6h for breakout signals
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = np.concatenate([np.full(19, np.nan), high_roll[19:]])  # align to current bar
+    donchian_low = np.concatenate([np.full(19, np.nan), low_roll[19:]])
     
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(close_4h_vals).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Volume confirmation: volume > 60th percentile of 30-period lookback
+    vol_series = pd.Series(volume)
+    vol_percentile_60 = vol_series.rolling(window=30, min_periods=30).quantile(0.60).values
+    volume_confirm = volume > vol_percentile_60
     
-    # 1d volume regime: volume > 70th percentile of 50-period lookback (high volume days only)
-    vol_1d = df_1d['volume'].values
-    vol_series_1d = pd.Series(vol_1d)
-    vol_percentile_70_1d = vol_series_1d.rolling(window=50, min_periods=50).quantile(0.70).values
-    volume_regime_1d = vol_1d > vol_percentile_70_1d
-    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime_1d.astype(float))
-    
-    # Session filter: 08-20 UTC (reduce noise trades)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    # Fixed position size to control trade frequency (0.20 = 20%)
-    fixed_size = 0.20
+    # Fixed position size for low turnover
+    fixed_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of calculations (50 for EMA and volume percentile)
+    # Warmup: max of calculations (50 for 1d indicators, 20 for Donchian, 30 for volume)
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(volume_regime_aligned[i]) or
-            not session_filter[i]):
+        # Skip if any data not ready
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_percentile_60[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        ema_50_val = ema_50_4h_aligned[i]
-        vol_regime = volume_regime_aligned[i] > 0.5  # convert back to boolean
-        size = fixed_size
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        donchian_high_val = donchian_high[i]
+        donchian_low_val = donchian_low[i]
+        vol_conf = volume_confirm[i]
         
-        # Entry conditions: breakout of Camarilla R3/S3 with volume regime AND 4h EMA50 trend filter
-        long_entry = (close_val > camarilla_r3_val) and vol_regime and (close_val > ema_50_val)
-        short_entry = (close_val < camarilla_s3_val) and vol_regime and (close_val < ema_50_val)
+        # Alligator regime: trending when lips > teeth > jaw (bullish) or lips < teeth < jaw (bearish)
+        # Avoid trading when Alligator lines are intertwined (choppy/market asleep)
+        bullish_regime = (lips_val > teeth_val) and (teeth_val > jaw_val)
+        bearish_regime = (lips_val < teeth_val) and (teeth_val < jaw_val)
+        trending_regime = bullish_regime or bearish_regime
+        
+        # Entry conditions: Donchian breakout with volume confirmation AND aligned with Alligator trend
+        long_entry = (close_val > donchian_high_val) and vol_conf and bullish_regime
+        short_entry = (close_val < donchian_low_val) and vol_conf and bearish_regime
         
         if position == 0:
             # Flat - look for entry
             if long_entry:
-                signals[i] = size
+                signals[i] = fixed_size
                 position = 1
             elif short_entry:
-                signals[i] = -size
+                signals[i] = -fixed_size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on mean reversion to midpoint (Camarilla center)
-            mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
-            if close_val < mid_point:
+            # Long - exit when price retouches lips (Alligator wake-up signal) or close below teeth
+            if close_val < lips_val or close_val < teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = size
+                signals[i] = fixed_size
         elif position == -1:
-            # Short - exit on mean reversion to midpoint (Camarilla center)
-            mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
-            if close_val > mid_point:
+            # Short - exit when price retouches lips or close above teeth
+            if close_val > lips_val or close_val > teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -size
+                signals[i] = -fixed_size
     
     return signals
 
-name = "1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolumeRegime"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_RegimeBreakout"
+timeframe = "6h"
 leverage = 1.0
