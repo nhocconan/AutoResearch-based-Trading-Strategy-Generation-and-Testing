@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1wTrend_VolumeConfirm_v1
-Hypothesis: Ichimoku cloud (TK cross + price above/below cloud) with 1w trend filter (price vs Kumo twist) and volume confirmation captures strong momentum swings. Works in bull/bear by only taking trades aligned with weekly Ichimoku trend. Targets 12-25 trades/year via strict entry conditions. Uses discrete sizing (0.25) to control drawdown.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>2.0x 20-bar average) captures strong trending moves on 12h timeframe. Uses discrete sizing (0.25) to target ~15-30 trades/year. Works in bull/bear by only taking breakouts aligned with 1d trend. Avoids overtrading via tight entry conditions.
 """
 
 import numpy as np
@@ -10,117 +10,117 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
+    # Load 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly Ichimoku components for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Conversion line (9-period): (highest high + lowest low)/2 over 9 periods
-    conversion_line_1w = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
-                         pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
-    # Base line (26-period): (highest high + lowest low)/2 over 26 periods
-    base_line_1w = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
-                   pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
-    # Leading Span A: (Conversion line + Base line)/2
-    leading_span_a_1w = (conversion_line_1w + base_line_1w) / 2
-    # Leading Span B: (highest high + lowest low)/2 over 52 periods
-    leading_span_b_1w = (pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
-                        pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2
+    # Calculate Camarilla levels from previous 1d bar
+    # For each 12h bar, we need the previous completed 1d bar's OHLC
+    # We'll compute Camarilla for each 1d bar then align to 12h
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Kumo twist: Leading Span A > Leading Span B = bullish cloud, < = bearish
-    kumo_twist_bullish = leading_span_a_1w > leading_span_b_1w
-    kumo_twist_bearish = leading_span_a_1w < leading_span_b_1w
+    # Previous 1d bar's OHLC (for Camarilla calculation)
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
     
-    # Align weekly trend to 6h
-    kumo_twist_bullish_aligned = align_htf_to_ltf(prices, df_1w, kumo_twist_bullish.values.astype(float))
-    kumo_twist_bearish_aligned = align_htf_to_ltf(prices, df_1w, kumo_twist_bearish.values.astype(float))
+    # Typical price for Camarilla
+    typical_price_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
     
-    # 6h Ichimoku components for entry signals
-    # Conversion line (9-period)
-    conversion_line = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
-                      pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
-    # Base line (26-period)
-    base_line = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
-                pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
-    # Leading Span A
-    leading_span_a = (conversion_line + base_line) / 2
-    # Leading Span B (52-period)
-    leading_span_b = (pd.Series(high).rolling(window=52, min_periods=52).max() + 
-                     pd.Series(low).rolling(window=52, min_periods=52).min()) / 2
+    # Camarilla R1 and S1 levels
+    R1_1d = typical_price_1d + (range_1d * 1.1 / 12)
+    S1_1d = typical_price_1d - (range_1d * 1.1 / 12)
     
-    # TK cross: Conversion line crosses Base line
-    tk_cross_bullish = conversion_line > base_line
-    tk_cross_bearish = conversion_line < base_line
+    # Align Camarilla levels to 12h timeframe
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
-    # Price relative to cloud: price > max(Span A, Span B) = above cloud
-    # price < min(Span A, Span B) = below cloud
-    cloud_top = np.maximum(leading_span_a, leading_span_b)
-    cloud_bottom = np.minimum(leading_span_a, leading_span_b)
-    price_above_cloud = close > cloud_top
-    price_below_cloud = close < cloud_bottom
+    # ATR(14) for stoploss calculation
+    tr1 = pd.Series(high[1:] - low[1:]).values
+    tr2 = pd.Series(np.abs(high[1:] - close[:-1])).values
+    tr3 = pd.Series(np.abs(low[1:] - close[:-1])).values
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.8)
+    volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
+    entry_price = 0.0
     
-    # Warmup: max of all indicators (52 for weekly, 52 for 6h Span B)
-    start_idx = max(52, 52)
+    # Warmup: max of EMA34 (34), ATR (14), volume MA (20)
+    start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
+        close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
+        trend_val = ema34_1d_aligned[i]
+        atr_val = atr[i]
+        r1_val = R1_1d_aligned[i]
+        s1_val = S1_1d_aligned[i]
+        vol_conf = volume_confirm[i]
+        
         # Skip if any data not ready
-        if (np.isnan(kumo_twist_bullish_aligned[i]) or np.isnan(kumo_twist_bearish_aligned[i]) or
-            np.isnan(conversion_line[i]) or np.isnan(base_line[i]) or
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
+        if (np.isnan(trend_val) or np.isnan(atr_val) or np.isnan(r1_val) or np.isnan(s1_val)):
+            # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Weekly trend filter from Ichimoku cloud twist
-        weekly_bullish = bool(kumo_twist_bullish_aligned[i])
-        weekly_bearish = bool(kumo_twist_bearish_aligned[i])
+        # Trend filter: price > 1d EMA34 = uptrend, price < 1d EMA34 = downtrend
+        is_uptrend = close_val > trend_val
+        is_downtrend = close_val < trend_val
         
-        # 6h Ichimoku entry conditions
-        tk_bullish = tk_cross_bullish[i]
-        tk_bearish = tk_cross_bearish[i]
-        price_above = price_above_cloud[i]
-        price_below = price_below_cloud[i]
-        vol_conf = volume_confirm[i]
+        # Camarilla breakout conditions
+        long_breakout = close_val > r1_val  # Break above R1
+        short_breakout = close_val < s1_val  # Break below S1
         
-        # Long: TK bullish cross + price above cloud + weekly bullish + volume
-        long_entry = tk_bullish and price_above and weekly_bullish and vol_conf
-        # Short: TK bearish cross + price below cloud + weekly bearish + volume
-        short_entry = tk_bearish and price_below and weekly_bearish and vol_conf
+        # Entry conditions: Camarilla breakout in direction of 1d trend + volume
+        long_entry = long_breakout and is_uptrend and vol_conf
+        short_entry = short_breakout and is_downtrend and vol_conf
         
-        # Exit: opposite TK cross or price re-enters cloud
-        long_exit = tk_bearish or (close[i] < cloud_top[i] and close[i] > cloud_bottom[i])
-        short_exit = tk_bullish or (close[i] > cloud_bottom[i] and close[i] < cloud_top[i])
+        # Exit conditions: ATR-based stoploss or opposite Camarilla touch
+        long_exit = False
+        short_exit = False
+        if position == 1:
+            # Long stoploss: entry price - 2.0 * ATR
+            stop_price = entry_price - 2.0 * atr_val
+            long_exit = close_val < stop_price or close_val < s1_val  # Stop or Camarilla S1 breakdown
+        elif position == -1:
+            # Short stoploss: entry price + 2.0 * ATR
+            stop_price = entry_price + 2.0 * atr_val
+            short_exit = close_val > stop_price or close_val > r1_val  # Stop or Camarilla R1 breakout
         
         if long_entry and position != 1:
             signals[i] = base_size
             position = 1
+            entry_price = close_val  # Approximate entry price for stop calculation
         elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
-        elif long_exit and position == 1:
+            entry_price = close_val
+        elif long_exit:
             signals[i] = 0.0
             position = 0
-        elif short_exit and position == -1:
+        elif short_exit:
             signals[i] = 0.0
             position = 0
         else:
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1wTrend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
