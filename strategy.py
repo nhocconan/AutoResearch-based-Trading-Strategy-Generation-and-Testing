@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d trend filter (EMA34) and volume spike confirmation.
-Enters long when price breaks above R1 with bullish daily trend and volume spike.
-Enters short when price breaks below S1 with bearish daily trend and volume spike.
+1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume
+Hypothesis: 1d Camarilla R1/S1 breakout with 1w trend filter (EMA34) and volume confirmation.
+Enters long when price breaks above R1 with bullish weekly trend and volume spike.
+Enters short when price breaks below S1 with bearish weekly trend and volume spike.
 Exits when price reverts to opposite Camarilla level (S1 for longs, R1 for shorts).
-Designed for 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+Designed for 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
 Uses discrete position sizing (0.25) to minimize churn. Works in both bull and bear markets.
 """
 
@@ -43,14 +43,15 @@ def generate_signals(prices):
     r1 = pivot + range_hl * 1.1 / 2
     s1 = pivot - range_hl * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 1d timeframe (no alignment needed as we're already on 1d)
+    r1_aligned = r1
+    s1_aligned = s1
     
-    # Load 1d data for trend filter (EMA34)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Load 1w data for trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Volume confirmation: volume > 2.0 * 20-period EMA volume
     avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -60,13 +61,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 1d shift + 34-period EMA)
+    # Start after warmup (need 1d shift + 34-period weekly EMA)
     start_idx = 1 + 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -76,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long logic: break above R1 + bullish 1d trend + volume spike
-        if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+        # Long logic: break above R1 + bullish 1w trend + volume spike
+        if close[i] > r1_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume_spike[i]:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: break below S1 + bearish 1d trend + volume spike
-        elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+        # Short logic: break below S1 + bearish 1w trend + volume spike
+        elif close[i] < s1_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume_spike[i]:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
@@ -108,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
