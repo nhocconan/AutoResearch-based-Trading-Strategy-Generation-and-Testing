@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R3/S3 breakout on 6h with 1d EMA34 trend filter and volume confirmation (2.0x average) to capture medium-term swings with tight entries. Uses discrete position sizing (0.25) and volatility-based exit (price closes beyond opposite Camarilla level) for risk management. Targets 12-37 trades/year on 6h timeframe to minimize fee drag while working in both bull and bear markets via trend filter.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume confirmation (1.8x average) to reduce false breakouts. Uses discrete position sizing (0.25) and ATR-based stoploss (2.0x) for risk management. Designed for low trade frequency (target 12-37/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The 1d EMA34 provides intermediate trend filtering that works across regimes, and volume confirmation ensures breakouts have participation.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for EMA trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -28,16 +28,16 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for volatility normalization (used in volume spike)
+    # Calculate ATR(14) for stoploss on 12h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter: volume > 2.0 * 20-period average
+    # Calculate volume spike filter: volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     # Calculate Camarilla levels from previous 1d bar
     prev_high = df_1d['high'].shift(1).values
@@ -51,16 +51,12 @@ def generate_signals(prices):
     
     pivot = (prev_high + prev_low + prev_close) / 3.0
     range_hl = prev_high - prev_low
-    r3 = pivot + (range_hl * 1.1 / 4.0)   # R3 level
-    s3 = pivot - (range_hl * 1.1 / 4.0)   # S3 level
-    r4 = pivot + (range_hl * 1.1 / 2.0)   # R4 level (strong breakout)
-    s4 = pivot - (range_hl * 1.1 / 2.0)   # S4 level (strong breakout)
+    r1 = pivot + (range_hl * 1.1 / 12.0)
+    s1 = pivot - (range_hl * 1.1 / 12.0)
     
-    # Align Camarilla levels to 6h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align Camarilla levels to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,10 +68,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(atr[i])):
             # Hold current position
@@ -88,16 +82,16 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        trend_1d_up = close_val > ema_34_1d_aligned[i]   # 1d medium-term uptrend
-        trend_1d_down = close_val < ema_34_1d_aligned[i]  # 1d medium-term downtrend
+        trend_1d_up = close_val > ema_34_1d_aligned[i]   # 1d intermediate uptrend
+        trend_1d_down = close_val < ema_34_1d_aligned[i]  # 1d intermediate downtrend
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above R3 AND 1d trend up AND volume spike
-            long_signal = (close_val > r3_aligned[i]) and trend_1d_up and vol_spike
+            # Long: price breaks above R1 AND 1d trend up AND volume spike
+            long_signal = (close_val > r1_aligned[i]) and trend_1d_up and vol_spike
             
-            # Short: price breaks below S3 AND 1d trend down AND volume spike
-            short_signal = (close_val < s3_aligned[i]) and trend_1d_down and vol_spike
+            # Short: price breaks below S1 AND 1d trend down AND volume spike
+            short_signal = (close_val < s1_aligned[i]) and trend_1d_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -112,20 +106,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price closes below S3 (opposite level) OR trend flips down
-            if (close_val < s3_aligned[i]) or (not trend_1d_up):
+            # Exit: trend flips down OR price hits ATR stoploss
+            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price closes above R3 (opposite level) OR trend flips up
-            if (close_val > r3_aligned[i]) or (not trend_1d_down):
+            # Exit: trend flips up OR price hits ATR stoploss
+            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
