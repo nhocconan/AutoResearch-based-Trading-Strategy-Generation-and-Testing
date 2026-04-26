@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume confirmation capture momentum in both bull/bear markets. Uses 1d HTF for trend and Camarilla calculation, 12h for entry timing. Target: 50-150 total trades over 4 years (12-37/year).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike capture momentum in both bull/bear markets. Uses 1d HTF for stronger trend alignment vs 12h, reducing whipsaw. Volume spike confirms validity. Discrete sizing (0.25) to minimize fee churn. Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
@@ -42,11 +42,11 @@ def generate_signals(prices):
     r1 = prev_close + (camarilla_range * 1.1 / 12)
     s1 = prev_close - (camarilla_range * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike detection on 12h (volume > 2.0x 20-period EMA)
+    # Volume spike detection on 4h (volume > 2.0x 20-period EMA)
     volume_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (volume_ema * 2.0)
     
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
