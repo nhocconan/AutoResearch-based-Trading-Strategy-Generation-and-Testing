@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: Ichimoku cloud (from 1d) acts as dynamic support/resistance on 6h. Price breaking above/below cloud with volume spike and aligned with 1d trend (via Tenkan/Kijun cross) captures strong continuation moves. Cloud filter reduces whipsaws in ranging markets. Works in bull/bear by only trading in direction of higher timeframe trend. Target: 60-120 trades over 4 years (15-30/year).
+4h_Donchian20_Breakout_VolumeSpike_ChopFilter_v1
+Hypothesis: Donchian(20) breakout with volume spike confirmation and choppiness regime filter on 4h timeframe. 
+In choppy markets (CHOP > 61.8), we fade breakouts (mean reversion); in trending markets (CHOP < 38.2), we follow breakouts.
+This adapts to both bull and bear regimes while minimizing false breakouts. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -10,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,74 +20,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Ichimoku and trend
+    # Load 1d data ONCE before loop for HTF regime filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Need sufficient 1d data for Ichimoku (52 periods max)
-    if len(df_1d) < 52:
-        return np.zeros(n)
-    
-    # Calculate Ichimoku components on 1d
+    # Calculate 1d ATR(14) for choppiness index
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # ATR(14)
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR14, n) / (n * ATR1)) / log10(n)
+    # where n=14 period
+    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not needed for breakout)
+    chop = 100 * np.log10(atr_sum / (14 * (highest_high - lowest_low))) / np.log10(14)
+    chop = np.nan_to_num(chop, nan=50.0)  # neutral when undefined
     
-    # Future cloud: Senkou A/B shifted 26 periods ahead
-    # But for current cloud, we use values already shifted
-    # Ichimoku cloud = between Senkou A and Senkou B
-    # Align all to 6h
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # The actual cloud boundaries for current period are Senkou A/B from 26 periods ago
-    # So we need to shift the aligned arrays by 26* (1d -> 6h conversion)
-    # 1d = 4 * 6h bars, so 26 * 4 = 104 bars of 6h
-    # But align_htf_to_ltf already accounts for HTF bar completion, so we use the values as-is
-    # The cloud is plotted 26 periods ahead, so current cloud is from past calculation
-    # For simplicity, we use current Tenkan/Kijun/Senkou for trend and cloud edges
+    # Donchian(20) channels on 4h
+    lookback = 20
+    highest_high_4h = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low_4h = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Trend filter: Tenkan > Kijun = uptrend, Tenkan < Kijun = downtrend
-    # Cloud top/bottom: max/min of Senkou A/B
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
-    
-    # Volume spike detection on 6h (volume > 2.0x 20-period EMA)
+    # Volume spike detection: volume > 2.0x 20-period EMA
     volume_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (volume_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need sufficient data for all indicators)
-    start_idx = max(100, 26, 20)  # 26 for Ichimoku base, 20 for volume EMA
+    # Start after warmup
+    start_idx = max(lookback, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan_aligned[i]) or 
-            np.isnan(kijun_aligned[i]) or
-            np.isnan(cloud_top[i]) or
-            np.isnan(cloud_bottom[i])):
+        if (np.isnan(chop_aligned[i]) or 
+            np.isnan(highest_high_4h[i]) or
+            np.isnan(lowest_low_4h[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -95,33 +78,50 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1d trend filter via Tenkan/Kijun
-        uptrend = tenkan_aligned[i] > kijun_aligned[i]
-        downtrend = tenkan_aligned[i] < kijun_aligned[i]
+        # Regime filter based on 1d Choppiness Index
+        chop_value = chop_aligned[i]
+        is_choppy = chop_value > 61.8  # range market -> mean reversion
+        is_trending = chop_value < 38.2  # trending market -> follow breakout
         
-        # Cloud breakout logic
-        price_above_cloud = close[i] > cloud_top[i]
-        price_below_cloud = close[i] < cloud_bottom[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high_4h[i-1]  # break above previous high
+        breakout_down = close[i] < lowest_low_4h[i-1]  # break below previous low
         
-        # Long logic: price breaks above cloud with volume spike + in uptrend
-        if price_above_cloud and volume_spike[i] and uptrend:
+        # Long logic
+        if is_trending and breakout_up and volume_spike[i]:
+            # Trending market: follow breakout
             if position != 1:
                 signals[i] = 0.25
                 position = 1
             else:
                 signals[i] = 0.25
-        # Short logic: price breaks below cloud with volume spike + in downtrend
-        elif price_below_cloud and volume_spike[i] and downtrend:
+        elif is_choppy and breakout_down and volume_spike[i]:
+            # Choppy market: fade breakout (sell the breakdown)
             if position != -1:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = -0.25
-        # Exit conditions: price returns to opposite cloud side or trend weakens
-        elif position == 1 and (price_below_cloud or not uptrend):
+        # Short logic
+        elif is_trending and breakout_down and volume_spike[i]:
+            # Trending market: follow breakout down
+            if position != -1:
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = -0.25
+        elif is_choppy and breakout_up and volume_spike[i]:
+            # Choppy market: fade breakout (buy the breakout failure)
+            if position != 1:
+                signals[i] = 0.25
+                position = 1
+            else:
+                signals[i] = 0.25
+        # Exit conditions: opposite Donchian breakout or volatility contraction
+        elif position == 1 and (breakout_down or chop_value > 70):  # exit on breakdown or extreme chop
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (price_above_cloud or not downtrend):
+        elif position == -1 and (breakout_up or chop_value > 70):  # exit on breakout or extreme chop
             signals[i] = 0.0
             position = 0
         else:
@@ -135,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
