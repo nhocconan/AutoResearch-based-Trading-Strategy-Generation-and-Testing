@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeFilter
-Hypothesis: Camarilla R3/S3 levels from 1d act as strong intraday support/resistance. 
-Break above R3 with 1w uptrend and volume spike = long. Break below S3 with 1w downtrend 
-and volume spike = short. Weekly trend filter avoids counter-trend trades in bear markets.
-Target: 7-25 trades/year per symbol (30-100 total over 4 years).
+6h_VWAP_Deviation_1dTrend_Filter
+Hypothesis: Price reverts to VWAP during institutional hours. Go long when price deviates below VWAP 
+with 1d uptrend and volume confirmation. Go short when price deviates above VWAP with 1d downtrend 
+and volume confirmation. Uses 6h timeframe to capture institutional reversion moves, avoiding 
+noise from lower timeframes. VWAP calculated using typical price * volume.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,41 +22,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # Calculate typical price and VWAP components
+    typical_price = (high + low + close) / 3.0
+    tp_vol = typical_price * volume
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    uptrend = close > ema_34_1w_aligned
-    downtrend = close < ema_34_1w_aligned
+    # Cumulative VWAP (reset daily)
+    cum_tp_vol = np.zeros(n)
+    cum_vol = np.zeros(n)
+    vwap = np.zeros(n)
     
-    # Get daily data for Camarilla pivot levels
+    # Get date for daily reset
+    dates = pd.to_datetime(prices['open_time']).date
+    
+    for i in range(n):
+        if i == 0 or dates[i] != dates[i-1]:
+            cum_tp_vol[i] = tp_vol[i]
+            cum_vol[i] = volume[i]
+        else:
+            cum_tp_vol[i] = cum_tp_vol[i-1] + tp_vol[i]
+            cum_vol[i] = cum_vol[i-1] + volume[i]
+        
+        if cum_vol[i] > 0:
+            vwap[i] = cum_tp_vol[i] / cum_vol[i]
+        else:
+            vwap[i] = typical_price[i]
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA20 for trend filter
     close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    uptrend = close > ema_20_1d_aligned
+    downtrend = close < ema_20_1d_aligned
     
-    # Camarilla R3, S3 levels: based on previous day's range
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
-    
-    # Align daily Camarilla levels to 1d timeframe (no further alignment needed)
-    camarilla_r3_aligned = camarilla_r3  # Already at 1d frequency
-    camarilla_s3_aligned = camarilla_s3  # Already at 1d frequency
-    
-    # Volume confirmation: volume > 2.0x 20-period MA (strict to reduce trades)
+    # Volume confirmation: volume > 1.3x 20-period MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 1.3)
+    
+    # VWAP deviation bands (1.5% deviation)
+    vwap_upper = vwap * 1.015
+    vwap_lower = vwap * 0.985
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,9 +75,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_confirm[i]) or 
-            i >= len(camarilla_r3_aligned) or i >= len(camarilla_s3_aligned) or
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -78,12 +87,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla R3, with 1w uptrend and volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and uptrend[i] and volume_confirm[i]:
+            # Long: Price below VWAP lower band, with 1d uptrend and volume confirmation
+            if close[i] < vwap_lower[i] and uptrend[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3, with 1w downtrend and volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and downtrend[i] and volume_confirm[i]:
+            # Short: Price above VWAP upper band, with 1d downtrend and volume confirmation
+            elif close[i] > vwap_upper[i] and downtrend[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -91,20 +100,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price closes below Camarilla S3 (reversal) OR 1w trend changes to downtrend
-            if close[i] < camarilla_s3_aligned[i] or not uptrend[i]:
+            # Exit: Price crosses above VWAP OR 1d trend changes to downtrend
+            if close[i] > vwap[i] or not uptrend[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price closes above Camarilla R3 (reversal) OR 1w trend changes to uptrend
-            if close[i] > camarilla_r3_aligned[i] or not downtrend[i]:
+            # Exit: Price crosses below VWAP OR 1d trend changes to uptrend
+            if close[i] < vwap[i] or not downtrend[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeFilter"
-timeframe = "1d"
+name = "6h_VWAP_Deviation_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
