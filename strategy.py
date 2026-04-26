@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ADX_DI_Cross_12hTrend_VolumeFilter
-Hypothesis: On 6h timeframe, enter long when +DI crosses above -DI with ADX>25 (trend strength), aligned with 12h EMA50 uptrend and volume confirmation (>1.5x 20-bar MA). Enter short when -DI crosses above +DI with ADX>25, aligned with 12h EMA50 downtrend and volume confirmation. Uses ADX to filter weak trends and DI crossovers for precise entries. Volume confirmation reduces false signals. Designed for 15-25 trades/year (60-100 total over 4 years) to avoid fee drag. Works in bull markets via long entries and bear markets via short entries, both filtered by 12h trend and ADX strength.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation
+Hypothesis: 12h breakout above/below daily Camarilla R3/S3 levels in direction of 1d EMA34 trend, confirmed by volume spike (>2x 20-bar MA). Camarilla levels provide strong intraday support/resistance. Trend filter ensures alignment with higher timeframe momentum. Volume confirmation reduces false breakouts. Designed for 12-37 trades/year (50-150 total over 4 years) to avoid fee drag. Works in both bull and bear markets by following the 1d trend while using Camarilla structure for precise entries.
 """
 
 import numpy as np
@@ -18,89 +18,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ADX and DI calculation on 6h data
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla levels from previous 1d bar (OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # Camarilla R3, S3 levels (based on previous day's range)
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Smoothed DM and TR
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align Camarilla levels to 12h timeframe (no additional delay needed as they're based on completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size
     
-    # Warmup: max of calculations (14 for ADX/DI, 20 for volume, 50 for 12h EMA)
-    start_idx = max(14, 20, 50)
+    # Warmup: max of calculations (20 for vol, 34 for ema)
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        ema_12h_val = ema_50_12h_aligned[i]
-        adx_val = adx[i]
-        plus_di_val = plus_di[i]
-        minus_di_val = minus_di[i]
-        vol_conf = volume_confirm[i]
+        ema_34_val = ema_34_1d_aligned[i]
+        camarilla_r3_val = camarilla_r3_aligned[i]
+        camarilla_s3_val = camarilla_s3_aligned[i]
+        vol_spike = volume_spike[i]
         
-        # Trend filters
-        bullish_12h = close_val > ema_12h_val
-        bearish_12h = close_val < ema_12h_val
+        # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
+        bullish_1d = close_val > ema_34_val
+        bearish_1d = close_val < ema_34_val
         
-        # ADX trend strength filter
-        strong_trend = adx_val > 25
+        # Entry conditions: breakout of Camarilla level in trend direction with volume
+        long_entry = (close_val > camarilla_r3_val) and bullish_1d and vol_spike
+        short_entry = (close_val < camarilla_s3_val) and bearish_1d and vol_spike
         
-        # DI crossover conditions
-        # Long: +DI crosses above -DI (current +DI > -DI and previous +DI <= previous -DI)
-        # Short: -DI crosses above +DI (current -DI > +DI and previous -DI <= previous +DI)
-        if i > 0:
-            prev_plus_di = plus_di[i-1]
-            prev_minus_di = minus_di[i-1]
-            bullish_cross = (plus_di_val > minus_di_val) and (prev_plus_di <= prev_minus_di)
-            bearish_cross = (minus_di_val > plus_di_val) and (prev_minus_di <= prev_plus_di)
-        else:
-            bullish_cross = False
-            bearish_cross = False
-        
-        # Entry conditions: DI crossover in trend direction with ADX>25 and volume confirmation
-        long_entry = bullish_cross and bullish_12h and strong_trend and vol_conf
-        short_entry = bearish_cross and bearish_12h and strong_trend and vol_conf
-        
-        # Exit conditions: opposite DI crossover or trend weakening (ADX<20) or trend reversal
-        exit_long = bearish_cross or (adx_val < 20) or not bullish_12h
-        exit_short = bullish_cross or (adx_val < 20) or not bearish_12h
+        # Exit conditions: opposite Camarilla level touch (or trend reversal)
+        exit_long = (close_val < camarilla_s3_val) or not bullish_1d
+        exit_short = (close_val > camarilla_r3_val) or not bearish_1d
         
         if long_entry and position != 1:
             signals[i] = base_size
@@ -120,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_DI_Cross_12hTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
