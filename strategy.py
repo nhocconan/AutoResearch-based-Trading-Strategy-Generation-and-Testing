@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume regime filter (volume > 1.5x median) to target 12-30 trades/year. Uses ATR trailing stop (2.0x) for risk management. Designed for low-frequency, high-conviction entries by requiring volume confirmation and clear 1d trend alignment, reducing whipsaw in bear markets while capturing strong breakouts.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v7
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike (>3x median) to target 20-40 trades/year. Uses ATR trailing stop (2.0x) for risk management. Designed for low-frequency, high-conviction entries by requiring strong volume confirmation and clear 1d trend alignment, reducing whipsaw in bear markets.
 """
 
 import numpy as np
@@ -35,12 +35,12 @@ def generate_signals(prices):
     camarilla_r1 = prev_close_1d + (1.0/6) * (prev_high_1d - prev_low_1d)
     camarilla_s1 = prev_close_1d - (1.0/6) * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume regime filter: volume > 1.5x median volume (50-period)
+    # Volume spike filter: volume > 3x median volume (50-period) for extreme conviction
     vol_median = pd.Series(volume).rolling(window=50, min_periods=50).median().values
     
     # ATR(14) for volatility-based stops
@@ -80,18 +80,18 @@ def generate_signals(prices):
         uptrend = close_val > ema_34_1d_val
         downtrend = close_val < ema_34_1d_val
         
-        # Volume regime filter: only trade in above-average volume environments
-        volume_regime = volume_val > 1.5 * vol_median_val
+        # Volume spike filter: only trade in extreme volume environments
+        volume_spike = volume_val > 3.0 * vol_median_val
         
         if position == 0:
-            # Long: break above R1 with volume regime, and uptrend
+            # Long: break above R1 with volume spike, and uptrend
             long_signal = (close_val > camarilla_r1_aligned[i]) and \
-                          volume_regime and \
+                          volume_spike and \
                           uptrend
             
-            # Short: break below S1 with volume regime, and downtrend
+            # Short: break below S1 with volume spike, and downtrend
             short_signal = (close_val < camarilla_s1_aligned[i]) and \
-                           volume_regime and \
+                           volume_spike and \
                            downtrend
             
             if long_signal:
@@ -125,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v7"
+timeframe = "4h"
 leverage = 1.0
