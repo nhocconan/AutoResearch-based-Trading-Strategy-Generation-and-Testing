@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm
-Hypothesis: 12h Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume confirmation.
-Works in bull/bear markets by combining Camarilla pivot structure with weekly trend filter.
+12h_Camarilla_R1_S1_Breakout_1wEMA50_VolumeSpike_v2
+Hypothesis: 12h Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume spike confirmation.
 Designed for 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.0, ±0.25).
+Uses proper HTF alignment and avoids overtrading by requiring confluence of trend, breakout, and volume.
 """
 
 import numpy as np
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm"
+name = "12h_Camarilla_R1_S1_Breakout_1wEMA50_VolumeSpike_v2"
 timeframe = "12h"
 leverage = 1.0
