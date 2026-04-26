@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_Chop_v1
-Hypothesis: On 1d timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction, RSI(14) for momentum confirmation, and Choppiness Index(14) as regime filter to avoid ranging markets. Enter long when KAMA slope up, RSI > 50, and CHOP < 50 (trending regime). Enter short when KAMA slope down, RSI < 50, and CHOP < 50. Exit on opposite signal or when CHOP > 61.8 (strong ranging). Designed for low trade frequency (~10-25/year) to minimize fee drag and work in both bull and bear markets via adaptive trend filter and regime avoidance.
+6h_Ichimoku_Kumo_Twist_1dTrend_v1
+Hypothesis: On 6h timeframe, trade Ichimoku cloud twists (Senkou Span A/B cross) with 1d trend filter (price vs EMA50) and volume confirmation. Ichimoku cloud twist indicates momentum shift, 1d EMA50 ensures alignment with higher timeframe trend, volume confirms participation. Designed for 6h to capture medium-term swings in both bull and bear markets by following the 1d trend while using 6h Ichimoku for timely entries and exits.
 """
 
 import numpy as np
@@ -16,116 +16,90 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter (optional, can use 1d EMA50 as proxy)
-    # But per instruction: use 1d as primary, 1w as HTF
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for HTF trend (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA(50) for HTF trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # KAMA on 1d close (ER=10, fast=2, slow=30)
-    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]| over 10 periods)
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=1)  # sum of |diff| over window
-    # Avoid division by zero
-    er = np.divide(change, volatility, out=np.zeros_like(change, dtype=float), where=volatility!=0)
-    # Smoothing constant: SC = [ER * (fastest - slowest) + slowest]^2
-    fastest = 2.0 / (2 + 1)
-    slowest = 2.0 / (30 + 1)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    # KAMA: kama[t] = kama[t-1] + SC * (close[t] - kama[t-1])
-    kama = np.full_like(close, np.nan, dtype=float)
-    kama[9] = close[9]  # start after first ER can be calculated
-    for i in range(10, n):
-        if not np.isnan(sc[i-10]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i-10] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate Ichimoku components on 6h data
+    # Conversion Line (Tenkan-sen): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # RSI(14) on 1d close
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend NaN for first element (diff reduces length by 1)
-    rsi = np.concatenate([[np.nan], rsi])
+    # Base Line (Kijun-sen): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Choppiness Index(14) on 1d: high CHOP = ranging, low CHOP = trending
-    # CHOP = 100 * log10(sum(ATR over n) / (log(n) * (max(high) - min(low)))) / log10(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]  # first TR
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero or log of zero
-    denominator = np.log(14) * (max_high - min_low)
-    chop = np.where(denominator > 0, 
-                    100 * np.log10(atr_sum / denominator) / np.log10(14), 
-                    np.nan)
+    # Leading Span A (Senkou Span A): (Conversion Line + Base Line) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Align HTF indicators to 1d timeframe (prices is already 1d)
-    # Since prices is 1d, alignment is trivial but we use the helper for consistency
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    kama_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama)
-    rsi_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), rsi)
-    chop_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), chop)
+    # Leading Span B (Senkou Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align HTF indicators to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)  # Use 1d data for alignment
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of KAMA needs 10, RSI needs 14, CHOP needs 14, EMA50 needs 50
-    start_idx = max(10, 14, 14, 50)  # 50
+    # Warmup: max of Ichimoku calculations (52) and 1d EMA (50)
+    start_idx = max(52, 50) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(kama_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or
+            np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(tenkan_sen[i]) or
+            np.isnan(kijun_sen[i])):
             signals[i] = 0.0
             continue
         
-        ema_50_1w_val = ema_50_1w_aligned[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = chop_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
         close_val = close[i]
+        vol_val = volume[i]
+        avg_vol = pd.Series(volume).rolling(window=24, min_periods=24).mean().iloc[i] if i >= 24 else 0
+        senkou_a = senkou_span_a_aligned[i]
+        senkou_b = senkou_span_b_aligned[i]
+        tenkan = tenkan_sen[i]
+        kijun = kijun_sen[i]
         
-        # KAMA slope: rising if close > kama, falling if close < kama
-        kama_rising = close_val > kama_val
-        kama_falling = close_val < kama_val
+        # Volume confirmation: above average volume
+        volume_filter = vol_val > avg_vol if avg_vol > 0 else True
         
-        # Trend filter: HTF 1w EMA50 direction
-        uptrend_1w = close_val > ema_50_1w_val
-        downtrend_1w = close_val < ema_50_1w_val
+        # Kumo twist detection: Senkou Span A/B cross
+        # Bullish twist: Senkou A crosses above Senkou B
+        # Bearish twist: Senkou A crosses below Senkou B
+        if i > 0:
+            prev_senkou_a = senkou_span_a_aligned[i-1]
+            prev_senkou_b = senkou_span_b_aligned[i-1]
+            bullish_twist = (senkou_a > senkou_b) and (prev_senkou_a <= prev_senkou_b)
+            bearish_twist = (senkou_a < senkou_b) and (prev_senkou_a >= prev_senkou_b)
+        else:
+            bullish_twist = False
+            bearish_twist = False
         
-        # Regime filter: only trade when market is trending (CHOP < 50) or moderately choppy
-        # Avoid strong ranging markets (CHOP > 61.8)
-        regime_filter = chop_val < 50.0
-        regime_exit = chop_val > 61.8  # exit if strong ranging
+        # Trend filter: price vs 1d EMA50
+        uptrend = close_val > ema_50_1d_val
+        downtrend = close_val < ema_50_1d_val
         
         if position == 0:
-            # Long: KAMA rising, RSI > 50, uptrend on 1w, favorable regime
-            long_signal = kama_rising and \
-                          (rsi_val > 50) and \
-                          uptrend_1w and \
-                          regime_filter
+            # Long: bullish Kumo twist with uptrend and volume
+            long_signal = bullish_twist and uptrend and volume_filter
             
-            # Short: KAMA falling, RSI < 50, downtrend on 1w, favorable regime
-            short_signal = kama_falling and \
-                           (rsi_val < 50) and \
-                           downtrend_1w and \
-                           regime_filter
+            # Short: bearish Kumo twist with downtrend and volume
+            short_signal = bearish_twist and downtrend and volume_filter
             
             if long_signal:
                 signals[i] = 0.25
@@ -138,20 +112,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit on opposite signal or strong ranging regime
-            if (not kama_rising) or regime_exit or (rsi_val < 40):
+            # Exit: bearish Kumo twist or price below Kumo (cloud)
+            if bearish_twist or close_val < min(senkou_a, senkou_b):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit on opposite signal or strong ranging regime
-            if (not kama_falling) or regime_exit or (rsi_val > 60):
+            # Exit: bullish Kumo twist or price above Kumo (cloud)
+            if bullish_twist or close_val > max(senkou_a, senkou_b):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_Chop_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_1dTrend_v1"
+timeframe = "6h"
 leverage = 1.0
