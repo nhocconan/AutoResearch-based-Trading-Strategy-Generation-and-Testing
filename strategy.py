@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1dRegime_VolumeConfirm_v1
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) combined with 1d regime (ADX>25 = trend, ADX<20 = range) and volume confirmation (>1.5x average) captures strong directional moves while avoiding whipsaws. In trend regime (ADX>25): go long when Bull Power > 0 and rising, short when Bear Power > 0 and rising. In range regime (ADX<20): fade extremes (long when Bull Power < -0.5*ATR, short when Bear Power < -0.5*ATR). Designed for 6h to target 12-37 trades/year with discrete sizing (0.25). Works in bull/bear via regime adaptation.
+12h_Camarilla_R1S1_Breakout_WeeklyTrend_VolumeSpike_v1
+Hypothesis: Weekly trend filter (price vs weekly EMA50) + Camarilla R1/S1 breakouts from 1d with volume spike (>2x average) captures strong institutional moves while avoiding counter-trend whipsaws. Works in bull/bear via weekly trend alignment. Designed for 12h to target 12-37 trades/year with discrete sizing (0.25).
 """
 
 import numpy as np
@@ -18,151 +18,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Elder Ray and regime
+    # Load 1d data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA13 for Elder Ray
-    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # 1d High, Low for Bull/Bear Power
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bull Power = High - EMA13
-    bull_power = high_1d - ema_13_1d
-    # Bear Power = EMA13 - Low
-    bear_power = ema_13_1d - low_1d
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # 1d ATR(14) for regime and thresholds
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1)) if len(df_1d) > 1 else np.zeros_like(high_1d)
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1)) if len(df_1d) > 1 else np.zeros_like(high_1d)
-    if len(df_1d) > 1:
-        tr2[0] = 0
-        tr3[0] = 0
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    else:
-        tr = tr1
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align to 1d (wait for completed 1d bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # 1d ADX(14) for regime detection
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # ATR(14) for volatility (used in volume spike threshold)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all 1d indicators to 6h (wait for completed 1d bar)
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 6h ATR(14) for stoploss
-    tr1_6h = high - low
-    tr2_6h = np.abs(high - np.roll(close, 1))
-    tr3_6h = np.abs(low - np.roll(close, 1))
-    tr2_6h[0] = 0
-    tr3_6h[0] = 0
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
-    
-    # 6h average volume for confirmation (24-period SMA = 2d * 4 = 8d? Actually 6h: 4 bars/day, so 24 = 6d)
-    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Average volume for confirmation (48-period SMA = 1d * 2 = 2d)
+    avg_volume = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     base_size = 0.25
     
-    # Warmup: max of EMA(13), ATR(14), ADX(14), volume(24)
-    start_idx = max(13, 14, 24)
+    # Warmup: max of EMA(50), volume(48)
+    start_idx = max(50, 48)
     
     for i in range(start_idx, n):
         close_val = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_13_1d_aligned[i]
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
-        atr_1d_val = atr_1d_aligned[i]
-        adx_val = adx_1d_aligned[i]
-        atr_6h_val = atr_6h[i]
+        ema_val = ema_50_1w_aligned[i]
+        r1_val = camarilla_r1_aligned[i]
+        s1_val = camarilla_s1_aligned[i]
         
         # Skip if any data not ready
-        if (np.isnan(ema_val) or np.isnan(bull_val) or np.isnan(bear_val) or 
-            np.isnan(atr_1d_val) or np.isnan(adx_val) or np.isnan(avg_vol) or 
-            np.isnan(atr_6h_val)):
+        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r1_val) or 
+            np.isnan(s1_val)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirmed = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 2.0x average volume
+        volume_confirmed = vol > 2.0 * avg_vol
         
-        # Regime detection
-        trending = adx_val > 25
-        ranging = adx_val < 20
+        # Trend filter: price vs weekly EMA50
+        uptrend = close_val > ema_val
+        downtrend = close_val < ema_val
         
-        # Initialize signal as hold
-        signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
+        # Long: price CLOSES above R1 with weekly uptrend and volume
+        long_condition = (close_val > r1_val) and uptrend and volume_confirmed
+        # Short: price CLOSES below S1 with weekly downtrend and volume
+        short_condition = (close_val < s1_val) and downtrend and volume_confirmed
         
-        if trending and volume_confirmed:
-            # Trend regime: follow Elder Ray momentum
-            # Long when Bull Power > 0 and rising (bullish momentum)
-            # Short when Bear Power > 0 and rising (bearish momentum)
-            if i > start_idx:
-                bull_prev = bull_power_aligned[i-1]
-                bear_prev = bear_power_aligned[i-1]
-                bull_rising = bull_val > bull_prev
-                bear_rising = bear_val > bear_prev
-                
-                long_condition = (bull_val > 0) and bull_rising
-                short_condition = (bear_val > 0) and bear_rising
-                
-                if long_condition and position != 1:
-                    signals[i] = base_size
-                    position = 1
-                    entry_price = close_val
-                elif short_condition and position != -1:
-                    signals[i] = -base_size
-                    position = -1
-                    entry_price = close_val
-        elif ranging and volume_confirmed:
-            # Range regime: fade Elder Ray extremes
-            # Long when Bull Power is very negative (oversold)
-            # Short when Bear Power is very negative (overbought)
-            long_condition = bull_val < (-0.5 * atr_1d_val)
-            short_condition = bear_val < (-0.5 * atr_1d_val)
-            
-            if long_condition and position != 1:
-                signals[i] = base_size
-                position = 1
-                entry_price = close_val
-            elif short_condition and position != -1:
-                signals[i] = -base_size
-                position = -1
-                entry_price = close_val
+        # Exit: price retests broken level
+        long_exit = (position == 1 and close_val <= r1_val)
+        short_exit = (position == -1 and close_val >= s1_val)
         
-        # Stoploss: ATR-based (2.0 * ATR)
-        if position == 1 and close_val < entry_price - 2.0 * atr_6h_val:
+        if long_condition and position != 1:
+            signals[i] = base_size
+            position = 1
+            entry_price = close_val
+        elif short_condition and position != -1:
+            signals[i] = -base_size
+            position = -1
+            entry_price = close_val
+        elif long_exit:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close_val > entry_price + 2.0 * atr_6h_val:
+        elif short_exit:
             signals[i] = 0.0
             position = 0
+        else:
+            # Hold position
+            signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1dRegime_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_WeeklyTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
