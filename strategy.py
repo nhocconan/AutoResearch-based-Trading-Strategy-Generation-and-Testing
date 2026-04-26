@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1
-Hypothesis: On 4h timeframe, use Camarilla R1/S1 from 1d pivot points for breakout entries with 1d trend filter (close > 1d EMA34) and volume confirmation (>2.0x 20-period average). Add choppiness regime filter (CHOP > 61.8 = range, only mean-revert at extremes) to avoid whipsaws in bear markets. Target: 19-50 trades/year. Uses R1/S1 levels (proven edge) with volume/trend confirmation to reduce false breakouts while maintaining edge in both bull and bear regimes.
+12h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1
+Hypothesis: On 12h timeframe, use Camarilla R1/S1 from 1d pivot points for breakout entries with 1d trend filter (close > 1d EMA34) and volume confirmation (>2.0x 20-period average). Add choppiness regime filter (CHOP > 61.8 = range, only mean-revert at extremes) to avoid whipsaws in bear markets. Target: 12-37 trades/year. Uses R1/S1 levels (proven edge) with volume/trend confirmation to reduce false breakouts while maintaining edge in both bull and bear regimes.
 """
 
 import numpy as np
@@ -47,7 +47,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels and EMA to 4h timeframe
+    # Align Camarilla levels and EMA to 12h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
@@ -141,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
