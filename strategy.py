@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Regime
-Hypothesis: Trade 12h Camarilla R3/S3 breakouts with 1d EMA34 trend filter, volume confirmation, and chop regime filter.
-Targets 75-175 total trades over 4 years (19-44/year) on 12h timeframe.
-Uses Camarilla R3/S3 levels (wider than R1/S1) for fewer but higher-quality breakouts.
+4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_ATRStop_v2
+Hypothesis: Trade 4h Camarilla R3/S3 breakouts with 1d EMA34 trend filter and ATR-based trailing stop.
+Volume confirmation removed to reduce trade frequency and focus on price-action/structure.
+Targets 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+Uses wider R3/S3 levels for fewer but higher-quality breakouts.
 1d EMA34 ensures trading with dominant long-term trend.
-Volume confirmation adds conviction to breakouts.
-Choppiness regime filter (CHOP < 38.2) ensures trending market where breakouts work.
-Designed for BTC/ETH with SOL as secondary - works in bull (breakouts with trend) and bear (mean reversion at extremes with trend filter).
+ATR trailing stop manages risk and captures trends.
+Works in bull (breakouts with trend) and bear (mean reversion at extremes with trend filter).
 """
 
 import numpy as np
@@ -22,7 +22,6 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Get 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -55,19 +54,9 @@ def generate_signals(prices):
     r3 = pivot + (range_hl * 1.1 / 4.0)
     s3 = pivot - (range_hl * 1.1 / 4.0)
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume confirmation: current volume > 1.8 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma)
-    
-    # Choppiness regime filter: CHOP(14) < 38.2 = trending market (good for breakouts)
-    hl_range = pd.Series(high - low).rolling(window=14, min_periods=14).sum()
-    true_range = pd.Series(tr1).rolling(window=14, min_periods=14).sum()
-    chop = 100 * np.log10(hl_range / true_range) / np.log10(14)
-    chop_regime = chop < 38.2  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,17 +64,15 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup: max of 1d EMA(34), volume MA(20), ATR(14), CHOP(14)
-    start_idx = max(34, 20, 14, 14) + 1
+    # Warmup: max of 1d EMA(34), ATR(14)
+    start_idx = max(34, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr[i]) or
-            np.isnan(vol_ma[i]) or
             np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(chop[i])):
+            np.isnan(s3_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -96,17 +83,15 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        vol_conf = volume_confirm[i]
         trend_1d_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
         trend_1d_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
-        regime_ok = chop_regime[i]  # trending market regime
         
         if position == 0:
-            # Long: price breaks above R3 AND volume confirm AND 1d trend up AND trending regime
-            long_signal = (close_val > r3_aligned[i]) and vol_conf and trend_1d_up and regime_ok
+            # Long: price breaks above R3 AND 1d trend up
+            long_signal = (close_val > r3_aligned[i]) and trend_1d_up
             
-            # Short: price breaks below S3 AND volume confirm AND 1d trend down AND trending regime
-            short_signal = (close_val < s3_aligned[i]) and vol_conf and trend_1d_down and regime_ok
+            # Short: price breaks below S3 AND 1d trend down
+            short_signal = (close_val < s3_aligned[i]) and trend_1d_down
             
             if long_signal:
                 signals[i] = 0.25
@@ -128,8 +113,8 @@ def generate_signals(prices):
             if close_val < highest_since_entry - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Alternative exit: trend flips down or regime changes to ranging
-            elif not trend_1d_up or not regime_ok:
+            # Alternative exit: trend flips down
+            elif not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
@@ -140,13 +125,13 @@ def generate_signals(prices):
             if close_val > lowest_since_entry + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Alternative exit: trend flips up or regime changes to ranging
-            elif not trend_1d_down or not regime_ok:
+            # Alternative exit: trend flips up
+            elif not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Regime"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
