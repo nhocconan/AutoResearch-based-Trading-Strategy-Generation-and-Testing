@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kumo_Twist_1dTrend_ADXFilter_v1
-Hypothesis: Ichimoku TK cross + Kumo twist (Senkou Span A/B cross) on 6h with 1d ADX>25 trend filter and volume confirmation. Kumo twist indicates momentum shift; TK cross provides entry timing. ADX filter ensures trending markets only. Designed for BTC/ETH with ~25-40 trades/year to avoid fee drag. Works in bull/bear by only trading with strong trend (ADX>25).
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA50 trend filter and volume spike (>2.0x median). Targets key intraday pivot levels with strong volume confirmation in trending markets. Designed for BTC/ETH with strict entry conditions (~15-30 trades/year) to avoid overtrading. Works in bull/bear by only trading with 1d trend direction.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,146 +18,121 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter (ADX)
+    # Get 1d data for HTF trend (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14)
-    plus_dm = np.where((df_1d['high'].values - np.roll(df_1d['high'].values, 1)) > 
-                       (np.roll(df_1d['low'].values, 1) - df_1d['low'].values),
-                       np.maximum(df_1d['high'].values - np.roll(df_1d['high'].values, 1), 0), 0)
-    minus_dm = np.where((np.roll(df_1d['low'].values, 1) - df_1d['low'].values) > 
-                        (df_1d['high'].values - np.roll(df_1d['high'].values, 1)),
-                        np.maximum(np.roll(df_1d['low'].values, 1) - df_1d['low'].values, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    tr = np.maximum(df_1d['high'].values - df_1d['low'].values,
-                    np.maximum(np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1)),
-                               np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))))
-    tr[0] = df_1d['high'].values[0] - df_1d['low'].values[0]
-    
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Get 6h data for Ichimoku
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 52:
+    # Get 12h data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Ichimoku components (9, 26, 52 periods)
-    high_9 = pd.Series(df_6h['high'].values).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(df_6h['low'].values).rolling(window=9, min_periods=9).min().values
-    high_26 = pd.Series(df_6h['high'].values).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(df_6h['low'].values).rolling(window=26, min_periods=26).min().values
-    high_52 = pd.Series(df_6h['high'].values).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(df_6h['low'].values).rolling(window=52, min_periods=52).min().values
+    # Calculate Camarilla levels from previous 12h bar (HLC of prior 12h)
+    cam_high = pd.Series(df_12h['high'].values).shift(1).values
+    cam_low = pd.Series(df_12h['low'].values).shift(1).values
+    cam_close = pd.Series(df_12h['close'].values).shift(1).values
     
-    tenkan_sen = (high_9 + low_9) / 2  # Conversion Line
-    kijun_sen = (high_26 + low_26) / 2  # Base Line
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)  # Leading Span A
-    senkou_span_b = ((high_52 + low_52) / 2)  # Leading Span B
-    chikou_span = df_6h['close'].values  # Lagging Span (not used for signals)
+    # Camarilla R1, S1 levels (key intraday support/resistance)
+    R1 = cam_close + (cam_high - cam_low) * 1.1 / 12
+    S1 = cam_close - (cam_high - cam_low) * 1.1 / 12
     
-    # Align HTF indicators to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b)
+    # Volume spike filter: volume > 2.0x median volume (30-period) for high conviction
+    vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median().values
     
-    # Volume spike filter: volume > 1.8x median (20-period)
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    # ATR(14) for volatility-based stops
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF indicators to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Warmup: max of ADX(14) 1d, Ichimoku (52), volume median (20)
-    start_idx = max(30, 52, 20) + 1
+    # Warmup: max of EMA(50) 1d, Camarilla (need 2 bars for shift), volume median (30), ATR (14)
+    start_idx = max(50, 2, 30, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(tenkan_sen_aligned[i]) or
-            np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or
-            np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(vol_median[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
+            np.isnan(vol_median[i]) or
+            np.isnan(atr[i])):
+            # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        adx_val = adx_1d_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
         close_val = close[i]
-        tenkan_val = tenkan_sen_aligned[i]
-        kijun_val = kijun_sen_aligned[i]
-        senkou_a_val = senkou_span_a_aligned[i]
-        senkou_b_val = senkou_span_b_aligned[i]
+        high_val = high[i]
+        low_val = low[i]
         volume_val = volume[i]
         vol_median_val = vol_median[i]
+        atr_val = atr[i]
+        r1_val = R1_aligned[i]
+        s1_val = S1_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_val > 25
+        # Trend filter: price > EMA50 (uptrend) or < EMA50 (downtrend)
+        uptrend = close_val > ema_50_1d_val
+        downtrend = close_val < ema_50_1d_val
         
-        # Volume confirmation: only trade in above-average volume
-        volume_ok = volume_val > 1.8 * vol_median_val
-        
-        # Kumo twist: Senkou Span A crosses above/below Senkou Span B
-        # We need previous bar values to detect cross
-        if i > start_idx:
-            prev_senkou_a = senkou_span_a_aligned[i-1]
-            prev_senkou_b = senkou_span_b_aligned[i-1]
-            kumo_twist_up = (senkou_a_val > senkou_b_val) and (prev_senkou_a <= prev_senkou_b)
-            kumo_twist_down = (senkou_a_val < senkou_b_val) and (prev_senkou_a >= prev_senkou_b)
-        else:
-            kumo_twist_up = False
-            kumo_twist_down = False
-        
-        # TK cross: Tenkan crosses Kijun
-        if i > start_idx:
-            prev_tenkan = tenkan_sen_aligned[i-1]
-            prev_kijun = kijun_sen_aligned[i-1]
-            tk_cross_up = (tenkan_val > kijun_val) and (prev_tenkan <= prev_kijun)
-            tk_cross_down = (tenkan_val < kijun_val) and (prev_tenkan >= prev_kijun)
-        else:
-            tk_cross_up = False
-            tk_cross_down = False
+        # Volume spike filter: only trade in high-volume environments
+        volume_spike = volume_val > 2.0 * vol_median_val
         
         if position == 0:
-            # Long: Kumo twist up + TK cross up + strong trend + volume
-            long_signal = kumo_twist_up and tk_cross_up and strong_trend and volume_ok
+            # Long: break above R1 with volume spike, and uptrend
+            long_signal = (close_val > r1_val) and \
+                          volume_spike and \
+                          uptrend
             
-            # Short: Kumo twist down + TK cross down + strong trend + volume
-            short_signal = kumo_twist_down and tk_cross_down and strong_trend and volume_ok
+            # Short: break below S1 with volume spike, and downtrend
+            short_signal = (close_val < s1_val) and \
+                           volume_spike and \
+                           downtrend
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
+                entry_price = close_val
+                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
+                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: TK cross down OR Kumo twist down OR ADX falls below 20
-            if tk_cross_down or kumo_twist_down or adx_val < 20:
+            highest_since_entry = max(highest_since_entry, high_val)
+            # ATR trailing stop (wider stop to reduce whipsaw)
+            if close_val < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: TK cross up OR Kumo twist up OR ADX falls below 20
-            if tk_cross_up or kumo_twist_up or adx_val < 20:
+            lowest_since_entry = min(lowest_since_entry, low_val)
+            # ATR trailing stop (wider stop to reduce whipsaw)
+            if close_val > lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Twist_1dTrend_ADXFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
