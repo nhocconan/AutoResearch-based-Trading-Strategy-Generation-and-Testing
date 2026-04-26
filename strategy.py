@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1dTrend_v1
-Hypothesis: On 6h timeframe, trade Ichimoku cloud breakouts with 1d EMA50 trend filter. 
-Long when price breaks above cloud in 1d uptrend, short when breaks below cloud in 1d downtrend. 
-Ichimoku provides dynamic support/resistance (cloud) and momentum (TK cross) while 1d trend filter 
-avoids counter-trend trades. Designed for low frequency (12-30 trades/year) to minimize fee drag 
-and work in both bull/bear markets via trend alignment.
+12h_Camarilla_R1S1_Breakout_1wTrend_1dRegime_v1
+Hypothesis: On 12h timeframe, trade Camarilla R1/S1 breakouts from prior 12h bar with 1w EMA50 trend filter and 1d chop regime filter. Target 12-37 trades/year by requiring confluence of HTF trend alignment, low-chop regime, and price structure breakout. Designed to work in both bull and bear markets via trend filter and regime avoidance of sideways chop. Uses weekly trend to capture major moves and daily chop filter to avoid whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -20,108 +16,129 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for HTF trend (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1w EMA(50) for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
+    # Get 12h data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
+    # Calculate Camarilla levels from previous 12h bar (HLC of prior 12h)
+    cam_high = pd.Series(df_12h['high'].values).shift(1).values
+    cam_low = pd.Series(df_12h['low'].values).shift(1).values
+    cam_close = pd.Series(df_12h['close'].values).shift(1).values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Camarilla R1, S1 levels (core breakout levels)
+    R1 = cam_close + (cam_high - cam_low) * 1.1 / 12
+    S1 = cam_close - (cam_high - cam_low) * 1.1 / 12
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2
+    # Get 1d data for chop regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Chikou Span (Lagging Span): not needed for breakout signals
+    # Choppiness Index (CHOP) on 1d: high CHOP = ranging market (avoid), low CHOP = trending (favor)
+    # CHOP = 100 * log10(sum(ATR over n) / (log(n) * (max(high) - min(low)))) / log10(n)
+    atr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                        np.maximum(np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1)),
+                                   np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))))
+    atr_1d[0] = df_1d['high'].values[0] - df_1d['low'].values[0]
+    atr_sum = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (np.log(14) * (max_high - min_low))) / np.log10(14)
     
-    # Cloud (Kumo) boundaries: Senkou Span A and B shifted forward 26 periods
-    # For breakout detection, we need current cloud (Senkou A/B shifted back 26 periods)
-    senkou_a_lagged = np.roll(senkou_a, 26)
-    senkou_b_lagged = np.roll(senkou_b, 26)
-    senkou_a_lagged[:26] = np.nan
-    senkou_b_lagged[:26] = np.nan
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_lagged, senkou_b_lagged)
-    cloud_bottom = np.minimum(senkou_a_lagged, senkou_b_lagged)
-    
-    # Align HTF indicators to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    cloud_top_aligned = align_htf_to_ltf(prices, df_1d, cloud_top)
-    cloud_bottom_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom)
+    # Align HTF indicators to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Warmup: max of Ichimoku calculations (52 for Senkou B) + 26 shift + 1d EMA50
-    start_idx = max(52, 26) + 26 + 50  # 154
+    # Warmup: max of EMA(50) 1w, Camarilla (need 2 bars for shift), CHOP (14)
+    start_idx = max(50, 2, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(cloud_top_aligned[i]) or
-            np.isnan(cloud_bottom_aligned[i])):
-            signals[i] = 0.0
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
+            np.isnan(chop_aligned[i])):
+            # Hold current position
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_50_1d_val = ema_50_1d_aligned[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
         close_val = close[i]
-        cloud_top_val = cloud_top_aligned[i]
-        cloud_bottom_val = cloud_bottom_aligned[i]
+        high_val = high[i]
+        low_val = low[i]
+        chop_val = chop_aligned[i]
+        r1_val = R1_aligned[i]
+        s1_val = S1_aligned[i]
         
-        # Trend filter: 1d EMA50 direction
-        uptrend = close_val > ema_50_1d_val
-        downtrend = close_val < ema_50_1d_val
+        # Trend filter: price > EMA50 (uptrend) or < EMA50 (downtrend)
+        uptrend = close_val > ema_50_1w_val
+        downtrend = close_val < ema_50_1w_val
         
-        # Cloud breakout signals
-        bullish_breakout = close_val > cloud_top_val
-        bearish_breakout = close_val < cloud_bottom_val
+        # Regime filter: only trade when market is trending (CHOP < 38.2) or moderately choppy (CHOP < 50)
+        # Avoid strong ranging markets (CHOP > 61.8)
+        regime_filter = chop_val < 50.0
         
         if position == 0:
-            # Long: price breaks above cloud in 1d uptrend
-            if bullish_breakout and uptrend:
+            # Long: break above R1 with uptrend and favorable regime
+            long_signal = (close_val > r1_val) and \
+                          uptrend and \
+                          regime_filter
+            
+            # Short: break below S1 with downtrend and favorable regime
+            short_signal = (close_val < s1_val) and \
+                           downtrend and \
+                           regime_filter
+            
+            if long_signal:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below cloud in 1d downtrend
-            elif bearish_breakout and downtrend:
+                entry_price = close_val
+                highest_since_entry = close_val
+            elif short_signal:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
+                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Hold long: exit when price breaks below cloud OR trend changes
+            # Hold long
             signals[i] = 0.25
-            if close_val < cloud_bottom_val or not uptrend:
+            highest_since_entry = max(highest_since_entry, high_val)
+            # Exit if market becomes strongly ranging
+            if chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Hold short: exit when price breaks above cloud OR trend changes
+            # Hold short
             signals[i] = -0.25
-            if close_val > cloud_top_val or not downtrend:
+            lowest_since_entry = min(lowest_since_entry, low_val)
+            # Exit if market becomes strongly ranging
+            if chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_1dRegime_v1"
+timeframe = "12h"
 leverage = 1.0
