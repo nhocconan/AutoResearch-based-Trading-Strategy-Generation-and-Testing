@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ATRStop
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts from the prior 1d session, with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg), capture institutional breakouts in both bull and bear markets. ATR-based stoploss (2.5x ATR) manages risk. Targets 12-30 trades/year to minimize fee drag while maintaining edge via trend filter and volatility-based exit. Uses 12h as primary timeframe for lower turnover and better test generalization.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2
+Hypothesis: Tighten entry by requiring volume spike >2.5x (not 2.0x) and ATR stoploss reduced to 2.0x to avoid whipsaws. Uses 1d EMA34 for trend filter and Camarilla R1/S1 from prior 1d bar. Targets 15-30 trades/year to reduce fee drag while maintaining edge in bull/bear markets via trend filter and volatility-based exit.
 """
 
 import numpy as np
@@ -18,18 +18,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend and Camarilla levels (more stable than lower timeframes)
+    # Get 1d data for HTF trend (more stable than lower timeframes)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
     # Calculate EMA34 on 1d for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Get 1d data for Camarilla levels (more stable than lower timeframes)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels from previous 1d bar (R1, S1)
     prev_close = np.concatenate([[np.nan], close_1d[:-1]])
@@ -40,7 +43,7 @@ def generate_signals(prices):
     r1 = prev_close + 1.1 * camarilla_range * 1.0 / 4  # R1 level
     s1 = prev_close - 1.1 * camarilla_range * 1.0 / 4  # S1 level
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -90,8 +93,8 @@ def generate_signals(prices):
         low_val = low[i]
         atr_val = atr[i]
         
-        # Volume spike condition: current volume > 2.0x 20-period average
-        volume_spike = vol_val > 2.0 * vol_ma_val
+        # Volume spike condition: current volume > 2.5x 20-period average (tighter)
+        volume_spike = vol_val > 2.5 * vol_ma_val
         
         if position == 0:
             # Long: price breaks above R1 with uptrend (close > EMA34) and volume spike
@@ -118,8 +121,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # 2. ATR-based stoploss: price drops below entry - 2.5 * ATR
-            elif close_val < entry_price - 2.5 * atr_val:
+            # 2. ATR-based stoploss: price drops below entry - 2.0 * ATR (tighter stop)
+            elif close_val < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -132,14 +135,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # 2. ATR-based stoploss: price rises above entry + 2.5 * ATR
-            elif close_val > entry_price + 2.5 * atr_val:
+            # 2. ATR-based stoploss: price rises above entry + 2.0 * ATR (tighter stop)
+            elif close_val > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ATRStop"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
