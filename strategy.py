@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Donchian20_Breakout_VolumeSpike
-Hypothesis: Trade 6h Donchian(20) breakouts only when aligned with weekly pivot direction (price above/below weekly pivot) and volume spike (>90th percentile). Weekly pivot provides institutional reference; Donchian breakout captures momentum; volume spike confirms participation. Only trade in direction of weekly bias to avoid counter-trend whipsaws. Target: 15-25 trades/year per symbol. Uses discrete size 0.25 to limit fees.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: On 12h timeframe, trade Camarilla R3/S3 breakouts with volume spike (top 20%) and 1d EMA34 trend filter. Only trade breakouts aligned with daily trend to avoid counter-trend whipsaws. Uses tighter R3/S3 levels for stronger breakouts. Volume spike ensures institutional participation. Fixed size 0.25 to limit trades. Target: 12-37 trades/year.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,61 +18,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for pivot and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for HTF filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly OHLC for pivot calculation (using prior completed weekly bar)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Previous 1d bar's OHLC for Camarilla levels (R3/S3 = stronger breakout levels)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Weekly pivot point: (H + L + C) / 3
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Calculate Camarilla levels: R3, S3 (stronger breakout levels)
+    rng = high_1d - low_1d
+    camarilla_r3 = close_1d_vals + (rng * 1.1 / 4)   # R3 level
+    camarilla_s3 = close_1d_vals - (rng * 1.1 / 4)   # S3 level
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Donchian(20) on 6h for breakout
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # 1d EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d_vals)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike: volume > 90th percentile of 100-period lookback
+    # Volume spike: volume > 80th percentile of 50-period lookback (high volume days only)
     vol_series = pd.Series(volume)
-    vol_percentile_90 = vol_series.rolling(window=100, min_periods=100).quantile(0.90).values
-    volume_spike = volume > vol_percentile_90
+    vol_percentile_80 = vol_series.rolling(window=50, min_periods=50).quantile(0.80).values
+    volume_spike = volume > vol_percentile_80
     
-    # Fixed position size to control trade frequency (discrete level)
+    # Fixed position size to control trade frequency
     fixed_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of calculations (100 for volume percentile, 20 for Donchian)
-    start_idx = 100
+    # Warmup: max of calculations (50 for EMA and volume percentile)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_percentile_90[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_percentile_80[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        pivot_val = weekly_pivot_aligned[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
+        camarilla_r3_val = camarilla_r3_aligned[i]
+        camarilla_s3_val = camarilla_s3_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         size = fixed_size
         
-        # Entry conditions: Donchian breakout with volume spike AND aligned with weekly pivot
-        long_entry = (close_val > donch_high) and vol_spike and (close_val > pivot_val)
-        short_entry = (close_val < donch_low) and vol_spike and (close_val < pivot_val)
+        # Entry conditions: breakout of Camarilla R3/S3 with volume spike AND aligned with 1d EMA34 trend
+        long_entry = (close_val > camarilla_r3_val) and vol_spike and (close_val > ema_34_val)
+        short_entry = (close_val < camarilla_s3_val) and vol_spike and (close_val < ema_34_val)
         
         if position == 0:
             # Flat - look for entry
@@ -85,15 +87,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit when price retreats below weekly pivot (trend change)
-            if close_val < pivot_val:
+            # Long - exit on mean reversion to midpoint (Camarilla center)
+            mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
+            if close_val < mid_point:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price rises above weekly pivot (trend change)
-            if close_val > pivot_val:
+            # Short - exit on mean reversion to midpoint (Camarilla center)
+            mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
+            if close_val > mid_point:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Donchian20_Breakout_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
