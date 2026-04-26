@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeChop_v1
-Hypothesis: On 12h timeframe, trade breakouts above/below daily Camarilla R1/S1 only when aligned with 1d EMA50 trend, confirmed by volume spike (>2.0x 20-bar average), and filtered by choppiness regime (CHOP > 50 = range means we mean-revert at extremes, CHOP < 50 = trend means we follow breakouts). Uses ATR(14) stoploss at 2.0x ATR. Discrete sizing at 0.25 to limit fee drag. Target: 12-30 trades/year on BTC/ETH/SOL.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: On 4h timeframe, trade breakouts above/below daily Camarilla R1/S1 only when aligned with 1d EMA50 trend and confirmed by volume spike (>2.0x 20-bar average). Uses ATR(14) stoploss at 2.0x ATR. Discrete sizing at 0.25 to limit fee drag. Target: 20-50 trades/year on BTC/ETH/SOL for robust performance in bull/bear/range regimes.
 """
 
 import numpy as np
@@ -46,41 +46,27 @@ def generate_signals(prices):
     # Calculate 1d EMA50 for trend filter (more stable than EMA34)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align all HTF indicators to 12h timeframe
+    # Align all HTF indicators to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # ATR for stoploss calculation (12h ATR)
+    # ATR for stoploss calculation (4h ATR)
     atr_period = 14
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]  # first bar
     atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
-    # Volume spike: current volume > 2.0 * 20-period average (stricter for fewer trades)
+    # Volume spike: current volume > 2.0 * 20-period average (strict to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
-    
-    # Choppiness Index regime filter (14-period)
-    # CHOP > 50 = ranging market (favor mean reversion at extremes)
-    # CHOP < 50 = trending market (favor breakouts)
-    chop_period = 14
-    true_range = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    true_range[0] = high[0] - low[0]
-    atr_chop = pd.Series(true_range).rolling(window=chop_period, min_periods=chop_period).sum().values
-    highest_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
-    lowest_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
-    # Avoid division by zero
-    range_chop = highest_high - lowest_low
-    range_chop = np.where(range_chop == 0, 1e-10, range_chop)
-    chop = 100 * np.log10(atr_chop / np.log10(chop_period) / range_chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of pivot calc (1), EMA50 (50), ATR (14), volume MA (20), CHOP (14)
-    start_idx = max(1, 50, 14, 20, 14) + 1
+    # Warmup: max of pivot calc (1), EMA50 (50), ATR (14), volume MA (20)
+    start_idx = max(1, 50, 14, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -88,8 +74,7 @@ def generate_signals(prices):
             np.isnan(s1_aligned[i]) or
             np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(atr[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(chop[i])):
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -105,26 +90,13 @@ def generate_signals(prices):
         close_val = close[i]
         atr_val = atr[i]
         vol_spike = volume_spike[i]
-        chop_val = chop[i]
         
         if position == 0:
-            # Determine regime: CHOP < 50 = trending (follow breakouts), CHOP >= 50 = ranging (mean revert at extremes)
-            is_trending = chop_val < 50
+            # Long: price breaks above R1, above 1d EMA50, with volume spike
+            long_signal = (close_val > r1_val) and (close_val > ema_50_val) and vol_spike
             
-            if is_trending:
-                # Trending regime: follow breakouts
-                # Long: price breaks above R1, above 1d EMA50, with volume spike
-                long_signal = (close_val > r1_val) and (close_val > ema_50_val) and vol_spike
-                
-                # Short: price breaks below S1, below 1d EMA50, with volume spike
-                short_signal = (close_val < s1_val) and (close_val < ema_50_val) and vol_spike
-            else:
-                # Ranging regime: mean reversion at extremes
-                # Long: price breaks below S1 (oversold) and reverts, with volume spike
-                long_signal = (close_val < s1_val) and vol_spike
-                
-                # Short: price breaks above R1 (overbought) and reverts, with volume spike
-                short_signal = (close_val > r1_val) and vol_spike
+            # Short: price breaks below S1, below 1d EMA50, with volume spike
+            short_signal = (close_val < s1_val) and (close_val < ema_50_val) and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -139,34 +111,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit conditions
-            if is_trending:
-                # In trending regime: exit on break below S1 OR ATR stop
-                exit_signal = (close_val < s1_val) or (close_val < entry_price - 2.0 * atr_val)
-            else:
-                # In ranging regime: exit on reversion to pivot OR ATR stop
-                exit_signal = (close_val >= pivot) or (close_val < entry_price - 2.0 * atr_val)
-            
-            if exit_signal:
+            # Exit: price breaks below S1 OR ATR stoploss (2.0*ATR below entry)
+            if (close_val < s1_val) or (close_val < entry_price - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit conditions
-            if is_trending:
-                # In trending regime: exit on break above R1 OR ATR stop
-                exit_signal = (close_val > r1_val) or (close_val > entry_price + 2.0 * atr_val)
-            else:
-                # In ranging regime: exit on reversion to pivot OR ATR stop
-                exit_signal = (close_val <= pivot) or (close_val > entry_price + 2.0 * atr_val)
-            
-            if exit_signal:
+            # Exit: price breaks above R1 OR ATR stoploss (2.0*ATR above entry)
+            if (close_val > r1_val) or (close_val > entry_price + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeChop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
