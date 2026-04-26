@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_TrendFilter_v2
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-Enters long when price breaks above R1 with bullish 1d trend and volume spike.
-Enters short when price breaks below S1 with bearish 1d trend and volume spike.
-Exits when price reverses to opposite Camarilla level or trend changes.
-Fixed: Corrected trend filter logic (long when close > EMA, short when close < EMA).
-Position sizing fixed at 0.25 to minimize fee churn. Target: 12-37 trades/year on 12h.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Enters long when price breaks above R1 with bullish 1d trend (close > EMA34) and volume spike (>2x 20-bar MA).
+Enters short when price breaks below S1 with bearish 1d trend (close < EMA34) and volume spike.
+Exits when price reverses to opposite Camarilla level or 1d trend changes.
+Position size 0.25 balances profit potential and fee drag. Target: 20-50 trades/year on 4h.
 Works in bull/bear by aligning with 1d trend to avoid counter-trend trades.
 """
 
@@ -50,7 +49,7 @@ def generate_signals(prices):
     r1 = pivot + (range_1d * 1.0 / 12.0)  # R1 level
     s1 = pivot - (range_1d * 1.0 / 12.0)  # S1 level
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -78,12 +77,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with 1d bullish trend (close > EMA) and volume spike
+            # Long: price breaks above R1 with 1d bullish trend and volume spike
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema_34_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with 1d bearish trend (close < EMA) and volume spike
+            # Short: price breaks below S1 with 1d bearish trend and volume spike
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_34_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
@@ -93,20 +92,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price closes below S1 OR 1d trend turns bearish (close < EMA)
+            # Exit: price closes below S1 OR 1d trend turns bearish
             if (close[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price closes above R1 OR 1d trend turns bullish (close > EMA)
+            # Exit: price closes above R1 OR 1d trend turns bullish
             if (close[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_TrendFilter_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
