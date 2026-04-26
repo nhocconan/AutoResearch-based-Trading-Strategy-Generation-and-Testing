@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1d EMA34 trend filter and volume spike (>2.5x average volume).
-Uses discrete position sizing (0.30) to balance return and risk. Target: 50-120 trades over 4 years (12-30/year) on 12h timeframe.
-Designed to work in both bull and bear markets: breaks above R3 with 1d uptrend and volume = long; breaks below S3 with 1d downtrend and volume = short.
-Volume threshold increased to 2.5x to reduce trade frequency and avoid fee drag. Uses 1d trend filter for BTC/ETH edge.
+4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_NoChop
+Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter and volume spike (>2x average volume), 
+without chop filter to reduce over-filtering and increase trade quality. R3/S3 are stronger levels 
+than R1/S1, leading to fewer but higher-quality trades. In bull markets: price breaks above R3 with 
+1d uptrend and high volume → long. In bear markets: price breaks below S3 with 1d downtrend and 
+high volume → short. Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-100 
+trades over 4 years (12-25/year) on 4h timeframe. Requires BTC/ETH edge via 1d trend and volume 
+filters; avoids SOL-only bias by requiring trend alignment.
 """
 
 import numpy as np
@@ -35,13 +38,13 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.30
+    base_size = 0.25
     
     # Start after warmup (need 20 for Camarilla calculation, 34 for EMA)
     start_idx = max(20, 34)
     
     for i in range(start_idx, n):
-        # Need previous period's OHLC for Camarilla levels
+        # Need previous day's OHLC for Camarilla levels
         if i < 1:
             # Hold current position
             if position == 0:
@@ -89,8 +92,8 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2.5x average volume (stricter for fewer trades)
-        volume_confirmed = vol > 2.5 * avg_vol
+        # Volume confirmation: current volume > 2.0x average volume (stricter for fewer trades)
+        volume_confirmed = vol > 2.0 * avg_vol
         
         # Long logic: price breaks above R3 with 1d uptrend and volume confirmation
         long_condition = (close_val > r3) and (close_val > ema_val) and volume_confirmed
@@ -124,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_NoChop"
+timeframe = "4h"
 leverage = 1.0
