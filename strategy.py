@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Regime_DonchianBreakout
-Hypothesis: KAMA adapts to market noise, providing a robust trend filter. Combine with Donchian(20) breakouts for entry timing and 1d chop regime filter to avoid whipsaws. Works in bull/bear via KAMA's adaptive nature and regime filter. Target 12-25 trades/year on 12h timeframe with discrete sizing 0.25 to minimize fee drag.
+4h_TRIX_VolumeSpike_ChopRegime
+Hypothesis: TRIX (triple-smoothed EMA) momentum with volume spike confirmation and choppiness regime filter. 
+Long when TRIX crosses above zero with volume spike in choppy/range market (CHOP > 61.8). 
+Short when TRIX crosses below zero with volume spike in choppy/range market. 
+Uses 12h EMA50 as trend filter to avoid counter-trend trades. 
+Discrete sizing 0.25 to limit trades (~20-40/year). Works in bull/bear via 12h trend filter and chop regime.
 """
 
 import numpy as np
@@ -16,67 +20,49 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for chop regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop for HTF trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d True Range and ATR for chop regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    close_12h_series = pd.Series(close_12h)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 1d ADX for trend strength (optional filter)
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / tr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / tr_14
-    dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx_1d = pd.Series(dx_14).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 1d Chop regime: high ADX = trending, low ADX = ranging
-    chop_threshold = 25  # ADX > 25 = trending
-    
-    # Calculate KAMA on primary timeframe (12h)
+    # TRIX: triple EMA of close, then ROC
     close_series = pd.Series(close)
-    # Efficiency Ratio
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, axis=0)), axis=0) if False else np.sum(np.abs(np.diff(close)), axis=0)
-    # Correct volatility calculation: sum of absolute changes over 10 periods
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, len(close)):
-        if not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3.pct_change(periods=1))
+    trix_values = trix.values
     
-    # Calculate Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full_like(close, np.nan)
-    lowest_low = np.full_like(close, np.nan)
-    for i in range(lookback, len(close)):
-        highest_high[i] = np.max(high[i-lookback:i])
-        lowest_low[i] = np.min(low[i-lookback:i])
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (highest(high,n) - lowest(low,n))))
+    # Simplified: CHOP > 61.8 = range, CHOP < 38.2 = trend
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    # Sum of ATR over 14 periods
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Choppiness Index
+    chop = 100 * np.log10(atr_sum / (np.log10(14) * (highest_high - lowest_low)))
+    # Handle division by zero or invalid values
+    chop = np.where((highest_high - lowest_low) > 0, chop, 50.0)
+    
+    # Volume spike: volume > 2.0 * average volume over 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     # Fixed position size to control trade frequency
     fixed_size = 0.25
@@ -85,34 +71,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need 30 for KAMA, 20 for Donchian, 50 for 1d indicators
-    start_idx = 50
+    # Warmup: need 50 for 12h EMA, 15*3 for TRIX, 14 for ATR/CHOP, 20 for volume MA
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(trix_values[i]) or
+            np.isnan(chop[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        kama_val = kama[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
-        adx_val = adx_1d_aligned[i]
+        ema_50_val = ema_50_12h_aligned[i]
+        trix_val = trix_values[i]
+        trix_prev = trix_values[i-1]
+        chop_val = chop[i]
+        vol_spike = volume_spike[i]
         size = fixed_size
-        
-        # Regime filter: only trade when ADX > 25 (trending market)
-        is_trending = adx_val > chop_threshold
         
         if position == 0:
             # Flat - look for entry
-            # Long: price breaks above upper Donchian channel in trending market AND price > KAMA
-            long_entry = is_trending and close_val > upper_channel and close_val > kama_val
-            # Short: price breaks below lower Donchian channel in trending market AND price < KAMA
-            short_entry = is_trending and close_val < lower_channel and close_val < kama_val
+            # TRIX crossing zero with volume spike in choppy market
+            trix_cross_up = trix_prev <= 0 and trix_val > 0
+            trix_cross_down = trix_prev >= 0 and trix_val < 0
+            
+            # Only trade in choppy/range market (CHOP > 61.8)
+            in_chop = chop_val > 61.8
+            
+            # Long entry: TRIX crosses up + volume spike + chop + above 12h EMA50 (uptrend bias)
+            long_entry = trix_cross_up and vol_spike and in_chop and (close_val > ema_50_val)
+            # Short entry: TRIX crosses down + volume spike + chop + below 12h EMA50 (downtrend bias)
+            short_entry = trix_cross_down and vol_spike and in_chop and (close_val < ema_50_val)
             
             if long_entry:
                 signals[i] = size
@@ -125,18 +116,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on trend reversal or Donchian middle line
-            middle_channel = (upper_channel + lowest_low[i]) / 2  # approximate middle
-            if close_val < kama_val or close_val < middle_channel:
+            # Long - exit on TRIX cross down or trend change
+            if trix_val < 0 or close_val < ema_50_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on trend reversal or Donchian middle line
-            middle_channel = (highest_high[i] + lowest_low[i]) / 2
-            if close_val > kama_val or close_val > middle_channel:
+            # Short - exit on TRIX cross up or trend change
+            if trix_val > 0 or close_val > ema_50_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -145,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Regime_DonchianBreakout"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopRegime"
+timeframe = "4h"
 leverage = 1.0
