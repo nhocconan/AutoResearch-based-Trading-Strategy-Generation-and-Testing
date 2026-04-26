@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1d EMA34 trend filter, volume confirmation (>2x average volume), and choppiness regime filter (CHOP < 45 for stronger trending markets). Uses discrete position sizing (0.25) to minimize fee churn. Designed to work in both bull and bear markets via 1d trend alignment and regime filtering to avoid whipsaws in ranging markets. Target timeframe 12h aims for 50-150 total trades over 4 years to reduce fee drag and improve test generalization.
+4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter_V3
+Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter, volume confirmation (>2.2x average volume), and choppiness regime filter (CHOP < 40 for stronger trending markets). Uses discrete position sizing (0.25) to minimize fee churn. Tighter volume and regime filters reduce overtrading while maintaining edge in both bull and bear markets via 1d trend alignment.
 """
 
 import numpy as np
@@ -51,8 +51,8 @@ def generate_signals(prices):
     chop_ratio = chop_numerator / chop_denominator
     chop = 100 * np.log10(chop_ratio) / np.log10(14)
     # CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    # We want strongly trending markets: CHOP < 45 (stricter for fewer trades)
-    chop_filter = chop < 45
+    # We want strongly trending markets: CHOP < 40 (stricter for fewer trades)
+    chop_filter = chop < 40
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -114,10 +114,10 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume (stricter for fewer trades)
-        volume_confirmed = vol > 2.0 * avg_vol
+        # Volume confirmation: current volume > 2.2x average volume (tighter for fewer trades)
+        volume_confirmed = vol > 2.2 * avg_vol
         
-        # Regime filter: only trade in strongly trending markets (CHOP < 45)
+        # Regime filter: only trade in strongly trending markets (CHOP < 40)
         regime_ok = chop_val
         
         # Long logic: price breaks above R3 with 1d uptrend, volume confirmation, and trending regime
@@ -168,6 +168,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter_V3"
+timeframe = "4h"
 leverage = 1.0
