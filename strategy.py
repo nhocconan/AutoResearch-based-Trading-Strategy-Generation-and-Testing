@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v3
-Hypothesis: Refine the Camarilla R1/S1 breakout with stricter volume confirmation (3.0x average) and add ATR-based volatility filter to avoid low-momentum whipsaws. Use 1d trend (close > EMA34) for directional bias. Target 20-35 trades/year by tightening entry conditions. Works in bull (breakouts with trend) and bear (fades false breakouts via regime filter).
+6h_Ichimoku_Kumo_Twist_Breakout_1wTrend_VolumeFilter
+Hypothesis: Use Ichimoku cloud twist (Senkou Span A/B cross) from weekly timeframe as trend filter, with 6h price breaking above/below the cloud (Senkou Span A) for entries, confirmed by volume spike (>1.8x 20-period average). Weekly trend ensures alignment with major market direction, reducing whipsaws in bear markets. Weekly timeframe provides stable trend signal, while 6h captures medium-term momentum. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,65 +18,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need at least 34 periods for EMA34
+    # Get weekly data for Ichimoku calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w < 52):  # Need at least 52 periods for weekly Ichimoku (26*2)
         return np.zeros(n)
     
-    # Calculate 1d OHLC for Camarilla pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Ichimoku components on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels (based on previous 1d bar's range)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 over 9 periods
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high_1w).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low_1w).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_sen = (max_high_tenkan + min_low_tenkan) / 2
     
-    camarilla_r1 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 12
-    camarilla_s1 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 12
+    # Kijun-sen (Base Line): (highest high + lowest low)/2 over 26 periods
+    period_kijun = 26
+    max_high_kijun = pd.Series(high_1w).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low_1w).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_sen = (max_high_kijun + min_low_kijun) / 2
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Align Camarilla levels and EMA to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 over 52 periods shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_span_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
     
-    # Volume confirmation: volume > 3.0x 20-period average (stricter)
+    # Cloud twist: Senkou Span A crossing above/below Senkou Span B
+    # Twist up: Senkou Span A > Senkou Span B (bullish twist)
+    # Twist down: Senkou Span A < Senkou Sen B (bearish twist)
+    twist_up = senkou_span_a > senkou_span_b
+    twist_down = senkou_span_a < senkou_span_b
+    
+    # Align Ichimoku components to 6h timeframe
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
+    twist_up_aligned = align_htf_to_ltf(prices, df_1w, twist_up.astype(float))
+    twist_down_aligned = align_htf_to_ltf(prices, df_1w, twist_down.astype(float))
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     volume_series = pd.Series(volume)
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 3.0
-    
-    # ATR-based volatility filter: avoid low-volatility whipsaws
-    def calculate_atr(high, low, close, window=14):
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        atr = pd.Series(tr).ewm(alpha=1/window, adjust=False, min_periods=window).mean().values
-        return atr
-    
-    atr = calculate_atr(high, low, close, 14)
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    volatility_filter = atr > (0.5 * atr_ma)  # Only trade when volatility is above half its MA
+    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Camarilla (1d EMA34) + volume MA + ATR warmup
-    start_idx = max(34, 20, 14)  # 34 for EMA34
+    # Warmup: need Ichimoku calculation (52 periods) + volume MA warmup
+    start_idx = max(52, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(senkou_span_a_aligned[i]) or 
+            np.isnan(twist_up_aligned[i]) or np.isnan(twist_down_aligned[i]) or
+            np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -86,16 +85,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1d trend alignment
-        trend_1d_uptrend = close[i] > ema_34_1d_aligned[i]
-        trend_1d_downtrend = close[i] < ema_34_1d_aligned[i]
+        # Weekly trend filter from cloud twist
+        weekly_bullish = twist_up_aligned[i] > 0.5
+        weekly_bearish = twist_down_aligned[i] > 0.5
         
         if position == 0:
-            # Long: price breaks above R1 + 1d uptrend + volume spike + volatility filter
-            long_signal = (close[i] > camarilla_r1_aligned[i]) and trend_1d_uptrend and volume_spike[i] and volatility_filter[i]
+            # Long: price above Senkou Span A + weekly bullish twist + volume spike
+            long_signal = (close[i] > senkou_span_a_aligned[i]) and weekly_bullish and volume_spike[i]
             
-            # Short: price breaks below S1 + 1d downtrend + volume spike + volatility filter
-            short_signal = (close[i] < camarilla_s1_aligned[i]) and trend_1d_downtrend and volume_spike[i] and volatility_filter[i]
+            # Short: price below Senkou Span A + weekly bearish twist + volume spike
+            short_signal = (close[i] < senkou_span_a_aligned[i]) and weekly_bearish and volume_spike[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -108,20 +107,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price touches S1 OR 1d trend turns down
-            if (close[i] < camarilla_s1_aligned[i] or not trend_1d_uptrend):
+            # Exit: price touches Senkou Span A OR weekly trend turns bearish
+            if (close[i] < senkou_span_a_aligned[i] or not weekly_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price touches R1 OR 1d trend turns up
-            if (close[i] > camarilla_r1_aligned[i] or not trend_1d_downtrend):
+            # Exit: price touches Senkou Span A OR weekly trend turns bullish
+            if (close[i] > senkou_span_a_aligned[i] or not weekly_bearish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v3"
-timeframe = "4h"
+name = "6h_Ichimoku_Kumo_Twist_Breakout_1wTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
