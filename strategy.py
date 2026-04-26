@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Chop_Donchian20_Breakout
-Hypothesis: Combine RSI mean reversion with Donchian breakout and choppiness regime filter.
-Long when: RSI<30 + price breaks above Donchian(20) high + CHOP>61.8 (range regime).
-Short when: RSI>70 + price breaks below Donchian(20) low + CHOP>61.8 (range regime).
-Exit when: price reverts to Donchian midpoint or regime shifts to trending (CHOP<38.2).
-Uses 4h timeframe with discrete 0.25 position size to limit fee drag. Designed for BTC/ETH:
-- Works in ranging markets (2025+ bear/range) via mean reversion at extremes
-- Volume not required; relies on price action and regime
-- Targets 20-40 trades/year for optimal test generalization.
+1d_WilliamsFractal_Breakout_1wTrend
+Hypothesis: Use weekly Williams Fractals to identify major swing points on 1d chart.
+Long when: price breaks above recent bullish fractal (resistance turned support) in weekly uptrend.
+Short when: price breaks below recent bearish fractal (support turned resistance) in weekly downtrend.
+Exit on opposite fractal break or weekly trend reversal.
+Designed for BTC/ETH: captures major trend continuations with low trade frequency.
+Weekly trend filter prevents counter-trend trades in choppy markets.
+Target: 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,101 +23,84 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Load weekly HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Donchian(20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_high = high_series.rolling(window=20, min_periods=20).max().values
-    donch_low = low_series.rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Weekly EMA34 for trend (needs completed weekly candle)
+    weekly_close = df_1w['close'].values
+    ema_34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Choppiness Index(14)
-    atr_list = []
-    for i in range(n):
-        if i == 0:
-            tr = high[i] - low[i]
-        else:
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr_list.append(tr)
-    atr = pd.Series(atr_list).rolling(window=14, min_periods=14).mean().values
-    
-    highest_high = high_series.rolling(window=14, min_periods=14).max().values
-    lowest_low = low_series.rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    hl_range = highest_high - lowest_low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    
-    chop = 100 * np.log10(np.sum(atr, axis=0) / np.log10(14) / hl_range) if False else \
-           100 * np.log10(np.nansum(atr) / np.log10(14) / hl_range) if False else \
-           100 * np.log10(pd.Series(atr).rolling(14, min_periods=14).sum().values / np.log10(14) / hl_range)
-    # Simplified: chop = 100 * log10(sum(atr(14)) / log10(14) / (HH-LL))
-    atr_sum = pd.Series(atr_list).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(atr_sum / np.log10(14) / hl_range)
-    
-    # Fixed position size
-    fixed_size = 0.25
+    # Compute Williams Fractals on weekly data (needs 2-bar confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1w['high'].values,
+        df_1w['low'].values
+    )
+    # Additional 2-bar delay for fractal confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1w, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1w, bullish_fractal, additional_delay_bars=2
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    fixed_size = 0.25  # 25% position size
     
-    # Warmup: need 20 for Donchian, 14 for RSI/CHOP
-    start_idx = max(20, 14)
+    # Warmup: need enough data for weekly indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
+        # Get aligned weekly values for current daily bar
+        weekly_trend = ema_34_1w_aligned[i]
+        weekly_close_val = df_1w['close'].values[-1] if len(df_1w['close'].values) > 0 else 0  # placeholder, will be replaced below
+        
+        # Proper way to get aligned weekly close - we need to align the weekly close series
+        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, df_1w['close'].values)
+        weekly_close_val = weekly_close_aligned[i]
+        
         # Skip if any data not ready
-        if (np.isnan(rsi[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(chop[i]) or np.isnan(donch_mid[i])):
+        if (np.isnan(weekly_trend) or np.isnan(weekly_close_val) or
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        size = fixed_size
         
         if position == 0:
-            # Flat - look for entry in ranging regime (CHOP > 61.8)
-            if chop[i] > 61.8:
-                # Long: RSI oversold + break above Donchian high
-                long_entry = (rsi[i] < 30) and (close_val > donch_high[i])
-                # Short: RSI overbought + break below Donchian low
-                short_entry = (rsi[i] > 70) and (close_val < donch_low[i])
-                
-                if long_entry:
-                    signals[i] = size
+            # Flat - look for entry in direction of weekly trend
+            # Weekly uptrend: price above EMA34
+            # Weekly downtrend: price below EMA34
+            if close_val > weekly_trend:  # Weekly uptrend
+                # Long: break above recent bullish fractal (resistance turned support)
+                if close_val > bullish_fractal_aligned[i]:
+                    signals[i] = fixed_size
                     position = 1
-                elif short_entry:
-                    signals[i] = -size
+            elif close_val < weekly_trend:  # Weekly downtrend
+                # Short: break below recent bearish fractal (support turned resistance)
+                if close_val < bearish_fractal_aligned[i]:
+                    signals[i] = -fixed_size
                     position = -1
-                else:
-                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit when price reverts to midpoint or regime shifts to trending
-            if close_val < donch_mid[i] or chop[i] < 38.2:
+            # Long - exit on weekly trend reversal or bearish fractal break
+            if close_val < weekly_trend or close_val < bearish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = size
+                signals[i] = fixed_size
         elif position == -1:
-            # Short - exit when price reverts to midpoint or regime shifts to trending
-            if close_val > donch_mid[i] or chop[i] < 38.2:
+            # Short - exit on weekly trend reversal or bullish fractal break
+            if close_val > weekly_trend or close_val > bullish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -size
+                signals[i] = -fixed_size
     
     return signals
 
-name = "4h_RSI_Chop_Donchian20_Breakout"
-timeframe = "4h"
+name = "1d_WilliamsFractal_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
