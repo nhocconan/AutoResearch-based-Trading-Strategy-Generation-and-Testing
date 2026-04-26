@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kumo_Twist_1dTrend_VolumeConfirm
-Hypothesis: Ichimoku TK cross + Kumo twist (Senkou A/B cross) from 1d as regime filter, with 6h TK cross for entry timing and volume confirmation. Works in bull/bear markets by using Kumo twist to detect trend changes early and TK cross for momentum confirmation. Designed for 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.0, ±0.25) to minimize fee churn.
+12h_Williams_Alligator_1wTrend_VolumeConfirm
+Hypothesis: Williams Alligator on 12h with 1w trend filter and volume confirmation. Works in bull/bear markets by using Alligator jaws-teeth-lips for trend direction and separation strength, filtered by 1w EMA50 and volume spikes. Designed for 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.0, ±0.25) to minimize fee drag.
 """
 
 import numpy as np
@@ -18,75 +18,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(20) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Load 1d data for Ichimoku (Kumo twist as regime filter)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Williams Alligator on 12h: SMAs of median price
+    # Jaw: 13-period SMA, 8-bar shift
+    # Teeth: 8-period SMA, 5-bar shift  
+    # Lips: 5-period SMA, 3-bar shift
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate Ichimoku components on 1d
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (period9_high + period9_low) / 2
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = (period52_high + period52_low) / 2
-    
-    # Kumo twist: Senkou A crossing above/below Senkou B (trend change signal)
-    # We use the non-shifted values to detect the cross, then align with proper delay
-    senkou_a_raw = senkou_a_1d
-    senkou_b_raw = senkou_b_1d
-    
-    # Align Ichimoku components to LTF (1d values available after the 1d bar closes)
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_raw)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_raw)
-    
-    # Calculate 6h Ichimoku for entry timing (TK cross)
-    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_6h = (period9_high_6h + period9_low_6h) / 2
-    
-    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_6h = (period26_high_6h + period26_low_6h) / 2
-    
-    # Volume confirmation: volume > 1.5 * 20-period EMA volume
+    # Volume confirmation: volume > 2.0 * 20-period EMA volume
     avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_volume)
+    volume_spike = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(26, 52) + 1
+    start_idx = max(20, 13, 8, 5, 50) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -96,43 +65,44 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
+        # Alligator conditions: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        
+        # Alligator separation strength (avoid choppy markets)
+        jaw_teeth_sep = np.abs(teeth[i] - jaw[i]) / (at[i] + 1e-10)
+        teeth_lips_sep = np.abs(lips[i] - teeth[i]) / (atr[i] + 1e-10)
+        separation_ok = (jaw_teeth_sep > 0.5) and (teeth_lips_sep > 0.3)
+        
         # Discrete position sizing
         base_size = 0.25
         
-        # Kumo twist detection from 1d: Senkou A > Senkou B = bullish twist, Senkou A < Senkou B = bearish twist
-        kumo_bullish = senkou_a_aligned[i] > senkou_b_aligned[i]
-        kumo_bearish = senkou_a_aligned[i] < senkou_b_aligned[i]
-        
-        # 6h TK cross: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
-        tk_bullish_6h = tenkan_6h[i] > kijun_6h[i]
-        tk_bearish_6h = tenkan_6h[i] < kijun_6h[i]
-        
-        # Long logic: Kumo bullish twist (from 1d) + 6h TK bullish cross + volume spike
-        if kumo_bullish and tk_bullish_6h and volume_spike[i]:
+        # Long logic: Alligator uptrend + price > 1w EMA50 (uptrend filter) + volume spike + separation
+        if alligator_long and close[i] > ema_50_1w_aligned[i] and volume_spike[i] and separation_ok:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: Kumo bearish twist (from 1d) + 6h TK bearish cross + volume spike
-        elif kumo_bearish and tk_bearish_6h and volume_spike[i]:
+        # Short logic: Alligator downtrend + price < 1w EMA50 (downtrend filter) + volume spike + separation
+        elif alligator_short and close[i] < ema_50_1w_aligned[i] and volume_spike[i] and separation_ok:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
         # ATR-based stoploss: exit if price moves against position by 2.5 * ATR
-        elif position == 1 and close[i] < (tenkan_6h[i] + kijun_6h[i])/2 - 2.5 * atr[i]:
+        elif position == 1 and close[i] < lips[i] - 2.5 * atr[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > (tenkan_6h[i] + kijun_6h[i])/2 + 2.5 * atr[i]:
+        elif position == -1 and close[i] > lips[i] + 2.5 * atr[i]:
             signals[i] = 0.0
             position = 0
-        # Exit when Kumo twist reverses or TK cross reverses
-        elif position == 1 and (not kumo_bullish or not tk_bullish_6h):
+        # Exit Alligator signal: lips crosses teeth in opposite direction
+        elif position == 1 and lips[i] < teeth[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (not kumo_bearish or not tk_bearish_6h):
+        elif position == -1 and lips[i] > teeth[i]:
             signals[i] = 0.0
             position = 0
         else:
@@ -146,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Twist_1dTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Williams_Alligator_1wTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
