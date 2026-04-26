@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: Use 6h timeframe with Donchian(20) breakout confirmed by 1d EMA50 trend and volume spike. 
-Targets 12-30 trades/year (50-150 over 4 years) to minimize fee drag. Works in bull/bear markets by 
-using 1d EMA50 for trend direction and volume confirmation to filter false breakouts. Includes 
-ATR-based stoploss to manage risk.
+4h_Donchian20_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Use 4h Donchian(20) breakout confirmed by 1d EMA50 trend and volume spike. 1d trend is more stable than 12h, reducing whipsaw. Volume spike filters false breakouts. ATR stoploss manages risk. Designed for 20-50 trades/year to minimize fee drag and work in both bull/bear markets via 1d trend filter.
 """
 
 import numpy as np
@@ -21,11 +18,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) on 6h
+    # Donchian channels (20-period) on 4h
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d EMA50 for trend filter
+    # 1d EMA50 for trend filter (more stable than 12h)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -48,7 +45,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need 20 for Donchian, 50 for 1d EMA, 20 for volume avg, 14 for ATR
+    # Warmup: max of 20 (Donchian), 50 (1d EMA), 20 (volume), 14 (ATR)
     start_idx = max(20, 50, 20, 14)
     
     for i in range(start_idx, n):
@@ -60,7 +57,7 @@ def generate_signals(prices):
         
         close_val = close[i]
         atr_val = atr[i]
-        size = 0.25  # 25% position size
+        size = 0.30  # 30% position size
         
         if position == 0:
             # Flat - look for breakout with trend and volume confirmation
@@ -106,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
