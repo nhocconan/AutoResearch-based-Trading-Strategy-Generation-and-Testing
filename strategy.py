@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: 12-hour Camarilla R3/S3 breakout with daily EMA34 trend filter and volume confirmation. Uses discrete position sizing (0.25) and ATR-based stoploss (1.5x) for risk management. Designed for low trade frequency (target 12-37/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The daily EMA34 provides strong trend filtering that works across regimes, and volume confirmation ensures breakouts have participation. Focuses on BTC and ETH as primary targets.
+4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_ATRStop_v3
+Hypothesis: 4-hour Camarilla R3/S3 breakout with daily EMA50 trend filter (slower, more reliable than EMA34) and volume confirmation (2.0x average). Uses discrete position sizing (0.25) and ATR-based stoploss (2.5x) for wider risk management. Targets 20-40 trades/year to minimize fee drag while capturing medium-term swings. Daily EMA50 provides strong trend filtering that works across bull/bear regimes, and volume confirmation ensures breakouts have genuine participation. Focuses on BTC and ETH as primary targets.
 """
 
 import numpy as np
@@ -23,25 +23,24 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA(34) on daily for trend filter
+    # Calculate EMA(50) on daily for trend filter (slower, more reliable)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR(14) for stoploss on 12h
+    # Calculate ATR(14) for stoploss on 4h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter: volume > 1.8 * 20-period average
+    # Calculate volume spike filter: volume > 2.0 * 20-period average (stricter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     # Calculate Camarilla levels from previous daily bar
     # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
-    # We need previous day's H, L, C
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -50,7 +49,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
     camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
     
-    # Align Camarilla levels to 12h (use previous day's levels)
+    # Align Camarilla levels to 4h (use previous day's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -58,12 +57,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of daily EMA(34), volume MA, ATR
-    start_idx = max(34, 20, 14) + 1
+    # Warmup: max of daily EMA(50), volume MA, ATR
+    start_idx = max(50, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(camarilla_r3_aligned[i]) or
             np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(vol_ma[i]) or
@@ -78,8 +77,8 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        trend_1d_up = close_val > ema_34_1d_aligned[i]   # Daily uptrend
-        trend_1d_down = close_val < ema_34_1d_aligned[i]  # Daily downtrend
+        trend_1d_up = close_val > ema_50_1d_aligned[i]   # Daily uptrend
+        trend_1d_down = close_val < ema_50_1d_aligned[i]  # Daily downtrend
         vol_spike = volume_spike[i]
         
         if position == 0:
@@ -103,19 +102,19 @@ def generate_signals(prices):
             # Hold long
             signals[i] = 0.25
             # Exit: trend flips down OR price hits ATR stoploss
-            if (not trend_1d_up) or (close_val < entry_price - 1.5 * atr[i]):
+            if (not trend_1d_up) or (close_val < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
             # Exit: trend flips up OR price hits ATR stoploss
-            if (not trend_1d_down) or (close_val > entry_price + 1.5 * atr[i]):
+            if (not trend_1d_down) or (close_val > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_ATRStop_v3"
+timeframe = "4h"
 leverage = 1.0
