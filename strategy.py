@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1w EMA50 trend filter and volume spike (>2x average volume). Uses discrete position sizing (0.25) to minimize fee churn. Exits when price retests the broken Camarilla level (R1 for longs, S1 for shorts). Works in both bull and bear markets by following the 1w trend direction, confirmed by volume to avoid false breakouts. Targeting 50-150 total trades over 4 years on 12h timeframe.
+4h_Keltner_Channel_Breakout_Volume_Trend_v1
+Hypothesis: 4h Keltner Channel (20 EMA ± 2*ATR) breakout with 1d EMA50 trend filter and volume confirmation (>1.5x average volume). Enters long when price breaks above upper Keltner with uptrend and volume, short when breaks below lower Keltner with downtrend and volume. Exits when price retests the 20 EMA (middle line) or reverses across 1d EMA50. Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear by following 1d trend, confirmed by volume to avoid false breakouts. Keltner adapts to volatility via ATR, effective in ranging and trending markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need warmup for EMA, volume
+    if n < 60:  # Need warmup for EMA, ATR, volume
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,32 +18,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Load 1d data for Camarilla levels (using daily to calculate pivot points)
+    # Load 1d data for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla R1 and S1 levels (inner levels for tighter stops)
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate 4h EMA20 (middle of Keltner)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 12h timeframe (1 bar delay for completed 1d bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate ATR(10) for Keltner width
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Keltner Channel: 20 EMA ± 2*ATR
+    keltner_upper = ema_20 + 2.0 * atr
+    keltner_lower = ema_20 - 2.0 * atr
     
     # Calculate average volume for confirmation (20-period SMA)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,23 +48,23 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 50 for 1w EMA, 20 for volume)
-    start_idx = max(50, 20)
+    # Start after warmup (need 50 for 1d EMA, 20 for EMA20, 10 for ATR, 20 for volume)
+    start_idx = max(50, 20, 10, 20)
     
     for i in range(start_idx, n):
         # Get current values
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
+        ema_val = ema_20[i]
+        up_val = keltner_upper[i]
+        low_val = keltner_lower[i]
+        ema_1d_val = ema_50_1d_aligned[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_50_1w_aligned[i]
-        r1_val = camarilla_r1_aligned[i]
-        s1_val = camarilla_s1_aligned[i]
+        atr_val = atr[i]
         
         # Skip if any data not ready
-        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r1_val) or 
-            np.isnan(s1_val)):
+        if (np.isnan(ema_val) or np.isnan(up_val) or np.isnan(low_val) or 
+            np.isnan(ema_1d_val) or np.isnan(avg_vol) or np.isnan(atr_val)):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -78,17 +74,19 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2x average volume (strong breakout)
-        volume_confirmed = vol > 2.0 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = vol > 1.5 * avg_vol
         
-        # Long logic: price breaks above Camarilla R1 with 1w uptrend and volume confirmation
-        long_condition = (close_val > r1_val) and (close_val > ema_val) and volume_confirmed
-        # Short logic: price breaks below Camarilla S1 with 1w downtrend and volume confirmation
-        short_condition = (close_val < s1_val) and (close_val < ema_val) and volume_confirmed
+        # Long logic: price breaks above upper Keltner with 1d uptrend and volume confirmation
+        long_condition = (close_val > up_val) and (close_val > ema_1d_val) and volume_confirmed
+        # Short logic: price breaks below lower Keltner with 1d downtrend and volume confirmation
+        short_condition = (close_val < low_val) and (close_val < ema_1d_val) and volume_confirmed
         
-        # Exit logic: price retests or breaks the broken Camarilla level
-        long_exit = (position == 1 and close_val <= r1_val)
-        short_exit = (position == -1 and close_val >= s1_val)
+        # Exit logic: 
+        # Long exit: price retests or breaks below 20 EMA (middle line) OR closes below 1d EMA50 (trend change)
+        long_exit = (position == 1 and (close_val <= ema_val or close_val < ema_1d_val))
+        # Short exit: price retests or breaks above 20 EMA (middle line) OR closes above 1d EMA50 (trend change)
+        short_exit = (position == -1 and (close_val >= ema_val or close_val > ema_1d_val))
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -113,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Keltner_Channel_Breakout_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
