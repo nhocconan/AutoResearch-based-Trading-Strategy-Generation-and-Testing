@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_1wTrend_VolumeConfirmation
-Hypothesis: Daily Donchian(20) breakout in direction of weekly EMA50 trend, confirmed by volume spike (>1.8x 20-bar MA). Donchian channels provide clear structure for breakouts, weekly EMA50 filters for higher timeframe momentum, volume confirmation reduces false signals. Designed for 30-100 total trades over 4 years (7-25/year) to minimize fee drag. Works in both bull and bear markets by following weekly trend while using daily structure for precise entries.
+6h_ADX_DI_Cross_12hTrend_VolumeFilter
+Hypothesis: On 6h timeframe, enter long when +DI crosses above -DI with ADX>25 (trend strength), aligned with 12h EMA50 uptrend and volume confirmation (>1.5x 20-bar MA). Enter short when -DI crosses above +DI with ADX>25, aligned with 12h EMA50 downtrend and volume confirmation. Uses ADX to filter weak trends and DI crossovers for precise entries. Volume confirmation reduces false signals. Designed for 15-25 trades/year (60-100 total over 4 years) to avoid fee drag. Works in bull markets via long entries and bear markets via short entries, both filtered by 12h trend and ADX strength.
 """
 
 import numpy as np
@@ -18,58 +18,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Daily Donchian(20) channels
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # ADX and DI calculation on 6h data
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed DM and TR
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size
     
-    # Warmup: max of calculations (20 for Donchian/vol, 50 for EMA)
-    start_idx = max(donchian_window, 50)
+    # Warmup: max of calculations (14 for ADX/DI, 20 for volume, 50 for 12h EMA)
+    start_idx = max(14, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        ema_50_val = ema_50_1w_aligned[i]
-        upper_channel = donchian_high[i]
-        lower_channel = donchian_low[i]
-        vol_spike = volume_spike[i]
+        ema_12h_val = ema_50_12h_aligned[i]
+        adx_val = adx[i]
+        plus_di_val = plus_di[i]
+        minus_di_val = minus_di[i]
+        vol_conf = volume_confirm[i]
         
-        # Determine weekly trend: bullish if price > EMA50, bearish if price < EMA50
-        bullish_1w = close_val > ema_50_val
-        bearish_1w = close_val < ema_50_val
+        # Trend filters
+        bullish_12h = close_val > ema_12h_val
+        bearish_12h = close_val < ema_12h_val
         
-        # Entry conditions: breakout of Donchian channel in trend direction with volume
-        long_entry = (close_val > upper_channel) and bullish_1w and vol_spike
-        short_entry = (close_val < lower_channel) and bearish_1w and vol_spike
+        # ADX trend strength filter
+        strong_trend = adx_val > 25
         
-        # Exit conditions: opposite channel touch (or trend reversal)
-        exit_long = (close_val < lower_channel) or not bullish_1w
-        exit_short = (close_val > upper_channel) or not bearish_1w
+        # DI crossover conditions
+        # Long: +DI crosses above -DI (current +DI > -DI and previous +DI <= previous -DI)
+        # Short: -DI crosses above +DI (current -DI > +DI and previous -DI <= previous +DI)
+        if i > 0:
+            prev_plus_di = plus_di[i-1]
+            prev_minus_di = minus_di[i-1]
+            bullish_cross = (plus_di_val > minus_di_val) and (prev_plus_di <= prev_minus_di)
+            bearish_cross = (minus_di_val > plus_di_val) and (prev_minus_di <= prev_plus_di)
+        else:
+            bullish_cross = False
+            bearish_cross = False
+        
+        # Entry conditions: DI crossover in trend direction with ADX>25 and volume confirmation
+        long_entry = bullish_cross and bullish_12h and strong_trend and vol_conf
+        short_entry = bearish_cross and bearish_12h and strong_trend and vol_conf
+        
+        # Exit conditions: opposite DI crossover or trend weakening (ADX<20) or trend reversal
+        exit_long = bearish_cross or (adx_val < 20) or not bullish_12h
+        exit_short = bullish_cross or (adx_val < 20) or not bearish_12h
         
         if long_entry and position != 1:
             signals[i] = base_size
@@ -89,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wTrend_VolumeConfirmation"
-timeframe = "1d"
+name = "6h_ADX_DI_Cross_12hTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
