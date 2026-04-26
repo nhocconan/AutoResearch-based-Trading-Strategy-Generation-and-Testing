@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSqueeze
-Hypothesis: 4h breakout above/below daily Camarilla R1/S1 levels in direction of 1d EMA34 trend, confirmed by volume squeeze (<0.5x 20-bar MA) to anticipate expansion breakout. Camarilla R1/S1 provide tight intraday support/resistance. Trend filter ensures alignment with higher timeframe momentum. Volume squeeze precedes expansion, reducing false breakouts. Designed for 20-50 trades/year (80-200 total over 4 years) to avoid fee drag. Works in both bull and bear markets by following the 1d trend while using Camarilla structure for precise entries.
+1d_Camarilla_Pivot_Breakout_1wTrend_VolumeConfirmation
+Hypothesis: Daily breakout above/below weekly Camarilla R3/S3 levels in direction of 1w EMA50 trend, confirmed by daily volume spike (>2x 20-day MA). Uses weekly timeframe for trend and structure to avoid noise, daily for execution. Camarilla levels from prior weekly candle provide robust support/resistance. Volume confirmation filters false breakouts. Designed for 7-25 trades/year (30-100 total over 4 years) to minimize fee drag. Works in bull/bear by following weekly trend.
 """
 
 import numpy as np
@@ -18,66 +18,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla levels from previous 1d bar (OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous 1w bar (OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla R1, S1 levels (based on previous day's range)
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Camarilla R3, S3 levels (based on previous week's range)
+    camarilla_r3 = close_1w + (high_1w - low_1w) * 1.1 / 4
+    camarilla_s3 = close_1w - (high_1w - low_1w) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (no additional delay needed as they're based on completed 1d bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to 1d timeframe (no additional delay needed as they're based on completed 1w bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Volume squeeze: volume < 0.5x 20-period average (anticipates expansion)
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_squeeze = volume < (vol_ma * 0.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size
     
-    # Warmup: max of calculations (20 for vol, 34 for ema)
-    start_idx = max(20, 34)
+    # Warmup: max of calculations (20 for vol, 50 for ema)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        ema_34_val = ema_34_1d_aligned[i]
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
-        vol_squeeze = volume_squeeze[i]
+        ema_50_val = ema_50_1w_aligned[i]
+        camarilla_r3_val = camarilla_r3_aligned[i]
+        camarilla_s3_val = camarilla_s3_aligned[i]
+        vol_spike = volume_spike[i]
         
-        # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
-        bullish_1d = close_val > ema_34_val
-        bearish_1d = close_val < ema_34_val
+        # Determine 1w trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_1w = close_val > ema_50_val
+        bearish_1w = close_val < ema_50_val
         
-        # Entry conditions: breakout of Camarilla level in trend direction with volume squeeze
-        long_entry = (close_val > camarilla_r1_val) and bullish_1d and vol_squeeze
-        short_entry = (close_val < camarilla_s1_val) and bearish_1d and vol_squeeze
+        # Entry conditions: breakout of Camarilla level in trend direction with volume
+        long_entry = (close_val > camarilla_r3_val) and bullish_1w and vol_spike
+        short_entry = (close_val < camarilla_s3_val) and bearish_1w and vol_spike
         
         # Exit conditions: opposite Camarilla level touch (or trend reversal)
-        exit_long = (close_val < camarilla_s1_val) or not bullish_1d
-        exit_short = (close_val > camarilla_r1_val) or not bearish_1d
+        exit_long = (close_val < camarilla_s3_val) or not bullish_1w
+        exit_short = (close_val > camarilla_r3_val) or not bearish_1w
         
         if long_entry and position != 1:
             signals[i] = base_size
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSqueeze"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_Breakout_1wTrend_VolumeConfirmation"
+timeframe = "1d"
 leverage = 1.0
