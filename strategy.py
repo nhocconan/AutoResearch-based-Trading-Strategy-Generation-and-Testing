@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_Midpoint_Breakout_1dTrend_VolumeFilter
-Hypothesis: Camarilla midpoint breakout with 1d EMA50 trend filter and volume confirmation (>1.5x 20-bar MA). Uses midpoint (R4/S4) for breakout entries in trending markets only. Volume filter reduces false breakouts. Works in bull/bear by following 1d trend while using Camarilla structure for precise entries. Target: 20-35 trades/year.
+4h_TRIX_VolumeSpike_ChopRegime
+Hypothesis: TRIX (15-period) crossing zero line with volume spike (>2.0x 20-bar MA) and choppiness regime filter (CHOP < 38.2 = trending). TRIX is a momentum oscillator that filters out insignificant cycles and is effective in both bull and bear markets. Volume confirmation ensures breakout strength, while chop filter avoids range-bound whipsaws. Target: 20-40 trades/year.
 """
 
 import numpy as np
@@ -13,68 +13,57 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # TRIX calculation (15-period, 3x EMA smoothing)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = np.where(ema3[:-1] != 0, (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100, 0)
+    trix = np.concatenate([np.full(15, np.nan), trix])  # Align length
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Choppiness regime filter: CHOP(14) > 61.8 = range, CHOP < 38.2 = trending
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((atr_14 * 14) / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop_regime = (chop < 38.2)  # Only trade in trending regime
     
-    # Previous 1d bar's OHLC for Camarilla midpoint (R4/S4 = stronger breakout levels)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
-    
-    # Calculate Camarilla levels: R4, S4 (stronger breakout levels)
-    rng = high_1d - low_1d
-    camarilla_r4 = close_1d_vals + (rng * 1.1 / 2)   # R4 level
-    camarilla_s4 = close_1d_vals - (rng * 1.1 / 2)   # S4 level
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Volume confirmation: volume > 1.5x 20-period average (dynamic threshold)
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size (25% of capital)
     
-    # Warmup: max of calculations (20 for vol, 50 for 1d EMA)
-    start_idx = max(20, 50)
+    # Warmup: max of calculations (15 for TRIX, 20 for volume, 14 for chop)
+    start_idx = max(15, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(trix[i]) or 
+            np.isnan(vol_ma[i]) or 
+            np.isnan(chop[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        close_val = close[i]
-        camarilla_r4_val = camarilla_r4_aligned[i]
-        camarilla_s4_val = camarilla_s4_aligned[i]
-        ema_50_val = ema_50_1d_aligned[i]
+        trix_val = trix[i]
+        trix_prev = trix[i-1]
         vol_spike = volume_spike[i]
+        in_trend = chop_regime[i]
         
-        # Determine 1d trend: bullish if price > EMA50, bearish if price < EMA50
-        bullish_1d = close_val > ema_50_val
-        bearish_1d = close_val < ema_50_val
-        
-        # Entry conditions: breakout of Camarilla R4/S4 in trend direction with volume spike
-        long_entry = (close_val > camarilla_r4_val) and bullish_1d and vol_spike
-        short_entry = (close_val < camarilla_s4_val) and bearish_1d and vol_spike
+        # Entry conditions: TRIX crossing zero line with volume spike and in trending regime
+        long_entry = (trix_prev <= 0 and trix_val > 0) and vol_spike and in_trend
+        short_entry = (trix_prev >= 0 and trix_val < 0) and vol_spike and in_trend
         
         if position == 0:
             # Flat - look for entry
@@ -87,15 +76,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on mean reversion to 1d close or trend change
-            if close_val < close_1d_vals[-1] if i >= len(close_1d_vals) else close_val < camarilla_s4_val or not bullish_1d:
+            # Long - exit when TRIX crosses below zero or chop regime shifts
+            if trix_val < 0 or not in_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = base_size
         elif position == -1:
-            # Short - exit on mean reversion to 1d close or trend change
-            if close_val > close_1d_vals[-1] if i >= len(close_1d_vals) else close_val > camarilla_r4_val or not bearish_1d:
+            # Short - exit when TRIX crosses above zero or chop regime shifts
+            if trix_val > 0 or not in_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_Midpoint_Breakout_1dTrend_VolumeFilter"
+name = "4h_TRIX_VolumeSpike_ChopRegime"
 timeframe = "4h"
 leverage = 1.0
