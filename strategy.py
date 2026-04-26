@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_Filtered_v2
-Hypothesis: Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation capture institutional moves.
-Adds ATR-based trailing stoploss to reduce whipsaws and improve risk-adjusted returns. Targets 25-35 trades/year for optimal fee efficiency.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_Filtered_v3
+Hypothesis: Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume confirmation, and ATR trailing stoploss.
+Adds choppiness regime filter to avoid whipsaws in sideways markets. Targets 20-30 trades/year for optimal fee efficiency.
 Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes during low volatility).
 """
 
@@ -21,9 +21,9 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Pre-compute session filter (UTC 9-15) - peak liquidity hours
+    # Pre-compute session filter (UTC 8-16) - peak liquidity hours
     hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 9) & (hours <= 15)
+    in_session = (hours >= 8) & (hours <= 16)
     
     # Get 1d data for HTF trend and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
@@ -63,6 +63,16 @@ def generate_signals(prices):
     # Volume average (20-period = ~3.3 days on 4h) for volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Choppiness Index regime filter (14-period)
+    # High CHOP (>61.8) = ranging market (mean revert), Low CHOP (<38.2) = trending
+    hl_range = np.maximum(high, low) - np.minimum(high, low)
+    tr_chop = np.maximum(hl_range, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_chop[0] = hl_range[0]  # first value
+    atr_chop = pd.Series(tr_chop).ewm(span=14, adjust=False, min_periods=14).mean().values
+    chop = 100 * np.log10(atr_chop.sum() / (np.abs(np.diff(close, prepend=close[0])).sum() + 1e-10)) / np.log10(14)
+    chop = np.where(np.isnan(chop), 50, chop)  # fill NaN with neutral value
+    chop_ma = pd.Series(chop).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -70,7 +80,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start index: need warmup for calculations
-    start_idx = max(20, 34, 14)  # volume MA, 1d EMA, ATR
+    start_idx = max(20, 34, 14, 14)  # volume MA, 1d EMA, ATR, chop
     
     for i in range(start_idx, n):
         # Skip if not in trading session or data not ready
@@ -79,7 +89,8 @@ def generate_signals(prices):
             np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_ma[i]) or
-            np.isnan(atr[i])):
+            np.isnan(atr[i]) or
+            np.isnan(chop_ma[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -99,15 +110,19 @@ def generate_signals(prices):
         high_val = high[i]
         low_val = low[i]
         atr_val = atr[i]
+        chop_val = chop_ma[i]
         
-        # Volume confirmation: current volume > 2.5x 20-period average (stricter)
-        volume_confirmed = vol_val > 2.5 * vol_ma_val
+        # Regime filter: only trade in trending markets (CHOP < 45)
+        trending_market = chop_val < 45
+        
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirmed = vol_val > 2.0 * vol_ma_val
         
         if position == 0:
             # Long: price breaks above R1 with uptrend (close > EMA34) and volume confirmation
-            long_signal = (high_val > r1_val) and (close_val > ema_34_1d_val) and volume_confirmed
+            long_signal = (high_val > r1_val) and (close_val > ema_34_1d_val) and volume_confirmed and trending_market
             # Short: price breaks below S1 with downtrend (close < EMA34) and volume confirmation
-            short_signal = (low_val < s1_val) and (close_val < ema_34_1d_val) and volume_confirmed
+            short_signal = (low_val < s1_val) and (close_val < ema_34_1d_val) and volume_confirmed and trending_market
             
             if long_signal:
                 signals[i] = 0.25
@@ -145,6 +160,12 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
                 highest_since_entry = 0.0
+            # 3. Regime change: market becomes too choppy
+            elif chop_val >= 55:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
@@ -169,9 +190,15 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
                 lowest_since_entry = 0.0
+            # 3. Regime change: market becomes too choppy
+            elif chop_val >= 55:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                lowest_since_entry = 0.0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_Filtered_v2"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_Filtered_v3"
 timeframe = "4h"
 leverage = 1.0
