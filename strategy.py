@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Chop
-Hypothesis: Camarilla R1/S1 breakouts from 1d pivots with 1d trend filter, volume spike, and chop regime filter capture institutional reversal points with controlled frequency. 
-Long: price > R1 + volume spike + 1d uptrend + chop < 61.8 (trending). 
-Short: price < S1 + volume spike + 1d downtrend + chop < 61.8 (trending). 
-Uses discrete position sizing (0.25) and ATR-based stoploss to limit fee drag and manage risk. 
-Target: 75-200 trades over 4 years on 4h timeframe.
+6h_WilliamsAlligator_TrendWithWeeklyFilter
+Hypothesis: Williams Alligator (SMAs with offsets) identifies trending regimes on 6h, while 1-week trend filter ensures alignment with higher-timeframe direction. 
+In bull markets: price above Alligator lips/teeth/jaw with 1w uptrend → long. 
+In bear markets: price below Alligator components with 1w downtrend → short. 
+Uses volume confirmation to avoid choppy breakouts. Target: 50-150 trades over 4 years. 
+Alligator's smoothed SMAs reduce whipsaw vs plain EMA crossovers.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:  # Need warmup for indicators
+    if n < 30:  # Need warmup for SMAs
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,74 +22,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: volume > 2.0x 20-period median
+    # Volume confirmation: volume > 1.5x 20-period median
     vol_series = pd.Series(volume)
     vol_median = vol_series.rolling(window=20, min_periods=20).median().values
-    volume_spike = volume > (vol_median * 2.0)
+    volume_spike = volume > (vol_median * 1.5)
     
-    # Load 1d data for HTF trend filter and Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Williams Alligator on 6h: SMAs with offsets
+    # Jaw: 13-period SMA, offset 8 bars
+    # Teeth: 8-period SMA, offset 5 bars  
+    # Lips: 5-period SMA, offset 3 bars
+    close_series = pd.Series(close)
+    jaw_raw = close_series.rolling(window=13, min_periods=13).mean().shift(8)
+    teeth_raw = close_series.rolling(window=8, min_periods=8).mean().shift(5)
+    lips_raw = close_series.rolling(window=5, min_periods=5).mean().shift(3)
+    
+    jaw = jaw_raw.values
+    teeth = teeth_raw.values
+    lips = lips_raw.values
+    
+    # 1-week trend filter: EMA50 on 1w
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Camarilla pivot levels from previous 1d bar's OHLC
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
-    
-    typical_price = (h_1d + l_1d + c_1d) / 3.0
-    hl_range = h_1d - l_1d
-    
-    r1_1d = typical_price + (hl_range * 1.1 / 12.0)
-    s1_1d = typical_price - (hl_range * 1.1 / 12.0)
-    
-    # Align Camarilla levels to 4h timeframe (use previous 1d bar's levels)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Choppiness Index regime filter (14-period)
-    chop_period = 14
-    atr_period = chop_period
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr_vals = pd.Series(tr1).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Calculate highest high and lowest low over chop_period
-    hh = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
-    ll = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
-    
-    # Chop = 100 * log10(sum(tr1)/ (hh - ll)) / log10(chop_period)
-    sum_tr = pd.Series(tr1).rolling(window=chop_period, min_periods=chop_period).sum().values
-    denom = hh - ll
-    chop = np.where((denom > 0) & (~np.isnan(sum_tr)), 
-                    100 * np.log10(sum_tr / denom) / np.log10(chop_period), 
-                    np.nan)
-    
-    # Chop < 61.8 indicates trending regime (favor breakouts)
-    chop_filter = chop < 61.8
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     bars_since_entry = 0
     
-    # Start after warmup (need 34 for EMA, 14 for chop, 20 for volume median)
-    start_idx = 34
+    # Start after warmup (need 13+8=21 for jaw, plus 1w EMA)
+    start_idx = 30
     
     for i in range(start_idx, n):
         bars_since_entry += 1
         
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(volume_spike[i]) or 
-            np.isnan(chop_filter[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -100,23 +72,28 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        ema_val = ema_34_1d_aligned[i]
-        r1_val = r1_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
-        vol_spike = volume_spike[i]
-        chop_ok = chop_filter[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema_1w_val = ema_50_1w_aligned[i]
         
-        # Long logic: price breaks above R1 with volume spike, 1d uptrend, and trending regime
-        long_condition = (close_val > r1_val) and vol_spike and (close_val > ema_val) and chop_ok
-        # Short logic: price breaks below S1 with volume spike, 1d downtrend, and trending regime
-        short_condition = (close_val < s1_val) and vol_spike and (close_val < ema_val) and chop_ok
+        # Alligator alignment: check if all three lines are ordered
+        # Bullish alignment: lips > teeth > jaw (price above all)
+        # Bearish alignment: lips < teeth < jaw (price below all)
+        bullish_alignment = (lips_val > teeth_val) and (teeth_val > jaw_val)
+        bearish_alignment = (lips_val < teeth_val) and (teeth_val < jaw_val)
         
-        # Exit logic: trend reversal or chop regime shift to ranging
-        exit_long = (close_val < ema_val) or (chop >= 61.8)
-        exit_short = (close_val > ema_val) or (chop >= 61.8)
+        # Long logic: bullish alignment + price above lips + 1w uptrend + volume spike
+        long_condition = bullish_alignment and (close_val > lips_val) and (close_val > ema_1w_val) and volume_spike[i]
+        # Short logic: bearish alignment + price below lips + 1w downtrend + volume spike
+        short_condition = bearish_alignment and (close_val < lips_val) and (close_val < ema_1w_val) and volume_spike[i]
         
-        # Minimum holding period: 1 bar to reduce churn
-        if position != 0 and bars_since_entry < 1:
+        # Exit logic: Alligator alignment breaks or 1w trend reversal
+        exit_long = not bullish_alignment or (close_val < ema_1w_val)
+        exit_short = not bearish_alignment or (close_val > ema_1w_val)
+        
+        # Minimum holding period: 2 bars
+        if position != 0 and bars_since_entry < 2:
             # Hold position regardless of signals
             if position == 0:
                 signals[i] = 0.0
@@ -153,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Chop"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_TrendWithWeeklyFilter"
+timeframe = "6h"
 leverage = 1.0
