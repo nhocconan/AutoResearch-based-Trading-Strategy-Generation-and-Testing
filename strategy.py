@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_WeeklyTrend_VolumeConfirm_v1
-Hypothesis: On 6h timeframe, Camarilla R3/S3 breakouts with weekly trend filter (price > weekly EMA50 for long, < for short) and volume confirmation (>2x avg) provides robust directional signals. Works in bull markets (long when price > weekly EMA50 + R3 breakout) and bear markets (short when price < weekly EMA50 + S3 breakdown). Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Targets 50-150 trades over 4 years (12-37/year) for optimal 6h frequency. Weekly trend filter avoids whipsaws in counter-trend breakouts while volume spike confirms institutional participation.
+12h_Camarilla_R3_S3_Breakout_WeeklyTrend_VolumeConfirm_v1
+Hypothesis: On 12h timeframe, Camarilla R3/S3 breakouts with weekly trend filter (price > weekly EMA50 for long, < for short) and volume confirmation (>2x avg) provides robust directional signals. Works in bull markets (long when price > weekly EMA50 + R3 breakout) and bear markets (short when price < weekly EMA50 + S3 breakdown). Uses discrete sizing (0.0, ±0.30) to minimize fee churn. Targets 50-150 trades over 4 years (12-37/year) for optimal 12h frequency. Weekly trend filter avoids whipsaws in counter-trend breakouts while volume spike confirms institutional participation.
 """
 
 import numpy as np
@@ -43,7 +43,7 @@ def generate_signals(prices):
     camarilla_r3 = c_1d + (h_1d - l_1d) * 1.1 / 4
     camarilla_s3 = c_1d - (h_1d - l_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -65,9 +65,9 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
             continue
         
         vol_confirmed = vol_ratio[i] > 2.0  # volume at least 2.0x average
@@ -84,23 +84,23 @@ def generate_signals(prices):
                            vol_confirmed)
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
+            signals[i] = 0.30
             # Exit: price closes below weekly EMA50 OR breaks below S3 (reversal)
             if close[i] < ema_50_1w_aligned[i] or close[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
+            signals[i] = -0.30
             # Exit: price closes above weekly EMA50 OR breaks above R3 (reversal)
             if close[i] > ema_50_1w_aligned[i] or close[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
@@ -108,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_WeeklyTrend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_WeeklyTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
