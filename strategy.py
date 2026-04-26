@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Uses Camarilla pivot levels from 12h timeframe combined with 1d EMA34 trend filter to avoid counter-trend trades.
-Volume spike confirms institutional interest. Designed for 50-150 total trades over 4 years (12-37/year) with 
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Uses Camarilla pivot levels from 4h timeframe combined with 1d EMA34 trend filter to avoid counter-trend trades.
+Volume spike confirms institutional interest. Designed for 75-200 total trades over 4 years (19-50/year) with 
 discrete position sizing (0.0, ±0.30). Works in both bull and bear markets by aligning with higher timeframe trend.
 """
 
@@ -21,17 +21,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate Camarilla levels from previous 12h bar
-    camarilla_range = (df_12h['high'].values - df_12h['low'].values) * 1.1 / 12
-    camarilla_R1 = df_12h['close'].values + camarilla_range * 1
-    camarilla_S1 = df_12h['close'].values - camarilla_range * 1
+    # Calculate Camarilla levels from previous 4h bar
+    camarilla_range = (df_4h['high'].values - df_4h['low'].values) * 1.1 / 12
+    camarilla_R1 = df_4h['close'].values + camarilla_range * 1
+    camarilla_S1 = df_4h['close'].values - camarilla_range * 1
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_S1)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_S1)
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -49,7 +49,7 @@ def generate_signals(prices):
     base_size = 0.30
     
     # Start after warmup
-    start_idx = max(34, 20) + 1
+    start_idx = max(50, 34, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -96,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
