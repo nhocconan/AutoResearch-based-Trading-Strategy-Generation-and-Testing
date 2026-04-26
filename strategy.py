@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike (>2x average volume). Uses discrete position sizing (0.25) to minimize fee churn. Camarilla levels provide institutional support/resistance; breakouts with volume and HTF trend capture momentum in both bull and bear markets. Low trade frequency (~20-40/year) avoids fee drag while maintaining edge.
+1d_KAMA_Trend_RSI_ChopFilter
+Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction, combined with RSI(14) for momentum and Choppiness Index for regime filtering. Enters long when KAMA slopes up, RSI > 50, and market is trending (CHOP < 38.2). Enters short when KAMA slopes down, RSI < 50, and market is trending. Uses discrete position sizing (0.25) to minimize fee churn and ATR-based stoploss for risk management. Designed to work in both bull and bear markets by adapting to trend regime and avoiding ranging markets where whipsaws occur.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need warmup for EMA and volume
+    if n < 100:  # Need warmup for indicators
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,39 +18,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for HTF trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Load weekly data for HTF trend context (optional filter)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, 1))
+    change = np.insert(change, 0, 0)  # align length
+    volatility = np.sum(np.abs(np.diff(close, 1)), axis=0)  # placeholder, will compute properly below
     
-    # Camarilla levels from previous 1d bar (H, L, C)
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Proper KAMA calculation
+    lookback = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    # Camarilla R1, S1, R2, S2, R3, S3, R4, S4
-    camarilla_r1 = c_1d + (h_1d - l_1d) * 1.0/12
-    camarilla_s1 = c_1d - (h_1d - l_1d) * 1.0/12
-    camarilla_r2 = c_1d + (h_1d - l_1d) * 2.0/12
-    camarilla_s2 = c_1d - (h_1d - l_1d) * 2.0/12
-    camarilla_r3 = c_1d + (h_1d - l_1d) * 3.0/12
-    camarilla_s3 = c_1d - (h_1d - l_1d) * 3.0/12
-    camarilla_r4 = c_1d + (h_1d - l_1d) * 4.0/12
-    camarilla_s4 = c_1d - (h_1d - l_1d) * 4.0/12
+    # Calculate efficiency ratio
+    price_change = np.abs(np.diff(close, lookback))
+    price_change = np.concatenate([np.full(lookback, np.nan), price_change])
     
-    # Align Camarilla levels (1d data needs to complete before use)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    volatility_sum = np.zeros_like(close)
+    for i in range(lookback, len(close)):
+        volatility_sum[i] = np.sum(np.abs(np.diff(close[i-lookback:i+1, 0])))
+    volatility_sum[:lookback] = np.nan
+    
+    er = np.where(volatility_sum > 0, price_change / volatility_sum, 0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate Choppiness Index (CHOP) for regime detection
+    chop_window = 14
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    max_high = pd.Series(high).rolling(window=chop_window, min_periods=chop_window).max().values
+    min_low = pd.Series(low).rolling(window=chop_window, min_periods=chop_window).min().values
+    
+    chop = np.zeros_like(close)
+    for i in range(chop_window, len(close)):
+        if atr[i] > 0 and not np.isnan(max_high[i]) and not np.isnan(min_low[i]):
+            chop[i] = 100 * np.log10(np.sum(tr[i-chop_window+1:i+1]) / (np.log10(chop_window) * (max_high[i] - min_low[i]))) / np.log10(chop_window)
+        else:
+            chop[i] = np.nan
+    chop[:chop_window] = np.nan
+    
+    # Calculate ATR(14) for stoploss
+    atr_val = atr  # already calculated above
     
     # Calculate average volume for confirmation (20-period SMA)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,32 +93,24 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     base_size = 0.25
+    atr_multiplier = 2.0  # ATR stoploss multiplier
     
-    # Start after warmup (need 20 for volume, 34 for EMA)
-    start_idx = max(20, 34)
+    # Start after warmup (need 20 for volume, 34 for KAMA stability, 14 for ATR/RSI/CHOP)
+    start_idx = max(20, 34, 14)
     
     for i in range(start_idx, n):
         # Get current values
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_34_1d_aligned[i]
-        
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
-        r4 = r4_aligned[i]
-        s4 = s4_aligned[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        chop_val = chop[i]
+        atr_val = atr_val[i]
         
         # Skip if any data not ready
-        if (np.isnan(ema_val) or np.isnan(avg_vol) or 
-            np.isnan(r1) or np.isnan(s1) or np.isnan(r2) or np.isnan(s2) or
-            np.isnan(r3) or np.isnan(s3) or np.isnan(r4) or np.isnan(s4)):
+        if (np.isnan(kama_val) or np.isnan(rsi_val) or np.isnan(chop_val) or 
+            np.isnan(avg_vol) or np.isnan(atr_val)):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -94,20 +120,37 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume (strict filter)
-        volume_confirmed = vol > 2.0 * avg_vol
+        # KAMA slope for trend direction (using 2-period slope)
+        kama_slope = kama_val - kama[i-1] if i > 0 else 0
         
-        # Long logic: price breaks above R1 with 1d uptrend and volume confirmation
-        long_condition = (close_val > r1) and (close_val > ema_val) and volume_confirmed
-        # Short logic: price breaks below S1 with 1d downtrend and volume confirmation
-        short_condition = (close_val < s1) and (close_val < ema_val) and volume_confirmed
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirmed = vol > 1.3 * avg_vol
         
-        # Exit logic: trend reversal (close crosses 1d EMA34) or opposite Camarilla level touch
-        exit_long = close_val < ema_val
-        exit_short = close_val > ema_val
-        # Additional exit: touch opposite S1/R1 (mean reversion within day)
-        exit_long_opposite = position == 1 and close_val < s1
-        exit_short_opposite = position == -1 and close_val > r1
+        # Regime filter: trending market (CHOP < 38.2)
+        trending_regime = chop_val < 38.2
+        
+        # Long logic: KAMA trending up, RSI > 50, trending regime, volume confirmation
+        long_condition = (kama_slope > 0) and (rsi_val > 50) and trending_regime and volume_confirmed
+        # Short logic: KAMA trending down, RSI < 50, trending regime, volume confirmation
+        short_condition = (kama_slope < 0) and (rsi_val < 50) and trending_regime and volume_confirmed
+        
+        # Exit logic: KAMA slope reversal or RSI extreme
+        exit_long = (kama_slope <= 0) or (rsi_val < 40)
+        exit_short = (kama_slope >= 0) or (rsi_val > 60)
+        
+        # ATR-based stoploss
+        if position == 1:
+            stop_price = entry_price - atr_multiplier * atr_val
+            if close_val < stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:
+            stop_price = entry_price + atr_multiplier * atr_val
+            if close_val > stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -117,10 +160,10 @@ def generate_signals(prices):
             signals[i] = -base_size
             position = -1
             entry_price = close_val  # Enter at next bar open, approximate with close
-        elif position == 1 and (exit_long or exit_long_opposite):
+        elif position == 1 and exit_long:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (exit_short or exit_short_opposite):
+        elif position == -1 and exit_short:
             signals[i] = 0.0
             position = 0
         else:
@@ -134,6 +177,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
