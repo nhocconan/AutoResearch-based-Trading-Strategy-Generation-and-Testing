@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
-Hypothesis: Daily Camarilla R3/S3 level breakouts with weekly trend filter (price above/below 1w EMA34) and volume confirmation (ATR ratio > 1.3). Camarilla levels provide high-probability reversal/breakout points. Weekly trend ensures alignment with higher timeframe momentum to avoid counter-trend trades. Volume spike confirms institutional participation. Discrete sizing 0.25 targets ~20-40 trades/year. Works in bull/bear via weekly trend filter.
+6h_Donchian20_Breakout_12hTrend_VolumeRegime
+Hypothesis: 6h Donchian(20) breakout with 12h EMA50 trend filter and volume regime filter (ATR ratio > 1.3). Donchian channels provide clear breakout levels. 12h EMA50 ensures alignment with higher timeframe momentum to avoid counter-trend trades. Volume regime confirms institutional participation. Discrete sizing 0.25 limits trades (~15-30/year). Works in bull/bear via 12h trend filter - only trade in direction of higher timeframe trend.
 """
 
 import numpy as np
@@ -18,16 +18,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load 12h data ONCE before loop for HTF trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    close_12h_series = pd.Series(close_12h)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate ATR(14) for volume regime
     atr_period = 14
@@ -40,27 +40,10 @@ def generate_signals(prices):
     # Calculate ATR ratio (current ATR / 50-period ATR) for volume regime
     atr_ratio = atr / pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     
-    # Calculate daily Camarilla levels (based on previous day's OHLC)
-    # Camarilla equations:
-    # H4 = Close + 1.1*(High-Low)/2
-    # L4 = Close - 1.1*(High-Low)/2
-    # H3 = Close + 1.1*(High-Low)/4
-    # L3 = Close - 1.1*(High-Low)/4
-    # H2 = Close + 1.1*(High-Low)/6
-    # L2 = Close - 1.1*(High-Low)/6
-    # H1 = Close + 1.1*(High-Low)/12
-    # L1 = Close - 1.1*(High-Low)/12
-    # R3 = H3, S3 = L3 (we focus on these levels)
-    
-    # Shift OHLC by 1 to use previous day's data for today's levels
-    prev_high = np.concatenate([[np.nan], high[:-1]])
-    prev_low = np.concatenate([[np.nan], low[:-1]])
-    prev_close = np.concatenate([[np.nan], close[:-1]])
-    
-    # Calculate Camarilla levels
-    hl_range = prev_high - prev_low
-    camarilla_h3 = prev_close + 1.1 * hl_range / 4
-    camarilla_l3 = prev_close - 1.1 * hl_range / 4
+    # Donchian Channel (20 periods)
+    period_dc = 20
+    dc_upper = pd.Series(high).rolling(window=period_dc, min_periods=period_dc).max().values
+    dc_lower = pd.Series(low).rolling(window=period_dc, min_periods=period_dc).min().values
     
     # Fixed position size to control trade frequency
     fixed_size = 0.25
@@ -68,28 +51,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of calculations (34 for weekly EMA, 50 for ATR ratio)
+    # Warmup: max of calculations (50 for ATR ratio and EMA, 20 for Donchian)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_ratio[i])):
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        h3_val = camarilla_h3[i]
-        l3_val = camarilla_l3[i]
-        ema_34_val = ema_34_1w_aligned[i]
+        dc_upper_val = dc_upper[i]
+        dc_lower_val = dc_lower[i]
+        ema_50_val = ema_50_12h_aligned[i]
         vol_spike = atr_ratio[i] > 1.3  # volume regime
         size = fixed_size
         
-        # Entry conditions: Camarilla R3/S3 breakout with volume spike AND aligned with weekly EMA34 trend
-        # Long: price breaks above R3 (bullish breakout)
-        # Short: price breaks below S3 (bearish breakout)
-        long_entry = (close_val > h3_val) and vol_spike and (close_val > ema_34_val)
-        short_entry = (close_val < l3_val) and vol_spike and (close_val < ema_34_val)
+        # Entry conditions: Donchian breakout with volume spike AND aligned with 12h EMA50 trend
+        # Long: price breaks above upper Donchian band
+        # Short: price breaks below lower Donchian band
+        long_entry = (close_val > dc_upper_val) and vol_spike and (close_val > ema_50_val)
+        short_entry = (close_val < dc_lower_val) and vol_spike and (close_val < ema_50_val)
         
         if position == 0:
             # Flat - look for entry
@@ -102,21 +85,21 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit when price re-enters Camarilla H3-L3 range or trend reversal
-            if close_val < h3_val and close_val > l3_val:  # back inside H3-L3 range
+            # Long - exit when price re-enters Donchian channel or trend reversal
+            if close_val < dc_upper_val and close_val > dc_lower_val:  # back inside channel
                 signals[i] = 0.0
                 position = 0
-            elif close_val < ema_34_val:  # trend reversal
+            elif close_val < ema_50_val:  # trend reversal
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price re-enters Camarilla H3-L3 range or trend reversal
-            if close_val > l3_val and close_val < h3_val:  # back inside H3-L3 range
+            # Short - exit when price re-enters Donchian channel or trend reversal
+            if close_val > dc_lower_val and close_val < dc_upper_val:  # back inside channel
                 signals[i] = 0.0
                 position = 0
-            elif close_val > ema_34_val:  # trend reversal
+            elif close_val > ema_50_val:  # trend reversal
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_12hTrend_VolumeRegime"
+timeframe = "6h"
 leverage = 1.0
