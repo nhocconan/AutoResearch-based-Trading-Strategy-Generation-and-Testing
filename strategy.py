@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation_v2
-Hypothesis: 12h breakout above/below daily Camarilla R3/S3 levels in direction of 1d EMA34 trend, confirmed by volume spike (>1.8x 40-bar MA). Reduced volume threshold to increase signal reliability while maintaining low trade frequency. Uses 2-bar minimum holding period to prevent whipsaw. Designed for 12-37 trades/year (50-150 total over 4 years) to avoid fee drag. Works in both bull and bear markets by following the 1d trend while using Camarilla structure for precise entries.
+4h_Donchian20_Breakout_1dTrend_VolumeConfirmation
+Hypothesis: 4h breakout above/below 20-period Donchian channel in direction of 1d EMA50 trend, confirmed by volume spike (>1.5x 20-bar MA). Uses Donchian breakouts (proven edge) with 1d trend filter to avoid counter-trend trades. Volume confirmation reduces false breakouts. Designed for 20-50 trades/year (75-200 total over 4 years) to avoid fee drag. Works in both bull and bear markets by following the 1d trend while using Donchian structure for precise entries.
 """
 
 import numpy as np
@@ -18,72 +18,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivot and trend
+    # Load 1d data ONCE before loop for EMA50 trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels on 1d (R3, S3)
-    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian channel (20-period) on 4h
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_roll
+    donchian_lower = low_roll
     
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume confirmation: volume > 1.8x 40-period average (stricter threshold)
-    vol_ma = pd.Series(volume).rolling(window=40, min_periods=40).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     base_size = 0.25  # Position size
     
-    # Warmup: max of calculations (40 for vol, 34 for ema)
-    start_idx = max(40, 34)
+    # Warmup: max of calculations (20 for Donchian, 20 for vol, 50 for ema)
+    start_idx = max(20, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             bars_since_entry += 1 if position != 0 else 0
             continue
         
         close_val = close[i]
-        ema_34_val = ema_34_1d_aligned[i]
-        r3_val = camarilla_r3_aligned[i]
-        s3_val = camarilla_s3_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
         vol_spike = volume_spike[i]
         
-        # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
-        bullish_1d = close_val > ema_34_val
-        bearish_1d = close_val < ema_34_val
+        # Determine 1d trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_1d = close_val > ema_50_val
+        bearish_1d = close_val < ema_50_val
         
-        # Entry conditions: breakout of Camarilla R3/S3 in trend direction with volume
-        # R3 = resistance level, break above = long
-        # S3 = support level, break below = short
-        long_entry = (close_val > r3_val) and bullish_1d and vol_spike
-        short_entry = (close_val < s3_val) and bearish_1d and vol_spike
+        # Entry conditions: breakout of Donchian channel in trend direction with volume
+        # Upper break = long, lower break = short
+        long_entry = (close_val > upper) and bullish_1d and vol_spike
+        short_entry = (close_val < lower) and bearish_1d and vol_spike
         
-        # Exit conditions: opposite Camarilla level touch (or trend reversal)
-        exit_long = (close_val < s3_val) or not bullish_1d
-        exit_short = (close_val > r3_val) or not bearish_1d
+        # Exit conditions: opposite Donchian touch (or trend reversal)
+        exit_long = (close_val < lower) or not bullish_1d
+        exit_short = (close_val > upper) or not bearish_1d
         
-        # Minimum holding period: 2 bars
-        min_hold = 2
+        # Minimum holding period: 3 bars
+        min_hold = 3
         
         if position == 0:
             # Flat - look for entry
@@ -119,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation_v2"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
