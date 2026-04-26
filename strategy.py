@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4_S4_Breakout_1wTrend_HTF_VolumeSpike
-Hypothesis: On 6h timeframe, price breaking Camarilla R4/S4 levels in the direction of 1w EMA50 trend with volume confirmation (>1.8x 20-period MA) captures high-probability institutional breakout moves. The 1w EMA50 provides a strong trend filter resistant to whipsaw, while Camarilla R4/S4 levels represent significant breakout zones requiring strong momentum. Volume spike confirms participation. Designed for 12-37 trades/year with discrete sizing (±0.25) and ATR-based trailing stop (2.5x) to minimize fee drag and work in both bull/bear markets with BTC/ETH edge.
+12h_Donchian20_Breakout_1wTrend_Filter_VolumeConfirm
+Hypothesis: On 12h timeframe, price breaking Donchian(20) channels in the direction of 1w EMA50 trend with volume confirmation (>1.8x 20-period MA) captures high-probability trend continuation moves. The 1w EMA50 acts as a strong trend filter, Donchian levels provide clear breakout zones, and volume spike confirms institutional participation. Designed for 12-30 trades/year with discrete sizing (±0.25) and ATR-based trailing stop (2.5x) to minimize fee drag and work in both bull/bear markets with BTC/ETH edge.
 """
 
 import numpy as np
@@ -18,44 +18,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Load 1w data ONCE before loop for EMA trend filter
+    # Load 1w data ONCE before loop for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: based on previous day's range
-    daily_range = high_1d - low_1d
-    camarilla_r4 = close_1d + daily_range * 1.1 / 2
-    camarilla_s4 = close_1d - daily_range * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe (wait for completed 1d bar)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
     # 1w EMA50 for trend filter
-    close_series_1w = pd.Series(df_1w['close'].values)
-    ema_50_1w = close_series_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 6h ATR(20) for trailing stop
+    # 12h Donchian(20) channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # 12h ATR(20) for trailing stop
     tr1 = pd.Series(high).diff().abs()
     tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
     tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
-    tr_6h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_6h = tr_6h.ewm(span=20, adjust=False, min_periods=20).mean()
-    atr_6h_values = atr_6h.values
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = tr_12h.ewm(span=20, adjust=False, min_periods=20).mean()
+    atr_12h_values = atr_12h.values
     
-    # Volume spike filter: volume > 1.8 * 20-period MA on 6h
+    # Volume spike filter: volume > 1.8 * 20-period MA on 12h
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (volume_ma * 1.8)
     
@@ -65,22 +52,22 @@ def generate_signals(prices):
     highest_since_long = 0.0
     lowest_since_short = 0.0
     
-    # Warmup: max of EMA (50), ATR (20), volume MA (20) + time for 1d/1w alignment
-    start_idx = max(50, 20, 20) + 4  # +4 to ensure 1d bar completion (6h -> 1d: 4 bars per day)
+    # Warmup: max of EMA (50), Donchian (20), ATR (20), volume MA (20) + time for 1w alignment
+    start_idx = max(50, 20, 20, 20) + 84  # +84 to ensure 1w bar completion (12h -> 1w: 14 bars per week)
     
     for i in range(start_idx, n):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
         vol = volume[i]
-        r4_val = camarilla_r4_aligned[i]
-        s4_val = camarilla_s4_aligned[i]
         ema_val = ema_50_1w_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_6h_values[i]
+        atr_val = atr_12h_values[i]
         
         # Skip if any data not ready (NaN from alignment or calculation)
-        if (np.isnan(r4_val) or np.isnan(s4_val) or np.isnan(ema_val) or 
+        if (np.isnan(ema_val) or np.isnan(upper) or np.isnan(lower) or 
             np.isnan(atr_val) or np.isnan(volume_ma[i])):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
@@ -90,9 +77,9 @@ def generate_signals(prices):
         trend_bullish = close_val > ema_val
         trend_bearish = close_val < ema_val
         
-        # Camarilla breakout conditions: price breaks R4/S4 with trend alignment + volume spike
-        long_breakout = close_val > r4_val
-        short_breakout = close_val < s4_val
+        # Donchian breakout conditions: price breaks upper/lower with trend alignment + volume spike
+        long_breakout = close_val > upper
+        short_breakout = close_val < lower
         
         long_entry = trend_bullish and long_breakout and vol_spike
         short_entry = trend_bearish and short_breakout and vol_spike
@@ -140,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Breakout_1wTrend_HTF_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1wTrend_Filter_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
