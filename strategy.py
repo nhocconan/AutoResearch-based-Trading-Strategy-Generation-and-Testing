@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_v1
-Hypothesis: Daily Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation (2.0x average). Uses discrete position sizing (0.25) and ATR-based stoploss (2.5x) for risk management. Designed for low trade frequency (target 7-25/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The weekly EMA50 provides strong trend filtering that works across regimes, and volume confirmation ensures breakouts have participation. This strategy focuses on BTC and ETH as primary targets, avoiding SOL-only bias.
+12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: 12-hour Donchian(20) breakout with daily EMA34 trend filter and volume confirmation (2.0x average). Uses discrete position sizing (0.25) and ATR-based stoploss (2.5x) for risk management. Designed for low trade frequency (target 12-37/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The daily EMA34 provides strong trend filtering that works across regimes, and volume confirmation ensures breakouts have participation. This strategy focuses on BTC and ETH as primary targets, avoiding SOL-only bias.
 """
 
 import numpy as np
@@ -18,17 +18,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA(50) on weekly for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate EMA(34) on daily for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for stoploss on daily
+    # Calculate ATR(14) for stoploss on 12h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -39,31 +39,25 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Calculate Donchian(20) channels from previous daily bar
-    # Use rolling window on daily data via HTF
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate Donchian(20) channels from previous 12h bar
+    # Use rolling window on 12h data (primary timeframe)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20-period high and low on daily close
-    high_20 = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 1d (already aligned since we're using 1d data)
-    # But we need to shift by 1 to avoid look-ahead (use previous day's channel)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # Align Donchian levels to avoid look-ahead (use previous bar's channel)
+    high_20_aligned = align_htf_to_ltf(prices, prices, high_20)  # Self-align for same timeframe
+    low_20_aligned = align_htf_to_ltf(prices, prices, low_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of weekly EMA(50), volume MA, ATR, Donchian
-    start_idx = max(50, 20, 14) + 1
+    # Warmup: max of daily EMA(34), volume MA, ATR, Donchian
+    start_idx = max(34, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(high_20_aligned[i]) or
             np.isnan(low_20_aligned[i]) or
             np.isnan(vol_ma[i]) or
@@ -78,16 +72,16 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        trend_1w_up = close_val > ema_50_1w_aligned[i]   # Weekly uptrend
-        trend_1w_down = close_val < ema_50_1w_aligned[i]  # Weekly downtrend
+        trend_1d_up = close_val > ema_34_1d_aligned[i]   # Daily uptrend
+        trend_1d_down = close_val < ema_34_1d_aligned[i]  # Daily downtrend
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian AND weekly trend up AND volume spike
-            long_signal = (close_val > high_20_aligned[i]) and trend_1w_up and vol_spike
+            # Long: price breaks above upper Donchian AND daily trend up AND volume spike
+            long_signal = (close_val > high_20_aligned[i]) and trend_1d_up and vol_spike
             
-            # Short: price breaks below lower Donchian AND weekly trend down AND volume spike
-            short_signal = (close_val < low_20_aligned[i]) and trend_1w_down and vol_spike
+            # Short: price breaks below lower Donchian AND daily trend down AND volume spike
+            short_signal = (close_val < low_20_aligned[i]) and trend_1d_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -103,19 +97,19 @@ def generate_signals(prices):
             # Hold long
             signals[i] = 0.25
             # Exit: trend flips down OR price hits ATR stoploss
-            if (not trend_1w_up) or (close_val < entry_price - 2.5 * atr[i]):
+            if (not trend_1d_up) or (close_val < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
             # Exit: trend flips up OR price hits ATR stoploss
-            if (not trend_1w_down) or (close_val > entry_price + 2.5 * atr[i]):
+            if (not trend_1d_down) or (close_val > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
