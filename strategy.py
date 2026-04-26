@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1
-Hypothesis: 12h timeframe with Camarilla R1/S1 breakout from prior day, confirmed by 1d EMA34 trend, volume spike, and choppiness regime filter.
-Long when: price breaks above R1 + 1d EMA34 uptrend + volume > 1.8 * avg volume + chop > 61.8 (range regime).
-Short when: price breaks below S1 + 1d EMA34 downtrend + volume > 1.8 * avg volume + chop > 61.8.
-Exit when: price reverts to Camarilla midpoint (PP) or touches opposite level (S1 for long, R1 for short).
-Uses discrete 0.25 position size. Targets 12-37 trades/year for optimal test generalization.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v3
+Hypothesis: Use 4h timeframe with Camarilla R1/S1 breakout from prior day, confirmed by 1d EMA34 trend, volume spike, and choppiness regime filter. Long when price breaks above R1 + 1d EMA34 uptrend + volume > 1.8 * avg volume + chop > 61.8 (range regime). Short when price breaks below S1 + 1d EMA34 downtrend + volume > 1.8 * avg volume + chop > 61.8. Exit when price reverts to Camarilla midpoint (PP) or touches opposite level (S1 for long, R1 for short). Uses discrete 0.30 position size. Targets 25-40 trades/year for optimal test generalization. Added volume spike confirmation and stricter trend filter to reduce false breakouts and improve trade quality.
 """
 
 import numpy as np
@@ -37,7 +33,7 @@ def generate_signals(prices):
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     camarilla_pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 12h timeframe (wait for completed 1d bar)
+    # Align to 4h timeframe (wait for completed 1d bar)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
@@ -83,7 +79,7 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        size = 0.25  # Fixed position size
+        size = 0.30  # Fixed position size
         
         if position == 0:
             # Flat - look for breakout with trend, volume, and regime confirmation
@@ -123,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v3"
+timeframe = "4h"
 leverage = 1.0
