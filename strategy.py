@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_Trend_VolumeConfirm
-Hypothesis: Elder Ray (Bull/Bear Power) combined with 1d EMA trend and volume confirmation captures institutional moves in both bull and bear markets. Bull Power = High - EMA13, Bear Power = Low - EMA13. Long when Bull Power > 0 and rising, Bear Power < 0, price > 1d EMA50, volume > 1.5x average. Short when Bear Power < 0 and falling, Bull Power < 0, price < 1d EMA50, volume > 1.5x average. Uses discrete sizing (0.25) to limit fee churn. Target 12-30 trades/year to avoid fee drag on 6h timeframe.
+12h_Camarilla_R1_S1_Breakout_1wTrend_Filter_v1
+Hypothesis: 12h Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume spike (>1.5x average) reduces false breakouts in ranging/bear markets. Uses ATR-based stoploss (2.0) and discrete sizing (0.25) to limit fee churn. Only trades when price closes beyond Camarilla level (avoids intrabar noise). Designed for BTC/ETH: weekly trend filter works in bull/bear, volume confirms participation, ATR stop adapts to volatility. Target 12-30 trades/year to avoid fee drag on 12h timeframe.
 """
 
 import numpy as np
@@ -18,25 +18,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # ATR(14) for dynamic stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Camarilla levels from previous 1d bar
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # EMA13 for Elder Ray (using 6h close)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
-    
-    # Smooth Bull/Bear Power to reduce noise (2-period EMA)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=2, adjust=False, min_periods=2).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=2, adjust=False, min_periods=2).mean().values
+    # Align to 12h (wait for completed 1d bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Average volume for confirmation (20-period SMA)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,21 +59,23 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     base_size = 0.25
+    atr_multiplier = 2.0
     
-    # Warmup: max of EMA13(13), EMA50(50), volume(20)
-    start_idx = max(13, 50, 20)
+    # Warmup: max of EMA(50), volume(20), ATR(14)
+    start_idx = max(50, 20, 14)
     
     for i in range(start_idx, n):
         close_val = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_50_val = ema_50_1d_aligned[i]
-        bull_val = bull_power_smooth[i]
-        bear_val = bear_power_smooth[i]
+        ema_val = ema_50_1w_aligned[i]
+        r1_val = camarilla_r1_aligned[i]
+        s1_val = camarilla_s1_aligned[i]
+        atr_val = atr[i]
         
         # Skip if any data not ready
-        if (np.isnan(ema_50_val) or np.isnan(avg_vol) or np.isnan(bull_val) or 
-            np.isnan(bear_val)):
+        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(atr_val)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
@@ -67,19 +83,18 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirmed = vol > 1.5 * avg_vol
         
-        # Rising Bull Power: current > previous
-        bull_rising = i > start_idx and bull_val > bull_power_smooth[i-1]
-        # Falling Bear Power: current < previous
-        bear_falling = i > start_idx and bear_val < bear_power_smooth[i-1]
+        # Long: price CLOSES above R1 with 1w uptrend and volume
+        long_condition = (close_val > r1_val) and (close_val > ema_val) and volume_confirmed
+        # Short: price CLOSES below S1 with 1w downtrend and volume
+        short_condition = (close_val < s1_val) and (close_val < ema_val) and volume_confirmed
         
-        # Long: Bull Power > 0 and rising, Bear Power < 0, price > 1d EMA50, volume confirmed
-        long_condition = (bull_val > 0) and bull_rising and (bear_val < 0) and (close_val > ema_50_val) and volume_confirmed
-        # Short: Bear Power < 0 and falling, Bull Power < 0, price < 1d EMA50, volume confirmed
-        short_condition = (bear_val < 0) and bear_falling and (bull_val < 0) and (close_val < ema_50_val) and volume_confirmed
+        # Stoploss: ATR-based
+        long_stop = (position == 1 and close_val < entry_price - atr_multiplier * atr_val)
+        short_stop = (position == -1 and close_val > entry_price + atr_multiplier * atr_val)
         
-        # Exit: Elder Ray divergence or trend change
-        long_exit = (position == 1 and (bull_val <= 0 or close_val < ema_50_val))
-        short_exit = (position == -1 and (bear_val >= 0 or close_val > ema_50_val))
+        # Exit: price retests broken level OR stoploss hit
+        long_exit = (position == 1 and (close_val <= r1_val or long_stop))
+        short_exit = (position == -1 and (close_val >= s1_val or short_stop))
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -101,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
