@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_CloudFilter_v1
-Hypothesis: 6h Ichimoku Tenkan-Kijun cross with 1d cloud filter and volume confirmation.
-- Uses 6h timeframe to capture medium-term swings with lower frequency than 1h/4h
-- Ichimoku TK cross provides momentum signals (bullish when Tenkan > Kijun)
-- 1d Ichimoku cloud acts as trend filter: only take longs when price above cloud, shorts when below cloud
-- Volume spike (1.8x 20-period average) confirms institutional participation
-- Designed for 15-35 trades/year (60-140 total over 4 years) to minimize fee drag
-- Works in bull/bear markets by using 1d cloud as primary trend filter and TK cross for timing
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Uses 12h timeframe to capture medium-term swings with lower trade frequency
+- Camarilla R1/S1 levels from 1d provide precise support/resistance from prior day
+- 1d EMA34 filter ensures trades align with higher timeframe trend
+- Volume spike (2.0x 20-period average) confirms institutional participation
+- Designed for 12-30 trades/year (48-120 total over 4 years) to minimize fee drag
+- Works in bull/bear markets by trading with the 1d trend and using volume/ADX to filter false breakouts
 """
 
 import numpy as np
@@ -27,62 +27,80 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Ichimoku components
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate ADX(14) on 1d for trend strength filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    max_high_9 = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_9 = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan_1d = (max_high_9 + min_low_9) / 2
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    max_high_26 = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_26 = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun_1d = (max_high_26 + min_low_26) / 2
+    # +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
+    # Smoothed values (Wilder's smoothing)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: smoothed = (prev_smoothed * (period-1) + current) / period
+            for i in range(period, len(data)):
+                if not np.isnan(data[i]) and not np.isnan(result[i-1]):
+                    result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period_senkou_b = 52
-    max_high_52 = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_52 = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b_1d = (max_high_52 + min_low_52) / 2
+    tr_smooth = wilder_smooth(tr, 14)
+    plus_dm_smooth = wilder_smooth(plus_dm, 14)
+    minus_dm_smooth = wilder_smooth(minus_dm, 14)
     
-    # Align 1d Ichimoku components to 6h timeframe
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    # DI+ and DI-
+    plus_di = np.where(tr_smooth != 0, (plus_dm_smooth / tr_smooth) * 100, 0)
+    minus_di = np.where(tr_smooth != 0, (minus_dm_smooth / tr_smooth) * 100, 0)
     
-    # Calculate 6h Ichimoku components for TK cross
-    max_high_9_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    min_low_9_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_6h = (max_high_9_6h + min_low_9_6h) / 2
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = wilder_smooth(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    max_high_26_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    min_low_26_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_6h = (max_high_26_6h + min_low_26_6h) / 2
+    # Calculate Camarilla levels from previous 1d bar
+    camarilla_r1 = close_1d + (1.0/12) * (high_1d - low_1d)
+    camarilla_s1 = close_1d - (1.0/12) * (high_1d - low_1d)
     
-    # Volume spike: volume > 1.8 * 20-period average
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume spike: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 52 for Senkou B, 26 for Kijun, 20 for volume MA)
-    start_idx = max(52, 26, 20)
+    # Start after warmup (need 34 for 1d EMA/ADX, 20 for volume MA)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
-            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -92,25 +110,25 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Determine cloud boundaries (Senkou Span A/B)
-        upper_cloud = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        lower_cloud = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        # Breakout conditions
+        breakout_long = close[i] > camarilla_r1_aligned[i]
+        breakout_short = close[i] < camarilla_s1_aligned[i]
         
-        # TK cross conditions
-        tk_cross_bullish = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
-        tk_cross_bearish = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
-        
-        # Price relative to cloud
-        price_above_cloud = close[i] > upper_cloud
-        price_below_cloud = close[i] < lower_cloud
+        # Re-entry conditions (price back inside Camarilla H3-L3 range)
+        # Calculate Camarilla H3/L3 for the day: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
+        camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
+        camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
+        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+        price_in_range = (close[i] > camarilla_l3_aligned[i]) and (close[i] < camarilla_h3_aligned[i])
         
         if position == 0:
-            # Long: bullish TK cross AND price above cloud AND volume spike
-            if tk_cross_bullish and price_above_cloud and volume_spike[i]:
+            # Long: breakout above R1 AND close > 1d EMA34 AND volume spike AND ADX > 25
+            if breakout_long and close[i] > ema34_1d_aligned[i] and volume_spike[i] and adx_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish TK cross AND price below cloud AND volume spike
-            elif tk_cross_bearish and price_below_cloud and volume_spike[i]:
+            # Short: breakout below S1 AND close < 1d EMA34 AND volume spike AND ADX > 25
+            elif breakout_short and close[i] < ema34_1d_aligned[i] and volume_spike[i] and adx_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -118,20 +136,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: bearish TK cross OR price drops below cloud
-            if tk_cross_bearish or not price_above_cloud:
+            # Exit: breakout below S1 OR price re-enters Camarilla H3-L3 range
+            if breakout_short or price_in_range:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: bullish TK cross OR price rises above cloud
-            if tk_cross_bullish or not price_below_cloud:
+            # Exit: breakout above R1 OR price re-enters Camarilla H3-L3 range
+            if breakout_long or price_in_range:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
