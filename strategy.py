@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter
-Hypothesis: On 12h timeframe, Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume spike (>2x 20-bar MA) work in both bull and bear markets by following higher timeframe trend. Chop regime filter (CHOP < 38.2 = trending) ensures we only take breakouts in trending markets, avoiding false signals in ranges. Uses tighter R3/S3 levels (vs R1/S1) to reduce trade frequency to target 12-37/year. Designed for BTC/ETH with discrete position sizing (0.25) to minimize fee drag.
+4h_Camarilla_R3_S3_Breakout_1dEMA50_VolumeSpike_RegimeFilter
+Hypothesis: Camarilla R3/S3 breakouts with 1d EMA50 trend filter, volume confirmation (>2.0x 20-bar MA), and 4h chop regime filter (CHOP > 61.8 = range). Uses 1d EMA50 for smoother trend identification and tighter volume confirmation to reduce false breakouts. Targets 20-40 trades/year by requiring confluence of trend, structure, volume, and regime conditions. Works in bull/bear markets by following 1d trend while using Camarilla structure for precise entries.
 """
 
 import numpy as np
@@ -20,13 +20,13 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop for HTF filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter (smoother than EMA34)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Previous day's OHLC for Camarilla levels (R3/S3 = wider breakout levels)
     high_1d = df_1d['high'].values
@@ -38,7 +38,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d_vals + (rng * 1.1 / 4)   # R3 level
     camarilla_s3 = close_1d_vals - (rng * 1.1 / 4)   # S3 level
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -46,7 +46,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # Chop regime filter: only take breakouts in trending markets (CHOP < 38.2 = trending)
+    # 4h Chop regime filter: avoid breakouts in ranging markets (CHOP > 61.8 = choppy)
     def calculate_chop(high_arr, low_arr, close_arr, window=14):
         """Calculate Choppiness Index"""
         atr = []
@@ -70,18 +70,18 @@ def generate_signals(prices):
         return chop
     
     chop_values = calculate_chop(high, low, close, window=14)
-    is_trending = chop_values < 38.2  # True when trending (favor breakouts)
+    chop_regime = chop_values > 61.8  # True when choppy/ranging (avoid breakouts)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size (25% of capital)
     
-    # Warmup: max of calculations (20 for vol, 34 for 1d EMA, 14 for chop)
-    start_idx = max(20, 34, 14)
+    # Warmup: max of calculations (20 for vol, 50 for 1d EMA, 14 for chop)
+    start_idx = max(20, 50, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(vol_ma[i]) or 
@@ -92,17 +92,17 @@ def generate_signals(prices):
         close_val = close[i]
         camarilla_r3_val = camarilla_r3_aligned[i]
         camarilla_s3_val = camarilla_s3_aligned[i]
-        ema_34_val = ema_34_1d_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
         vol_spike = volume_spike[i]
-        is_trending_market = is_trending[i]
+        is_choppy = chop_regime[i]
         
-        # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
-        bullish_1d = close_val > ema_34_val
-        bearish_1d = close_val < ema_34_val
+        # Determine 1d trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_1d = close_val > ema_50_val
+        bearish_1d = close_val < ema_50_val
         
-        # Entry conditions: breakout of Camarilla R3/S3 in trend direction with volume spike AND in trending regime
-        long_entry = (close_val > camarilla_r3_val) and bullish_1d and vol_spike and is_trending_market
-        short_entry = (close_val < camarilla_s3_val) and bearish_1d and vol_spike and is_trending_market
+        # Entry conditions: breakout of Camarilla R3/S3 in trend direction with volume spike AND not in choppy regime
+        long_entry = (close_val > camarilla_r3_val) and bullish_1d and vol_spike and (not is_choppy)
+        short_entry = (close_val < camarilla_s3_val) and bearish_1d and vol_spike and (not is_choppy)
         
         if position == 0:
             # Flat - look for entry
@@ -117,7 +117,7 @@ def generate_signals(prices):
         elif position == 1:
             # Long - exit on mean reversion to mid-point or trend change or chop regime
             mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
-            if close_val < mid_point or not bullish_1d or not is_trending_market:
+            if close_val < mid_point or not bullish_1d or is_choppy:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,7 +125,7 @@ def generate_signals(prices):
         elif position == -1:
             # Short - exit on mean reversion to mid-point or trend change or chop regime
             mid_point = (camarilla_r3_val + camarilla_s3_val) / 2
-            if close_val > mid_point or not bearish_1d or not is_trending_market:
+            if close_val > mid_point or not bearish_1d or is_choppy:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA50_VolumeSpike_RegimeFilter"
+timeframe = "4h"
 leverage = 1.0
