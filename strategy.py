@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_ChopRegime_ATRStop
-Hypothesis: Trade 4h TRIX zero-line crosses with volume confirmation and choppiness regime filter.
-TRIX (12,20,9) filters noise and captures momentum. Volume spike confirms institutional participation.
-Choppiness regime (CHOP > 61.8) ensures range-bound conditions for mean-reversion exits.
-ATR-based stoploss controls risk. Works in bull/bear by adapting to regime: trend follow in trending (CHOP < 38.2),
-mean-revert in choppy (CHOP > 61.8). Target: 75-200 trades over 4 years.
+1d_KAMA_Trend_Filtered_With_Volume_And_Chop_Regime_v2
+Hypothesis: Daily KAMA trend with volume confirmation and choppiness regime filter.
+KAMA adapts to market noise, reducing whipsaw in choppy regimes. Volume confirms institutional participation.
+Choppiness filter avoids trend-following in ranging markets. Designed for BTC/ETH in both bull/bear markets.
+Target: 30-100 trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,21 +21,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and choppiness regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate TRIX on 4h: EMA(EMA(EMA(close,12),20),9) - percentage change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
+    # Calculate KAMA(10) on 1d
+    close_1d = close  # prices are already 1d
+    # Efficiency ratio
+    change = np.abs(np.diff(close_1d, n=10))
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_1d, np.nan, dtype=np.float64)
+    kama[9] = close_1d[9]  # seed
+    for i in range(10, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_aligned = kama  # already 1d
     
-    # Calculate 1d EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA(10) for trend filter
+    close_1w = df_1w['close'].values
+    ema_10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -45,37 +53,37 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume spike: volume > 2.0 * 20-period average (stricter to reduce trades)
+    # Volume confirmation: volume > 1.5 * 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Calculate Choppiness Index on 1d: CHOP = 100 * log10(sum(ATR(14),14) / (max(high,14)-min(low,14))) / log10(14)
-    # Simplified: use true range and range over 14 periods
-    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
-                       np.maximum(np.abs(df_1d['high'].values - np.concatenate([[np.nan], df_1d['close'].values[:-1]])),
-                                  np.abs(df_1d['low'].values - np.concatenate([[np.nan], df_1d['close'].values[:-1]]))))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    chop = 100 * np.log10(sum_atr_14 / range_14) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Choppiness regime: CHOP(14) > 61.8 = ranging (avoid trend signals)
+    # True range
+    tr_chop = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_chop[0] = high[0] - low[0]  # first bar
+    atr_chop = pd.Series(tr_chop).rolling(window=14, min_periods=14).mean().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.where((hh - ll) != 0, 100 * np.log10(atr_chop.sum() / (hh - ll)) / np.log10(14), 50)
+    chop_sum = pd.Series(chop).rolling(window=14, min_periods=14).sum().values
+    chop = chop_sum  # already summed over window
+    chop_regime = chop > 61.8  # True = ranging, avoid trend signals
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of TRIX warmup, EMA, ATR, volume MA, CHOP
-    start_idx = max(12+20+9, 34, 14, 20, 14) + 1
+    # Warmup: max of KAMA seed, ATR, volume MA, chop
+    start_idx = max(10, 14, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(kama_aligned[i]) or
+            np.isnan(ema_10_1w_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i]) or
-            np.isnan(chop_aligned[i])):
+            np.isnan(chop_regime[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -86,31 +94,17 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        trix_val = trix[i]
-        trix_prev = trix[i-1]
-        trend_1d_up = close_val > ema_34_1d_aligned[i]
-        trend_1d_down = close_val < ema_34_1d_aligned[i]
+        kama_val = kama_aligned[i]
+        ema_1w_val = ema_10_1w_aligned[i]
         vol_spike = volume_spike[i]
-        chop_val = chop_aligned[i]
-        
-        # Regime filters
-        is_choppy = chop_val > 61.8   # range-bound: mean revert
-        is_trending = chop_val < 38.2  # trending: trend follow
+        is_chopping = chop_regime[i]  # True if ranging
         
         if position == 0:
-            # Entry logic adapts to regime
-            if is_choppy:
-                # In choppy market: mean reversion at TRIX extremes
-                long_signal = (trix_prev <= -0.5 and trix_val > -0.5) and vol_spike  # TRIX crosses up from oversold
-                short_signal = (trix_prev >= 0.5 and trix_val < 0.5) and vol_spike   # TRIX crosses down from overbought
-            elif is_trending:
-                # In trending market: trend follow with TRIX zero-line cross
-                long_signal = (trix_prev <= 0 and trix_val > 0) and trend_1d_up and vol_spike
-                short_signal = (trix_prev >= 0 and trix_val < 0) and trend_1d_down and vol_spike
-            else:
-                # Transition regime: require stronger signal
-                long_signal = (trix_prev <= 0 and trix_val > 0.2) and trend_1d_up and vol_spike
-                short_signal = (trix_prev >= 0 and trix_val < -0.2) and trend_1d_down and vol_spike
+            # Long: price > KAMA AND 1w trend up AND volume spike AND NOT chopping
+            long_signal = (close_val > kama_val) and (close_val > ema_1w_val) and vol_spike and (not is_chopping)
+            
+            # Short: price < KAMA AND 1w trend down AND volume spike AND NOT chopping
+            short_signal = (close_val < kama_val) and (close_val < ema_1w_val) and vol_spike and (not is_chopping)
             
             if long_signal:
                 signals[i] = 0.25
@@ -125,34 +119,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit logic adapts to regime
-            if is_choppy:
-                # In choppy: exit at TRIX overbought or stoploss
-                if (trix_val >= 0.5) or (close_val < entry_price - 1.5 * atr[i]):
-                    signals[i] = 0.0
-                    position = 0
-            else:
-                # In trending: exit at trend flip or stoploss
-                if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]):
-                    signals[i] = 0.0
-                    position = 0
+            # Exit: price < KAMA OR trend flips down OR ATR stoploss
+            if (close_val < kama_val) or (close_val < ema_1w_val) or (close_val < entry_price - 1.5 * atr[i]):
+                signals[i] = 0.0
+                position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit logic adapts to regime
-            if is_choppy:
-                # In choppy: exit at TRIX oversold or stoploss
-                if (trix_val <= -0.5) or (close_val > entry_price + 1.5 * atr[i]):
-                    signals[i] = 0.0
-                    position = 0
-            else:
-                # In trending: exit at trend flip or stoploss
-                if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]):
-                    signals[i] = 0.0
-                    position = 0
+            # Exit: price > KAMA OR trend flips up OR ATR stoploss
+            if (close_val > kama_val) or (close_val > ema_1w_val) or (close_val > entry_price + 1.5 * atr[i]):
+                signals[i] = 0.0
+                position = 0
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_ChopRegime_ATRStop"
-timeframe = "4h"
+name = "1d_KAMA_Trend_Filtered_With_Volume_And_Chop_Regime_v2"
+timeframe = "1d"
 leverage = 1.0
