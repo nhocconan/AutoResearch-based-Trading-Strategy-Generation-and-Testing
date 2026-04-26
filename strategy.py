@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter_V3
-Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter, volume confirmation (>2.2x average volume), and choppiness regime filter (CHOP < 40 for stronger trending markets). Uses discrete position sizing (0.25) to minimize fee churn. Tighter volume and regime filters reduce overtrading while maintaining edge in both bull and bear markets via 1d trend alignment.
+6h_Camarilla_R4S4_Breakout_12hTrend_VolumeConfirm
+Hypothesis: Camarilla R4/S4 breakout on 6h with 12h EMA50 trend filter and volume confirmation (>1.5x average volume). Uses discrete position sizing (0.25) to minimize fee churn. Designed to capture strong momentum moves in both bull and bear markets by aligning with 12h trend and requiring volume confirmation to avoid false breakouts. R4/S4 levels represent stronger breakout points than R3/S3, reducing whipsaws.
 """
 
 import numpy as np
@@ -18,14 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for HTF trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data for HTF trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate ATR(14) for stoploss
     tr1 = high - low
@@ -38,33 +38,17 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period SMA)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Choppiness Index (14-period) for regime filter
-    # CHOP = 100 * log10(sum(ATR1) / (max(high) - min(low))) / log10(N)
-    atr_1 = pd.Series(tr).rolling(window=1, min_periods=1).sum().values  # True Range itself
-    sum_atr_1 = pd.Series(atr_1).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop_numerator = sum_atr_1
-    chop_denominator = max_high - min_low
-    # Avoid division by zero
-    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)
-    chop_ratio = chop_numerator / chop_denominator
-    chop = 100 * np.log10(chop_ratio) / np.log10(14)
-    # CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    # We want strongly trending markets: CHOP < 40 (stricter for fewer trades)
-    chop_filter = chop < 40
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     base_size = 0.25
     atr_multiplier = 2.5  # ATR stoploss multiplier
     
-    # Start after warmup (need 20 for Camarilla, 34 for EMA, 14 for ATR, 14 for CHOP)
-    start_idx = max(20, 34, 14, 14)
+    # Start after warmup (need 20 for Camarilla, 50 for EMA, 14 for ATR, 20 for volume)
+    start_idx = max(20, 50, 14, 20)
     
     for i in range(start_idx, n):
-        # Need previous day's OHLC for Camarilla levels
+        # Need previous period's OHLC for Camarilla levels
         if i < 1:
             # Hold current position
             if position == 0:
@@ -92,19 +76,18 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
             
-        # Camarilla R3 and S3 levels (stronger levels)
-        r3 = prev_close + range_val * 1.1 / 4
-        s3 = prev_close - range_val * 1.1 / 4
+        # Camarilla R4 and S4 levels (stronger breakout levels)
+        r4 = prev_close + range_val * 1.5 / 2
+        s4 = prev_close - range_val * 1.5 / 2
         
         close_val = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_34_1d_aligned[i]
+        ema_val = ema_50_12h_aligned[i]
         atr_val = atr[i]
-        chop_val = chop_filter[i]
         
         # Skip if any data not ready
-        if np.isnan(r3) or np.isnan(s3) or np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(atr_val):
+        if np.isnan(r4) or np.isnan(s4) or np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(atr_val):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -114,20 +97,17 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2.2x average volume (tighter for fewer trades)
-        volume_confirmed = vol > 2.2 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = vol > 1.5 * avg_vol
         
-        # Regime filter: only trade in strongly trending markets (CHOP < 40)
-        regime_ok = chop_val
+        # Long logic: price breaks above R4 with 12h uptrend and volume confirmation
+        long_condition = (close_val > r4) and (close_val > ema_val) and volume_confirmed
+        # Short logic: price breaks below S4 with 12h downtrend and volume confirmation
+        short_condition = (close_val < s4) and (close_val < ema_val) and volume_confirmed
         
-        # Long logic: price breaks above R3 with 1d uptrend, volume confirmation, and trending regime
-        long_condition = (close_val > r3) and (close_val > ema_val) and volume_confirmed and regime_ok
-        # Short logic: price breaks below S3 with 1d downtrend, volume confirmation, and trending regime
-        short_condition = (close_val < s3) and (close_val < ema_val) and volume_confirmed and regime_ok
-        
-        # Exit logic: trend reversal (close crosses 1d EMA34) OR regime change to ranging
-        exit_long = close_val < ema_val or not chop_val
-        exit_short = close_val > ema_val or not chop_val
+        # Exit logic: trend reversal (close crosses 12h EMA50)
+        exit_long = close_val < ema_val
+        exit_short = close_val > ema_val
         
         # ATR-based stoploss
         if position == 1:
@@ -168,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter_V3"
-timeframe = "4h"
+name = "6h_Camarilla_R4S4_Breakout_12hTrend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
