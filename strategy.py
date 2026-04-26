@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 4h Camarilla R3/S3 level breakout with 1d EMA34 trend filter and volume spike (>2.0x 20-period median). 
-Enters long when price closes above R3 with volume confirmation and bullish 1d trend. 
-Enters short when price closes below S3 with volume confirmation and bearish 1d trend. 
-Exits on opposite Camarilla level touch (long exits at S3, short exits at R3). 
-Uses discrete position sizing (0.25) to minimize churn. Target: 75-200 trades over 4 years. 
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h Camarilla R1/S1 level breakout with 1d EMA34 trend filter and volume spike (>2.0x 20-period median). 
+Enters long when price closes above R1 with volume confirmation and bullish 1d trend. 
+Enters short when price closes below S1 with volume confirmation and bearish 1d trend. 
+Exits on opposite Camarilla level touch (long exits at S1, short exits at R1). 
+Uses discrete position sizing (0.25) to minimize churn. Target: 50-150 trades over 4 years. 
 Works in both bull and bear markets by following 1d trend filter and requiring volume confirmation.
+Timeframe: 12h (primary), HTF: 1d for trend and Camarilla levels.
 """
 
 import numpy as np
@@ -40,12 +41,12 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla levels for 1d (R3, S3)
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate Camarilla levels for 1d (R1, S1)
+    # Camarilla: R1 = close + 1.1*(high-low)/4, S1 = close - 1.1*(high-low)/4
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,7 +58,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(vol_median[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -67,25 +68,25 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long logic: close above R3 + volume confirm + bullish 1d trend
-        if close[i] > camarilla_r3_aligned[i] and volume_confirm[i] and close[i] > ema34_1d_aligned[i]:
+        # Long logic: close above R1 + volume confirm + bullish 1d trend
+        if close[i] > camarilla_r1_aligned[i] and volume_confirm[i] and close[i] > ema34_1d_aligned[i]:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: close below S3 + volume confirm + bearish 1d trend
-        elif close[i] < camarilla_s3_aligned[i] and volume_confirm[i] and close[i] < ema34_1d_aligned[i]:
+        # Short logic: close below S1 + volume confirm + bearish 1d trend
+        elif close[i] < camarilla_s1_aligned[i] and volume_confirm[i] and close[i] < ema34_1d_aligned[i]:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
-        # Exit: long exits when price touches S3, short exits when price touches R3
-        elif position == 1 and close[i] <= camarilla_s3_aligned[i]:
+        # Exit: long exits when price touches S1, short exits when price touches R1
+        elif position == 1 and close[i] <= camarilla_s1_aligned[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] >= camarilla_r3_aligned[i]:
+        elif position == -1 and close[i] >= camarilla_r1_aligned[i]:
             signals[i] = 0.0
             position = 0
         else:
@@ -99,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
