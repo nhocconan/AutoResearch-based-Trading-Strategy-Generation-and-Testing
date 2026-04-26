@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
-Hypothesis: Daily timeframe with Camarilla R3/S3 breakout, confirmed by 1-week EMA50 trend and volume spike.
-Long when: price breaks above R3 + 1w EMA50 uptrend + volume > 1.5 * 20-day avg volume.
-Short when: price breaks below S3 + 1w EMA50 downtrend + volume > 1.5 * 20-day avg volume.
+12h_Camarilla_R3_S3_Breakout_1wEMA50_VolumeSpike_MTFTrend
+Hypothesis: Use 12h timeframe with Camarilla R3/S3 breakout, confirmed by 1w EMA50 trend and volume spike.
+Long when: price breaks above R3 + 1w EMA50 uptrend + volume > 1.5 * avg volume.
+Short when: price breaks below S3 + 1w EMA50 downtrend + volume > 1.5 * avg volume.
 Exit when: price reverts to Camarilla midpoint (PP) or touches opposite Camarilla level.
-Uses discrete 0.25 position size to limit fee drag. Targets 20-60 trades/year for 1d timeframe.
-Works in both bull and bear via trend filter and volume confirmation to avoid false breakouts.
+Uses discrete 0.25 position size to limit fee drag. Designed for BTC/ETH:
+- Works in trending markets via breakout with trend filter
+- Volume confirmation reduces false breakouts
+- Targets 12-37 trades/year for optimal test generalization.
+- Uses proper MTF data loading with get_htf_data ONCE before loop and align_htf_to_ltf.
 """
 
 import numpy as np
@@ -28,8 +31,8 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation (shifted by 1 for previous completed day)
-    prev_high = df_1d['high'].shift(1).values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values  # shift(1) for previous day
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
@@ -38,7 +41,7 @@ def generate_signals(prices):
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     camarilla_pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 1d timeframe (wait for completed 1d bar)
+    # Align to 12h timeframe (wait for completed 1d bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
@@ -108,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1wEMA50_VolumeSpike_MTFTrend"
+timeframe = "12h"
 leverage = 1.0
