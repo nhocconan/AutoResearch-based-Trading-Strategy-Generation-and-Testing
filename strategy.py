@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation_v2
-Hypothesis: 12h breakout above/below daily Camarilla R3/S3 levels in direction of 1d EMA34 trend, confirmed by volume spike (>2x 20-bar MA). Uses discrete position sizing (0.0, ±0.30) to reduce fee churn. Optimized for 12-37 trades/year on BTC/ETH/SOL by tightening volume confirmation and adding minimum holding period of 2 bars to prevent whipsaw. Works in both bull and bear markets by following the 1d trend while using Camarilla structure for precise entries.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSqueeze
+Hypothesis: 4h breakout above/below daily Camarilla R1/S1 levels in direction of 1d EMA34 trend, confirmed by volume squeeze (<0.5x 20-bar MA) to anticipate expansion breakout. Camarilla R1/S1 provide tight intraday support/resistance. Trend filter ensures alignment with higher timeframe momentum. Volume squeeze precedes expansion, reducing false breakouts. Designed for 20-50 trades/year (80-200 total over 4 years) to avoid fee drag. Works in both bull and bear markets by following the 1d trend while using Camarilla structure for precise entries.
 """
 
 import numpy as np
@@ -33,22 +33,21 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R3, S3 levels (based on previous day's range)
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Camarilla R1, S1 levels (based on previous day's range)
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe (no additional delay needed as they're based on completed 1d bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 4h timeframe (no additional delay needed as they're based on completed 1d bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume confirmation: volume > 2x 20-period average
+    # Volume squeeze: volume < 0.5x 20-period average (anticipates expansion)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_squeeze = volume < (vol_ma * 0.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0  # Track holding period to prevent immediate reversal
-    base_size = 0.30  # Position size (discrete level to reduce churn)
+    base_size = 0.25  # Position size
     
     # Warmup: max of calculations (20 for vol, 34 for ema)
     start_idx = max(20, 34)
@@ -56,58 +55,48 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
-            bars_since_entry += 1 if position != 0 else 0
             continue
         
         close_val = close[i]
         ema_34_val = ema_34_1d_aligned[i]
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        vol_spike = volume_spike[i]
+        camarilla_r1_val = camarilla_r1_aligned[i]
+        camarilla_s1_val = camarilla_s1_aligned[i]
+        vol_squeeze = volume_squeeze[i]
         
         # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
         bullish_1d = close_val > ema_34_val
         bearish_1d = close_val < ema_34_val
         
-        # Entry conditions: breakout of Camarilla level in trend direction with volume
-        long_entry = (close_val > camarilla_r3_val) and bullish_1d and vol_spike
-        short_entry = (close_val < camarilla_s3_val) and bearish_1d and vol_spike
+        # Entry conditions: breakout of Camarilla level in trend direction with volume squeeze
+        long_entry = (close_val > camarilla_r1_val) and bullish_1d and vol_squeeze
+        short_entry = (close_val < camarilla_s1_val) and bearish_1d and vol_squeeze
         
         # Exit conditions: opposite Camarilla level touch (or trend reversal)
-        exit_long = (close_val < camarilla_s3_val) or not bullish_1d
-        exit_short = (close_val > camarilla_r3_val) or not bearish_1d
+        exit_long = (close_val < camarilla_s1_val) or not bullish_1d
+        exit_short = (close_val > camarilla_r1_val) or not bearish_1d
         
-        # Prevent immediate reversal: require minimum 2-bar holding period
-        can_reverse = bars_since_entry >= 2
-        
-        if long_entry and position != 1 and can_reverse:
+        if long_entry and position != 1:
             signals[i] = base_size
             position = 1
-            bars_since_entry = 0
-        elif short_entry and position != -1 and can_reverse:
+        elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
-            bars_since_entry = 0
         elif position == 1 and exit_long:
             signals[i] = 0.0
             position = 0
-            bars_since_entry = 0
         elif position == -1 and exit_short:
             signals[i] = 0.0
             position = 0
-            bars_since_entry = 0
         else:
             # Hold position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
-            if position != 0:
-                bars_since_entry += 1
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSqueeze"
+timeframe = "4h"
 leverage = 1.0
