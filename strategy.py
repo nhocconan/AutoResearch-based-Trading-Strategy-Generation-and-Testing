@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Camarilla R1/S1 breakout on 12h timeframe with 1-week EMA50 trend filter and volume spike (>2x median) to capture strong momentum moves. Works in bull/bear markets by only trading with the 1w trend and avoiding low-volume, choppy conditions. Targets 12-37 trades/year via tight entry conditions requiring confluence of breakout, trend, and volume.
+1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike_v1
+Hypothesis: Daily Camarilla R1/S1 breakout with 1-week EMA50 trend filter and volume spike (>2x median) captures strong momentum moves across BTC/ETH/SOL. Uses 1d timeframe to reduce trade frequency (target: 30-100/4 years) and avoid fee drag. Works in bull/bear by trading only with 1w trend and requiring volume confirmation to avoid chop.
 """
 
 import numpy as np
@@ -41,7 +41,7 @@ def generate_signals(prices):
     camarilla_r1 = prev_close_1d + (1.0/6) * (prev_high_1d - prev_low_1d)
     camarilla_s1 = prev_close_1d - (1.0/6) * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 1d timeframe
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
@@ -131,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
