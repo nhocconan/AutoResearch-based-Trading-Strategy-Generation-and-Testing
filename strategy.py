@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeS
-Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-Designed for low trade frequency (12h timeframe) to minimize fee drag while capturing medium-term momentum.
-In bull markets: breakouts with trend and volume capture sustained moves.
-In bear markets: trend filter prevents counter-trend entries; volume spike reduces false breakouts.
-Target: 50-150 total trades over 4 years (12-37/year) to stay within fee-efficient range for 12h.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_ATRStop_
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and ATR-based stoploss.
+Designed for low-to-moderate trade frequency (4h timeframe) to balance opportunity and fee drag.
+In bull markets: breakouts with trend capture momentum.
+In bear markets: trend filter prevents counter-trend entries; ATR stop manages risk during whipsaws.
+Target: 75-200 total trades over 4 years (19-50/year) to stay within fee-efficient range for 4h.
 Uses proven winning formula: price channel breakout + volume confirmation + regime filter (trend) + ATR stop.
 """
 
@@ -25,7 +25,7 @@ def generate_signals(prices):
     
     # Get 1d data for EMA trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate EMA(34) on 1d for trend filter
@@ -63,7 +63,7 @@ def generate_signals(prices):
     r1 = pivot + (range_hl * 1.1 / 12.0)
     s1 = pivot - (range_hl * 1.1 / 12.0)
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeS"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_ATRStop_"
+timeframe = "4h"
 leverage = 1.0
