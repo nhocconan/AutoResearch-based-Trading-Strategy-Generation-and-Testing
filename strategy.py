@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_Filter_v1
-Hypothesis: 12h Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume spike (>1.5x average) reduces false breakouts in ranging/bear markets. Uses ATR-based stoploss (2.0) and discrete sizing (0.25) to limit fee churn. Only trades when price closes beyond Camarilla level (avoids intrabar noise). Designed for BTC/ETH: weekly trend filter works in bull/bear, volume confirms participation, ATR stop adapts to volatility. Target 12-30 trades/year to avoid fee drag on 12h timeframe.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_RegimeFilter_v1
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend and ADX regime filter avoids whipsaws in ranging markets. Only trades in trending regimes (ADX > 25) to improve win rate and reduce false breakouts. Volume confirmation ensures institutional participation. Designed for BTC/ETH: trend filter works in bull/bear, volume confirms breakout validity, ADX filter prevents overtrading in chop. Target 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,39 +18,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:  # Need enough for EMA34 and ADX
         return np.zeros(n)
     
-    # 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR(14) for dynamic stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1d ADX(14) for regime filter
+    # Calculate True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
+    tr_1d[0] = 0  # First value has no previous close
+    
+    # Calculate +DM and -DM
+    up_move = df_1d['high'].diff().values
+    down_move = df_1d['low'].diff().values * -1  # Positive when low decreases
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr_1d = wilder_smooth(tr_1d, 14)
+    plus_di_1d = 100 * wilder_smooth(plus_dm, 14) / atr_1d
+    minus_di_1d = 100 * wilder_smooth(minus_dm, 14) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilder_smooth(dx_1d, 14)
+    
+    # Align to 4h (wait for completed 1d bar)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Calculate Camarilla levels from previous 1d bar
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align to 12h (wait for completed 1d bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align to 4h (wait for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Average volume for confirmation (20-period SMA)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,42 +85,42 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     base_size = 0.25
-    atr_multiplier = 2.0
     
-    # Warmup: max of EMA(50), volume(20), ATR(14)
-    start_idx = max(50, 20, 14)
+    # Warmup: max of EMA(34), volume(20), ADX(14+14+14)
+    start_idx = max(34, 20, 42)  # EMA34, volume20, ADX needs 14+14+14=42
     
     for i in range(start_idx, n):
         close_val = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_50_1w_aligned[i]
-        r1_val = camarilla_r1_aligned[i]
-        s1_val = camarilla_s1_aligned[i]
-        atr_val = atr[i]
+        ema_val = ema_34_1d_aligned[i]
+        adx_val = adx_1d_aligned[i]
+        r3_val = camarilla_r3_aligned[i]
+        s3_val = camarilla_s3_aligned[i]
         
         # Skip if any data not ready
-        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(atr_val)):
+        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(adx_val) or 
+            np.isnan(r3_val) or np.isnan(s3_val)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
+        # Volume confirmation: current volume > 1.5x average volume (slightly relaxed for more trades)
         volume_confirmed = vol > 1.5 * avg_vol
         
-        # Long: price CLOSES above R1 with 1w uptrend and volume
-        long_condition = (close_val > r1_val) and (close_val > ema_val) and volume_confirmed
-        # Short: price CLOSES below S1 with 1w downtrend and volume
-        short_condition = (close_val < s1_val) and (close_val < ema_val) and volume_confirmed
+        # Regime filter: only trade in trending markets (ADX > 25)
+        trending_regime = adx_val > 25
         
-        # Stoploss: ATR-based
-        long_stop = (position == 1 and close_val < entry_price - atr_multiplier * atr_val)
-        short_stop = (position == -1 and close_val > entry_price + atr_multiplier * atr_val)
+        # Long: price CLOSES above R3 with 1d uptrend, volume, and trending regime
+        long_condition = (close_val > r3_val) and (close_val > ema_val) and volume_confirmed and trending_regime
+        # Short: price CLOSES below S3 with 1d downtrend, volume, and trending regime
+        short_condition = (close_val < s3_val) and (close_val < ema_val) and volume_confirmed and trending_regime
         
-        # Exit: price retests broken level OR stoploss hit
-        long_exit = (position == 1 and (close_val <= r1_val or long_stop))
-        short_exit = (position == -1 and (close_val >= s1_val or short_stop))
+        # Exit: price retests broken level OR reverse signal
+        long_exit = (position == 1 and close_val <= r3_val)
+        short_exit = (position == -1 and close_val >= s3_val)
+        reverse_exit_long = (position == 1 and short_condition)
+        reverse_exit_short = (position == -1 and long_condition)
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -104,10 +130,10 @@ def generate_signals(prices):
             signals[i] = -base_size
             position = -1
             entry_price = close_val
-        elif long_exit:
+        elif long_exit or reverse_exit_long:
             signals[i] = 0.0
             position = 0
-        elif short_exit:
+        elif short_exit or reverse_exit_short:
             signals[i] = 0.0
             position = 0
         else:
@@ -116,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Filter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_RegimeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
