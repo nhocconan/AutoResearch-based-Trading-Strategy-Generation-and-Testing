@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeRegime
-Hypothesis: 12h Camarilla R1/S1 breakout with 1w trend filter (price > EMA50) and volume confirmation (>1.8x EMA20 volume) only in trending regimes (ADX > 25).
-Exits when price reverts to opposite Camarilla level.
-Designed for 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
+Hypothesis: 4h Camarilla R1/S1 breakout with 1w trend filter (price > EMA50) and volume confirmation (>1.8x EMA20 volume).
+Enters long when price breaks above R1 with bullish 1w trend and volume spike.
+Enters short when price breaks below S1 with bearish 1w trend and volume spike.
+Exits when price reverts to opposite Camarilla level (S1 for longs, R1 for shorts).
+Designed for 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 Uses discrete position sizing (0.25) to minimize churn. Works in both bull and bear markets by following 1w trend.
 """
 
@@ -41,7 +43,7 @@ def generate_signals(prices):
     r1 = pivot + range_hl * 1.1 / 4.0
     s1 = pivot - range_hl * 1.1 / 4.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -55,48 +57,17 @@ def generate_signals(prices):
     avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (1.8 * avg_volume)
     
-    # ADX regime filter: only trade when ADX > 25 (trending market)
-    # Calculate ADX on 1d timeframe
-    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean()
-    
-    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
-    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed +DM and -DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / atr.values
-    minus_di = 100 * minus_dm_smooth / atr.values
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    trending_regime = adx_aligned > 25
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 1d shift + 50-period EMA + ADX)
+    # Start after warmup (need 1d shift + 50-period EMA)
     start_idx = 1 + 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(trending_regime[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -106,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long logic: break above R1 + bullish 1w trend + volume spike + trending regime
-        if close[i] > r1_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_spike[i] and trending_regime[i]:
+        # Long logic: break above R1 + bullish 1w trend + volume spike
+        if close[i] > r1_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_spike[i]:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: break below S1 + bearish 1w trend + volume spike + trending regime
-        elif close[i] < s1_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_spike[i] and trending_regime[i]:
+        # Short logic: break below S1 + bearish 1w trend + volume spike
+        elif close[i] < s1_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_spike[i]:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
@@ -138,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
