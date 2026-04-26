@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop
-Hypothesis: On 4h timeframe, Donchian channel (20) breakouts with 1d EMA34 trend filter and volume spike (>2x 20-bar average) capture strong momentum moves in both bull and bear markets. ATR-based stoploss (2.5x ATR) limits drawdown. Targets 20-40 trades/year to minimize fee drag while maintaining edge via trend and volume confirmation.
+1d_Donchian20_Breakout_1wTrend_VolumeConfirmation
+Hypothesis: On daily timeframe, Donchian channel breakouts (20-period) with 1-week EMA50 trend filter and volume confirmation (>1.5x 20-bar avg) capture strong trending moves while avoiding false breakouts in choppy markets. Targets 15-25 trades/year to minimize fee drag. Works in bull markets via upside breakouts and in bear markets via downside breakouts with trend filter preventing counter-trend entries.
 """
 
 import numpy as np
@@ -18,48 +18,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Get 1w data for HTF trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA34 on 1d for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA50 on 1w for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # ATR(14) for volatility and stoploss
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr2[0] = tr1[0]  # first bar
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Donchian channels (20-period) on 1d
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume average (20-period) for volume spike confirmation
+    # Volume average (20-period) for volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    atr_at_entry = 0.0
     
     # Start index: need warmup for calculations
-    start_idx = max(40, 34, 20, 20, 14)  # 1d lookback, EMA34, Donchian, volume MA, ATR
+    start_idx = max(lookback, 50, 20)  # Donchian lookback, EMA50 warmup, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -70,84 +59,49 @@ def generate_signals(prices):
             continue
         
         # Get aligned values
-        ema_34_val = ema_34_aligned[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
+        ema_50_val = ema_50_aligned[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         vol_ma_val = vol_ma[i]
         vol_val = volume[i]
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        atr_val = atr[i]
         
-        # Volume confirmation: current volume > 2x 20-period average
-        volume_confirmed = vol_val > 2.0 * vol_ma_val
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = vol_val > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: price breaks above Donchian high with uptrend (close > EMA34) and volume confirmation
-            long_signal = (high_val > donchian_high_val) and (close_val > ema_34_val) and volume_confirmed
-            # Short: price breaks below Donchian low with downtrend (close < EMA34) and volume confirmation
-            short_signal = (low_val < donchian_low_val) and (close_val < ema_34_val) and volume_confirmed
+            # Long: price breaks above upper Donchian channel with uptrend (close > EMA50) and volume confirmation
+            long_signal = (high_val > upper_channel) and (close_val > ema_50_val) and volume_confirmed
+            # Short: price breaks below lower Donchian channel with downtrend (close < EMA50) and volume confirmation
+            short_signal = (low_val < lower_channel) and (close_val < ema_50_val) and volume_confirmed
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                atr_at_entry = atr_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                atr_at_entry = atr_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions:
-            # 1. ATR-based stoploss: price closes below entry - 2.5 * ATR_at_entry
-            if close_val < entry_price - 2.5 * atr_at_entry:
+            # Exit: price closes below lower Donchian channel (breakdown)
+            if close_val < lower_channel:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                atr_at_entry = 0.0
-            # 2. Trend reversal: close crosses below EMA34
-            elif close_val < ema_34_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                atr_at_entry = 0.0
-            # 3. Donchian reversal: price breaks below Donchian low (exit long)
-            elif low_val < donchian_low_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                atr_at_entry = 0.0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions:
-            # 1. ATR-based stoploss: price closes above entry + 2.5 * ATR_at_entry
-            if close_val > entry_price + 2.5 * atr_at_entry:
+            # Exit: price closes above upper Donchian channel (breakout)
+            if close_val > upper_channel:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                atr_at_entry = 0.0
-            # 2. Trend reversal: close crosses above EMA34
-            elif close_val > ema_34_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                atr_at_entry = 0.0
-            # 3. Donchian reversal: price breaks above Donchian high (exit short)
-            elif high_val > donchian_high_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                atr_at_entry = 0.0
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wTrend_VolumeConfirmation"
+timeframe = "1d"
 leverage = 1.0
