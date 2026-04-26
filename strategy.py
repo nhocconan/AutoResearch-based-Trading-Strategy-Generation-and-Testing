@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike
-Hypothesis: On 4h timeframe, price breaking above Camarilla R1 level with 12h EMA50 uptrend and volume spike (>1.8x 20-period MA) captures high-probability long entries in bull markets; breaking below S1 level with 12h EMA50 downtrend and volume spike captures short entries in bear markets. Uses discrete position sizing (±0.25) and ATR-based trailing stop (2.0x) for exits. Targets 20-50 trades/year by requiring HTF trend alignment, volume confirmation, and precise pivot structure—designed to work in both bull (trend continuation) and bear (trend continuation down) markets with strong BTC/ETH edge from proven Camarilla pivot effectiveness.
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_SessionFilter
+Hypothesis: On 1h timeframe, price breaking above Camarilla R1 level with 4h EMA20 uptrend and volume spike captures high-probability long entries; breaking below S1 with 4h EMA20 downtrend and volume spike captures short entries. Uses 4h for signal direction, 1h only for entry timing. Adds UTC 08-20 session filter to avoid low-liquidity hours. Uses discrete position sizing (±0.20) to minimize fee churn. Targets 15-37 trades/year by requiring HTF trend alignment, volume confirmation, and precise pivot structure. Designed to work in both bull (trend continuation) and bear (trend continuation down) markets with BTC/ETH edge from Camarilla pivot effectiveness.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,15 +18,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Pre-compute session hours (08-20 UTC) once before loop
+    # open_time is already datetime64[ms], so .index.hour works directly
+    hours = prices.index.hour
+    
+    # Load 4h data ONCE before loop for HTF trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12h EMA50 for trend
-    close_12h = pd.Series(df_12h['close'])
-    ema_50_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA20 for trend
+    close_4h = pd.Series(df_4h['close'])
+    ema_20_4h = close_4h.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
     # Daily data for Camarilla pivot calculation (yesterday's OHLC)
     df_1d = get_htf_data(prices, '1d')
@@ -49,41 +53,53 @@ def generate_signals(prices):
     R1 = close_1d_prev + rangeprev * 1.1 / 12
     S1 = close_1d_prev - rangeprev * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 1h timeframe (wait for completed 1d bar)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # 4h ATR(14) for trailing stop
+    # 1h ATR(14) for trailing stop
     tr1 = pd.Series(high).diff().abs()
     tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
     tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h = tr_4h.ewm(span=14, adjust=False, min_periods=14).mean()
-    atr_4h_values = atr_4h.values
+    tr_1h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1h = tr_1h.ewm(span=14, adjust=False, min_periods=14).mean()
+    atr_1h_values = atr_1h.values
     
-    # Volume spike filter: volume > 1.8 * 20-period MA on 4h
+    # Volume spike filter: volume > 1.8 * 20-period MA on 1h
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.25
+    base_size = 0.20
     highest_since_long = 0.0
     lowest_since_short = 0.0
     
-    # Warmup: max of EMA50 (50), ATR (14), volume MA (20), Camarilla needs 2 days
-    start_idx = max(50, 14, 20) + 24  # +24 to ensure 2 days of 4h data for Camarilla
+    # Warmup: max of EMA20 (20), ATR (14), volume MA (20), Camarilla needs 2 days
+    start_idx = max(20, 14, 20) + 24  # +24 to ensure 2 days of 1h data for Camarilla
     
     for i in range(start_idx, n):
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            # Outside session: flatten position
+            signals[i] = 0.0
+            position = 0
+            highest_since_long = 0.0
+            lowest_since_short = 0.0
+            continue
+        
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
         vol = volume[i]
-        ema_trend = ema_50_12h_aligned[i]
+        ema_trend = ema_20_4h_aligned[i]
         r1_val = R1_aligned[i]
         s1_val = S1_aligned[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_4h_values[i]
+        atr_val = atr_1h_values[i]
         
         # Skip if any data not ready (NaN from alignment or calculation)
         if (np.isnan(ema_trend) or np.isnan(r1_val) or np.isnan(s1_val) or 
@@ -92,7 +108,7 @@ def generate_signals(prices):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Trend filter: bullish when price > EMA50, bearish when price < EMA50
+        # Trend filter: bullish when price > EMA20, bearish when price < EMA20
         trend_bullish = close_val > ema_trend
         trend_bearish = close_val < ema_trend
         
@@ -146,6 +162,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_SessionFilter"
+timeframe = "1h"
 leverage = 1.0
