@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v3
-Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume confirmation, and choppiness regime filter (CHOP > 61.8 = range) works in both bull and bear markets by trading mean-reversion breaks in ranging conditions with trend alignment. Uses discrete 0.30 position size to limit fee drag. Targets 20-40 trades/year.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ChopFilter_v3
+Hypothesis: Use 4h timeframe with Camarilla R1/S1 breakout from prior day, confirmed by 1d EMA34 trend, volume spike (>1.8x 20-bar avg), and chop > 61.8 (range regime). 
+Long: price breaks above R1 + 1d EMA34 up + volume spike + chop > 61.8. 
+Short: price breaks below S1 + 1d EMA34 down + volume spike + chop > 61.8. 
+Exit: price reverts to Camarilla midpoint (PP) or touches opposite level (S1 for long, R1 for short). 
+Discrete size 0.30. Targets ~30 trades/year to avoid fee drag. Works in bull/bear via regime filter and trend alignment.
 """
 
 import numpy as np
@@ -18,7 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
+    # Calculate Camarilla levels from previous day (using 1d HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -47,7 +51,7 @@ def generate_signals(prices):
     volume_spike = volume > (1.8 * vol_avg)
     
     # Choppiness Index (CHOP) regime filter - using 14-period
-    # CHOP > 61.8 = ranging market (good for breakout mean reversion)
+    # CHOP > 61.8 = ranging market (good for breakouts in range)
     # CHOP < 38.2 = trending market
     atr_period = 14
     tr1 = high[1:] - low[1:]
@@ -119,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v3"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ChopFilter_v3"
 timeframe = "4h"
 leverage = 1.0
