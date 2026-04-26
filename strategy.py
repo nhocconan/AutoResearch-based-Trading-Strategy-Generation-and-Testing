@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kumo_Twist_1dTrend_v2
-Hypothesis: 6h Ichimoku Kumo twist (Tenkan/Kijun cross inside cloud) with 1d EMA50 trend filter.
-Works in bull/bear: EMA50 defines trend direction, Kumo twist catches reversals within that trend.
-Target: 12-30 trades/year (50-120 over 4 years) via strict Kumo twist + trend alignment.
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakouts on 4h with 12h EMA50 trend filter and volume spike (2.0x median). 
+Uses 12h timeframe for HTF trend to better capture medium-term direction while maintaining 4h entry precision.
+Designed for 20-50 trades/year on 4h to minimize fee drag while maintaining edge in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,111 +18,111 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for HTF trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Get 12h data for HTF trend and Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen: (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Calculate Camarilla levels from previous 12h OHLC
+    prev_close_12h = df_12h['close'].shift(1).values
+    prev_high_12h = df_12h['high'].shift(1).values
+    prev_low_12h = df_12h['low'].shift(1).values
     
-    # Kijun-sen: (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    camarilla_r1 = prev_close_12h + 1.000/6 * (prev_high_12h - prev_low_12h)
+    camarilla_s1 = prev_close_12h - 1.000/6 * (prev_high_12h - prev_low_12h)
     
-    # Senkou Span A: (Tenkan + Kijun) / 2 plotted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
+    # Align HTF indicators to 4h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
     
-    # Senkou Span B: (52-period high + 52-period low) / 2 plotted 26 periods ahead
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
+    # Volume confirmation: 2.0x median volume (20-period) for signal
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Kumo twist: Tenkan crosses Kijun while both are inside the cloud
-    # Cloud top/bottom (aligned to current time, no look-ahead)
-    # Senkou spans are plotted 26 periods ahead, so to get current cloud we look back 26
-    senkou_a_lagged = np.roll(senkou_a, 26)
-    senkou_b_lagged = np.roll(senkou_b, 26)
-    senkou_a_lagged[:26] = np.nan
-    senkou_b_lagged[:26] = np.nan
-    
-    cloud_top = np.maximum(senkou_a_lagged, senkou_b_lagged)
-    cloud_bottom = np.minimum(senkou_a_lagged, senkou_b_lagged)
-    
-    # Tenkan/Kijun cross signals
-    tenkan_prev = np.roll(tenkan, 1)
-    kijun_prev = np.roll(kijun, 1)
-    tenkan_prev[0] = np.nan
-    kijun_prev[0] = np.nan
-    
-    tk_cross_up = (tenkan > kijun) & (tenkan_prev <= kijun_prev)
-    tk_cross_down = (tenkan < kijun) & (tenkan_prev >= kijun_prev)
-    
-    # Price inside cloud (both Tenkan and Kijun between cloud boundaries)
-    price_in_cloud = (tenkan > cloud_bottom) & (tenkan < cloud_top) & \
-                     (kijun > cloud_bottom) & (kijun < cloud_top)
-    
-    # Kumo twist signals: cross occurs while inside cloud
-    kumotwist_long = tk_cross_up & price_in_cloud
-    kumotwist_short = tk_cross_down & price_in_cloud
+    # ATR(14) for volatility-based stops
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Warmup: max of Ichimoku calculations (52) + 1d EMA (50)
-    start_idx = max(52, 50)
+    # Warmup: max of EMA(50) 12h, volume median (20), ATR (14)
+    start_idx = max(50, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(kumotwist_long[i]) or
-            np.isnan(kumotwist_short[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_median[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(atr[i])):
+            # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_50_1d_val = ema_50_1d_aligned[i]
+        ema_50_12h_val = ema_50_12h_aligned[i]
         close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
+        volume_val = volume[i]
+        vol_median_val = vol_median[i]
+        atr_val = atr[i]
+        
+        # Trend filter: price > EMA50 (uptrend) or < EMA50 (downtrend)
+        uptrend = close_val > ema_50_12h_val
+        downtrend = close_val < ema_50_12h_val
         
         if position == 0:
-            # Long: Kumo twist bullish + price above 1d EMA50 (uptrend)
-            long_signal = kumotwist_long[i] and (close_val > ema_50_1d_val)
-            # Short: Kumo twist bearish + price below 1d EMA50 (downtrend)
-            short_signal = kumotwist_short[i] and (close_val < ema_50_1d_val)
+            # Long: break above R1 with volume spike, and uptrend
+            long_signal = (close_val > camarilla_r1_aligned[i]) and \
+                          (volume_val > 2.0 * vol_median_val) and \
+                          uptrend
+            
+            # Short: break below S1 with volume spike, and downtrend
+            short_signal = (close_val < camarilla_s1_aligned[i]) and \
+                           (volume_val > 2.0 * vol_median_val) and \
+                           downtrend
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
+                entry_price = close_val
+                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
+                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Kumo twist bearish OR price crosses below 1d EMA50
-            if kumotwist_short[i] or (close_val < ema_50_1d_val):
+            highest_since_entry = max(highest_since_entry, high_val)
+            # ATR trailing stop
+            if close_val < highest_since_entry - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Kumo twist bullish OR price crosses above 1d EMA50
-            if kumotwist_long[i] or (close_val > ema_50_1d_val):
+            lowest_since_entry = min(lowest_since_entry, low_val)
+            # ATR trailing stop
+            if close_val > lowest_since_entry + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Twist_1dTrend_v2"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
