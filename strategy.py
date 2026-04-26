@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolFilter_v1
-Hypothesis: Camarilla R1/S1 breakout on 1h with 4h trend filter and 1d volume confirmation. 
-In bull/bear markets: breakouts aligned with 4h trend + above-average 1d volume capture strong moves while avoiding false breakouts in chop. 
-Uses discrete sizing (0.20) and session filter (08-20 UTC) to minimize fee churn. Targets 60-150 trades over 4 years by requiring confluence of 3 factors.
+6h_Camarilla_R4_S4_Breakout_1wTrend_Filter_v1
+Hypothesis: 6h Camarilla R4/S4 breakouts with 1w trend filter. In strong weekly trends (price > 1w EMA50), only take breakouts in trend direction (R4 longs in uptrend, S4 shorts in downtrend). In ranging weekly markets (price near 1w EMA50), take both breakout directions for mean reversion potential. Uses volume confirmation to avoid false breakouts. Targets 50-150 trades over 4 years by requiring weekly alignment and volume spike. Works in bull/bear via adaptive logic: trend continuation in strong trends, bidirectional in ranging weeks. Discrete position sizing (0.25) minimizes fee churn.
 """
 
 import numpy as np
@@ -20,13 +18,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    # Load 1d data ONCE before loop for volume filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate ATR for Camarilla levels (using 5-period ATR)
-    atr_period = 5
+    # Calculate 1w EMA50 for HTF trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    htf_trend = np.where(close > ema_50_1w_aligned, 1, 
+                        np.where(close < ema_50_1w_aligned, -1, 0))  # 1=uptrend, -1=downtrend, 0=ranging
+    
+    # Calculate ATR for volume spike filter
+    atr_period = 14
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -36,91 +38,117 @@ def generate_signals(prices):
     tr = np.maximum.reduce([tr1, tr2, tr3])
     atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
-    # Previous day's OHLC for Camarilla calculation (using 4h data as proxy for daily)
-    # We'll use the last 4h bar's OHLC to approximate previous day
-    prev_close = np.roll(close, 1)  # previous close
-    prev_high = np.roll(high, 1)    # previous high
-    prev_low = np.roll(low, 1)      # previous low
+    # Volume spike: current volume > 1.5 * ATR-adjusted average volume
+    vol_ma = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    vol_spike = volume > (1.5 * vol_ma)
     
-    # Camarilla levels: R1, S1, R2, S2, R3, S3, R4, S4
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    # Using previous day's range
-    camarilla_range = prev_high - prev_low
-    R1 = prev_close + 1.1 * camarilla_range / 12
-    S1 = prev_close - 1.1 * camarilla_range / 12
+    # Calculate Camarilla levels from previous 6h bar
+    camarilla_r4 = np.zeros(n)
+    camarilla_s4 = np.zeros(n)
     
-    # Calculate 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    htf_trend = np.where(close > ema_20_4h_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
-    
-    # Calculate 1d average volume for volume filter
-    avg_vol_1d = pd.Series(df_1d['volume'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    volume_filter = volume > avg_vol_1d_aligned  # above average volume
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    for i in range(1, n):
+        # Camarilla levels based on previous bar's range
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        range_val = prev_high - prev_low
+        
+        camarilla_r4[i] = prev_close + (range_val * 1.1 / 2)  # R4 = C + (H-L)*1.1/2
+        camarilla_s4[i] = prev_close - (range_val * 1.1 / 2)  # S4 = C - (H-L)*1.1/2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 for EMA, 1 for Camarilla)
-    start_idx = max(20, 1)
+    # Start after warmup (need 20 for volume MA, 1 for camarilla)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or
-            np.isnan(R1[i]) or np.isnan(S1[i])):
+        if (np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        # Check session
-        if not session_filter[i]:
-            signals[i] = 0.0
-            position = 0
-            continue
-        
-        # Long entry: price breaks above R1 with 4h uptrend and volume confirmation
-        if close[i] > R1[i] and htf_trend[i] == 1 and volume_filter[i]:
-            if position != 1:
-                signals[i] = 0.20
-                position = 1
-            else:
-                signals[i] = 0.20
-        # Short entry: price breaks below S1 with 4h downtrend and volume confirmation
-        elif close[i] < S1[i] and htf_trend[i] == -1 and volume_filter[i]:
-            if position != -1:
-                signals[i] = -0.20
-                position = -1
-            else:
-                signals[i] = -0.20
-        # Exit conditions: price returns to previous close (mean reversion)
-        elif position == 1 and close[i] < prev_close[i]:
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and close[i] > prev_close[i]:
-            signals[i] = 0.0
-            position = 0
-        # Hold current position
-        else:
+        # Volume confirmation
+        if not vol_spike[i]:
+            # No volume spike - hold current position or stay flat
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
+            continue
+        
+        # Breakout logic with weekly trend filter
+        if htf_trend[i] == 1:  # Weekly uptrend
+            if close[i] > camarilla_r4[i]:  # R4 breakout - continuation long
+                if position != 1:
+                    signals[i] = 0.25
+                    position = 1
+                else:
+                    signals[i] = 0.25
+            elif close[i] < camarilla_s4[i]:  # S4 breakdown - avoid shorts in uptrend
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold current position
+                if position == 0:
+                    signals[i] = 0.0
+                elif position == 1:
+                    signals[i] = 0.25
+                else:
+                    signals[i] = -0.25
+                    
+        elif htf_trend[i] == -1:  # Weekly downtrend
+            if close[i] < camarilla_s4[i]:  # S4 breakdown - continuation short
+                if position != -1:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = -0.25
+            elif close[i] > camarilla_r4[i]:  # R4 breakout - avoid longs in downtrend
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold current position
+                if position == 0:
+                    signals[i] = 0.0
+                elif position == 1:
+                    signals[i] = 0.25
+                else:
+                    signals[i] = -0.25
+                    
+        else:  # Weekly ranging (near EMA50)
+            if close[i] > camarilla_r4[i]:  # R4 breakout - long
+                if position != 1:
+                    signals[i] = 0.25
+                    position = 1
+                else:
+                    signals[i] = 0.25
+            elif close[i] < camarilla_s4[i]:  # S4 breakdown - short
+                if position != -1:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = -0.25
+            else:
+                # Hold current position
+                if position == 0:
+                    signals[i] = 0.0
+                elif position == 1:
+                    signals[i] = 0.25
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolFilter_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R4_S4_Breakout_1wTrend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
