@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakouts on 12h timeframe with 1d EMA34 trend filter and volume confirmation (>1.8x 20-bar average) capture strong trending moves. Uses discrete sizing (0.25) to target 12-37 trades/year. Works in bull/bear by only taking breakouts aligned with 1d trend. ATR-based stoploss controls drawdown. R1/S1 levels provide more frequent but reliable signals than R3/S3 when combined with volume and trend filters, reducing overtrading while maintaining edge in ranging markets.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ATRStop_v4
+Hypothesis: Camarilla R3/S3 breakouts on 4h with 1d EMA34 trend filter and volume confirmation (>2.0x 20-bar average) capture strong trends. Uses ATR(14)*2.0 stoploss and discrete sizing (0.25) to limit trades to 20-50/year. Works in bull/bear by only taking breakouts aligned with 1d trend. Prioritizes ETH/BTC by requiring volume confirmation to reduce false breakouts in low-liquidity periods.
 """
 
 import numpy as np
@@ -34,9 +34,9 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.8)
+    volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,20 +68,20 @@ def generate_signals(prices):
             prev_close = close[i-1]
             range_val = prev_high - prev_low
             
-            # Camarilla R1 and S1 levels
-            r1 = prev_close + range_val * 1.1 / 12
-            s1 = prev_close - range_val * 1.1 / 12
+            # Camarilla R3 and S3 levels
+            r3 = prev_close + range_val * 1.1 / 4
+            s3 = prev_close - range_val * 1.1 / 4
         else:
-            r1 = close_val
-            s1 = close_val
+            r3 = close_val
+            s3 = close_val
         
         # Trend filter: price > 1d EMA34 = uptrend, price < 1d EMA34 = downtrend
         is_uptrend = close_val > trend_val
         is_downtrend = close_val < trend_val
         
         # Camarilla breakout conditions
-        long_breakout = close_val > r1
-        short_breakout = close_val < s1
+        long_breakout = close_val > r3
+        short_breakout = close_val < s3
         
         # Entry conditions: Camarilla breakout in direction of 1d trend + volume
         long_entry = long_breakout and is_uptrend and vol_conf
@@ -93,11 +93,11 @@ def generate_signals(prices):
         if position == 1:
             # Long stoploss: entry price - 2.0 * ATR
             stop_price = entry_price - 2.0 * atr_val
-            long_exit = close_val < stop_price or close_val < s1  # Stop or Camarilla S1 breakdown
+            long_exit = close_val < stop_price or close_val < s3  # Stop or Camarilla S3 breakdown
         elif position == -1:
             # Short stoploss: entry price + 2.0 * ATR
             stop_price = entry_price + 2.0 * atr_val
-            short_exit = close_val > stop_price or close_val > r1  # Stop or Camarilla R1 breakout
+            short_exit = close_val > stop_price or close_val > r3  # Stop or Camarilla R3 breakout
         
         if long_entry and position != 1:
             signals[i] = base_size
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ATRStop_v4"
+timeframe = "4h"
 leverage = 1.0
