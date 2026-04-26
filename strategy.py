@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v3
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>1.5x median).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>1.5x median).
 Enters long when price breaks above R1 with volume confirmation and bullish 1d trend (price > EMA50).
 Enters short when price breaks below S1 with volume confirmation and bearish 1d trend (price < EMA50).
-Exits on opposite breakout (price returns to the other level).
+Exits on opposite breakout or when price returns to Camarilla pivot (close level).
 Uses discrete position sizing (0.25) to minimize churn. Target: 50-150 trades over 4 years.
 Works in both bull and bear markets by following 1d trend filter.
 """
@@ -23,31 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for 12h (based on previous 12h bar)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Calculate Camarilla levels for 4h (based on previous 4h bar)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    h_12h = df_12h['high'].values
-    l_12h = df_12h['low'].values
-    c_12h = df_12h['close'].values
+    h_4h = df_4h['high'].values
+    l_4h = df_4h['low'].values
+    c_4h = df_4h['close'].values
     
     # Previous bar's values for level calculation (to avoid look-ahead)
-    h_12h_prev = np.roll(h_12h, 1)
-    l_12h_prev = np.roll(l_12h, 1)
-    c_12h_prev = np.roll(c_12h, 1)
-    h_12h_prev[0] = np.nan
-    l_12h_prev[0] = np.nan
-    c_12h_prev[0] = np.nan
+    h_4h_prev = np.roll(h_4h, 1)
+    l_4h_prev = np.roll(l_4h, 1)
+    c_4h_prev = np.roll(c_4h, 1)
+    h_4h_prev[0] = np.nan
+    l_4h_prev[0] = np.nan
+    c_4h_prev[0] = np.nan
     
     # Calculate Camarilla R1 and S1 levels
-    rng_12h = h_12h_prev - l_12h_prev
-    r1_12h = c_12h_prev + (rng_12h * 1.1 / 12)
-    s1_12h = c_12h_prev - (rng_12h * 1.1 / 12)
+    rng_4h = h_4h_prev - l_4h_prev
+    r1_4h = c_4h_prev + (rng_4h * 1.1 / 12)
+    s1_4h = c_4h_prev - (rng_4h * 1.1 / 12)
     
-    # Align to 12h primary timeframe
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Align to 4h primary timeframe
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
     
     # Volume confirmation: volume > 1.5x 50-period median
     volume_series = pd.Series(volume)
@@ -69,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
             np.isnan(vol_median[i]) or np.isnan(ema_50_1d_aligned[i])):
             # Hold current position
             if position == 0:
@@ -81,24 +81,24 @@ def generate_signals(prices):
             continue
         
         # Long logic: price breaks above R1 + volume confirmation + bullish 1d trend
-        if close[i] > r1_12h_aligned[i] and volume_confirm[i] and close[i] > ema_50_1d_aligned[i]:
+        if close[i] > r1_4h_aligned[i] and volume_confirm[i] and close[i] > ema_50_1d_aligned[i]:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
         # Short logic: price breaks below S1 + volume confirmation + bearish 1d trend
-        elif close[i] < s1_12h_aligned[i] and volume_confirm[i] and close[i] < ema_50_1d_aligned[i]:
+        elif close[i] < s1_4h_aligned[i] and volume_confirm[i] and close[i] < ema_50_1d_aligned[i]:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
         # Exit: opposite breakout (price returns to the other level)
-        elif position == 1 and close[i] < s1_12h_aligned[i]:
+        elif position == 1 and close[i] < s1_4h_aligned[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > r1_12h_aligned[i]:
+        elif position == -1 and close[i] > r1_4h_aligned[i]:
             signals[i] = 0.0
             position = 0
         else:
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
