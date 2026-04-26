@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_WilliamsVixFix_MeanReversion
-Hypothesis: Williams Vix Fix (WVF) identifies volatility spikes and mean reversion opportunities on 6h timeframe.
-Uses 12h EMA50 as trend filter to avoid counter-trend trades. Works in bull/bear via adaptive mean reversion.
-Target: 15-25 trades/year per symbol (~60-100 total over 4 years) to minimize fee drag.
+4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation. 
+Only trade breakouts aligned with daily trend. Uses discrete position sizing (0.25) to minimize fee drag.
+Target: 20-50 trades/year per symbol (~80-200 total over 4 years) to avoid fee drag.
+Works in bull/bear via trend filter - only long in uptrend, short in downtrend.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,51 +21,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for indicators
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 50:
+    # Get 1d data for Camarilla levels and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values
     
-    # Calculate Williams Vix Fix on 6h
-    # WVF = ((Highest Close in period - Low) / (Highest Close in period)) * 100
-    # We invert it to get a volatility measure: higher WVF = higher fear/volatility
-    highest_close_22 = pd.Series(close).rolling(window=22, min_periods=22).max().values
-    wvf = ((highest_close_22 - low) / highest_close_22) * 100
+    # Camarilla width
+    rang = high_1d - low_1d
     
-    # Smooth WVF with EMA10 for signal line
-    wvf_smooth = pd.Series(wvf).ewm(span=10, min_periods=10, adjust=False).mean().values
+    # Resistance levels
+    r3 = close_1d_prev + rang * 1.1 / 4
+    r4 = close_1d_prev + rang * 1.1 / 2
     
-    # Calculate mean reversion z-score on 6h close
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    zscore = (close - sma_20) / (std_20 + 1e-9)  # Avoid division by zero
+    # Support levels
+    s3 = close_1d_prev - rang * 1.1 / 4
+    s4 = close_1d_prev - rang * 1.1 / 2
     
-    # Align all indicators
-    wvf_smooth_aligned = wvf_smooth
-    zscore_aligned = zscore
-    ema_50_12h_aligned = ema_50_12h_aligned  # Already aligned
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume spike detector (20-bar volume MA)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need WVF (22), zscore (20), EMA50 (50)
-    start_idx = max(50, 22, 20)
+    # Start after warmup period
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(wvf_smooth_aligned[i]) or 
-            np.isnan(zscore_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -74,27 +76,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Trend filter: price relative to 12h EMA50
-        price_above_ema = close[i] > ema_50_12h_aligned[i]
-        price_below_ema = close[i] < ema_50_12h_aligned[i]
-        
-        # Mean reversion conditions:
-        # Long: High volatility (WVF > 80) + oversold (z-score < -1.5) + price below EMA (discount in uptrend)
-        # Short: High volatility (WVF > 80) + overbought (z-score > 1.5) + price above EMA (premium in downtrend)
-        long_condition = (wvf_smooth_aligned[i] > 80 and 
-                         zscore_aligned[i] < -1.5 and 
-                         price_below_ema)
-        short_condition = (wvf_smooth_aligned[i] > 80 and 
-                          zscore_aligned[i] > 1.5 and 
-                          price_above_ema)
+        # Trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Enter long on mean reversion long signal
-            if long_condition:
+            # Long: price breaks above R3 with volume spike in uptrend
+            if close[i] > r3_aligned[i] and volume_spike[i] and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short on mean reversion short signal
-            elif short_condition:
+            # Short: price breaks below S3 with volume spike in downtrend
+            elif close[i] < s3_aligned[i] and volume_spike[i] and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -102,24 +94,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: volatility decreases OR mean reversion complete OR trend changes
-            if (wvf_smooth_aligned[i] < 40 or  # Low volatility
-                zscore_aligned[i] > -0.5 or    # Mean reversion complete
-                not price_below_ema):          # Trend changed
+            # Exit: price closes below R3 OR trend changes
+            if close[i] < r3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: volatility decreases OR mean reversion complete OR trend changes
-            if (wvf_smooth_aligned[i] < 40 or   # Low volatility
-                zscore_aligned[i] < 0.5 or      # Mean reversion complete
-                not price_above_ema):           # Trend changed
+            # Exit: price closes above S3 OR trend changes
+            if close[i] > s3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WilliamsVixFix_MeanReversion"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
