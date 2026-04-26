@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime_ADX
-Hypothesis: Camarilla R3/S3 breakouts on 4h filtered by 1d EMA34 trend, volume spike, and ADX regime filter captures strong institutional moves with controlled trade frequency. Long when price breaks above R3 in bullish 1d trend with volume confirmation and trending regime; short when breaks below S3 in bearish 1d trend. Uses discrete sizing (±0.30) to limit churn and targets 30-50 trades/year for robust test performance.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime_ADX_v2
+Hypothesis: Refined version of strategy #94480 with tighter volume confirmation (3.0x avg) and higher ADX threshold (30) to reduce overtrading while maintaining edge. Targets 15-25 trades/year for better test generalization. Long when price breaks above R3 in bullish 1d trend with extreme volume spike and strong trending regime; short when breaks below S3 in bearish 1d trend. Uses discrete sizing (±0.30) to limit churn.
 """
 
 import numpy as np
@@ -46,11 +46,11 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: volume > 2.0x 20-period average (tight filter)
+    # Volume confirmation: volume > 3.0x 20-period average (tighter filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 3.0)
     
-    # ADX regime filter: only trade in trending markets (ADX > 25)
+    # ADX regime filter: only trade in strongly trending markets (ADX > 30)
     # Calculate ADX on 4h data
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
@@ -117,8 +117,8 @@ def generate_signals(prices):
         bullish_1d = close_val > ema_34_val
         bearish_1d = close_val < ema_34_val
         
-        # Regime filter: only trade in trending markets (ADX > 25)
-        trending_regime = adx_val > 25
+        # Regime filter: only trade in strongly trending markets (ADX > 30)
+        trending_regime = adx_val > 30
         
         # Entry conditions: price breaks above/below Camarilla levels in direction of 1d trend with volume confirmation and trending regime
         long_entry = (close_val > r3_val) and bullish_1d and vol_spike and trending_regime
@@ -143,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime_ADX"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime_ADX_v2"
 timeframe = "4h"
 leverage = 1.0
