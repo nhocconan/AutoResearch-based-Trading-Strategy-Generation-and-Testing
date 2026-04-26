@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_ChopFilter
-Hypothesis: On 1d timeframe, enter long when KAMA(10) is rising AND RSI(14) > 50 AND Choppiness Index(14) < 38.2 (trending regime).
-Enter short when KAMA(10) is falling AND RSI(14) < 50 AND Choppiness Index(14) < 38.2.
-Exit when KAMA reverses direction or Choppiness Index > 61.8 (range regime).
-Uses discrete sizing (0.0, ±0.25) to limit fee drag. Target: 7-25 trades/year.
-Works in both bull and bear markets by adapting to trending regime via Chop filter.
+6h_ADX_Alligator_Filter_1dTrend_Volume
+Hypothesis: On 6h timeframe, enter long when ADX > 25 (trending), price > Alligator Jaw (EMA13) AND 1d trend is up (close > EMA34) AND volume > 1.5x 20-period average volume. Enter short when ADX > 25, price < Alligator Jaw (EMA13) AND 1d trend is down (close < EMA34) AND volume > 1.5x 20-period average volume. Exit when ADX < 20 (range) or price crosses Alligator Teeth (EMA8). Uses discrete sizing (0.0, ±0.25) to limit fee drag. Target: 12-37 trades/year.
 """
 
 import numpy as np
@@ -20,62 +16,76 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for higher timeframe trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA(10) on 1d close
+    # Calculate 1d EMA34 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Alligator (6h timeframe): Jaw=EMA13, Teeth=EMA8, Lips=EMA5
     close_s = pd.Series(close)
-    # Efficiency Ratio (ER) over 10 periods
-    change = abs(close_s - close_s.shift(10))
-    volatility = abs(close_s.diff()).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    sc = sc.fillna(0.01)  # fallback when ER is NaN
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-    kama = kama.astype(float)
+    jaw = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values  # Jaw (EMA13)
+    teeth = close_s.ewm(span=8, adjust=False, min_periods=8).mean().values   # Teeth (EMA8)
+    lips = close_s.ewm(span=5, adjust=False, min_periods=5).mean().values    # Lips (EMA5)
     
-    # KAMA direction: 1 if rising, -1 if falling, 0 if flat
-    kama_dir = np.zeros_like(close)
-    kama_dir[1:] = np.sign(np.diff(kama))
+    # Calculate ADX (6h timeframe)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        else:
+            plus_dm[i] = 0
+            
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+        else:
+            minus_dm[i] = 0
+            
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Choppiness Index(14)
-    atr = pd.Series(np.maximum(high - low, np.maximum(high - close_s.shift(1), low - close_s.shift(1)))).rolling(window=14, min_periods=14).mean()
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max()
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr.sum() / (hh - ll)) / np.log10(14)
-    chop = chop.fillna(50).values  # neutral when undefined
+    # Wilder's smoothing
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, n):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # 1w EMA50 for trend filter (aligned)
-    close_1w = pd.Series(df_1w['close'].values)
-    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
+    
+    plus_di14 = 100 * plus_dm14 / tr14
+    minus_di14 = 100 * minus_dm14 / tr14
+    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Volume confirmation: 1.5x average volume
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA warmup (10), RSI warmup (14), ATR warmup (14), HH/LL warmup (14)
-    start_idx = max(10, 14, 14, 14)
+    # Warmup: need ADX, Alligator, volume MA, and 1d EMA warmup
+    start_idx = max(14+13, 20, 34)  # ADX needs ~27, Alligator Jaw needs 13, volume MA needs 20, 1d EMA needs 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(kama_dir[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -86,19 +96,15 @@ def generate_signals(prices):
             continue
         
         # Entry conditions
-        kama_rising = kama_dir[i] > 0
-        kama_falling = kama_dir[i] < 0
-        rsi_above_50 = rsi[i] > 50
-        rsi_below_50 = rsi[i] < 50
-        chop_trending = chop[i] < 38.2  # trending regime
-        chop_ranging = chop[i] > 61.8   # range regime
+        adx_trending = adx[i] > 25
+        adx_ranging = adx[i] < 20
         
         if position == 0:
-            # Long: KAMA rising + RSI > 50 + trending regime
-            long_signal = kama_rising and rsi_above_50 and chop_trending
+            # Long: ADX trending, price > Jaw, 1d uptrend, volume spike
+            long_signal = adx_trending and (close[i] > jaw[i]) and (close[i] > ema_34_1d_aligned[i]) and volume_spike[i]
             
-            # Short: KAMA falling + RSI < 50 + trending regime
-            short_signal = kama_falling and rsi_below_50 and chop_trending
+            # Short: ADX trending, price < Jaw, 1d downtrend, volume spike
+            short_signal = adx_trending and (close[i] < jaw[i]) and (close[i] < ema_34_1d_aligned[i]) and volume_spike[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -111,20 +117,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: KAMA reverses OR chop enters range regime
-            if not kama_rising or chop_ranging:
+            # Exit: ADX ranging OR price < Teeth (EMA8)
+            if adx_ranging or close[i] < teeth[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: KAMA reverses OR chop enters range regime
-            if not kama_falling or chop_ranging:
+            # Exit: ADX ranging OR price > Teeth (EMA8)
+            if adx_ranging or close[i] > teeth[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Direction_RSI_ChopFilter"
-timeframe = "1d"
+name = "6h_ADX_Alligator_Filter_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
