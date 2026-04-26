@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_HighLowBreakout_12hTrend_VolumeConfirm_v1
-Hypothesis: On 6h timeframe, trade breakouts above/below weekly pivot-derived resistance/support (R1/S1) only when aligned with 12h EMA50 trend and confirmed by volume spike. Weekly pivots provide structure based on prior week's range, reducing noise. 12h EMA50 ensures trend alignment across multiple timeframes. Volume spike confirms momentum. Designed for 6h to capture multi-day moves in both bull and bear markets by filtering with 12h trend. Uses discrete sizing (0.25) to limit fee drag. Target: 12-37 trades/year (50-150 over 4 years).
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v3
+Hypothesis: On 4h timeframe, trade breakouts above/below daily Camarilla R1/S1 only when aligned with 1d EMA34 trend and confirmed by volume spike (>2.0x 20-bar average). Camarilla levels from daily timeframe provide institutional support/resistance. 1d EMA34 ensures trend alignment. Volume spike filters weak breakouts. Designed for 4h to capture swing moves in both bull and bear markets with tight entries (target: 20-50 trades/year). Uses discrete sizing (0.30) to limit fee drag.
 """
 
 import numpy as np
@@ -18,61 +18,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot calculation (need 5 days for prior week)
+    # Get 1d data for Camarilla pivot and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: using prior week's high, low, close
-    # Resample 1d to weekly: Friday's close determines weekly close
-    # We need prior week's data, so shift by 5 trading days
+    # Calculate Camarilla pivot levels from prior day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get prior week's OHLC (5-day aggregation)
-    # For each point, look back 5 days to get prior week's high/low/close
-    # Since we're on daily data, we can compute rolling window of 5
-    # But we want the completed prior week, so we use values from 5-10 days ago
-    # Simpler: use the high/low/close from 5 days ago as weekly proxy
-    # More accurate: compute true weekly, but for speed we use 5-day lookback
-    # We'll use the high/low/close from 5 periods ago (prior week)
-    high_5d_ago = np.roll(high_1d, 5)
-    low_5d_ago = np.roll(low_1d, 5)
-    close_5d_ago = np.roll(close_1d, 5)
-    # For first 5 bars, use first available
-    high_5d_ago[:5] = high_1d[0]
-    low_5d_ago[:5] = low_1d[0]
-    close_5d_ago[:5] = close_1d[0]
+    # Use prior day's OHLC (shift by 1 to avoid look-ahead)
+    high_prev = np.roll(high_1d, 1)
+    low_prev = np.roll(low_1d, 1)
+    close_prev = np.roll(close_1d, 1)
+    # For first bar, use first available
+    high_prev[0] = high_1d[0]
+    low_prev[0] = low_1d[0]
+    close_prev[0] = close_1d[0]
     
-    # Calculate weekly pivot points (standard formula)
-    weekly_pivot = (high_5d_ago + low_5d_ago + close_5d_ago) / 3.0
-    weekly_range = high_5d_ago - low_5d_ago
-    r1 = 2.0 * weekly_pivot - low_5d_ago
-    s1 = 2.0 * weekly_pivot - high_5d_ago
-    # For breakout, we use R1 and S1 as key levels
+    # Camarilla calculations
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    range_val = high_prev - low_prev
+    r1 = close_prev + range_val * 1.1 / 12
+    s1 = close_prev - range_val * 1.1 / 12
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Align all HTF indicators to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Align all HTF indicators to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR for stoploss calculation (6h ATR)
+    # ATR for stoploss calculation (4h ATR)
     atr_period = 14
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]  # first bar
     atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
-    # Volume spike: current volume > 2.0 * 20-period average (higher threshold for fewer trades)
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -80,68 +65,66 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of pivot calc (5), EMA50 (50), ATR (14), volume MA (20)
-    start_idx = max(5, 50, 14, 20) + 1
+    # Warmup: max of pivot calc (1), EMA34 (34), ATR (14), volume MA (20)
+    start_idx = max(1, 34, 14, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
             continue
         
-        weekly_pivot_val = weekly_pivot_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema_50_val = ema_50_12h_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         close_val = close[i]
         atr_val = atr[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above R1, above 12h EMA50, with volume spike
-            long_signal = (close_val > r1_val) and (close_val > ema_50_val) and vol_spike
+            # Long: price breaks above R1, above 1d EMA34, with volume spike
+            long_signal = (close_val > r1_val) and (close_val > ema_34_val) and vol_spike
             
-            # Short: price breaks below S1, below 12h EMA50, with volume spike
-            short_signal = (close_val < s1_val) and (close_val < ema_50_val) and vol_spike
+            # Short: price breaks below S1, below 1d EMA34, with volume spike
+            short_signal = (close_val < s1_val) and (close_val < ema_34_val) and vol_spike
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = close_val
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
-            # Exit: price breaks below S1 OR ATR stoploss (2.5*ATR below entry for wider stop)
-            if (close_val < s1_val) or (close_val < entry_price - 2.5 * atr_val):
+            signals[i] = 0.30
+            # Exit: price breaks below S1 OR ATR stoploss (2.0*ATR below entry)
+            if (close_val < s1_val) or (close_val < entry_price - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
-            # Exit: price breaks above R1 OR ATR stoploss (2.5*ATR above entry)
-            if (close_val > r1_val) or (close_val > entry_price + 2.5 * atr_val):
+            signals[i] = -0.30
+            # Exit: price breaks above R1 OR ATR stoploss (2.0*ATR above entry)
+            if (close_val > r1_val) or (close_val > entry_price + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyPivot_HighLowBreakout_12hTrend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
