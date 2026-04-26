@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kumo_Twist_1dTrend_VolumeFilter
-Hypothesis: 6h Ichimoku cloud twist (Tenkan/Kijun cross) with 1d trend filter and volume confirmation.
-Enters long when Tenkan crosses above Kijun AND price is above cloud (bullish twist) with 1d uptrend and volume spike.
-Enters short when Tenkan crosses below Kijun AND price is below cloud (bearish twist) with 1d downtrend and volume spike.
-Exits on opposite twist or trend failure.
-Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 6h.
-Works in bull/bear by aligning with 1d trend to avoid counter-trend trades.
-Ichimoku twist captures momentum shifts while cloud acts as dynamic support/resistance.
+1h_VolumeSpike_Camarilla_Breakout_4hTrend
+Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike confirmation.
+Enters long when price breaks above R1 with bullish 4h trend and volume > 2x 20-period MA.
+Enters short when price breaks below S1 with bearish 4h trend and volume > 2x 20-period MA.
+Exits when price reverses to opposite Camarilla level or 4h trend changes.
+Uses 4h/1d for signal direction, 1h only for entry timing to reduce trades.
+Position size fixed at 0.20 to minimize fee churn and control drawdown.
+Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
+Works in bull/bear by aligning with 4h trend to avoid counter-trend trades.
 """
 
 import numpy as np
@@ -16,107 +17,102 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need 26+26 for Ichimoku
+    # Session filter: 08-20 UTC (reduces noise trades)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for trend and Camarilla pivot calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter (more responsive than 34)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (high_tenkan + low_tenkan) / 2.0
+    # Calculate previous 4h bar's Camarilla pivot levels (R1, S1)
+    # Need HLC from previous 4h bar to avoid look-ahead
+    high_4h_prev = np.roll(df_4h['high'].values, 1)
+    low_4h_prev = np.roll(df_4h['low'].values, 1)
+    close_4h_prev = np.roll(df_4h['close'].values, 1)
+    # First value will be invalid (rolled from last), set to nan
+    high_4h_prev[0] = np.nan
+    low_4h_prev[0] = np.nan
+    close_4h_prev[0] = np.nan
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (high_kijun + low_kijun) / 2.0
+    # Camarilla pivot calculation
+    pivot = (high_4h_prev + low_4h_prev + close_4h_prev) / 3.0
+    range_4h = high_4h_prev - low_4h_prev
+    r1 = pivot + (range_4h * 1.0 / 12.0)  # R1 level
+    s1 = pivot - (range_4h * 1.0 / 12.0)  # S1 level
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2.0
+    # Align Camarilla levels to 1h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (high_senkou_b + low_senkou_b) / 2.0
-    
-    # Volume confirmation: volume > 1.8x 30-period MA
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    # Volume confirmation: volume > 2.0x 20-period MA
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 52 for Senkou B)
-    start_idx = 52
+    # Start after warmup (need 50 for EMA, 20 for volume MA, 1 for pivot)
+    start_idx = max(50, 20, 1)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
+        # Skip if any data not ready or outside session
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_spike[i]) or not in_session[i]):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
             continue
         
-        # Determine Ichimoku twist (Tenkan/Kijun cross)
-        bullish_twist = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        bearish_twist = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
-        
-        # Determine price vs cloud
-        above_cloud = close[i] > senkou_a[i] and close[i] > senkou_b[i]
-        below_cloud = close[i] < senkou_a[i] and close[i] < senkou_b[i]
-        
         if position == 0:
-            # Long: bullish twist + above cloud + 1d uptrend + volume spike
-            if (bullish_twist and above_cloud and 
+            # Long: price breaks above R1 with 4h bullish trend and volume spike
+            if (close[i] > r1_aligned[i] and 
                 close[i] > ema_50_aligned[i] and volume_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: bearish twist + below cloud + 1d downtrend + volume spike
-            elif (bearish_twist and below_cloud and 
+            # Short: price breaks below S1 with 4h bearish trend and volume spike
+            elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_50_aligned[i] and volume_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
-            # Exit: bearish twist OR price drops below cloud OR 1d trend turns bearish
-            if (bearish_twist or below_cloud or close[i] < ema_50_aligned[i]):
+            signals[i] = 0.20
+            # Exit: price closes below S1 OR 4h trend turns bearish
+            if (close[i] < s1_aligned[i] or close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
-            # Exit: bullish twist OR price rises above cloud OR 1d trend turns bullish
-            if (bullish_twist or above_cloud or close[i] > ema_50_aligned[i]):
+            signals[i] = -0.20
+            # Exit: price closes above R1 OR 4h trend turns bullish
+            if (close[i] > r1_aligned[i] or close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Twist_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "1h_VolumeSpike_Camarilla_Breakout_4hTrend"
+timeframe = "1h"
 leverage = 1.0
