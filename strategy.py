@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike (>1.5x avg) provides high-probability directional signals. The 12h timeframe reduces trade frequency to avoid fee drag, while the 1d EMA34 filter ensures alignment with the daily trend. Volume confirmation ensures institutional participation. Long when price > 1d EMA34 + breaks above R1 + volume spike; short when price < 1d EMA34 + breaks below R1 + volume spike. Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Targets 50-150 trades over 4 years (12-37/year) for optimal 12h frequency. Works in bull markets (trend following) and bear markets (trend following with short signals).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike (>1.5x avg) provides high-probability directional signals with controlled trade frequency. Uses 1d trend for better regime alignment (works in bull/bear via trend filter). Long when price > 1d EMA34 + breaks above R1 + volume spike; short when price < 1d EMA34 + breaks below R1 + volume spike. Discrete sizing (0.0, ±0.25) minimizes fee churn. Targets 75-150 trades over 4 years (19-37/year) for optimal 4h frequency.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF indicators (EMA34, Camarilla pivots)
+    # Get 1d data for HTF trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:  # need enough for EMA34
         return np.zeros(n)
@@ -28,19 +28,24 @@ def generate_signals(prices):
     ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d OHLC for Camarilla pivot levels (previous 1d bar)
-    o_1d = df_1d['open'].values
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Get 4h data for Camarilla pivot levels (based on previous 4h bar)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    # Calculate 4h OHLC for Camarilla pivot levels (previous 4h bar)
+    o_4h = df_4h['open'].values
+    h_4h = df_4h['high'].values
+    l_4h = df_4h['low'].values
+    c_4h = df_4h['close'].values
     
     # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = c_1d + (h_1d - l_1d) * 1.1 / 12
-    camarilla_s1 = c_1d - (h_1d - l_1d) * 1.1 / 12
+    camarilla_r1 = c_4h + (h_4h - l_4h) * 1.1 / 12
+    camarilla_s1 = c_4h - (h_4h - l_4h) * 1.1 / 12
     
-    # Align Camarilla levels to 1d timeframe (no additional delay needed)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to 4h timeframe (no additional delay needed)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
     
     # Volume ratio (current / 20-period average) for spike confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -103,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
