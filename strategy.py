@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Trend_Filter_VolumeSpike_v1
-Hypothesis: Vortex Indicator (VI) identifies trend direction on 1d timeframe; 4h price breaks above/below Donchian(20) channels in alignment with 1d VI trend and volume spike (>1.5x 20-period MA) generate high-probability entries. Exits on opposite Donchian break or trend reversal. Uses discrete sizing (0.25) to minimize fee churn. Works in bull/bear by following 1d VI trend. Target: 19-50 trades/year (75-200 total over 4 years).
+6h_Ichimoku_TK_Cross_CloudFilter_1dTrend
+Hypothesis: On 6h timeframe, enter long when Tenkan-sen crosses above Kijun-sen AND price is above 1d Ichimoku cloud (bullish regime), short when Tenkan crosses below Kijun AND price is below 1d cloud. Uses volume confirmation (>1.3x 20-period MA) to filter false breaks. Ichimoku cloud from 1d provides multi-timeframe trend filter that works in both bull and bear markets by only taking trades aligned with higher timeframe regime. Discrete position sizing (0.25) minimizes fee churn. Target: 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,65 +18,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Vortex and Donchian calculation
+    # Get 1d data for Ichimoku cloud (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:  # need 26*2 for Senkou B
         return np.zeros(n)
     
-    # Calculate 1d Vortex Indicator (VI)
+    # Calculate Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Get 1d Ichimoku cloud for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first value NaN
+    # 1d Tenkan-sen (9-period)
+    tenkan_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max().values + 
+                 pd.Series(low_1d).rolling(window=9, min_periods=9).min().values) / 2
     
-    # Vortex movements
-    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
-    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    # 1d Kijun-sen (26-period)
+    kijun_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max().values + 
+                pd.Series(low_1d).rolling(window=26, min_periods=26).min().values) / 2
     
-    # Sum over 14 periods
-    period = 14
-    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
+    # 1d Senkou Span A
+    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
     
-    # VI+ and VI-
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
+    # 1d Senkou Span B (52-period)
+    senkou_b_1d = (pd.Series(high_1d).rolling(window=52, min_periods=52).max().values + 
+                   pd.Series(low_1d).rolling(window=52, min_periods=52).min().values) / 2
     
-    # Trend: VI+ > VI- = uptrend, VI- > VI+ = downtrend
-    uptrend_1d = vi_plus > vi_minus
-    downtrend_1d = vi_minus > vi_plus
+    # 1d Cloud boundaries: max/min of Senkou A/B
+    upper_cloud_1d = np.maximum(senkou_a_1d, senkou_b_1d)
+    lower_cloud_1d = np.minimum(senkou_a_1d, senkou_b_1d)
     
-    # Align Vortex trend to 4h
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    # Align 1d cloud to 6h timeframe (already completed 1d bar)
+    upper_cloud_aligned = align_htf_to_ltf(prices, df_1d, upper_cloud_1d)
+    lower_cloud_aligned = align_htf_to_ltf(prices, df_1d, lower_cloud_1d)
     
-    # 4h Donchian(20) channels
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # TK Cross signals
+    tk_cross_above = (tenkan > kijun) & (tenkan.shift(1) <= kijun.shift(1))
+    tk_cross_below = (tenkan < kijun) & (tenkan.shift(1) >= kijun.shift(1))
     
-    # Volume confirmation: volume > 1.5x 20-period MA
+    # Price relative to 1d cloud
+    price_above_cloud = close > upper_cloud_aligned
+    price_below_cloud = close < lower_cloud_aligned
+    
+    # Volume confirmation: volume > 1.3x 20-period MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for 1d VI + 20 for Donchian + 20 for volume MA)
-    start_idx = 54
+    # Start after warmup (need 52 for Senkou B, 26 for Kijun, 20 for volume MA)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
-            np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(upper_cloud_aligned[i]) or np.isnan(lower_cloud_aligned[i]) or
+            np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -87,14 +102,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high with 1d uptrend and volume spike
-            if (close[i] > high_roll[i] and 
-                uptrend_1d_aligned[i] and volume_spike[i]):
+            # Long: TK cross above + price above 1d cloud + volume spike
+            if (tk_cross_above[i] and price_above_cloud[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with 1d downtrend and volume spike
-            elif (close[i] < low_roll[i] and 
-                  downtrend_1d_aligned[i] and volume_spike[i]):
+            # Short: TK cross below + price below 1d cloud + volume spike
+            elif (tk_cross_below[i] and price_below_cloud[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
@@ -102,20 +115,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price breaks below Donchian low OR 1d trend changes to downtrend
-            if (close[i] < low_roll[i] or not uptrend_1d_aligned[i]):
+            # Exit: TK cross below (trend change) OR price breaks below 1d cloud (regime change)
+            if tk_cross_below[i] or not price_above_cloud[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price breaks above Donchian high OR 1d trend changes to uptrend
-            if (close[i] > high_roll[i] or not downtrend_1d_aligned[i]):
+            # Exit: TK cross above (trend change) OR price breaks above 1d cloud (regime change)
+            if tk_cross_above[i] or not price_below_cloud[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Vortex_Trend_Filter_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend"
+timeframe = "6h"
 leverage = 1.0
