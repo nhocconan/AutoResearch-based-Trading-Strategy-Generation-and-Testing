@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: On 12h timeframe, use Camarilla R1/S1 levels from 1d for breakout entries, filtered by 1d trend direction (close > EMA34) and volume spike (>2.0x 20-period average). Enter long when price breaks above R1 with 1d uptrend and volume spike. Enter short when price breaks below S1 with 1d downtrend and volume spike. Uses discrete position size 0.25 to balance capture and drawdown. Designed for 12-30 trades/year on 12h by requiring daily alignment and volume confirmation, reducing overtrading while capturing structured moves in both bull and bear markets.
+6h_WilliamsVIXFix_Reversion_1dTrend_VolumeFilter
+Hypothesis: On 6h timeframe, use Williams VIX Fix (WVF) to identify extreme fear/greed reversals, filtered by 1d trend (price > EMA34) and volume confirmation (>1.5x 20-period average). Enter long when WVF > 0.8 (extreme fear) in 1d uptrend with volume confirmation. Enter short when WVF < 0.2 (extreme greed) in 1d downtrend with volume confirmation. Uses discrete position size 0.25. Designed for 12-25 trades/year on 6h by requiring extreme readings and trend alignment, reducing whipsaw in choppy markets while capturing mean reversion in both bull and bear regimes.
 """
 
 import numpy as np
@@ -18,46 +18,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for Williams VIX Fix and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    # Camarilla: R1 = close + 1.1*(high-low)/4, S1 = close - 1.1*(high-low)/4
-    # Using previous 1d bar's OHLC
-    prev_1d_close = df_1d['close'].shift(1).values
-    prev_1d_high = df_1d['high'].shift(1).values
-    prev_1d_low = df_1d['low'].shift(1).values
-    
-    camarilla_range = prev_1d_high - prev_1d_low
-    r1 = prev_1d_close + 1.1 * camarilla_range / 4
-    s1 = prev_1d_close - 1.1 * camarilla_range / 4
-    
-    # Align Camarilla levels to 12h timeframe (no additional delay needed as they're based on completed 1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate Williams VIX Fix: WVF = ((HighestClose - Low) / (HighestClose - LowestLow)) * 100
+    # where HighestClose = highest close over lookback period, LowestLow = lowest low over lookback
+    lookback = 22
+    highest_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    wvf = ((highest_close - low) / (highest_close - lowest_low + 1e-10)) * 100
     
     # Calculate 1d EMA34 for trend filter
     close_1d_series = pd.Series(df_1d['close'].values)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 2.0
+    volume_confirm = volume / np.maximum(volume_ma, 1e-10) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA warmup, volume MA warmup
-    start_idx = max(34, 20)
+    # Warmup: need WVF lookback, EMA warmup, volume MA warmup
+    start_idx = max(lookback, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(wvf[i]) or 
+            np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -72,11 +64,11 @@ def generate_signals(prices):
         trend_1d_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 + 1d uptrend + volume spike
-            long_signal = (close[i] > r1_aligned[i]) and trend_1d_uptrend and volume_spike[i]
+            # Long: WVF > 0.8 (extreme fear) + 1d uptrend + volume confirmation
+            long_signal = (wvf[i] > 80.0) and trend_1d_uptrend and volume_confirm[i]
             
-            # Short: price breaks below S1 + 1d downtrend + volume spike
-            short_signal = (close[i] < s1_aligned[i]) and trend_1d_downtrend and volume_spike[i]
+            # Short: WVF < 0.2 (extreme greed) + 1d downtrend + volume confirmation
+            short_signal = (wvf[i] < 20.0) and trend_1d_downtrend and volume_confirm[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -89,20 +81,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price breaks below S1 OR 1d trend turns down
-            if (close[i] < s1_aligned[i] or not trend_1d_uptrend):
+            # Exit: WVF < 0.5 (fear subsided) OR 1d trend turns down
+            if (wvf[i] < 50.0 or not trend_1d_uptrend):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price breaks above R1 OR 1d trend turns up
-            if (close[i] > r1_aligned[i] or not trend_1d_downtrend):
+            # Exit: WVF > 0.5 (greed subsided) OR 1d trend turns up
+            if (wvf[i] > 50.0 or not trend_1d_downtrend):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_WilliamsVIXFix_Reversion_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
