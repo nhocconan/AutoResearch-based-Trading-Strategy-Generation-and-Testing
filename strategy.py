@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v2
-Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike confirmation.
-In trending markets (price > 12h EMA50), buy breakouts above R1 and sell breakdowns below S1.
-In ranging markets, avoid false breakouts using volume spike filter (volume > 1.5x 20-period average).
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 20-50 trades per year.
-Works in bull/bear via trend filter: only follow breakouts in direction of 12h trend.
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_v1
+Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend alignment and volume spike confirmation. In trending markets (4h close > 4h EMA20), take long at R1 breakout and short at S1 breakout. Uses volume > 1.5x 20-period average to confirm breakout strength. Session filter (08-20 UTC) reduces noise. Targets 15-30 trades/year by requiring tight confluence of trend, level break, and volume. Works in bull/bear via trend following logic - only trades in direction of 4h trend, avoiding counter-trend whipsaws.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,133 +18,98 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Pre-compute session hours for efficiency
+    hours = prices.index.hour  # Already DatetimeIndex
     
-    # Calculate ATR for stoploss (using 14-period ATR)
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
+    # Load 4h data ONCE before loop for HTF trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA50 for HTF trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    htf_trend = np.where(close > ema_50_12h_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
+    # Calculate 4h EMA20 for trend filter
+    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    htf_trend = np.where(close > ema_20_4h_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
     
-    # Calculate volume spike filter: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    # Calculate previous day's high, low, close for Camarilla levels
+    # Use 1d data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla levels using previous day's OHLC
+    # Camarilla R1 = close + (high - low) * 1.1/12
+    # Camarilla S1 = close - (high - low) * 1.1/12
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Align Camarilla levels to 1h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume spike filter: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for EMA, 20 for volume MA)
-    start_idx = max(50, 20)
+    # Start after warmup (need 20 for volume MA, 1 for Camarilla)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(htf_trend[i])):
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_ma[i])):
             # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = 0.25
-            else:
-                signals[i] = -0.25
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
             continue
         
-        # Calculate Camarilla levels for TODAY (using previous day's OHLC)
-        # For 4h data, we need to group by day - use open_time to get date
-        current_date = prices.iloc[i]['open_time'].date()
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
-        # Get previous day's data (all 4h bars from yesterday)
-        if i >= 6:  # Need at least 6 bars back to ensure we have yesterday's data
-            # Find start of yesterday's session
-            lookback = i
-            while lookback > 0 and prices.iloc[lookback]['open_time'].date() == current_date:
-                lookback -= 1
-            
-            if lookback >= 0 and lookback < i:
-                # Yesterday's data is from lookback+1 to i-1 (inclusive)
-                yesterday_high = high[lookback+1:i].max()
-                yesterday_low = low[lookback+1:i].min()
-                yesterday_close = close[i-1]  # Previous bar's close
-                
-                # Calculate Camarilla levels
-                range_val = yesterday_high - yesterday_low
-                if range_val > 0:
-                    R1 = yesterday_close + (range_val * 1.1 / 12)
-                    S1 = yesterday_close - (range_val * 1.1 / 12)
-                    
-                    # Breakout conditions with volume confirmation and trend filter
-                    if htf_trend[i] == 1:  # Uptrend - only look for longs
-                        if close[i] > R1 and volume_spike[i]:
-                            if position != 1:
-                                signals[i] = 0.25
-                                position = 1
-                            else:
-                                signals[i] = 0.25
-                        elif position == 1 and close[i] < ema_50_12h_aligned[i]:
-                            # Exit if price crosses below 12h EMA50
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            # Hold current position
-                            if position == 0:
-                                signals[i] = 0.0
-                            elif position == 1:
-                                signals[i] = 0.25
-                    else:  # Downtrend - only look for shorts
-                        if close[i] < S1 and volume_spike[i]:
-                            if position != -1:
-                                signals[i] = -0.25
-                                position = -1
-                            else:
-                                signals[i] = -0.25
-                        elif position == -1 and close[i] > ema_50_12h_aligned[i]:
-                            # Exit if price crosses above 12h EMA50
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            # Hold current position
-                            if position == 0:
-                                signals[i] = 0.0
-                            elif position == -1:
-                                signals[i] = -0.25
-                else:
-                    # Invalid range calculation - hold position
-                    if position == 0:
-                        signals[i] = 0.0
-                    elif position == 1:
-                        signals[i] = 0.25
-                    else:
-                        signals[i] = -0.25
+        if not in_session:
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Long entry: price breaks above R1 with volume spike and 4h uptrend
+        if close[i] > r1_aligned[i] and volume_spike[i] and htf_trend[i] == 1:
+            if position != 1:
+                signals[i] = 0.20
+                position = 1
             else:
-                # Not enough data for yesterday - hold position
-                if position == 0:
-                    signals[i] = 0.0
-                elif position == 1:
-                    signals[i] = 0.25
-                else:
-                    signals[i] = -0.25
+                signals[i] = 0.20
+        
+        # Short entry: price breaks below S1 with volume spike and 4h downtrend
+        elif close[i] < s1_aligned[i] and volume_spike[i] and htf_trend[i] == -1:
+            if position != -1:
+                signals[i] = -0.20
+                position = -1
+            else:
+                signals[i] = -0.20
+        
+        # Exit conditions: reverse signal or loss of trend/volume
+        elif position == 1 and (close[i] < s1_aligned[i] or htf_trend[i] != 1 or not volume_spike[i]):
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and (close[i] > r1_aligned[i] or htf_trend[i] != -1 or not volume_spike[i]):
+            signals[i] = 0.0
+            position = 0
+        
+        # Hold current position
         else:
-            # Not enough data yet - hold position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
