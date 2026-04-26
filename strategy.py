@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop_v1
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1-week EMA50 trend filter (long-term regime) and volume confirmation (2.0x average) to reduce false breakouts. Uses discrete position sizing (0.25) and ATR-based stoploss (2.5x) for risk management. Designed for low trade frequency (target 19-50/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The 1-week EMA50 provides strong trend filtering that works across regimes, and volume confirmation ensures breakouts have participation.
+1d_Camarilla_R1S1_Breakout_1wEMA34_Trend_VolumeSpike_v1
+Hypothesis: Daily Camarilla R1/S1 breakout with weekly EMA34 trend filter and volume confirmation (2.0x average) to capture medium-term swings in both bull and bear markets. Uses discrete position sizing (0.25) and no intraday stoploss (exit on trend reversal or opposite signal). Designed for low trade frequency (target 12-30/year) to minimize fee drag while ensuring convergence across regimes. The 1-week EMA34 provides adaptive trend filtering that works across market cycles, and volume confirmation ensures breakouts have institutional participation.
 """
 
 import numpy as np
@@ -23,17 +23,17 @@ def generate_signals(prices):
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1w for trend filter
+    # Calculate EMA(34) on 1w for trend filter
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ATR(14) for stoploss on 4h
+    # Calculate ATR(14) for volatility filter (not stoploss)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -59,20 +59,19 @@ def generate_signals(prices):
     r1 = pivot + (range_hl * 1.1 / 12.0)
     s1 = pivot - (range_hl * 1.1 / 12.0)
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 1d
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    # Warmup: max of 1w EMA(50), volume MA, ATR
-    start_idx = max(50, 20, 14) + 1
+    # Warmup: max of 1w EMA(34), volume MA, ATR
+    start_idx = max(34, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma[i]) or
@@ -87,8 +86,8 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        trend_1w_up = close_val > ema_50_1w_aligned[i]   # 1w long-term uptrend
-        trend_1w_down = close_val < ema_50_1w_aligned[i]  # 1w long-term downtrend
+        trend_1w_up = close_val > ema_34_1w_aligned[i]   # 1w medium-term uptrend
+        trend_1w_down = close_val < ema_34_1w_aligned[i]  # 1w medium-term downtrend
         vol_spike = volume_spike[i]
         
         if position == 0:
@@ -101,30 +100,28 @@ def generate_signals(prices):
             if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend flips down OR price hits ATR stoploss
-            if (not trend_1w_up) or (close_val < entry_price - 2.5 * atr[i]):
+            # Exit: trend flips down OR price breaks below S1 (contrarian signal)
+            if (not trend_1w_up) or (close_val < s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend flips up OR price hits ATR stoploss
-            if (not trend_1w_down) or (close_val > entry_price + 2.5 * atr[i]):
+            # Exit: trend flips up OR price breaks above R1 (contrarian signal)
+            if (not trend_1w_down) or (close_val > r1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
