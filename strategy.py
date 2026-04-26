@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_VolumeConfirm
-Hypothesis: Camarilla R1/S1 breakouts with 1d EMA34 trend filter and choppiness regime filter (CHOP<61.8) on 4h timeframe.
-Only takes trades in trending, low-chop environments with volume confirmation (>1.6x 20-bar avg volume).
-Designed for low trade frequency (19-50/year) with discrete sizing (0.25) to minimize fee drag.
-Works in both bull/bear: trend filter adapts to market direction, chop filter avoids whipsaws in ranging markets.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h timeframe strategy using 1d Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation (>1.8x 20-bar avg volume).
+Designed for low trade frequency (12-37/year) with discrete sizing (0.30) to minimize fee drag.
+Works in both bull/bear: trend filter adapts to market direction, volume confirms institutional interest.
+Only 12h bars considered for entries/exits to reduce overtrading and improve generalization.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -41,27 +41,19 @@ def generate_signals(prices):
     R1 = prev_close + camarilla_range * 1.0/12
     S1 = prev_close - camarilla_range * 1.0/12
     
-    # Align Camarilla levels to 4h timeframe (1d -> 4h)
+    # Align Camarilla levels to 12h timeframe (1d -> 12h)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: 1.6x average volume (slightly reduced from 1.8 to increase signal rate moderately)
+    # Volume confirmation: 1.8x average volume (using 12h volume)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for stop (14-period)
+    # ATR for stop (14-period) - using 12h data
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Choppiness Index regime filter (14-period)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop_raw = 100 * np.log10(atr_14 * 14 / (max_high_14 - min_low_14 + 1e-10)) / np.log10(14)
-    chop_raw = np.where((max_high_14 - min_low_14) <= 0, 100, chop_raw)
-    chop_raw = np.where(np.isnan(chop_raw) | np.isinf(chop_raw), 50, chop_raw)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,7 +61,7 @@ def generate_signals(prices):
     long_stop = 0.0
     short_stop = 0.0
     
-    # Warmup: max of 1d EMA (34), volume MA (20), ATR (14), CHOP (14)
+    # Warmup: max of 1d EMA (34), volume MA (20), ATR (14)
     start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
@@ -78,15 +70,14 @@ def generate_signals(prices):
             np.isnan(R1_aligned[i]) or 
             np.isnan(S1_aligned[i]) or 
             np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(chop_raw[i])):
+            np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
             continue
         
         ema_34_1d_val = ema_34_1d_aligned[i]
@@ -98,24 +89,20 @@ def generate_signals(prices):
         volume_val = volume[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        chop_val = chop_raw[i]
-        
-        # Regime filter: only trade when not too choppy (CHOP < 61.8 = trending market)
-        regime_filter = chop_val < 61.8
         
         if position == 0:
-            # Long: break above R1, uptrend (close > 1d EMA34), volume spike, good regime
-            long_signal = (high_val > R1_val) and (close_val > ema_34_1d_val) and (volume_val > 1.6 * vol_ma_val) and regime_filter
-            # Short: break below S1, downtrend (close < 1d EMA34), volume spike, good regime
-            short_signal = (low_val < S1_val) and (close_val < ema_34_1d_val) and (volume_val > 1.6 * vol_ma_val) and regime_filter
+            # Long: break above R1, uptrend (close > 1d EMA34), volume spike
+            long_signal = (high_val > R1_val) and (close_val > ema_34_1d_val) and (volume_val > 1.8 * vol_ma_val)
+            # Short: break below S1, downtrend (close < 1d EMA34), volume spike
+            short_signal = (low_val < S1_val) and (close_val < ema_34_1d_val) and (volume_val > 1.8 * vol_ma_val)
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = close_val
                 long_stop = entry_price - 2.0 * atr_val
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = close_val
                 short_stop = entry_price + 2.0 * atr_val
@@ -123,25 +110,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
+            signals[i] = 0.30
             # Update trailing stop: move stop up as price makes new highs
             long_stop = max(long_stop, high_val - 2.0 * atr_val)
-            # Exit: trailing stop hit or trend reversal (price < 1d EMA34) or regime becomes too choppy
-            if (low_val < long_stop) or (close_val < ema_34_1d_val) or (chop_val >= 61.8):
+            # Exit: trailing stop hit or trend reversal (price < 1d EMA34)
+            if (low_val < long_stop) or (close_val < ema_34_1d_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
+            signals[i] = -0.30
             # Update trailing stop: move stop down as price makes new lows
             short_stop = min(short_stop, low_val + 2.0 * atr_val)
-            # Exit: trailing stop hit or trend reversal (price > 1d EMA34) or regime becomes too choppy
-            if (high_val > short_stop) or (close_val > ema_34_1d_val) or (chop_val >= 61.8):
+            # Exit: trailing stop hit or trend reversal (price > 1d EMA34)
+            if (high_val > short_stop) or (close_val > ema_34_1d_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_VolumeConfirm"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
