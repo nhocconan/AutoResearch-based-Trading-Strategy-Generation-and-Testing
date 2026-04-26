@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA34_Trend_VolumeSpike
-Hypothesis: On 4h timeframe, price breaking Camarilla R1/S1 levels with 12h trend alignment and volume confirmation provides edge in both bull and bear markets.
-In bull markets: 12h EMA34 uptrend + R1 breakout with volume = long setup.
-In bear markets: 12h EMA34 downtrend + S1 breakdown with volume = short setup.
-Volume spike (>1.8x 20-bar MA) filters weak breakouts. Discrete sizing (0.0, ±0.25) minimizes fee churn.
-Targets 20-40 trades/year (~80-160 over 4 years) to avoid fee drag on 4h timeframe.
-ATR-based stoploss (2.5x) manages risk.
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_SessionFilter
+Hypothesis: On 1h timeframe, price breaking Camarilla R1/S1 levels with 4h trend alignment and volume confirmation provides edge in both bull and bear markets. Session filter (08-20 UTC) reduces noise trades. Uses 4h for signal direction, 1h only for entry timing. Targets 15-37 trades/year (~60-150 over 4 years) to avoid fee drag on 1h timeframe. ATR-based stoploss (2.0x) manages risk. Discrete sizing (0.0, ±0.20) minimizes fee churn.
 """
 
 import numpy as np
@@ -23,17 +18,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for HTF trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate EMA(34) on 12h for trend filter
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate EMA(34) on 4h for trend filter
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Calculate ATR(14) for stoploss on 4h
+    # Calculate ATR(14) for stoploss on 1h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -44,9 +39,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.maximum(vol_ma, 1e-10)  # avoid division by zero
     
-    # Calculate Camarilla levels from previous 4h bar
-    # Need to get 4h OHLC from the prices dataframe directly
-    # Since we're on 4h timeframe, we can use the current bar's data shifted by 1
+    # Calculate Camarilla levels from previous 1h bar
     prev_high = np.concatenate([[np.nan], high[:-1]])
     prev_low = np.concatenate([[np.nan], low[:-1]])
     prev_close = np.concatenate([[np.nan], close[:-1]])
@@ -54,68 +47,73 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + ((prev_high - prev_low) * 1.1 / 6)
     camarilla_s1 = prev_close - ((prev_high - prev_low) * 1.1 / 6)
     
+    # Session filter: 08-20 UTC (already datetime64[ms] in open_time column)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour  # pre-compute before loop
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of 12h EMA(34), ATR(14), volume MA(20)
+    # Warmup: max of 4h EMA(34), ATR(14), volume MA(20)
     start_idx = max(34, 14, 20) + 1
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or
+        # Skip if any data not ready or outside session
+        if (np.isnan(ema_34_4h_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ratio[i]) or
             np.isnan(camarilla_r1[i]) or
-            np.isnan(camarilla_s1[i])):
+            np.isnan(camarilla_s1[i]) or
+            not in_session[i]):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
             continue
         
         close_val = close[i]
         vol_confirmed = vol_ratio[i] > 1.8  # volume at least 1.8x average
-        trend_12h_up = close_val > ema_34_12h_aligned[i]
-        trend_12h_down = close_val < ema_34_12h_aligned[i]
+        trend_4h_up = close_val > ema_34_4h_aligned[i]
+        trend_4h_down = close_val < ema_34_4h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 AND 12h trend up AND volume confirmation
-            long_signal = (close_val > camarilla_r1[i]) and trend_12h_up and vol_confirmed
+            # Long: price breaks above Camarilla R1 AND 4h trend up AND volume confirmation
+            long_signal = (close_val > camarilla_r1[i]) and trend_4h_up and vol_confirmed
             
-            # Short: price breaks below Camarilla S1 AND 12h trend down AND volume confirmation
-            short_signal = (close_val < camarilla_s1[i]) and trend_12h_down and vol_confirmed
+            # Short: price breaks below Camarilla S1 AND 4h trend down AND volume confirmation
+            short_signal = (close_val < camarilla_s1[i]) and trend_4h_down and vol_confirmed
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close_val
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
+            signals[i] = 0.20
             # Exit: trend flips down OR price hits ATR stoploss
-            if (not trend_12h_up) or (close_val < entry_price - 2.5 * atr[i]):
+            if (not trend_4h_up) or (close_val < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
+            signals[i] = -0.20
             # Exit: trend flips up OR price hits ATR stoploss
-            if (not trend_12h_down) or (close_val > entry_price + 2.5 * atr[i]):
+            if (not trend_4h_down) or (close_val > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_SessionFilter"
+timeframe = "1h"
 leverage = 1.0
