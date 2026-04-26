@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1d trend filter and volume confirmation.
-12h timeframe reduces trade frequency to avoid fee drag. Camarilla levels provide precise support/resistance.
-1d EMA34 trend filter ensures breakouts align with daily trend. Volume spike confirms institutional participation.
-ATR-based stoploss manages risk. Designed for both bull and bear markets by combining breakout with trend filter.
+4h_Camarilla_R1_S1_Breakout_1dATRRegime_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 4h with 1d ATR-based regime filter and volume spike. Uses tighter Camarilla levels (R1/S1) for more frequent but still selective entries. 1d ATR regime filter distinguishes trending (ATR rising) from ranging (ATR falling) markets to adjust stoploss dynamically. Volume spike confirms institutional participation. Designed for 20-50 trades/year to minimize fee drag while working in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,47 +18,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d ATR for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Camarilla pivot levels (R3, R2, R1, PP, S1, S2, S3)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
-        return np.zeros(n)
+    # True Range calculation for 1d
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # ATR regime: rising ATR = trending market, falling ATR = ranging market
+    atr_ma = pd.Series(atr_1d_aligned).rolling(window=10, min_periods=10).mean().values
+    atr_regime = atr_1d_aligned > atr_ma  # True = trending, False = ranging
     
-    # Camarilla pivot calculations
-    PP = (high_12h + low_12h + close_12h) / 3.0
-    R1 = PP + (high_12h - low_12h) * 1.0 / 12.0
-    R2 = PP + (high_12h - low_12h) * 2.0 / 12.0
-    R3 = PP + (high_12h - low_12h) * 3.0 / 12.0
-    S1 = PP - (high_12h - low_12h) * 1.0 / 12.0
-    S2 = PP - (high_12h - low_12h) * 2.0 / 12.0
-    S3 = PP - (high_12h - low_12h) * 3.0 / 12.0
+    # Calculate 1d Camarilla pivot levels (R1, S1)
+    PP = (high_1d + low_1d + close_1d) / 3.0
+    R1 = PP + (high_1d - low_1d) * 1.0 / 12.0
+    S1 = PP - (high_1d - low_1d) * 1.0 / 12.0
     
-    # Align Camarilla levels to 12h timeframe (no additional delay needed for pivot levels)
-    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
-    R2_aligned = align_htf_to_ltf(prices, df_12h, R2)
-    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
-    PP_aligned = align_htf_to_ltf(prices, df_12h, PP)
-    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_12h, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_avg)
     
-    # ATR for stoploss (14-period)
+    # ATR for stoploss (14-period on 4h)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -73,12 +64,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Warmup: need enough for all indicators
-    start_idx = max(20, 20, 14, 34)  # volume avg, ATR, EMA34
+    start_idx = max(20, 20, 14)  # volume avg, ATR, EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr[i]) or
+            np.isnan(atr_regime[i])):
             signals[i] = 0.0
             continue
         
@@ -87,15 +79,11 @@ def generate_signals(prices):
         size = 0.25  # 25% position size to manage risk
         
         if position == 0:
-            # Flat - look for breakout with trend and volume confirmation
-            # Long: break above R3 + price above 1d EMA34 + volume spike
-            long_entry = (close_val > R3_aligned[i]) and \
-                       (close_val > ema_34_1d_aligned[i]) and \
-                       volume_spike[i]
-            # Short: break below S3 + price below 1d EMA34 + volume spike
-            short_entry = (close_val < S3_aligned[i]) and \
-                        (close_val < ema_34_1d_aligned[i]) and \
-                       volume_spike[i]
+            # Flat - look for breakout with volume confirmation
+            # Long: break above R1 + volume spike
+            long_entry = (close_val > R1_aligned[i]) and volume_spike[i]
+            # Short: break below S1 + volume spike
+            short_entry = (close_val < S1_aligned[i]) and volume_spike[i]
             
             if long_entry:
                 signals[i] = size
@@ -108,9 +96,13 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on R1 retracement or ATR stoploss
-            exit_condition = (close_val < R1_aligned[i]) or \
-                           (close_val < entry_price - 2.5 * atr_val)
+            # Long - exit on S1 retracement or ATR stoploss (tighter in ranging, wider in trending)
+            if atr_regime[i]:  # trending market - wider stop
+                exit_condition = (close_val < S1_aligned[i]) or \
+                               (close_val < entry_price - 3.0 * atr_val)
+            else:  # ranging market - tighter stop
+                exit_condition = (close_val < S1_aligned[i]) or \
+                               (close_val < entry_price - 1.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -118,9 +110,13 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on S1 retracement or ATR stoploss
-            exit_condition = (close_val > S1_aligned[i]) or \
-                           (close_val > entry_price + 2.5 * atr_val)
+            # Short - exit on R1 retracement or ATR stoploss
+            if atr_regime[i]:  # trending market - wider stop
+                exit_condition = (close_val > R1_aligned[i]) or \
+                               (close_val > entry_price + 3.0 * atr_val)
+            else:  # ranging market - tighter stop
+                exit_condition = (close_val > R1_aligned[i]) or \
+                               (close_val > entry_price + 1.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -130,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dATRRegime_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
