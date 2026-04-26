@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolumeSpike_v1
-Hypothesis: For 1h timeframe, use 4h Camarilla R1/S1 breakouts with 4h EMA50 trend filter and 1d volume spike confirmation.
-Only trade during 08-20 UTC session to reduce noise. Target 15-30 trades/year by using tight entry conditions:
-- Breakout must exceed Camarilla level by 0.1% to avoid false breakouts
-- Volume must be 2.5x 20-period 1h MA (not 1d) for intraday confirmation
-- Trend filter uses 4h EMA50 aligned to 1h
-- Position size fixed at 0.20 to limit drawdown
-- ATR-based stop (2.0) and time-based exit (48h max hold)
-Designed to work in both bull (breakouts with volume) and bear (mean reversion at extremes) markets.
+6h_Ichimoku_Cloud_WeeklyTrend_Filter_v3
+Hypothesis: 6h Ichimoku Cloud (TK Cross + price vs cloud) with 1w trend filter (price above/below weekly EMA50) and volume spike confirmation. 
+Designed to capture medium-term trends with low trade frequency (12-30/year) by requiring alignment across 6h, 1d, and 1w timeframes. 
+Works in bull markets (price above cloud + weekly uptrend) and bear markets (price below cloud + weekly downtrend). 
+Uses discrete position sizing (0.25) to minimize fee churn. 
+Ichimoku provides dynamic support/resistance via cloud, reducing whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -25,172 +22,128 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for Camarilla levels and EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate Camarilla levels from previous 4h bar
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_prev = df_4h['close'].values
-    
-    # Camarilla R1 and S1 levels
-    R1 = close_4h_prev + (high_4h - low_4h) * 1.1 / 12
-    S1 = close_4h_prev - (high_4h - low_4h) * 1.1 / 12
-    
-    # Align Camarilla levels
-    R1_aligned = align_htf_to_ltf(prices, df_4h, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_4h, S1)
-    
-    # Get 1d data for volume spike confirmation
+    # Get 1d data for Ichimoku components
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # 1d volume average for spike detection
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # 1h volume MA for entry confirmation (more responsive than 1d)
-    vol_ma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Ichimoku components (1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ATR for stoploss (using 14-period ATR on 1h)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Weekly trend filter: EMA50 on 1w
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: 1.8x average volume (moderate to balance frequency and reliability)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
     
-    # Warmup: max of 4h EMA (50), 1h volume MA (20), ATR (14)
-    start_idx = max(50, 20, 14)
+    # Warmup: max of Ichimoku (52), volume MA (20), weekly EMA (50)
+    start_idx = max(52, 20, 50)
     
     for i in range(start_idx, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = 0.20
-            else:
-                signals[i] = -0.20
-            continue
-            
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(vol_ma_1h[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or 
+            np.isnan(senkou_b_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        ema_50_4h_val = ema_50_4h_aligned[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
+        tenkan_val = tenkan_aligned[i]
+        kijun_val = kijun_aligned[i]
+        senkou_a_val = senkou_a_aligned[i]
+        senkou_b_val = senkou_b_aligned[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
         volume_val = volume[i]
-        vol_ma_1h_val = vol_ma_1h[i]
-        vol_ma_1d_val = vol_ma_1d_aligned[i]
-        atr_val = atr[i]
+        vol_ma_val = vol_ma[i]
+        
+        # Cloud top and bottom
+        cloud_top = max(senkou_a_val, senkou_b_val)
+        cloud_bottom = min(senkou_a_val, senkou_b_val)
         
         if position == 0:
-            bars_since_entry = 0
+            # Long: TK cross bullish + price above cloud + weekly uptrend + volume spike
+            tk_bullish = tenkan_val > kijun_val
+            price_above_cloud = close_val > cloud_top
+            weekly_uptrend = close_val > ema_50_1w_val
+            volume_spike = volume_val > 1.8 * vol_ma_val
             
-            # Long: price breaks above R1 with volume confirmation and uptrend
-            # Require 0.1% breakout to avoid false signals
-            long_breakout = high_val > R1_val * 1.001
-            long_volume = volume_val > 2.5 * vol_ma_1h_val  # 1h volume spike
-            long_trend = close_val > ema_50_4h_val
-            long_signal = long_breakout and long_volume and long_trend
-            
-            # Short: price breaks below S1 with volume confirmation and downtrend
-            short_breakout = low_val < S1_val * 0.999
-            short_volume = volume_val > 2.5 * vol_ma_1h_val  # 1h volume spike
-            short_trend = close_val < ema_50_4h_val
-            short_signal = short_breakout and short_volume and short_trend
-            
-            if long_signal:
-                signals[i] = 0.20
+            if tk_bullish and price_above_cloud and weekly_uptrend and volume_spike:
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            elif short_signal:
-                signals[i] = -0.20
+            # Short: TK cross bearish + price below cloud + weekly downtrend + volume spike
+            elif (tenkan_val < kijun_val and 
+                  close_val < cloud_bottom and 
+                  close_val < ema_50_1w_val and 
+                  volume_val > 1.8 * vol_ma_val):
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            bars_since_entry += 1
-            signals[i] = 0.20
-            
-            # Exit conditions
-            # 1. ATR stoploss
-            stop_loss = close_val < entry_price - 2.0 * atr_val
-            # 2. Trend reversal
-            trend_reversal = close_val < ema_50_4h_val
-            # 3. Time-based exit (max 48 hours)
-            time_exit = bars_since_entry >= 48
-            # 4. Mean reversion at Camarilla S3/S4 (bear market defense)
-            # Recalculate S3/S4 for current 4h bar
-            if i >= 50:  # Need enough lookback for 4h alignment
-                # Get current 4h bar's Camarilla levels
-                idx_4h = i // 16  # Approximate, but we use aligned values for safety
-                # Use the aligned Camarilla levels from previous calculation
-                # Actually, we already have R1/S1 aligned, so compute S3/S4 similarly
-                # S3 = close_4h_prev - (high_4h - low_4h) * 1.1/4
-                # S4 = close_4h_prev - (high_4h - low_4h) * 1.1/2
-                # But we don't have current 4h bar's high/low/close here
-                # Simplified: use volatility-based mean reversion
-                vol_reversion = close_val < ema_50_4h_val - 1.5 * atr_val
-            
-            if stop_loss or trend_reversal or time_exit or vol_reversion:
+            # Hold long
+            signals[i] = 0.25
+            # Exit: TK cross bearish or price drops below cloud
+            if (tenkan_val < kijun_val) or (close_val < cloud_top):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            bars_since_entry += 1
-            signals[i] = -0.20
-            
-            # Exit conditions
-            # 1. ATR stoploss
-            stop_loss = close_val > entry_price + 2.0 * atr_val
-            # 2. Trend reversal
-            trend_reversal = close_val > ema_50_4h_val
-            # 3. Time-based exit (max 48 hours)
-            time_exit = bars_since_entry >= 48
-            # 4. Mean reversion at Camarilla R3/R4 (bull market defense)
-            vol_reversion = close_val > ema_50_4h_val + 1.5 * atr_val
-            
-            if stop_loss or trend_reversal or time_exit or vol_reversion:
+            # Hold short
+            signals[i] = -0.25
+            # Exit: TK cross bullish or price rises above cloud
+            if (tenkan_val > kijun_val) or (close_val > cloud_bottom):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_WeeklyTrend_Filter_v3"
+timeframe = "6h"
 leverage = 1.0
