@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d trend filter and volume spike captures strong directional moves in both bull/bear markets. Uses discrete sizing (0.25) and strict volume confirmation (2.0x) to limit trades to 12-37/year. Works by only taking breakouts aligned with 1d trend, reducing whipsaw. Added ATR-based stoploss to control drawdown.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ChopRegime_v1
+Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter, volume spike (2.0x), and choppiness regime (CHOP > 61.8) to capture strong trending moves while avoiding whipsaw in sideways markets. Uses discrete sizing (0.25) to limit trades to ~25-40/year. Works in both bull/bear by only taking breakouts aligned with 1d trend and chop filter.
 """
 
 import numpy as np
@@ -37,41 +37,44 @@ def generate_signals(prices):
     r1 = prev_close + camarilla_range * 1.1 / 12
     s1 = prev_close - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (stricter to reduce trades)
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (vol_ma * 2.0)
     
-    # ATR for stoploss (14-period)
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Choppiness Index regime filter: CHOP > 61.8 = ranging (avoid), CHOP < 38.2 = trending (favor)
+    # We want trending markets: CHOP < 61.8 (not strongly ranging)
+    atr_period = 14
+    chop_period = 14
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # first bar TR
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    highest_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
+    lowest_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
+    chop = 100 * np.log10(atr * chop_period / (highest_high - lowest_low)) / np.log10(chop_period)
+    chop_regime = chop < 61.8  # True when not strongly ranging (favor trending)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     base_size = 0.25
     
-    # Warmup: max of EMA34 (34), volume MA (20), ATR (14)
+    # Warmup: max of EMA34 (34), volume MA (20), ATR (14), CHOP (14)
     start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         trend_val = ema34_1d_aligned[i]
         vol_conf = volume_confirm[i]
-        atr_val = atr[i]
+        chop_reg = chop_regime[i]
         
         # Skip if any data not ready
-        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(trend_val) or np.isnan(atr_val)):
+        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(trend_val) or 
+            np.isnan(vol_conf) or np.isnan(chop_reg)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
@@ -80,43 +83,32 @@ def generate_signals(prices):
         is_uptrend = close_val > trend_val
         is_downtrend = close_val < trend_val
         
-        # Stoploss: 2 * ATR from entry
-        long_stop = entry_price - 2.0 * atr_val if position == 1 else np.inf
-        short_stop = entry_price + 2.0 * atr_val if position == -1 else -np.inf
+        # Entry conditions: Camarilla breakout in direction of trend + volume + chop regime
+        long_condition = (close_val > r1_val) and is_uptrend and vol_conf and chop_reg
+        short_condition = (close_val < s1_val) and is_downtrend and vol_conf and chop_reg
         
-        long_stop_hit = position == 1 and low_val <= long_stop
-        short_stop_hit = position == -1 and high_val >= short_stop
-        
-        # Entry conditions: Camarilla breakout in direction of trend + volume
-        long_condition = (close_val > r1_val) and is_uptrend and vol_conf
-        short_condition = (close_val < s1_val) and is_downtrend and vol_conf
-        
-        # Exit conditions: opposite Camarilla level touch or trend reversal or stoploss
-        long_exit = (position == 1 and (close_val < s1_val or not is_uptrend or long_stop_hit))
-        short_exit = (position == -1 and (close_val > r1_val or not is_downtrend or short_stop_hit))
+        # Exit conditions: opposite Camarilla level touch or trend reversal
+        long_exit = (position == 1 and (close_val < s1_val or not is_uptrend))
+        short_exit = (position == -1 and (close_val > r1_val or not is_downtrend))
         
         if long_condition and position != 1:
             signals[i] = base_size
             position = 1
-            entry_price = close_val
         elif short_condition and position != -1:
             signals[i] = -base_size
             position = -1
-            entry_price = close_val
         elif long_exit:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
         elif short_exit:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
         else:
             # Hold position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
