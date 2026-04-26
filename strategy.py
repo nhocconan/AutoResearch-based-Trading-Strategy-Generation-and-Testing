@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v4
-Hypothesis: Further tighten entry conditions from v3 to reduce trade frequency and avoid overtrading.
-- Increase volume confirmation threshold from 1.5x to 2.0x 20-period MA
-- Require both volume spike AND price closing above/below Camarilla level for confirmation
-- Add ATR-based volatility filter: only trade when ATR(14) > 0.5 * ATR(50) to avoid low-volatility chop
-- Keep discrete position sizing at 0.25 to minimize fee churn
-- Target: 15-30 trades/year (60-120 total over 4 years) to stay well under 400 max
-- Works in both bull and bear markets by following 1d EMA34 trend
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v1
+Hypothesis: Camarilla pivot R1/S1 breakout on 12h with 1d EMA34 trend filter and volume confirmation (>1.5x 20-period MA). 
+Long when price breaks above R1 in 1d uptrend with volume spike. Short when price breaks below S1 in 1d downtrend with volume spike.
+Uses discrete position sizing (0.25) to minimize fee churn. 
+Camarilla levels derived from prior 1d OHLC. 
+Designed to work in both bull and bear markets by following the 1d trend.
+Target: 12-37 trades/year (50-150 total over 4 years) for 12h timeframe.
 """
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -49,7 +48,7 @@ def generate_signals(prices):
     r3 = close_1d_prev + camarilla_range * 1.1 / 4
     s3 = close_1d_prev - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
@@ -61,30 +60,20 @@ def generate_signals(prices):
     uptrend_1d = close > ema_34_1d_aligned
     downtrend_1d = close < ema_34_1d_aligned
     
-    # Volume confirmation: volume > 2.0x 20-period MA (tightened from 1.5x to reduce trades)
+    # Volume confirmation: volume > 1.5x 20-period MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
-    
-    # ATR-based volatility filter: avoid low-volatility chop
-    atr_14 = pd.Series(close).rolling(window=14, min_periods=14).apply(
-        lambda x: np.mean(np.abs(np.diff(x, prepend=x[0]))), raw=False
-    ).values
-    atr_50 = pd.Series(close).rolling(window=50, min_periods=50).apply(
-        lambda x: np.mean(np.abs(np.diff(x, prepend=x[0]))), raw=False
-    ).values
-    volatility_filter = atr_14 > (0.5 * atr_50)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for ATR + 34 for 1d EMA + 20 for volume MA + 1 for Camarilla shift)
-    start_idx = 105
+    # Start after warmup (need 34 for 1d EMA + 20 for volume MA + 1 for Camarilla shift)
+    start_idx = 55
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(volatility_filter[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -95,14 +84,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price closes above R1 with 1d uptrend, volume spike, and volatility filter
+            # Long: price breaks above R1 with 1d uptrend and volume spike
             if (close[i] > r1_aligned[i] and 
-                uptrend_1d[i] and volume_spike[i] and volatility_filter[i]):
+                uptrend_1d[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price closes below S1 with 1d downtrend, volume spike, and volatility filter
+            # Short: price breaks below S1 with 1d downtrend and volume spike
             elif (close[i] < s1_aligned[i] and 
-                  downtrend_1d[i] and volume_spike[i] and volatility_filter[i]):
+                  downtrend_1d[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
@@ -124,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v4"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v1"
+timeframe = "12h"
 leverage = 1.0
