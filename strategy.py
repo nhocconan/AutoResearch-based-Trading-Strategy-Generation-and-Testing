@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v7
-Hypothesis: Camarilla R1/S1 breakouts with 1d ATR-based trend filter (price > EMA + 0.5*ATR = uptrend) and volume spike confirmation (2.5x). Uses ATR trailing stop (2.0x) and trend reversal exit. 1d HTF provides stable regime filter. Tight entry conditions target 20-50 trades/year to minimize fee drag. Works in bull via breakouts and in bear via short breakdowns with volume confirmation.
+1d_Weekly_Camarilla_R1_S1_Breakout_WeeklyTrend_Filter_v5
+Hypothesis: Daily Camarilla R1/S1 breakouts with weekly trend filter (price above/below weekly EMA20) and volume confirmation. Uses ATR-based trailing stop. Designed for low trade frequency (<25/year) to minimize fee drag. Works in bull/bear via weekly trend filter that adapts to regime.
 """
 
 import numpy as np
@@ -18,50 +18,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d ATR (14-period) for volatility measurement and trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 1d ATR-weighted trend filter: close > (ema_close + 0.5*atr) = uptrend
-    ema_close_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_filter_1d = ema_close_1d + 0.5 * atr_14_1d  # Uptrend threshold
-    
-    # Previous 1d bar's high, low, close for Camarilla levels
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Previous weekly bar's high, low, close for Camarilla levels
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
     # Calculate Camarilla levels: R1, S1
     camarilla_range = prev_high - prev_low
     R1 = prev_close + camarilla_range * 1.0/12
     S1 = prev_close - camarilla_range * 1.0/12
     
-    # Align 1d indicators to 4h timeframe
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    trend_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_filter_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align weekly indicators to daily timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
     
-    # Volume confirmation: 2.5x average volume (tighter to reduce trades)
+    # Volume confirmation: 2.0x average volume (balanced to avoid overtrading)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for stop (14-period on 4h)
-    tr1_4h = high[1:] - low[1:]
-    tr2_4h = np.abs(high[1:] - close[:-1])
-    tr3_4h = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
-    atr_14_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    # ATR for stop (14-period on daily)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,28 +57,26 @@ def generate_signals(prices):
     long_stop = 0.0
     short_stop = 0.0
     
-    # Warmup: max of 1d ATR (14), trend filter (20), volume MA (20), 4h ATR (14)
-    start_idx = max(14, 20, 20, 14)
+    # Warmup: max of weekly EMA (20), volume MA (20), ATR (14)
+    start_idx = max(20, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(trend_filter_1d_aligned[i]) or 
+        if (np.isnan(ema_20_1w_aligned[i]) or 
             np.isnan(R1_aligned[i]) or 
             np.isnan(S1_aligned[i]) or 
             np.isnan(vol_ma[i]) or 
-            np.isnan(atr_14_4h[i])):
+            np.isnan(atr_14[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
             continue
         
-        atr_14_1d_val = atr_14_1d_aligned[i]
-        trend_filter_1d_val = trend_filter_1d_aligned[i]
+        ema_20_1w_val = ema_20_1w_aligned[i]
         R1_val = R1_aligned[i]
         S1_val = S1_aligned[i]
         close_val = close[i]
@@ -98,47 +84,47 @@ def generate_signals(prices):
         low_val = low[i]
         volume_val = volume[i]
         vol_ma_val = vol_ma[i]
-        atr_14_4h_val = atr_14_4h[i]
+        atr_14_val = atr_14[i]
         
         if position == 0:
-            # Long: break above R1, uptrend (close > trend_filter), volume spike
-            long_signal = (high_val > R1_val) and (close_val > trend_filter_1d_val) and (volume_val > 2.5 * vol_ma_val)
-            # Short: break below S1, downtrend (close < trend_filter), volume spike
-            short_signal = (low_val < S1_val) and (close_val < trend_filter_1d_val) and (volume_val > 2.5 * vol_ma_val)
+            # Long: break above R1, weekly uptrend (close > weekly EMA20), volume spike
+            long_signal = (high_val > R1_val) and (close_val > ema_20_1w_val) and (volume_val > 2.0 * vol_ma_val)
+            # Short: break below S1, weekly downtrend (close < weekly EMA20), volume spike
+            short_signal = (low_val < S1_val) and (close_val < ema_20_1w_val) and (volume_val > 2.0 * vol_ma_val)
             
             if long_signal:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-                long_stop = entry_price - 2.0 * atr_14_4h_val
+                long_stop = entry_price - 2.0 * atr_14_val
             elif short_signal:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_val
-                short_stop = entry_price + 2.0 * atr_14_4h_val
+                short_stop = entry_price + 2.0 * atr_14_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.30
+            signals[i] = 0.25
             # Update trailing stop: move stop up as price makes new highs
-            long_stop = max(long_stop, high_val - 2.0 * atr_14_4h_val)
-            # Exit: trailing stop hit or trend reversal (close < trend_filter)
-            if (low_val < long_stop) or (close_val < trend_filter_1d_val):
+            long_stop = max(long_stop, high_val - 2.0 * atr_14_val)
+            # Exit: trailing stop hit or weekly trend reversal (close < weekly EMA20)
+            if (low_val < long_stop) or (close_val < ema_20_1w_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.30
+            signals[i] = -0.25
             # Update trailing stop: move stop down as price makes new lows
-            short_stop = min(short_stop, low_val + 2.0 * atr_14_4h_val)
-            # Exit: trailing stop hit or trend reversal (close > trend_filter)
-            if (high_val > short_stop) or (close_val > trend_filter_1d_val):
+            short_stop = min(short_stop, low_val + 2.0 * atr_14_val)
+            # Exit: trailing stop hit or weekly trend reversal (close > weekly EMA20)
+            if (high_val > short_stop) or (close_val > ema_20_1w_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v7"
-timeframe = "4h"
+name = "1d_Weekly_Camarilla_R1_S1_Breakout_WeeklyTrend_Filter_v5"
+timeframe = "1d"
 leverage = 1.0
