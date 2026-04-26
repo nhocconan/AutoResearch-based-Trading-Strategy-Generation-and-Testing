@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Choppiness_Filter_v2
-Hypothesis: Daily KAMA trend with choppiness regime filter and volume confirmation.
-- Long when KAMA trending up AND Choppiness Index < 38.2 (trending regime) AND volume > 1.2 * volume_ma(20)
-- Short when KAMA trending down AND Choppiness Index < 38.2 (trending regime) AND volume > 1.2 * volume_ma(20)
-- Uses 1-week EMA200 as higher timeframe trend filter to avoid counter-trend trades
-- Volume confirmation reduces false signals in low participation environments
-- Choppiness filter avoids whipsaws in ranging markets (CHOP > 61.8 = range)
-- Designed for low frequency (target 7-25 trades/year) to minimize fee drag on 1d timeframe
-- Novelty: Combines adaptive trend (KAMA) with regime detection (Choppiness) and volume for BTC/ETH edge in all markets
+6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Long when price breaks above Camarilla R3 AND 1d EMA34 uptrend AND volume > 1.5 * volume_ma(20)
+- Short when price breaks below Camarilla S3 AND 1d EMA34 downtrend AND volume > 1.5 * volume_ma(20)
+- Uses Camarilla pivot levels from prior 1d bar (completed bar only)
+- 1d EMA34 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws
+- Volume spike confirms institutional participation and reduces false breakouts
+- Designed for moderate frequency (target 12-37 trades/year) to minimize fee drag on 6h timeframe
+- Exit on opposite Camarilla level (S3 for longs, R3 for shorts) or trend reversal
+- Novelty: Combines Camarilla breakouts with HTF trend and volume confirmation for BTC/ETH edge in both bull/bear markets
 """
 
 import numpy as np
@@ -17,88 +18,68 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need enough data for calculations
+    if n < 60:  # Need enough data for calculations
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (adaptive trend) - primary signal
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close[t] - close[t-1]| over 10 periods
-    # Fix array alignment: change starts at index 10, volatility needs proper calculation
-    er = np.full_like(close, np.nan, dtype=float)
-    for i in range(10, len(close)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # for EMA(2)
-    slow_sc = 2 / (30 + 1)  # for EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan, dtype=float)
-    kama[9] = close[9]  # seed
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Load 6h data ONCE before loop for Camarilla levels (structure)
+    df_6h = get_htf_data(prices, '6h')
     
-    # KAMA trend: 1 = up (close > KAMA), -1 = down (close < KAMA)
-    kama_trend = np.where(close > kama, 1, -1)
+    # Calculate prior 6h bar's OHLC for Camarilla pivot
+    # We need the completed 6h bar's OHLC, so we use shift(1) on the 6h data
+    # But since we're using get_htf_data which gives us completed bars, we can use the last completed bar
+    # For each 6h bar, we use the previous completed 6h bar's OHLC
+    h_6h = df_6h['high'].values
+    l_6h = df_6h['low'].values
+    c_6h = df_6h['close'].values
     
-    # Calculate Choppiness Index (regime filter)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period has no previous close
+    # Calculate Camarilla levels for each 6h bar using prior 6h bar's OHLC
+    # Camarilla R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # We need to shift the OHLC by 1 to get the prior bar's values
+    h_prev = np.roll(h_6h, 1)
+    l_prev = np.roll(l_6h, 1)
+    c_prev = np.roll(c_6h, 1)
+    # Set first value to NaN since there's no prior bar
+    h_prev[0] = np.nan
+    l_prev[0] = np.nan
+    c_prev[0] = np.nan
     
-    # ATR(14) sum
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    camarilla_r3 = c_prev + (h_prev - l_prev) * 1.1 / 4
+    camarilla_s3 = c_prev - (h_prev - l_prev) * 1.1 / 4
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Align Camarilla levels to 6h timeframe (no additional delay needed for structure)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_s3)
     
-    # Choppiness Index: 100 * log10(atr_sum / (hh - ll)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh - ll
-    chop = np.full_like(close, np.nan, dtype=float)
-    mask = (range_hl > 0) & (~np.isnan(atr_sum))
-    chop[mask] = 100 * np.log10(atr_sum[mask] / range_hl[mask]) / np.log10(14)
+    # Load 1d data ONCE before loop for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Regime: CHOP < 38.2 = trending (good for signals), CHOP > 61.8 = ranging (avoid)
-    chop_trending = chop < 38.2
+    # Calculate 1d EMA34 for trend filter (needs completed 1d candle)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Trend: 1 = uptrend (close > EMA34), -1 = downtrend (close < EMA34), 0 = neutral/invalid
+    trend_1d = np.where(ema_34_1d_aligned > 0, 
+                        np.where(close > ema_34_1d_aligned, 1, -1), 
+                        0)
     
-    # Volume confirmation
+    # Calculate volume filter: volume > 1.5 * volume_ma(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.2 * volume_ma)
-    
-    # Load 1-week data ONCE before loop for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate 1-week EMA200 for trend filter (needs completed 1w candle)
-    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    # 1-week trend: 1 = uptrend (close > EMA200), -1 = downtrend (close < EMA200)
-    weekly_trend = np.where(ema_200_1w_aligned > 0, 
-                            np.where(close > ema_200_1w_aligned, 1, -1), 
-                            0)
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 200 for EMA, 14 for CHOP, 20 for volume MA)
-    start_idx = max(200, 14, 20)
+    # Start after warmup (need 34 for EMA, 20 for volume MA)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_trend[i]) or np.isnan(chop[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(weekly_trend[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(trend_1d[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -108,16 +89,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Entry conditions: KAMA trend + chop trending regime + volume spike + weekly trend alignment
+        # Camarilla R3/S3 breakout conditions with trend and volume spike filter
         if position == 0:
-            # Long: KAMA up AND chop trending AND volume spike AND weekly uptrend
-            if (kama_trend[i] == 1 and chop_trending[i] and volume_spike[i] and 
-                weekly_trend[i] == 1):
+            # Long: Price breaks above Camarilla R3 AND 1d uptrend AND volume spike
+            if close[i] > camarilla_r3_aligned[i] and trend_1d[i] == 1 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down AND chop trending AND volume spike AND weekly downtrend
-            elif (kama_trend[i] == -1 and chop_trending[i] and volume_spike[i] and 
-                  weekly_trend[i] == -1):
+            # Short: Price breaks below Camarilla S3 AND 1d downtrend AND volume spike
+            elif close[i] < camarilla_s3_aligned[i] and trend_1d[i] == -1 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -125,20 +104,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: KAMA turns down OR chop becomes ranging OR weekly trend turns down
-            if (kama_trend[i] == -1 or not chop_trending[i] or weekly_trend[i] == -1):
+            # Exit: Price falls below Camarilla S3 OR 1d trend turns down
+            if close[i] < camarilla_s3_aligned[i] or trend_1d[i] == -1:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: KAMA turns up OR chop becomes ranging OR weekly trend turns up
-            if (kama_trend[i] == 1 or not chop_trending[i] or weekly_trend[i] == 1):
+            # Exit: Price rises above Camarilla R3 OR 1d trend turns up
+            if close[i] > camarilla_r3_aligned[i] or trend_1d[i] == 1:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_Choppiness_Filter_v2"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
