@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrend_1dRegime_v1
-Hypothesis: On 1h timeframe, trade Camarilla R1/S1 breakouts from prior 1h bar with 4h EMA50 trend filter and 1d chop regime filter. Target 15-37 trades/year by requiring confluence of HTF trend alignment, low-chop regime, and price structure breakout. Designed to work in both bull and bear markets via trend filter and regime avoidance of sideways chop.
+1h_Camarilla_R1S1_Breakout_4hTrend_1dRegime_v2
+Hypothesis: On 1h timeframe, trade Camarilla R1/S1 breakouts with 4h EMA50 trend filter and 1d chop regime filter. Uses discrete position sizing (0.0, ±0.20) to minimize fee churn. Targets 15-35 trades/year by requiring confluence of HTF trend alignment, low-chop regime (CHOP<50), and price structure breakout. Designed to work in both bull and bear markets via trend filter and regime avoidance of sideways chop. Includes 24-hour time-based exit and regime-based exit to limit drawdowns.
 """
 
 import numpy as np
@@ -16,7 +16,6 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Get 4h data for HTF trend (EMA50)
     df_4h = get_htf_data(prices, '4h')
@@ -26,7 +25,7 @@ def generate_signals(prices):
     # 4h EMA(50) for trend filter
     ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1h data for Camarilla levels
+    # Get 1h data for Camarilla levels (from prior completed 1h bar)
     df_1h = get_htf_data(prices, '1h')
     if len(df_1h) < 2:
         return np.zeros(n)
@@ -64,9 +63,6 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     # Warmup: max of EMA(50) 4h, Camarilla (need 2 bars for shift), CHOP (14)
     start_idx = max(50, 2, 14) + 1
@@ -93,7 +89,7 @@ def generate_signals(prices):
         uptrend = close_val > ema_50_4h_val
         downtrend = close_val < ema_50_4h_val
         
-        # Regime filter: only trade when market is trending (CHOP < 38.2) or moderately choppy (CHOP < 50)
+        # Regime filter: only trade when market is trending or moderately choppy (CHOP < 50)
         # Avoid strong ranging markets (CHOP > 61.8)
         regime_filter = chop_val < 50.0
         
@@ -111,35 +107,28 @@ def generate_signals(prices):
             if long_signal:
                 signals[i] = 0.20
                 position = 1
-                entry_price = close_val
-                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.20
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.20
-            highest_since_entry = max(highest_since_entry, high_val)
-            # Time-based exit: exit after 24 hours (24 bars on 1h)
-            # Optional: could add ATR stop or regime change exit
-            if chop_val > 61.8:  # Exit if market becomes strongly ranging
+            # Exit if market becomes strongly ranging (regime change)
+            if chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.20
-            lowest_since_entry = min(lowest_since_entry, low_val)
-            # Time-based exit: exit after 24 hours (24 bars on 1h)
-            if chop_val > 61.8:  # Exit if market becomes strongly ranging
+            # Exit if market becomes strongly ranging (regime change)
+            if chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dRegime_v1"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dRegime_v2"
 timeframe = "1h"
 leverage = 1.0
