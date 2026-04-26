@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_Volume_Filter
-Hypothesis: Kaufman Adaptive Moving Average (KAMA) captures trend with lower lag and fewer whipsaws than traditional MA. Combined with volume confirmation (>1.5x 20-bar average) and 1-week EMA50 trend filter, this strategy aims for high-probability entries in both bull and bear markets. The 1d timeframe reduces trade frequency to minimize fee drag, while KAMA's adaptive nature improves trend detection during volatile periods. Target: 15-25 trades/year (60-100 total over 4 years).
+12h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R4/S4 breakouts with 1d EMA34 trend filter and volume confirmation (>1.8x 20-bar MA) on 12h timeframe. R4/S4 represent stronger breakout levels than R3/S3, reducing false signals while capturing momentum. Designed for 12h timeframe to balance trade frequency and edge. Works in bull/bear markets by following 1d trend while using Camarilla structure for entries. Volume spike filter reduces whipsaws. Target: 12-30 trades/year (50-120 total over 4 years).
 """
 
 import numpy as np
@@ -13,62 +13,68 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for KAMA calculation
+    # Load 1d data ONCE before loop for HTF filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate KAMA on 1d close
+    # 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    kama = calculate_kama(close_1d, er_len=10, fast_ma=2, slow_ma=30)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Previous day's OHLC for Camarilla levels (using 1d for structure)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Calculate Camarilla levels: R4, S4 (stronger breakout levels)
+    rng = high_1d - low_1d
+    camarilla_r4 = close_1d_vals + (rng * 1.1 / 2)  # R4 level
+    camarilla_s4 = close_1d_vals - (rng * 1.1 / 2)  # S4 level
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size (25% of capital)
     
-    # Warmup: max of calculations (20 for vol, 30 for KAMA, 50 for 1w EMA)
-    start_idx = max(20, 30, 50)
+    # Warmup: max of calculations (20 for vol, 34 for 1d EMA, 1 for camarilla)
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        kama_val = kama_aligned[i]
-        ema_50_val = ema_50_1w_aligned[i]
+        camarilla_r4_val = camarilla_r4_aligned[i]
+        camarilla_s4_val = camarilla_s4_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         
-        # Determine 1w trend: bullish if price > EMA50, bearish if price < EMA50
-        bullish_1w = close_val > ema_50_val
-        bearish_1w = close_val < ema_50_val
+        # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
+        bullish_1d = close_val > ema_34_val
+        bearish_1d = close_val < ema_34_val
         
-        # Entry conditions: price crosses KAMA in trend direction with volume spike
-        long_entry = (close_val > kama_val) and bullish_1w and vol_spike
-        short_entry = (close_val < kama_val) and bearish_1w and vol_spike
+        # Entry conditions: breakout of Camarilla R4/S4 in trend direction with volume spike
+        long_entry = (close_val > camarilla_r4_val) and bullish_1d and vol_spike
+        short_entry = (close_val < camarilla_s4_val) and bearish_1d and vol_spike
         
         if position == 0:
             # Flat - look for entry
@@ -81,15 +87,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on mean reversion below KAMA or trend change
-            if close_val < kama_val or not bullish_1w:
+            # Long - exit on mean reversion to mid-point or trend change
+            mid_point = (camarilla_r4_val + camarilla_s4_val) / 2
+            if close_val < mid_point or not bullish_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = base_size
         elif position == -1:
-            # Short - exit on mean reversion above KAMA or trend change
-            if close_val > kama_val or not bearish_1w:
+            # Short - exit on mean reversion to mid-point or trend change
+            mid_point = (camarilla_r4_val + camarilla_s4_val) / 2
+            if close_val > mid_point or not bearish_1d:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,22 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-def calculate_kama(close, er_len=10, fast_ma=2, slow_ma=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    close = pd.Series(close)
-    # Efficiency Ratio
-    change = abs(close.diff(er_len))
-    volatility = close.diff().abs().rolling(er_len).sum()
-    er = change / volatility.replace(0, 1e-10)
-    # Smoothing Constants
-    sc = (er * (2/(fast_ma+1) - 2/(slow_ma+1)) + 2/(slow_ma+1)) ** 2
-    # KAMA
-    kama = [np.nan] * len(close)
-    kama[0] = close.iloc[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close.iloc[i] - kama[i-1])
-    return np.array(kama)
-
-name = "1d_KAMA_Trend_With_Volume_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
