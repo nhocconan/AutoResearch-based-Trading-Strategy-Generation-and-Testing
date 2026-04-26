@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1w EMA50 trend filter and volume spike captures strong momentum moves while avoiding false breakouts in chop. Works in bull/bear via 1w trend alignment. Designed for 12h to target 12-37 trades/year with discrete sizing (0.25).
+4h_Camarilla_R3S3_Breakout_1wTrend_VolumeRegime_v1
+Hypothesis: Camarilla R3/S3 breakout with 1-week EMA20 trend filter and low-volume regime filter captures strong momentum moves while avoiding false breakouts in choppy or high-volume exhaustion conditions. Weekly trend ensures alignment with larger cycle direction, low-volume regime filters out climactic moves. Designed for 4h to target 20-40 trades/year with discrete sizing (0.25).
 """
 
 import numpy as np
@@ -23,9 +23,9 @@ def generate_signals(prices):
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1w EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     # Previous week's Camarilla levels (using 1w OHLC)
     prev_close = df_1w['close'].shift(1).values
@@ -38,31 +38,31 @@ def generate_signals(prices):
     R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
     S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
     R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
     S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
     
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Volume regime: current volume < 1.5 * 50-period average (avoid climactic volume)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    low_volume_regime = volume < (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Warmup: max of EMA50 (50) and volume MA (20)
-    start_idx = max(50, 20)
+    # Warmup: max of EMA20 (20) and volume MA (50)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         close_val = close[i]
-        ema_val = ema_50_1w_aligned[i]
+        ema_val = ema_20_1w_aligned[i]
         r3_val = R3_aligned[i]
         s3_val = S3_aligned[i]
         r4_val = R4_aligned[i]
         s4_val = S4_aligned[i]
-        vol_spike = volume_spike[i]
+        vol_regime = low_volume_regime[i]
         
         # Skip if any data not ready
         if (np.isnan(ema_val) or np.isnan(r3_val) or np.isnan(s3_val) or 
@@ -71,14 +71,14 @@ def generate_signals(prices):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Trend filter: price vs 1w EMA50
+        # Trend filter: price vs 1w EMA20
         uptrend = close_val > ema_val
         downtrend = close_val < ema_val
         
-        # Long: price breaks above R3 with 1w uptrend and volume spike
-        long_condition = (close_val > r3_val) and uptrend and vol_spike
-        # Short: price breaks below S3 with 1w downtrend and volume spike
-        short_condition = (close_val < s3_val) and downtrend and vol_spike
+        # Long: price breaks above R3 with 1w uptrend and low-volume regime (avoid exhaustion)
+        long_condition = (close_val > r3_val) and uptrend and vol_regime
+        # Short: price breaks below S3 with 1w downtrend and low-volume regime
+        short_condition = (close_val < s3_val) and downtrend and vol_regime
         
         # Exit: price re-enters R3-S3 range
         long_exit = (position == 1 and close_val < r3_val)
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1wTrend_VolumeRegime_v1"
+timeframe = "4h"
 leverage = 1.0
