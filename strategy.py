@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4S4_Breakout_12hTrend_VolumeConfirm
-Hypothesis: Camarilla R4/S4 breakout on 6h with 12h EMA50 trend filter and volume confirmation (>1.5x average volume). Uses discrete position sizing (0.25) to minimize fee churn. Designed to capture strong momentum moves in both bull and bear markets by aligning with 12h trend and requiring volume confirmation to avoid false breakouts. R4/S4 levels represent stronger breakout points than R3/S3, reducing whipsaws.
+12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1-week EMA34 trend filter and volume spike (>2x average volume). Uses discrete position sizing (0.25) to minimize fee churn. Designed to capture strong momentum moves in both bull and bear markets by aligning with weekly trend and requiring volume confirmation to avoid false breakouts. R1/S1 levels represent initial breakout points with higher probability of continuation in trending markets.
 """
 
 import numpy as np
@@ -18,14 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1-week EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Calculate ATR(14) for stoploss
     tr1 = high - low
@@ -44,8 +44,8 @@ def generate_signals(prices):
     base_size = 0.25
     atr_multiplier = 2.5  # ATR stoploss multiplier
     
-    # Start after warmup (need 20 for Camarilla, 50 for EMA, 14 for ATR, 20 for volume)
-    start_idx = max(20, 50, 14, 20)
+    # Start after warmup (need 20 for Camarilla, 34 for EMA, 14 for ATR, 20 for volume)
+    start_idx = max(20, 34, 14, 20)
     
     for i in range(start_idx, n):
         # Need previous period's OHLC for Camarilla levels
@@ -76,18 +76,18 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
             
-        # Camarilla R4 and S4 levels (stronger breakout levels)
-        r4 = prev_close + range_val * 1.5 / 2
-        s4 = prev_close - range_val * 1.5 / 2
+        # Camarilla R1 and S1 levels (initial breakout levels)
+        r1 = prev_close + range_val * 1.0 / 12
+        s1 = prev_close - range_val * 1.0 / 12
         
         close_val = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_val = ema_50_12h_aligned[i]
+        ema_val = ema_34_1w_aligned[i]
         atr_val = atr[i]
         
         # Skip if any data not ready
-        if np.isnan(r4) or np.isnan(s4) or np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(atr_val):
+        if np.isnan(r1) or np.isnan(s1) or np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(atr_val):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -97,15 +97,15 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirmed = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 2.0x average volume (stricter for fewer trades)
+        volume_confirmed = vol > 2.0 * avg_vol
         
-        # Long logic: price breaks above R4 with 12h uptrend and volume confirmation
-        long_condition = (close_val > r4) and (close_val > ema_val) and volume_confirmed
-        # Short logic: price breaks below S4 with 12h downtrend and volume confirmation
-        short_condition = (close_val < s4) and (close_val < ema_val) and volume_confirmed
+        # Long logic: price breaks above R1 with 1w uptrend and volume confirmation
+        long_condition = (close_val > r1) and (close_val > ema_val) and volume_confirmed
+        # Short logic: price breaks below S1 with 1w downtrend and volume confirmation
+        short_condition = (close_val < s1) and (close_val < ema_val) and volume_confirmed
         
-        # Exit logic: trend reversal (close crosses 12h EMA50)
+        # Exit logic: trend reversal (close crosses 1w EMA34)
         exit_long = close_val < ema_val
         exit_short = close_val > ema_val
         
@@ -148,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4S4_Breakout_12hTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
