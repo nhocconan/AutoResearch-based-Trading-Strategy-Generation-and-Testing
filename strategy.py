@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v2
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1-day EMA34 trend filter and volume confirmation (2.0x average). Uses discrete position sizing (0.25) and ATR-based stoploss (2.5x) for risk management. Designed for low trade frequency (target 19-50/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The 1-day EMA34 provides strong trend filtering that works across regimes, and volume confirmation ensures breakouts have participation.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v3
+Hypothesis: Tighten entry conditions by requiring volume > 2.5x average (vs 2.0x) and adding ATR-based dynamic stoploss (2.0x ATR) to reduce trade frequency and fee drag. Maintains Camarilla R1/S1 breakout logic with 1-day EMA34 trend filter for BTC/ETH/SOL. Target: 15-35 trades/year to stay well under fee drag threshold while capturing strong trending moves.
 """
 
 import numpy as np
@@ -35,9 +35,9 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter: volume > 2.0 * 20-period average
+    # Calculate volume spike filter: volume > 2.5 * 20-period average (tighter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (2.5 * vol_ma)
     
     # Get 1d data for Camarilla calculation
     if len(df_1d) < 2:
@@ -110,20 +110,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend flips down OR price hits ATR stoploss
-            if (not trend_1d_up) or (close_val < entry_price - 2.5 * atr[i]):
+            # Exit: trend flips down OR price hits ATR stoploss (tighter: 2.0x)
+            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend flips up OR price hits ATR stoploss
-            if (not trend_1d_down) or (close_val > entry_price + 2.5 * atr[i]):
+            # Exit: trend flips up OR price hits ATR stoploss (tighter: 2.0x)
+            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
