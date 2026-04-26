@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1
-Hypothesis: Use 4h timeframe with Camarilla R1/S1 breakout confirmed by 1d EMA34 trend and volume spike. Targets 20-50 trades/year to minimize fee drag. Works in bull/bear markets by using 1d EMA34 for trend direction and volume confirmation to filter false breakouts. Includes ATR-based stoploss to manage risk. Uses 1d HTF for Camarilla levels and trend filter.
+6h_Ichimoku_Kumo_Twist_1dTrend_VolumeFilter_v2
+Hypothesis: Uses Ichimoku cloud twist (Senkou Span A/B cross) from 1d timeframe as trend filter, combined with 6h Tenkan/Kijun cross for entry and volume confirmation. Works in bull/bear markets by using 1d cloud direction for trend and volume spike to filter false signals. Targets 15-25 trades/year to minimize fee drag. Uses discrete position sizing (0.25) to reduce churn.
 """
 
 import numpy as np
@@ -18,101 +18,108 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from 1d timeframe
+    # Get 1d data for Ichimoku (cloud twist and trend)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:  # need at least 2 days for previous day data
+    if len(df_1d) < 52:  # Need 26*2 for Senkou Span
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate Ichimoku components on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla calculations (R1/S1 levels)
-    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 6  # R1
-    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 6  # S1
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    tenkan_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                 pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    kijun_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2).shift(2)  # Shifted 2 periods ahead
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    senkou_b_1d = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                    pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2).shift(2)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Cloud twist: Senkou A crosses above/below Senkou B
+    # Twist up (bullish): Senkou A > Senkou B after previously being below
+    senkou_a_vals = senkou_a_1d.values
+    senkou_b_vals = senkou_b_1d.values
+    twist_up = (senkou_a_vals > senkou_b_vals) & (np.roll(senkou_a_vals, 1) <= np.roll(senkou_b_vals, 1))
+    # Twist down (bearish): Senkou A < Senkou B after previously being above
+    twist_down = (senkou_a_vals < senkou_b_vals) & (np.roll(senkou_a_vals, 1) >= np.roll(senkou_b_vals, 1))
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d Ichimoku components to 6h timeframe
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_vals)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_vals)
+    twist_up_aligned = align_htf_to_ltf(prices, df_1d, twist_up.astype(float))
+    twist_down_aligned = align_htf_to_ltf(prices, df_1d, twist_down.astype(float))
+    
+    # Calculate 6h Tenkan and Kijun for entry signals
+    tenkan_6h = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
+                 pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
+    kijun_6h = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
+                pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    
+    # TK Cross: Tenkan crosses above/below Kijun
+    tk_cross_up = (tenkan_6h > kijun_6h) & (np.roll(tenkan_6h, 1) <= np.roll(kijun_6h, 1))
+    tk_cross_down = (tenkan_6h < kijun_6h) & (np.roll(tenkan_6h, 1) >= np.roll(kijun_6h, 1))
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_avg)
     
-    # ATR for stoploss (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    # Warmup: need enough for all indicators
-    start_idx = max(34, 20, 14)  # 1d EMA34, volume avg, ATR
+    # Warmup: need enough for all indicators (52 for Senkou B, 26 for Kijun/Tenkan, 20 for volume)
+    start_idx = max(52, 26, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(twist_up_aligned[i]) or np.isnan(twist_down_aligned[i]) or
+            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        atr_val = atr[i]
-        size = 0.25  # 25% position size to manage risk
+        # Determine trend from 1d cloud twist
+        bullish_trend = twist_up_aligned[i] > 0.5
+        bearish_trend = twist_down_aligned[i] > 0.5
         
         if position == 0:
-            # Flat - look for breakout with trend and volume confirmation
-            # Long: break above Camarilla R1 (h3) + 1d EMA34 uptrend + volume spike
-            long_entry = (close_val > camarilla_h3_aligned[i]) and \
-                       (ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]) and \
-                       volume_spike[i]
-            # Short: break below Camarilla S1 (l3) + 1d EMA34 downtrend + volume spike
-            short_entry = (close_val < camarilla_l3_aligned[i]) and \
-                        (ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]) and \
-                        volume_spike[i]
+            # Flat - look for TK cross with trend and volume confirmation
+            # Long: Tenkan crosses above Kijun + bullish 1d cloud twist + volume spike
+            long_entry = tk_cross_up[i] and bullish_trend and volume_spike[i]
+            # Short: Tenkan crosses below Kijun + bearish 1d cloud twist + volume spike
+            short_entry = tk_cross_down[i] and bearish_trend and volume_spike[i]
             
             if long_entry:
-                signals[i] = size
+                signals[i] = 0.25
                 position = 1
-                entry_price = close_val
             elif short_entry:
-                signals[i] = -size
+                signals[i] = -0.25
                 position = -1
-                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on Camarilla S1 break or ATR stoploss
-            exit_condition = (close_val < camarilla_l3_aligned[i]) or \
-                           (close_val < entry_price - 2.5 * atr_val)
+            # Long - exit on TK cross down or bearish twist
+            exit_condition = tk_cross_down[i] or bearish_trend
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
-                signals[i] = size
+                signals[i] = 0.25
         elif position == -1:
-            # Short - exit on Camarilla R1 break or ATR stoploss
-            exit_condition = (close_val > camarilla_h3_aligned[i]) or \
-                           (close_val > entry_price + 2.5 * atr_val)
+            # Short - exit on TK cross up or bullish twist
+            exit_condition = tk_cross_up[i] or bullish_trend
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
-                signals[i] = -size
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_Kumo_Twist_1dTrend_VolumeFilter_v2"
+timeframe = "6h"
 leverage = 1.0
