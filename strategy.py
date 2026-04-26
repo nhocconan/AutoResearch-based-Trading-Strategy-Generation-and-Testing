@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Issue_30_Trend_HTF1dW1
-Hypothesis: On 6h timeframe, combine Issue #30 (Donchian20 breakout + volume spike) with HTF trend from 1d and weekly EMA34 to capture strong momentum moves while avoiding counter-trend trades. Issue #30 provides precise entry timing with volume confirmation, while HTF EMA filters ensure alignment with higher timeframe trend. This reduces false breakouts and improves win rate in both bull and bear markets by only trading in direction of HTF trend. Target: 50-150 total trades over 4 years (12-37/year).
+12h_Camarilla_R1_S1_Breakout_1wTrend_RegimeFilter_v1
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1-week EMA34 trend filter and choppiness regime filter capture institutional momentum moves while avoiding choppy markets. R1/S1 levels represent strong intraday support/resistance where breaks indicate smart money participation. 1-week EMA34 ensures alignment with long-term trend. Choppiness filter (CHOP > 61.8) avoids range-bound markets. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,39 +18,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Load 1w data ONCE before loop for HTF trend (EMA34)
+    # Load 1w data ONCE before loop for HTF trend filter (EMA34)
     df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate 1w EMA34 for trend filter
     close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
     
-    # Issue #30 components on 6h
-    # Donchian(20) breakout
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Load 1d data ONCE before loop for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # Volume spike (> 2x 20-period EMA)
-    volume_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (volume_ema * 2.0)
+    # Calculate Camarilla pivot levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's values (shifted by 1 to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # First bar: use first available values (no look-ahead)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Camarilla pivot calculations
+    range_1d = prev_high - prev_low
+    camarilla_r1 = prev_close + range_1d * 1.1 / 12
+    camarilla_s1 = prev_close - range_1d * 1.1 / 12
+    camarilla_r2 = prev_close + range_1d * 1.1 / 6
+    camarilla_s2 = prev_close - range_1d * 1.1 / 6
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    
+    # Choppiness regime filter on 1d timeframe
+    # CHOP(14) = 100 * log10(sum(ATR(1),14) / (log10(HH(14)-LL(14)) * sqrt(14)))
+    # Simplified: CHOP > 61.8 = ranging/choppy, CHOP < 38.2 = trending
+    tr_1d = np.maximum(high_1d - low_1d, 
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]  # first bar
+    atr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_raw = 100 * np.log10(atr_14 * 14 / (hh_14 - ll_14)) / np.log10(np.sqrt(14))
+    chop_raw = np.nan_to_num(chop_raw, nan=50.0)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
+    
+    # Volume spike detection on 12h (volume > 1.8x 30-period EMA)
+    volume_ema = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
+    volume_spike = volume > (volume_ema * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need sufficient data for all indicators)
-    start_idx = max(50, 20)
+    start_idx = max(100, 34, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(chop_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -60,29 +97,32 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # HTF trend filter (both 1d and 1w EMA34 must agree)
-        uptrend = (close[i] > ema_34_1d_aligned[i]) and (close[i] > ema_34_1w_aligned[i])
-        downtrend = (close[i] < ema_34_1d_aligned[i]) and (close[i] < ema_34_1w_aligned[i])
+        # 1w trend filter (EMA34)
+        uptrend = close[i] > ema_34_aligned[i]
+        downtrend = close[i] < ema_34_aligned[i]
         
-        # Long logic: Donchian breakout up + volume spike + HTF uptrend
-        if close[i] > donchian_high[i] and volume_spike[i] and uptrend:
+        # Regime filter: only trade when NOT choppy (CHOP < 61.8 = trending)
+        not_choppy = chop_aligned[i] < 61.8
+        
+        # Long logic: price breaks above R1 with volume spike + uptrend + not choppy
+        if close[i] > r1_aligned[i] and volume_spike[i] and uptrend and not_choppy:
             if position != 1:
                 signals[i] = 0.25
                 position = 1
             else:
                 signals[i] = 0.25
-        # Short logic: Donchian breakout down + volume spike + HTF downtrend
-        elif close[i] < donchian_low[i] and volume_spike[i] and downtrend:
+        # Short logic: price breaks below S1 with volume spike + downtrend + not choppy
+        elif close[i] < s1_aligned[i] and volume_spike[i] and downtrend and not_choppy:
             if position != -1:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = -0.25
-        # Exit conditions: opposite Donchian breakout or HTF trend reversal
-        elif position == 1 and (close[i] < donchian_low[i] or not uptrend):
+        # Exit conditions: price reaches opposite S2/R2 level or trend reversal or choppy market
+        elif position == 1 and (close[i] < s2_aligned[i] or not uptrend or chop_aligned[i] >= 61.8):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] > donchian_high[i] or not downtrend):
+        elif position == -1 and (close[i] > r2_aligned[i] or not downtrend or chop_aligned[i] >= 61.8):
             signals[i] = 0.0
             position = 0
         else:
@@ -96,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Issue_30_Trend_HTF1dW1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_RegimeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
