@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_Regime_v1
-Hypothesis: Combine Elder Ray Bull/Bear Power with 12h trend regime filter. 
-Bull Power = EMA(13) - Low; Bear Power = High - EMA(13). 
-Long when Bull Power > 0 AND rising AND 12h close > EMA(50). 
-Short when Bear Power > 0 AND rising AND 12h close < EMA(50). 
-Volume confirmation required. Uses discrete sizing (0.25) to limit fee churn.
-Target: 50-150 trades over 4 years = 12-37/year. Works in bull (trend continuation) and bear (counter-trend retracements) via regime filter.
+4h_Donchian20_Breakout_VolumeSpike_ChopFilter_v2
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and choppiness regime filter.
+Long when price breaks above upper Donchian channel AND volume > 2x 20-period average AND chop < 61.8 (trending).
+Short when price breaks below lower Donchian channel AND volume > 2x 20-period average AND chop < 61.8.
+Uses 1d trend filter: only long in 1d uptrend (close > EMA50), only short in 1d downtrend (close < EMA50).
+ATR-based stoploss: exit when price moves against position by 2.5x ATR(20).
+Discrete sizing: 0.25 to limit fee churn. Target: 75-200 trades over 4 years.
+Works in bull (breakouts continuation) and bear (breakdown continuation) via 1d trend filter.
 """
 
 import numpy as np
@@ -23,45 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Donchian(20) channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate EMA(50) on 12h for regime filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Elder Ray components on 6h
-    ema_period = 13
-    ema_13 = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
-    
-    bull_power = ema_13 - low  # Bull Power = EMA - Low
-    bear_power = high - ema_13  # Bear Power = High - EMA
-    
-    # Slope of Bull/Bear Power (3-period change)
-    bull_power_slope = bull_power - np.roll(bull_power, 3)
-    bear_power_slope = bear_power - np.roll(bear_power, 3)
-    # Handle roll NaNs
-    bull_power_slope[:3] = 0
-    bear_power_slope[:3] = 0
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (2.0 * vol_ma)
+    
+    # Choppiness Index (14) - range: 0-100, <38.2=trending, >61.8=choppy
+    chop_period = 14
+    atr_list = []
+    for i in range(n):
+        if i == 0:
+            tr = high[i] - low[i]
+        else:
+                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        atr_list.append(tr)
+    atr = pd.Series(atr_list).rolling(window=chop_period, min_periods=chop_period).mean().values
+    max_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
+    min_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
+    # Avoid division by zero
+    true_range_sum = pd.Series(atr_list).rolling(window=chop_period, min_periods=chop_period).sum().values
+    max_min_range = max_high - min_low
+    chop = np.where(max_min_range != 0, 100 * np.log10(true_range_sum / max_min_range) / np.log10(chop_period), 50)
+    
+    # 1d trend filter: EMA(50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # ATR(20) for stoploss
+    atr_period = 20
+    tr_list = []
+    for i in range(n):
+        if i == 0:
+            tr = high[i] - low[i]
+        else:
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_list.append(tr)
+    atr_20 = pd.Series(tr_list).rolling(window=atr_period, min_periods=atr_period).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Warmup: max of EMA(13), EMA(50) 12h, volume MA(20)
-    start_idx = max(13, 50, 20) + 1
+    # Warmup: max of lookback periods
+    start_idx = max(lookback, 20, chop_period, atr_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_13[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(chop[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_20[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -72,46 +91,49 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
-        bull_slope = bull_power_slope[i]
-        bear_slope = bear_power_slope[i]
+        high_val = high[i]
+        low_val = low[i]
         vol_conf = volume_confirm[i]
-        regime_long = close_val > ema_50_12h_aligned[i]  # 12h uptrend
-        regime_short = close_val < ema_50_12h_aligned[i]  # 12h downtrend
+        chop_val = chop[i]
+        regime_long = close_val > ema_50_1d_aligned[i]  # 1d uptrend
+        regime_short = close_val < ema_50_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: Bull Power positive AND rising AND volume confirm AND 12h uptrend
-            long_signal = (bull_val > 0) and (bull_slope > 0) and vol_conf and regime_long
+            # Long: price > upper Donchian AND volume confirm AND chop < 61.8 (trending) AND 1d uptrend
+            long_signal = (close_val > highest_high[i-1]) and vol_conf and (chop_val < 61.8) and regime_long
             
-            # Short: Bear Power positive AND rising AND volume confirm AND 12h downtrend
-            short_signal = (bear_val > 0) and (bear_slope > 0) and vol_conf and regime_short
+            # Short: price < lower Donchian AND volume confirm AND chop < 61.8 (trending) AND 1d downtrend
+            short_signal = (close_val < lowest_low[i-1]) and vol_conf and (chop_val < 61.8) and regime_short
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
+                entry_price = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Bull Power turns negative OR 12h trend flips down
-            if (bull_val <= 0) or (not regime_long):
+            # Exit: stoploss hit OR price re-enters Donchian channel
+            stoploss_level = entry_price - 2.5 * atr_20[i]
+            if close_val < stoploss_level or close_val < highest_high[i-1]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Bear Power turns negative OR 12h trend flips up
-            if (bear_val <= 0) or (not regime_short):
+            # Exit: stoploss hit OR price re-enters Donchian channel
+            stoploss_level = entry_price + 2.5 * atr_20[i]
+            if close_val > stoploss_level or close_val > lowest_low[i-1]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_Regime_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_VolumeSpike_ChopFilter_v2"
+timeframe = "4h"
 leverage = 1.0
