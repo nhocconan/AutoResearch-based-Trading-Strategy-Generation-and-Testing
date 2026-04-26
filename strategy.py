@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_ChopFilter_v1
-Hypothesis: On 1d timeframe, KAMA (adaptive trend) direction + RSI(14) extreme + Choppiness Index regime filter captures sustained moves while avoiding whipsaw in ranging markets. Uses discrete sizing (0.25) targeting 7-25 trades/year. Works in bull/bear by only taking KAMA-aligned signals. No stoploss needed - exit on signal reversal.
+6h_ElderRay_BullBearPower_1dTrend_VolumeConfirm_v1
+Hypothesis: Elder Ray Bull/Bear Power combined with 1d EMA50 trend filter and volume confirmation (>1.5x 20-bar average) captures strong directional moves on 6h timeframe. Bull Power = High - EMA13, Bear Power = Low - EMA13. Long when Bull Power > 0 and rising + price > 1d EMA50 + volume confirm. Short when Bear Power < 0 and falling + price < 1d EMA50 + volume confirm. Uses discrete sizing (0.25) to target 12-30 trades/year. Works in bull/bear by only taking signals aligned with 1d trend. Volatility-adjusted exit when power weakens.
 """
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,90 +18,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === INDICATORS ===
-    # KAMA(10, 2, 30) - Adaptive trend indicator
-    close_s = pd.Series(close)
-    change = np.abs(close_s.diff(10).values)
-    volatility = np.abs(close_s.diff(1)).rolling(window=10, min_periods=10).sum().values
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Choppiness Index(14) - regime filter
-    atr_14 = []
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # EMA13 for Elder Ray calculation (on 6h data)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
     
-    chop = np.zeros(n)
-    for i in range(13, n):
-        if atr_14[i] > 0 and max_high[i] > min_low[i]:
-            sum_atr = np.nansum(atr_14[i-13:i+1])
-            chop[i] = 100 * np.log10(sum_atr / (max_high[i] - min_low[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral
+    # Slope of Bull/Bear Power (1-bar change)
+    bull_power_slope = np.diff(bull_power, prepend=bull_power[0])
+    bear_power_slope = np.diff(bear_power, prepend=bear_power[0])
     
-    # === SIGNALS ===
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma * 1.5)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
+    entry_price = 0.0
     
-    # Warmup: max of KAMA(10), RSI(14), Chop(14)
-    start_idx = max(10, 14, 14)
+    # Warmup: max of EMA13 (13), EMA50 (50), volume MA (20)
+    start_idx = max(13, 50, 20)
     
     for i in range(start_idx, n):
-        kama_val = kama[i]
         close_val = close[i]
-        rsi_val = rsi[i]
-        chop_val = chop[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
+        bull_slope = bull_power_slope[i]
+        bear_slope = bear_power_slope[i]
+        trend_val = ema50_1d_aligned[i]
+        vol_conf = volume_confirm[i]
         
         # Skip if any data not ready
-        if np.isnan(kama_val) or np.isnan(rsi_val) or np.isnan(chop_val):
+        if (np.isnan(trend_val) or np.isnan(bull_val) or np.isnan(bear_val)):
+            # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # KAMA direction: price > KAMA = uptrend, price < KAMA = downtrend
-        is_uptrend = close_val > kama_val
-        is_downtrend = close_val < kama_val
+        # Trend filter: price > 1d EMA50 = uptrend, price < 1d EMA50 = downtrend
+        is_uptrend = close_val > trend_val
+        is_downtrend = close_val < trend_val
         
-        # RSI extremes: <30 oversold, >70 overbought
-        rsi_oversold = rsi_val < 30
-        rsi_overbought = rsi_val > 70
+        # Entry conditions: Elder Ray aligned with 1d trend + volume
+        long_entry = (bull_val > 0) and (bull_slope > 0) and is_uptrend and vol_conf
+        short_entry = (bear_val < 0) and (bear_slope < 0) and is_downtrend and vol_conf
         
-        # Choppiness regime: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (trend follow)
-        is_trending = chop_val < 38.2
-        is_ranging = chop_val > 61.8
-        
-        # Entry conditions
-        long_entry = is_uptrend and rsi_oversold and is_trending
-        short_entry = is_downtrend and rsi_overbought and is_trending
-        
-        # Exit conditions: reverse signal or regime change to ranging
-        long_exit = not is_uptrend or not rsi_oversold or is_ranging
-        short_exit = not is_downtrend or not rsi_overbought or is_ranging
+        # Exit conditions: Elder Ray weakening or opposite signal
+        long_exit = False
+        short_exit = False
+        if position == 1:
+            # Long exit: Bull Power turns negative or slope negative
+            long_exit = (bull_val <= 0) or (bull_slope <= 0)
+        elif position == -1:
+            # Short exit: Bear Power turns positive or slope positive
+            short_exit = (bear_val >= 0) or (bear_slope >= 0)
         
         if long_entry and position != 1:
             signals[i] = base_size
             position = 1
+            entry_price = close_val
         elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
+            entry_price = close_val
         elif long_exit:
             signals[i] = 0.0
             position = 0
@@ -113,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Direction_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
