@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4h1dTrend_VolumeSpike
-Hypothesis: Use 4h EMA50 and 1d EMA50 as trend filters with Camarilla R1/S1 breakouts on 1h. Volume confirmation ensures institutional participation. Target 15-37 trades/year by requiring both 4h and 1d trend alignment, reducing false signals in choppy markets. Works in bull/bear via dual timeframe trend filter.
+6h_WeeklyDonchian_Breakout_1dTrendFilter_VolumeSpike
+Hypothesis: Weekly Donchian breakout (20-week high/low) with 1d EMA50 trend filter and volume confirmation.
+In bull markets, price makes new weekly highs; in bear markets, new weekly lows. The 1d EMA50 ensures we only
+trade in the direction of the daily trend to avoid counter-trend breakouts. Volume confirmation filters out
+false breakouts. Designed for low trade frequency (~20-50/year) to minimize fee drag on 6h timeframe.
 """
 
 import numpy as np
@@ -18,15 +21,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for Donchian channels (20-week lookback)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly Donchian: highest high and lowest low over past 20 weeks
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate rolling max/min for 20 periods
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
+        return res
+    
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
+    
+    highest_high_20w = rolling_max(high_1w, 20)
+    lowest_low_20w = rolling_min(low_1w, 20)
+    
+    # Align weekly Donchian levels to 6h timeframe
+    highest_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high_20w)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_20w)
     
     # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -38,26 +60,8 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 1d data for Camarilla levels (using daily for pivot calculation)
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Previous 1d bar's high, low, close for Camarilla levels
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate Camarilla levels: R1, S1
-    camarilla_range = prev_high - prev_low
-    R1 = prev_close + camarilla_range * 1.0/12
-    S1 = prev_close - camarilla_range * 1.0/12
-    
-    # Align Camarilla levels to 1h timeframe (1d -> 1h)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume confirmation: 2.0x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 1.5x average volume (moderate to balance signal quality)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 24*6h = 6d lookback
     
     # ATR for stop (14-period)
     tr1 = high[1:] - low[1:]
@@ -72,30 +76,28 @@ def generate_signals(prices):
     long_stop = 0.0
     short_stop = 0.0
     
-    # Warmup: max of 4h EMA (50), 1d EMA (50), volume MA (20), ATR (14)
-    start_idx = max(50, 50, 20, 14)
+    # Warmup: max of weekly Donchian (20), 1d EMA (50), volume MA (24), ATR (14)
+    start_idx = max(20, 50, 24, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
+        if (np.isnan(highest_high_aligned[i]) or 
+            np.isnan(lowest_low_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
             np.isnan(vol_ma[i]) or 
             np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        ema_50_4h_val = ema_50_4h_aligned[i]
+        highest_high_val = highest_high_aligned[i]
+        lowest_low_val = lowest_low_aligned[i]
         ema_50_1d_val = ema_50_1d_aligned[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
@@ -104,44 +106,44 @@ def generate_signals(prices):
         atr_val = atr[i]
         
         if position == 0:
-            # Long: break above R1, uptrend (close > 4h EMA50 AND close > 1d EMA50), volume spike
-            long_signal = (high_val > R1_val) and (close_val > ema_50_4h_val) and (close_val > ema_50_1d_val) and (volume_val > 2.0 * vol_ma_val)
-            # Short: break below S1, downtrend (close < 4h EMA50 AND close < 1d EMA50), volume spike
-            short_signal = (low_val < S1_val) and (close_val < ema_50_4h_val) and (close_val < ema_50_1d_val) and (volume_val > 2.0 * vol_ma_val)
+            # Long: break above 20-week high, uptrend (close > 1d EMA50), volume confirmation
+            long_signal = (high_val > highest_high_val) and (close_val > ema_50_1d_val) and (volume_val > 1.5 * vol_ma_val)
+            # Short: break below 20-week low, downtrend (close < 1d EMA50), volume confirmation
+            short_signal = (low_val < lowest_low_val) and (close_val < ema_50_1d_val) and (volume_val > 1.5 * vol_ma_val)
             
             if long_signal:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-                long_stop = entry_price - 2.0 * atr_val
+                long_stop = entry_price - 2.5 * atr_val  # wider stop for 6h volatility
             elif short_signal:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_val
-                short_stop = entry_price + 2.0 * atr_val
+                short_stop = entry_price + 2.5 * atr_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.20
+            signals[i] = 0.25
             # Update trailing stop: move stop up as price makes new highs
-            long_stop = max(long_stop, high_val - 2.0 * atr_val)
-            # Exit: trailing stop hit or trend reversal (price < 4h EMA50 OR price < 1d EMA50)
-            if (low_val < long_stop) or (close_val < ema_50_4h_val) or (close_val < ema_50_1d_val):
+            long_stop = max(long_stop, high_val - 2.5 * atr_val)
+            # Exit: trailing stop hit or trend reversal (price < 1d EMA50)
+            if (low_val < long_stop) or (close_val < ema_50_1d_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.20
+            signals[i] = -0.25
             # Update trailing stop: move stop down as price makes new lows
-            short_stop = min(short_stop, low_val + 2.0 * atr_val)
-            # Exit: trailing stop hit or trend reversal (price > 4h EMA50 OR price > 1d EMA50)
-            if (high_val > short_stop) or (close_val > ema_50_4h_val) or (close_val > ema_50_1d_val):
+            short_stop = min(short_stop, low_val + 2.5 * atr_val)
+            # Exit: trailing stop hit or trend reversal (price > 1d EMA50)
+            if (high_val > short_stop) or (close_val > ema_50_1d_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4h1dTrend_VolumeSpike"
-timeframe = "1h"
+name = "6h_WeeklyDonchian_Breakout_1dTrendFilter_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
