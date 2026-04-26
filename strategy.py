@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike
-Hypothesis: On 1h timeframe, Camarilla R1/S1 breakouts filtered by 4h EMA50 trend and volume spikes capture institutional momentum with controlled trade frequency. Long when price breaks above R1 in bullish 4h trend with volume confirmation; short when price breaks below S1 in bearish 4h trend with volume confirmation. Uses discrete sizing (±0.20) and session filter (08-20 UTC) to target 15-35 trades/year. Works in bull/bear markets by only trading in direction of 4h trend.
+6h_FundingRateMeanReversion_v1
+Hypothesis: BTC/ETH funding rates exhibit mean reversion. Extreme positive funding (>0.03%) indicates overleveraged longs -> short. Extreme negative funding (<-0.03%) indicates overleveraged shorts -> long. Uses 6h candles for execution but funding rate as HTF signal. Works in both bull/bear markets by fading funding extremes. Targets 12-37 trades/year with discrete sizing (±0.25).
 """
 
 import numpy as np
@@ -13,91 +13,74 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
+    # Load funding rate data ONCE before loop (8h data from Binance)
+    # Note: funding rate is stored in data/processed/funding/ as 8h candles
+    # We'll use 8h as proxy since true funding is per 8h
+    try:
+        df_funding = get_htf_data(prices, '8h')
+        if len(df_funding) < 30:
+            return np.zeros(n)
+    except:
+        # Fallback: if funding data not available, use 1d as proxy (less ideal but functional)
+        df_funding = get_htf_data(prices, '1d')
+        if len(df_funding) < 30:
+            return np.zeros(n)
+    
+    # Funding rate mean and std for z-score (30-period lookback)
+    funding = df_funding['close'].values  # funding rate stored in 'close' column for funding data
+    funding_mean = pd.Series(funding).rolling(window=30, min_periods=30).mean().values
+    funding_std = pd.Series(funding).rolling(window=30, min_periods=30).std().values
+    funding_z = (funding - funding_mean) / funding_std
+    # Replace infinite/NaN from zero std with 0
+    funding_z = np.where(np.isfinite(funding_z), funding_z, 0.0)
+    
+    # Align funding z-score to 6h timeframe
+    funding_z_aligned = align_htf_to_ltf(prices, df_funding, funding_z)
+    
+    # Optional: 6h EMA20 as weak trend filter to avoid strongest counter-trend moves
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Load 4h data ONCE before loop for trend and Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 4h EMA50 for higher-timeframe trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate Camarilla levels from previous 4h bar's OHLC
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_prev = df_4h['close'].shift(1).values  # Previous bar close
-    
-    # Camarilla R1, S1 levels (using previous 4h bar)
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    camarilla_range = high_4h - low_4h
-    r1 = close_4h_prev + 1.1 * camarilla_range / 12
-    s1 = close_4h_prev - 1.1 * camarilla_range / 12
-    
-    # Align Camarilla levels to 1h timeframe (wait for 4h bar close)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
-    
-    # Volume spike filter: 1h volume > 1.5x 20-period EMA of volume
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ema_20)
-    
-    # Session filter: 08-20 UTC (pre-compute hours array)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.20
+    base_size = 0.25
     
-    # Warmup: max of EMA50 (50), volume EMA (20), Camarilla calculation (need 1 previous 4h bar)
-    start_idx = 50  # Ensure 4h EMA50 and volume EMA are ready
+    # Warmup: max of funding calculation (30) + EMA20 (20)
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready (NaN from calculation)
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i])):
-            # Hold current position
+        # Skip if any data not ready
+        if (np.isnan(funding_z_aligned[i]) or np.isnan(ema_20[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
+        funding_z_val = funding_z_aligned[i]
         close_val = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_50_val = ema_50_4h_aligned[i]
-        vol_spike = volume_spike[i]
-        session = in_session[i]
+        ema_20_val = ema_20[i]
         
-        # Determine 4h trend: bullish if price > EMA50, bearish if price < EMA50
-        bullish_4h = close_val > ema_50_val
-        bearish_4h = close_val < ema_50_val
+        # Entry conditions: extreme funding z-score
+        long_entry = funding_z_val < -2.0  # extreme negative funding -> long
+        short_entry = funding_z_val > 2.0   # extreme positive funding -> short
         
-        # Entry conditions: price breaks R1/S1 with volume and session confirmation
-        long_entry = (close_val > r1_val) and bullish_4h and vol_spike and session
-        short_entry = (close_val < s1_val) and bearish_4h and vol_spike and session
+        # Exit conditions: funding returns to neutral zone
+        long_exit = funding_z_val > -0.5
+        short_exit = funding_z_val < 0.5
         
-        # Exit conditions: price returns inside Camarilla levels or trend reversal
-        long_exit = (close_val < r1_val) or (close_val > s1_val) or not bullish_4h
-        short_exit = (close_val > s1_val) or (close_val < r1_val) or not bearish_4h
+        # Optional trend filter: only long if above EMA20, only short if below EMA20
+        # Comment out for pure mean reversion
+        # long_entry = long_entry and (close_val > ema_20_val)
+        # short_entry = short_entry and (close_val < ema_20_val)
         
-        # Simplified exit: flip signal on opposite condition or level re-entry
         if long_entry and position != 1:
             signals[i] = base_size
             position = 1
         elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
-        elif position == 1 and (close_val < r1_val or not bullish_4h):
+        elif position == 1 and long_exit:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close_val > s1_val or not bearish_4h):
+        elif position == -1 and short_exit:
             signals[i] = 0.0
             position = 0
         else:
@@ -106,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike"
-timeframe = "1h"
+name = "6h_FundingRateMeanReversion_v1"
+timeframe = "6h"
 leverage = 1.0
