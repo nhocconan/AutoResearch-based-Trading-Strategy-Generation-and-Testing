@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1wTrend_VolumeFilter
-Hypothesis: Ichimoku cloud acts as strong support/resistance on 6h timeframe. 
-Breakout above cloud with volume spike and weekly uptrend = long. 
-Breakdown below cloud with volume spike and weekly downtrend = short.
-Uses weekly trend filter to avoid counter-trend trades. Target: 12-37 trades/year per symbol.
-Timeframe: 6h, HTF: 1w
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 levels act as intraday support/resistance on 4h timeframe. 
+Breakout above R1 with volume spike and daily uptrend = long. Breakdown below S1 with 
+volume spike and daily downtrend = short. Uses daily trend filter to avoid counter-trend 
+trades. Target: 20-50 trades/year per symbol (75-200 total over 4 years).
+Timeframe: 4h, HTF: 1d
 """
 
 import numpy as np
@@ -22,61 +22,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter (more responsive than EMA34)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (high_tenkan + low_tenkan) / 2
+    # Calculate Camarilla levels from previous day's OHLC
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), 
+    #          R2 = C + ((H-L)*1.1/6), R1 = C + ((H-L)*1.1/12)
+    #          S1 = C - ((H-L)*1.1/12), S2 = C - ((H-L)*1.1/6), 
+    #          S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
+    # where C = (H+L+Close)/3 (typical price)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (high_kijun + low_kijun) / 2
+    # Need previous day's OHLC for current day's Camarilla levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Calculate typical price (pivot) from previous day
+    typical_price = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (high_senkou_b + low_senkou_b) / 2
+    # Calculate Camarilla R1 and S1 levels
+    r1 = typical_price + (range_hl * 1.1 / 12.0)
+    s1 = typical_price - (range_hl * 1.1 / 12.0)
     
-    # Chikou Span (Lagging Span): close plotted 26 periods behind
-    # Not used for breakout signals
+    # Align Camarilla levels to 4h timeframe (available after daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Cloud (Kumo): between Senkou Span A and Senkou Span B
-    # Upper cloud = max(senkou_a, senkou_b)
-    # Lower cloud = min(senkou_a, senkou_b)
-    upper_cloud = np.maximum(senkou_a, senkou_b)
-    lower_cloud = np.minimum(senkou_a, senkou_b)
-    
-    # Volume spike detector (20-period volume MA)
+    # Volume spike detector (20-period volume MA on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period (max of all lookbacks)
-    start_idx = 52  # Senkou B needs 52 periods
+    # Start after warmup period (need at least 1 day of data + volume MA)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
-            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -86,17 +79,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Trend filter from weekly EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Trend filter from daily EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above upper cloud with volume spike and weekly uptrend
-            if close[i] > upper_cloud[i] and volume_spike[i] and uptrend:
+            # Long: Price breaks above R1 with volume spike and daily uptrend
+            if close[i] > r1_aligned[i] and volume_spike[i] and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower cloud with volume spike and weekly downtrend
-            elif close[i] < lower_cloud[i] and volume_spike[i] and downtrend:
+            # Short: Price breaks below S1 with volume spike and daily downtrend
+            elif close[i] < s1_aligned[i] and volume_spike[i] and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -104,20 +97,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Price re-enters cloud (below upper cloud) OR weekly trend changes to downtrend
-            if close[i] < upper_cloud[i] or not uptrend:
+            # Exit: Price re-enters below R1 OR daily trend changes to downtrend
+            if close[i] < r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Price re-enters cloud (above lower cloud) OR weekly trend changes to uptrend
-            if close[i] > lower_cloud[i] or not downtrend:
+            # Exit: Price re-enters above S1 OR daily trend changes to uptrend
+            if close[i] > s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1wTrend_VolumeFilter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
