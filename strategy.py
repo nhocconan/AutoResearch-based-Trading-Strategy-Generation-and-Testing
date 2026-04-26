@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike
-Hypothesis: On 4h timeframe, price breaking Camarilla R1/S1 levels in the direction of 12h EMA50 trend with volume confirmation (>1.5x 20-period MA) captures high-probability trend continuation moves. The 12h EMA50 acts as a dynamic trend filter, while Camarilla levels provide precise entry/exit zones. Volume spike confirms institutional participation. Designed for 19-50 trades/year with discrete sizing (±0.30) and ATR-based trailing stop (2.0x) to minimize fee drag and work in both bull/bear markets with BTC/ETH edge.
+1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolSpike
+Hypothesis: On 1h timeframe, price breaking Camarilla R1/S1 levels from the prior 4h bar, in the direction of the 4h EMA50 trend with 1d volume confirmation (>2.0x 20-period MA), captures high-probability intraday trend continuation. The 4h EMA50 filters for intermediate-term trend, while 1d volume spike confirms broad market participation. Designed for 15-37 trades/year on BTC/ETH with discrete sizing (±0.20) and no trailing stop (reliance on strict entry conditions) to minimize fee drag and work in both bull/bear markets.
 """
 
 import numpy as np
@@ -18,70 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data ONCE before loop for Camarilla calculation and EMA trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for Camarilla calculation
+    # Calculate Camarilla pivot levels from previous 4h bar
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Camarilla levels: based on previous 4h bar's range
+    daily_range = high_4h - low_4h
+    camarilla_r1 = close_4h + daily_range * 1.1 / 12
+    camarilla_s1 = close_4h - daily_range * 1.1 / 12
+    
+    # Align Camarilla levels to 1h timeframe (wait for completed 4h bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
+    
+    # 4h EMA50 for trend filter
+    close_series = pd.Series(close_4h)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    
+    # Load 1d data ONCE before loop for volume spike filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d volume MA(20) for spike detection
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (volume_ma_1d * 2.0)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Camarilla levels: based on previous day's range
-    daily_range = high_1d - low_1d
-    camarilla_r1 = close_1d + daily_range * 1.1 / 12
-    camarilla_s1 = close_1d - daily_range * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 12h EMA50 for trend filter
-    close_12h_series = pd.Series(df_12h['close'].values)
-    ema_50 = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    
-    # 4h ATR(20) for trailing stop
-    tr1 = pd.Series(high).diff().abs()
-    tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
-    tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h = tr_4h.ewm(span=20, adjust=False, min_periods=20).mean()
-    atr_4h_values = atr_4h.values
-    
-    # Volume spike filter: volume > 1.5 * 20-period MA on 4h
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Session filter: 08-20 UTC (pre-compute hour array)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.30
-    highest_since_long = 0.0
-    lowest_since_short = 0.0
+    base_size = 0.20
     
-    # Warmup: max of EMA (50), ATR (20), volume MA (20) + time for 1d alignment
-    start_idx = max(50, 20, 20) + 6  # +6 to ensure 1d bar completion (4h -> 1d: 6 bars per day)
+    # Warmup: max of EMA (50), volume MA (20) + time for 4h and 1d alignment
+    start_idx = max(50, 20) + 4  # +4 to ensure 4h bar completion (1h -> 4h: 4 bars)
     
     for i in range(start_idx, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            # Hold current position or stay flat
+            signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
+            continue
+            
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        vol = volume[i]
         r1_val = camarilla_r1_aligned[i]
         s1_val = camarilla_s1_aligned[i]
         ema_val = ema_50_aligned[i]
-        vol_spike = volume_spike[i]
-        atr_val = atr_4h_values[i]
+        vol_spike = volume_spike_1d_aligned[i]
         
         # Skip if any data not ready (NaN from alignment or calculation)
         if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema_val) or 
-            np.isnan(atr_val) or np.isnan(volume_ma[i])):
+            np.isnan(volume_spike)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
@@ -97,49 +95,26 @@ def generate_signals(prices):
         long_entry = trend_bullish and long_breakout and vol_spike
         short_entry = trend_bearish and short_breakout and vol_spike
         
-        # Update highest/lowest for trailing stop (ATR-based)
-        if position == 1:
-            highest_since_long = max(highest_since_long, high_val)
-        elif position == -1:
-            lowest_since_short = min(lowest_since_short, low_val)
-        elif position == 0:
-            highest_since_long = 0.0
-            lowest_since_short = 0.0
-        
-        # Exit conditions: ATR-based trailing stoploss
-        long_exit = False
-        short_exit = False
-        if position == 1:
-            # Long trailing stop: highest since entry - 2.0 * ATR
-            stop_price = highest_since_long - 2.0 * atr_val
-            long_exit = close_val < stop_price
-        elif position == -1:
-            # Short trailing stop: lowest since entry + 2.0 * ATR
-            stop_price = lowest_since_short + 2.0 * atr_val
-            short_exit = close_val > stop_price
-        
         if long_entry and position != 1:
             signals[i] = base_size
             position = 1
-            highest_since_long = high_val
         elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
-            lowest_since_short = low_val
-        elif long_exit:
+        elif position == 1 and (close_val < s1_val or not trend_bullish):
+            # Exit long: price breaks S1 or trend turns bearish
             signals[i] = 0.0
             position = 0
-            highest_since_long = 0.0
-        elif short_exit:
+        elif position == -1 and (close_val > r1_val or not trend_bearish):
+            # Exit short: price breaks R1 or trend turns bullish
             signals[i] = 0.0
             position = 0
-            lowest_since_short = 0.0
         else:
             # Hold position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolSpike"
+timeframe = "1h"
 leverage = 1.0
