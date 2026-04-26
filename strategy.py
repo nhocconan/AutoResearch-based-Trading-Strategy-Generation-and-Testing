@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12h Camarilla R1/S1 breakouts aligned with 1d trend (price vs 1d EMA34) and volume spike (>2x average) capture institutional moves while avoiding counter-trend whipsaws. Works in bull/bear via 1d trend alignment. Targets 12-37 trades/year on 12h timeframe with discrete sizing (0.25) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakouts from 1d with daily trend filter (price vs daily EMA34) and volume spike (>2x average) captures institutional moves while avoiding counter-trend whipsaws. Works in bull/bear via daily trend alignment. Designed for 4h to target 20-50 trades/year with discrete sizing (0.25).
 """
 
 import numpy as np
@@ -48,16 +48,16 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Average volume for confirmation (24-period SMA = 1d * 2 = 2d for 12h timeframe)
-    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Average volume for confirmation (96-period SMA = 1d * 4 = 4d)
+    avg_volume = pd.Series(volume).rolling(window=96, min_periods=96).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     base_size = 0.25
     
-    # Warmup: max of EMA(34), volume(24)
-    start_idx = max(34, 24)
+    # Warmup: max of EMA(34), volume(96)
+    start_idx = max(34, 96)
     
     for i in range(start_idx, n):
         close_val = close[i]
@@ -77,13 +77,13 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 2.0x average volume
         volume_confirmed = vol > 2.0 * avg_vol
         
-        # Trend filter: price vs 1d EMA34
+        # Trend filter: price vs daily EMA34
         uptrend = close_val > ema_val
         downtrend = close_val < ema_val
         
-        # Long: price CLOSES above R1 with 1d uptrend and volume
+        # Long: price CLOSES above R1 with daily uptrend and volume
         long_condition = (close_val > r1_val) and uptrend and volume_confirmed
-        # Short: price CLOSES below S1 with 1d downtrend and volume
+        # Short: price CLOSES below S1 with daily downtrend and volume
         short_condition = (close_val < s1_val) and downtrend and volume_confirmed
         
         # Exit: price retests broken level
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
