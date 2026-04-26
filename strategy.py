@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_FundingRate_MeanReversion_ZScore_WeeklyTrend_v1
-Hypothesis: Funding rate mean reversion provides edge in BTC/ETH. Extreme positive funding (longs paying shorts) predicts mean reversion down; extreme negative funding predicts mean reversion up. Weekly trend filter avoids fighting major trends. Discrete sizing 0.25 controls fees. Target 15-30 trades/year.
+6h_Donchian20_WeeklyPivot_Direction_VolumeConfirm_v1
+Hypothesis: Trade 6h Donchian(20) breakouts aligned with weekly Camarilla pivot direction (from R3/S3 levels) and volume confirmation. Weekly pivot provides structural bias; Donchian breakout captures momentum; volume filters false signals. Works in bull/bear via weekly trend filter. Target 12-35 trades/year (50-150 over 4 years). Discrete size 0.25 to limit fee drag.
 """
 
 import numpy as np
@@ -14,44 +14,72 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load funding rate data (assuming available as column)
-    # If not available, fallback to price-based proxy
-    if 'funding_rate' in prices.columns:
-        funding = prices['funding_rate'].values
-    else:
-        # Proxy: use RSI divergence as funding proxy (not ideal but avoids zeros)
-        delta = pd.Series(close).diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        rs = gain.ewm(alpha=1/14, adjust=False).mean() / (loss.ewm(alpha=1/14, adjust=False).mean() + 1e-10)
-        funding = 100 - (100 / (1 + rs))  # RSI as proxy, scaled to [-100,100]
-        funding = (funding - 50) / 25  # Scale to approximately [-2,2] for Z-score
-    
-    # Get 1w data for trend filter
+    # Get weekly data for Camarilla pivot levels (trend filter)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 50:  # need sufficient weekly data
         return np.zeros(n)
     
-    # Weekly EMA34 trend
+    # Calculate weekly Camarilla R3 and S3 from previous weekly bar
     close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Funding rate Z-score (30-day lookback)
-    funding_series = pd.Series(funding)
-    funding_mean = funding_series.rolling(window=30, min_periods=30).mean().values
-    funding_std = funding_series.rolling(window=30, min_periods=30).std().values
-    funding_z = (funding - funding_mean) / np.maximum(funding_std, 1e-10)
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w[0] = np.nan  # first bar has no previous
+    
+    # Weekly Camarilla R3 and S3 (using previous weekly bar OHLC)
+    camarilla_r3_1w = prev_close_1w + 1.1 * (prev_high_1w - prev_low_1w) * 1.1 / 4
+    camarilla_s3_1w = prev_close_1w - 1.1 * (prev_high_1w - prev_low_1w) * 1.1 / 4
+    
+    # Weekly trend: price above/below weekly Camarilla midpoint
+    weekly_midpoint = (camarilla_r3_1w + camarilla_s3_1w) / 2
+    weekly_trend_up = close_1w > weekly_midpoint
+    weekly_trend_down = close_1w < weekly_midpoint
+    
+    # Align weekly data to 6h timeframe
+    camarilla_r3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
+    camarilla_s3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
+    weekly_midpoint_aligned = align_htf_to_ltf(prices, df_1w, weekly_midpoint)
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
+    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down.astype(float))
+    
+    # 6h Donchian(20) breakout levels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: volume > 1.8x 30-period average on 6h
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 1.8
+    
+    # Require close to stay beyond Donchian level for 2 consecutive bars to reduce false breakouts
+    close_above_donchian_high = close > donchian_high
+    close_below_donchian_low = close < donchian_low
+    close_above_donchian_high_2bar = close_above_donchian_high & np.roll(close_above_donchian_high, 1)
+    close_below_donchian_low_2bar = close_below_donchian_low & np.roll(close_below_donchian_low, 1)
+    close_above_donchian_high_2bar[0] = False
+    close_below_donchian_low_2bar[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need funding Z-score lookback
+    # Warmup: need Donchian (20), volume MA (30)
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(funding_z[i]) or np.isnan(ema_34_1w_aligned[i]):
-            # Hold position
+        # Skip if any data not ready
+        if (np.isnan(camarilla_r3_1w_aligned[i]) or np.isnan(camarilla_s3_1w_aligned[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_ma[i])):
+            # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -60,16 +88,23 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        weekly_uptrend = close[i] > ema_34_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_34_1w_aligned[i]
+        # Weekly trend alignment
+        trend_up = weekly_trend_up_aligned[i] > 0.5
+        trend_down = weekly_trend_down_aligned[i] > 0.5
         
         if position == 0:
-            # Long: extremely negative funding (shorts paying longs) + weekly uptrend or ranging
-            if funding_z[i] < -2.0 and (weekly_uptrend or True):  # allow ranging
+            # Long: price breaks above Donchian high + volume spike + weekly uptrend + 2-bar confirmation
+            long_breakout = close_above_donchian_high_2bar[i]
+            long_signal = long_breakout and volume_spike[i] and trend_up
+            
+            # Short: price breaks below Donchian low + volume spike + weekly downtrend + 2-bar confirmation
+            short_breakout = close_below_donchian_low_2bar[i]
+            short_signal = short_breakout and volume_spike[i] and trend_down
+            
+            if long_signal:
                 signals[i] = 0.25
                 position = 1
-            # Short: extremely positive funding (longs paying shorts) + weekly downtrend or ranging
-            elif funding_z[i] > 2.0 and (weekly_downtrend or True):  # allow ranging
+            elif short_signal:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -77,20 +112,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: funding normalizes or weekly trend turns down strongly
-            if funding_z[i] > -0.5 or (not weekly_uptrend and funding_z[i] > 0):
+            # Exit: price touches Donchian low OR weekly trend turns down
+            if (close[i] < donchian_low[i] or not trend_up):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: funding normalizes or weekly trend turns up strongly
-            if funding_z[i] < 0.5 or (not weekly_downtrend and funding_z[i] < 0):
+            # Exit: price touches Donchian high OR weekly trend turns up
+            if (close[i] > donchian_high[i] or not trend_down):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_FundingRate_MeanReversion_ZScore_WeeklyTrend_v1"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivot_Direction_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
