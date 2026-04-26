@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_IBS_MeanReversion_WeeklyTrendFilter_VolumeSpike_v1
-Hypothesis: On 6h timeframe, use Internal Bar Strength (IBS) for mean reversion entries, 
-filtered by weekly trend direction (price above/below weekly EMA20) and volume spike confirmation. 
-IBS = (close - low) / (high - low). Long when IBS < 0.2 (oversold) in weekly uptrend, 
-short when IBS > 0.8 (overbought) in weekly downtrend. Volume spike confirms institutional participation. 
-Designed for 12-30 trades/year to minimize fee drag while working in both bull and bear markets 
-by taking mean reversion trades only with the weekly trend.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike confirmation.
+Uses 12h timeframe to reduce trade frequency (target: 12-37 trades/year). 1d EMA34 determines trend direction.
+Volume spike confirms institutional participation. Designed to work in both bull and bear markets by taking
+directional trades only. Focus on BTC/ETH as primary targets.
 """
 
 import numpy as np
@@ -23,26 +21,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly EMA20 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h IBS (Internal Bar Strength)
-    # IBS = (close - low) / (high - low), ranges from 0 to 1
-    hl_range = high - low
-    # Avoid division by zero
-    ibs = np.where(hl_range != 0, (close - low) / hl_range, 0.5)
+    # Calculate 12h Camarilla pivot levels (R1, S1)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    PP = (high_12h + low_12h + close_12h) / 3.0
+    R1 = PP + (high_12h - low_12h) * 1.0 / 12.0
+    S1 = PP - (high_12h - low_12h) * 1.0 / 12.0
+    
+    # Align Camarilla levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_avg)
     
-    # ATR for stoploss (14-period on 6h)
+    # ATR for stoploss (14-period on 12h)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -54,27 +63,27 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Warmup: need enough for all indicators
-    start_idx = max(20, 20, 14)  # weekly EMA, volume avg, ATR
+    start_idx = max(34, 20, 14)  # EMA, volume avg, ATR
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(atr[i]) or np.isnan(ibs[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr[i]) or
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         atr_val = atr[i]
-        weekly_trend = ema_1w_aligned[i]
-        ibs_val = ibs[i]
+        ema_trend = ema_1d_aligned[i]
         size = 0.25  # 25% position size to manage risk
         
         if position == 0:
-            # Flat - look for mean reversion in direction of weekly trend with volume confirmation
-            # Long: weekly uptrend (price > weekly EMA20) AND IBS < 0.2 (oversold) + volume spike
-            long_entry = (close_val > weekly_trend) and (ibs_val < 0.2) and volume_spike[i]
-            # Short: weekly downtrend (price < weekly EMA20) AND IBS > 0.8 (overbought) + volume spike
-            short_entry = (close_val < weekly_trend) and (ibs_val > 0.8) and volume_spike[i]
+            # Flat - look for breakout in direction of 1d trend with volume confirmation
+            # Long: price above 1d EMA34 AND break above R1 + volume spike
+            long_entry = (close_val > ema_trend) and (close_val > R1_aligned[i]) and volume_spike[i]
+            # Short: price below 1d EMA34 AND break below S1 + volume spike
+            short_entry = (close_val < ema_trend) and (close_val < S1_aligned[i]) and volume_spike[i]
             
             if long_entry:
                 signals[i] = size
@@ -87,8 +96,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on IBS mean reversion (IBS > 0.5) or ATR stoploss
-            exit_condition = (ibs_val > 0.5) or \
+            # Long - exit on S1 retracement or ATR stoploss
+            exit_condition = (close_val < S1_aligned[i]) or \
                            (close_val < entry_price - 2.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
@@ -97,8 +106,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on IBS mean reversion (IBS < 0.5) or ATR stoploss
-            exit_condition = (ibs_val < 0.5) or \
+            # Short - exit on R1 retracement or ATR stoploss
+            exit_condition = (close_val > R1_aligned[i]) or \
                            (close_val > entry_price + 2.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
@@ -109,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IBS_MeanReversion_WeeklyTrendFilter_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
