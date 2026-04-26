@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike on 6h timeframe. 
-Camarilla levels provide institutional support/resistance. Breakouts above R3 or below S3 with 
-trend alignment and volume confirmation capture strong moves. Target 12-37 trades/year to minimize 
-fee drag. Works in bull/bear via trend filter.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Use 12h timeframe with Camarilla R3/S3 breakout confirmed by 1d trend (price above/below 1d EMA34) and volume spike. Camarilla levels provide precise intraday support/resistance that works in both bull and bear markets. Volume spike confirms breakout validity. Targets 12-37 trades/year to minimize fee drag. Uses ATR-based stoploss for risk management.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,85 +23,99 @@ def generate_signals(prices):
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Daily pivot: (daily_high + daily_low + daily_close) / 3
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # Camarilla levels: R3 = pivot + 1.1 * range / 2, S3 = pivot - 1.1 * range / 2
-    camarilla_r3 = daily_pivot + (1.1 * daily_range / 2.0)
-    camarilla_s3 = daily_pivot - (1.1 * daily_range / 2.0)
+    # Camarilla pivot levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    r3 = pivot + (range_val * 1.1 / 4.0)  # R3 level
+    s3 = pivot - (range_val * 1.1 / 4.0)  # S3 level
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_avg)
     
+    # ATR for stoploss (14-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25  # 25% position size
+    entry_price = 0.0
     
     # Warmup: need enough for all indicators
-    start_idx = max(20, 34)  # volume avg, EMA
+    start_idx = max(20, 34, 20, 14)  # volume avg, EMA34, volume spike, ATR
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
+        atr_val = atr[i]
+        size = 0.25  # 25% position size to manage risk
         
         if position == 0:
-            # Flat - look for breakout with trend and volume confirmation
-            # Long: break above Camarilla R3 + price above EMA34 + volume spike
-            long_entry = (close_val > camarilla_r3_aligned[i]) and \
+            # Flat - look for breakout with 1d trend and volume confirmation
+            # Long: break above R3 + price above 1d EMA34 + volume spike
+            long_entry = (close_val > r3_aligned[i]) and \
                        (close_val > ema_34_aligned[i]) and \
                        volume_spike[i]
-            # Short: break below Camarilla S3 + price below EMA34 + volume spike
-            short_entry = (close_val < camarilla_s3_aligned[i]) and \
+            # Short: break below S3 + price below 1d EMA34 + volume spike
+            short_entry = (close_val < s3_aligned[i]) and \
                         (close_val < ema_34_aligned[i]) and \
                         volume_spike[i]
             
             if long_entry:
                 signals[i] = size
                 position = 1
+                entry_price = close_val
             elif short_entry:
                 signals[i] = -size
                 position = -1
+                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on close below EMA34 or Camarilla S3 (mean reversion)
-            exit_condition = (close_val < ema_34_aligned[i]) or \
-                           (close_val < camarilla_s3_aligned[i])
+            # Long - exit on S3 break or ATR stoploss
+            exit_condition = (close_val < s3_aligned[i]) or \
+                           (close_val < entry_price - 2.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on close above EMA34 or Camarilla R3 (mean reversion)
-            exit_condition = (close_val > ema_34_aligned[i]) or \
-                           (close_val > camarilla_r3_aligned[i])
+            # Short - exit on R3 break or ATR stoploss
+            exit_condition = (close_val > r3_aligned[i]) or \
+                           (close_val > entry_price + 2.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
