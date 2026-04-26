@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_VolumeChopRegime
-Hypothesis: Camarilla R3/S3 breakouts with volume confirmation (top 30%) and choppiness regime filter (CHOP > 61.8 = ranging). Uses tighter R3/S3 levels for stronger breakouts. Volume ensures participation, CHOP filter avoids trending markets where mean reversion fails. Fixed size 0.25 to limit trades. Target: 20-30 trades/year.
+4h_Camarilla_R3_S3_Breakout_RegimeFilter
+Hypothesis: Camarilla R3/S3 breakouts from 1d HTF with volume confirmation (top 30%) and choppiness regime filter (CHOP > 61.8 = ranging). Uses discrete position sizing (0.25) to limit trades. Designed for ranging markets where mean reversion to midpoint works. Target: 20-30 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -18,24 +18,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for HTF filters
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for HTF filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous 12h bar's OHLC for Camarilla levels (R3/S3 = stronger breakout levels)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h_vals = df_12h['close'].values
+    # Previous 1d bar's OHLC for Camarilla levels (R3/S3 = stronger breakout levels)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
     # Calculate Camarilla levels: R3, S3 (stronger breakout levels)
-    rng = high_12h - low_12h
-    camarilla_r3 = close_12h_vals + (rng * 1.1 / 4)   # R3 level
-    camarilla_s3 = close_12h_vals - (rng * 1.1 / 4)   # S3 level
+    rng = high_1d - low_1d
+    camarilla_r3 = close_1d_vals + (rng * 1.1 / 4)   # R3 level
+    camarilla_s3 = close_1d_vals - (rng * 1.1 / 4)   # S3 level
     
     # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume regime: volume > 70th percentile of 50-period lookback (high volume days only)
     vol_series = pd.Series(volume)
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_VolumeChopRegime"
+name = "4h_Camarilla_R3_S3_Breakout_RegimeFilter"
 timeframe = "4h"
 leverage = 1.0
