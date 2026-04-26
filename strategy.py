@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1
-Hypothesis: Use 12h timeframe with Camarilla R1/S1 breakout from prior day, confirmed by 1d EMA34 trend, volume spike, and choppiness regime filter.
-Long when: price breaks above R1 + 1d EMA34 uptrend + volume > 1.8 * avg volume + chop > 61.8 (range regime).
-Short when: price breaks below S1 + 1d EMA34 downtrend + volume > 1.8 * avg volume + chop > 61.8.
-Exit when: price reverts to Camarilla midpoint (PP) or touches opposite level (S1 for long, R1 for short).
-Uses discrete 0.30 position size. Targets 12-37 trades/year for optimal test generalization.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v4
+Hypothesis: Prior v3 had 0 trades due to overly strict EMA trend condition (requiring EMA[i] > EMA[i-1] on same bar).
+Fix: Use EMA direction over 3 bars to reduce whipsaw while keeping trend filter. Keep volume spike and chop regime.
+Long: price > R1 + EMA34 up over 3 bars + volume spike + chop > 61.8.
+Short: price < S1 + EMA34 down over 3 bars + volume spike + chop > 61.8.
+Exit: price reverts to PP or touches opposite level.
+Target: 20-35 trades/year per symbol to avoid fee drag.
 """
 
 import numpy as np
@@ -37,7 +38,7 @@ def generate_signals(prices):
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     camarilla_pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 12h timeframe (wait for completed 1d bar)
+    # Align to 4h timeframe (wait for completed 1d bar)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
@@ -46,13 +47,17 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
+    # EMA34 direction over 3 bars (reduces whipsaw vs single bar)
+    ema_dir = np.zeros_like(ema_34_1d_aligned)
+    ema_dir[3:] = np.where(ema_34_1d_aligned[3:] > ema_34_1d_aligned[:-3], 1,
+                          np.where(ema_34_1d_aligned[3:] < ema_34_1d_aligned[:-3], -1, 0))
+    
     # Volume spike: current volume > 1.8 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.8 * vol_avg)
     
     # Choppiness Index (CHOP) regime filter - using 14-period
     # CHOP > 61.8 = ranging market (good for mean reversion/breakouts in range)
-    # CHOP < 38.2 = trending market
     atr_period = 14
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -71,8 +76,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 20 for volume avg, 34 for 1d EMA, 14 for ATR/CHOP
-    start_idx = max(20, 34, 14)
+    # Warmup: need 20 for volume avg, 34 for 1d EMA + 3 for direction, 14 for ATR/CHOP
+    start_idx = max(20, 34+3, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -87,14 +92,14 @@ def generate_signals(prices):
         
         if position == 0:
             # Flat - look for breakout with trend, volume, and regime confirmation
-            # Long: break above R1 + 1d EMA34 uptrend + volume spike + chop > 61.8
+            # Long: break above R1 + 1d EMA34 uptrend (3-bar) + volume spike + chop > 61.8
             long_entry = (close_val > camarilla_r1_aligned[i]) and \
-                       (ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]) and \
+                       (ema_dir[i] == 1) and \
                        volume_spike[i] and \
                        chop_regime[i]
-            # Short: break below S1 + 1d EMA34 downtrend + volume spike + chop > 61.8
+            # Short: break below S1 + 1d EMA34 downtrend (3-bar) + volume spike + chop > 61.8
             short_entry = (close_val < camarilla_s1_aligned[i]) and \
-                        (ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]) and \
+                        (ema_dir[i] == -1) and \
                         volume_spike[i] and \
                         chop_regime[i]
             
@@ -123,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v4"
+timeframe = "4h"
 leverage = 1.0
