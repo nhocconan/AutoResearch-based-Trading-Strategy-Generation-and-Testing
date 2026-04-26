@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_ChopFilter_v1
-Hypothesis: 1d timeframe strategy using KAMA for trend direction, RSI(14) for momentum confirmation, and Choppiness Index (CHOP) as regime filter. Long when KAMA up, RSI>50, CHOP<61.8 (trending); Short when KAMA down, RSI<50, CHOP<61.8. Uses 1w HTF for higher-timeframe trend alignment. Discrete sizing 0.25. Target 10-20 trades/year to minimize fee drag while capturing sustained trends in both bull and bear markets.
+6h_IchiCloud_Trend_1dEMA50_Filter
+Hypothesis: Use Ichimoku cloud (from 1d) as trend filter + TK cross on 6h for entry, with volume confirmation. Works in bull (cloud support) and bear (cloud resistance) by only trading in direction of higher timeframe trend. Target 12-30 trades/year.
 """
 
 import numpy as np
@@ -19,100 +19,100 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Session filter: UTC 8-20 for institutional activity (applies to 1d bars via index hour)
+    # Session filter: UTC 8-20 for institutional activity
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for primary indicators
+    # Get 1d data for Ichimoku cloud and EMA50 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # === 1d Indicators ===
-    close_1d = df_1d['close'].values
+    # Ichimoku components on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - trend direction
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)  # sum of |close[t] - close[t-1]| over 10 periods
-    # Pad volatility to match length
-    volatility = np.concatenate([np.full(9, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants: fastest EMA=2, slowest EMA=30
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # (ER*(0.5-0.0667)+0.0667)^2
-    # Initialize KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # seed at period 10
-    for i in range(10, len(close_1d)):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    max_high_9 = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_9 = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_9 + min_low_9) / 2
     
-    # RSI(14) - momentum
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    # Rolling average
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad RSI to align with close_1d (first 14 values NaN)
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    max_high_26 = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_26 = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_26 + min_low_26) / 2
     
-    # Choppiness Index (CHOP) - regime filter
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    # Sum of TR over 14 periods
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    # CHOP = 100 * log10(sum_tr / (hh - ll)) / log10(14)
-    range_hl = hh - ll
-    chop = np.where(range_hl > 0, 100 * np.log10(sum_tr / range_hl) / np.log10(14), 50)
-    # Pad CHOP (first 14 values NaN)
-    chop = np.concatenate([np.full(14, np.nan), chop])
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # === 1w HTF Trend Filter ===
-    close_1w = df_1w['close'].values
-    # Simple 1w EMA20 for trend
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Align to 1d timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    period_senkou_b = 52
+    max_high_52 = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_52 = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((max_high_52 + min_low_52) / 2)
     
-    # Align 1d indicators to 4h? No - we are on 1d timeframe, so we need to align to 1d bars
-    # But our prices are 4h? Wait: timeframe="1d" means we expect daily bars
-    # However, the engine may still pass 4h data? No - timeframe declares the expected resolution
-    # We must align our HTF data to the prices timeframe (which should be 1d if timeframe="1d")
-    # But to be safe, we align to the prices index regardless
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    chikou = close_1d
     
-    # Align all 1d indicators to prices timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate cloud (Senkou Span A/B) - note: already shifted 26 periods ahead in calculation
+    # For current price, we need Senkou A/B that were calculated 26 periods ago
+    senkou_a_lagged = np.roll(senkou_a, 26)
+    senkou_b_lagged = np.roll(senkou_b, 26)
+    senkou_a_lagged[:26] = np.nan
+    senkou_b_lagged[:26] = np.nan
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_lagged, senkou_b_lagged)
+    cloud_bottom = np.minimum(senkou_a_lagged, senkou_b_lagged)
+    
+    # 1d EMA50 for additional trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align all 1d indicators to 6h
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    cloud_top_aligned = align_htf_to_ltf(prices, df_1d, cloud_top)
+    cloud_bottom_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom)
+    chikou_aligned = align_htf_to_ltf(prices, df_1d, chikou)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # TK cross on 6h: Tenkan/Kijun cross
+    tk_cross_above = tenkan_aligned > kijun_aligned
+    tk_cross_below = tenkan_aligned < kijun_aligned
+    
+    # Price relative to cloud
+    price_above_cloud = close > cloud_top_aligned
+    price_below_cloud = close < cloud_bottom_aligned
+    price_in_cloud = ~(price_above_cloud | price_below_cloud)
+    
+    # Chikou confirmation: Chikou above/below price 26 periods ago
+    chikou_confirm_long = chikou_aligned > np.roll(close, 26)
+    chikou_confirm_short = chikou_aligned < np.roll(close, 26)
+    # Handle first 26 values
+    chikou_confirm_long[:26] = False
+    chikou_confirm_short[:26] = False
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of KAMA seed (10), RSI (14), CHOP (14), EMA20_1w
-    start_idx = max(10, 14, 14, 20)
+    # Warmup: max of Ichimoku calculations (52) and volume MA (20)
+    start_idx = max(52, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready or outside session
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or
+        if (np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or 
+            np.isnan(cloud_top_aligned[i]) or 
+            np.isnan(cloud_bottom_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma[i]) or
             not in_session[i]):
             # Hold current position
             if position == 0:
@@ -123,20 +123,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = chop_aligned[i]
-        ema_20_1w_val = ema_20_1w_aligned[i]
-        close_val = close[i]
-        
-        # Regime filter: only trade when market is trending (CHOP < 61.8)
-        is_trending = chop_val < 61.8
+        # Trend filter: price and EMA50 on same side of cloud
+        bullish_trend = (close[i] > ema_50_1d_aligned[i]) and price_above_cloud[i]
+        bearish_trend = (close[i] < ema_50_1d_aligned[i]) and price_below_cloud[i]
         
         if position == 0:
-            # Long: KAMA up (price > KAMA), RSI > 50, trending regime, HTF uptrend (close > EMA20_1w)
-            long_signal = (close_val > kama_val) and (rsi_val > 50) and is_trending and (close_val > ema_20_1w_val)
-            # Short: KAMA down (price < KAMA), RSI < 50, trending regime, HTF downtrend (close < EMA20_1w)
-            short_signal = (close_val < kama_val) and (rsi_val < 50) and is_trending and (close_val < ema_20_1w_val)
+            # Long: TK cross bullish + bullish trend + chikou long + volume
+            long_signal = (tk_cross_above[i] and 
+                          bullish_trend and 
+                          chikou_confirm_long[i] and 
+                          volume_confirmed[i])
+            # Short: TK cross bearish + bearish trend + chikou short + volume
+            short_signal = (tk_cross_below[i] and 
+                           bearish_trend and 
+                           chikou_confirm_short[i] and 
+                           volume_confirmed[i])
             
             if long_signal:
                 signals[i] = 0.25
@@ -149,20 +150,24 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend reversal (price < KAMA) OR RSI < 40 (momentum loss) OR HTF trend change (close < EMA20_1w)
-            if (close_val < kama_val) or (rsi_val < 40) or (close_val < ema_20_1w_val):
+            # Exit: TK cross bearish OR price drops below cloud bottom OR trend reversal
+            if (tk_cross_below[i] or 
+                close[i] < cloud_bottom_aligned[i] or
+                close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend reversal (price > KAMA) OR RSI > 60 (momentum loss) OR HTF trend change (close > EMA20_1w)
-            if (close_val > kama_val) or (rsi_val > 60) or (close_val > ema_20_1w_val):
+            # Exit: TK cross bullish OR price rises above cloud top OR trend reversal
+            if (tk_cross_above[i] or 
+                close[i] > cloud_top_aligned[i] or
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Direction_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_IchiCloud_Trend_1dEMA50_Filter"
+timeframe = "6h"
 leverage = 1.0
