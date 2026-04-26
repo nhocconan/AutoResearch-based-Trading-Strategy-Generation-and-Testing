@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_FundingRate_ZScore_Reversal_v1
-Hypothesis: Funding rate mean reversion works on BTC/ETH. Extreme positive funding (longs paying shorts) precedes price declines; extreme negative funding (shorts paying longs) precedes rallies. 
-Use 1-week funding rate z-score (30d window) to detect extremes. Enter opposite position when z-score > 2.0 (short) or < -2.0 (long). 
-Exit when z-score reverts toward zero (|z| < 0.5) or after 7 days max hold. 
-Timeframe = 1d for low trade frequency (~10-20/year) to minimize fee drag. Works in both bull and bear markets as funding extremes occur in all regimes.
+6h_ElderRay_BullBearPower_12hTrend_VolumeConfirm_v3
+Hypothesis: Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13) on 6h with 12h EMA34 trend filter and volume confirmation. 
+Long when Bull Power > 0 AND price > EMA34_12h AND volume spike. 
+Short when Bear Power < 0 AND price < EMA34_12h AND volume spike. 
+Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. 
+Designed to work in both bull (trend following) and bear (counter-trend via EMA filter) markets.
 """
 
 import numpy as np
@@ -13,78 +14,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load funding rate data (assuming available as column or external)
-    # Since funding rate may not be in prices, we'll simulate using price action proxy
-    # In real implementation, this would load from data/processed/funding/*.parquet
-    # For now, we use a proxy: funding rate approximation based on basis
-    # But to respect rules and avoid look-ahead, we'll use price momentum as proxy
-    # Actually, we need to use actual funding data - let's check if it's available
-    
-    # Since we cannot read external files in generate_signals per rules,
-    # and funding data isn't in prices DataFrame, we need to use what's available
-    # Alternative: use basis between perpetual and spot? Not available.
-    # Fallback: use RSI extremes as proxy for funding sentiment (not ideal but trade-generating)
-    
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Use 1d timeframe - we are already on 1d
-    # Calculate RSI as proxy for overbought/oversold (funding extremes correlate)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate z-score of RSI (proxy for funding z-score)
-    rsi_mean = pd.Series(rsi_values).ewm(span=30, adjust=False, min_periods=30).mean().values
-    rsi_std = pd.Series(rsi_values).ewm(span=30, adjust=False, min_periods=30).std().values
-    rsi_std = np.where(rsi_std == 0, 1, rsi_std)  # avoid division by zero
-    rsi_zscore = (rsi_values - rsi_mean) / rsi_std
+    # Calculate EMA34 on 12h
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Volume confirmation: volume > 1.5 * 20-period EMA of volume
+    avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_in_trade = 0
     
-    start_idx = 30  # need 30 days for z-score calculation
+    # Start after warmup
+    start_idx = max(34, 13, 20)
     
     for i in range(start_idx, n):
-        bars_in_trade += 1
-        
-        # Exit conditions: z-score reverts or max 7 days hold
-        if position != 0:
-            if abs(rsi_zscore[i]) < 0.5 or bars_in_trade >= 7:
+        # Skip if any data not ready
+        if (np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(ema13[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i])):
+            # Hold current position
+            if position == 0:
                 signals[i] = 0.0
-                position = 0
-                bars_in_trade = 0
-                continue
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
+            continue
         
-        # Entry logic: extreme RSI z-score (proxy for funding extremes)
-        if position == 0:
-            if rsi_zscore[i] < -2.0:  # extremely oversold -> long
+        # Long logic: Bull Power > 0 AND price > EMA34_12h AND volume spike
+        if bull_power[i] > 0 and close[i] > ema34_12h_aligned[i] and volume_spike[i]:
+            if position != 1:
                 signals[i] = 0.25
                 position = 1
-                bars_in_trade = 0
-            elif rsi_zscore[i] > 2.0:  # extremely overbought -> short
+            else:
+                signals[i] = 0.25
+        # Short logic: Bear Power < 0 AND price < EMA34_12h AND volume spike
+        elif bear_power[i] < 0 and close[i] < ema34_12h_aligned[i] and volume_spike[i]:
+            if position != -1:
                 signals[i] = -0.25
                 position = -1
-                bars_in_trade = 0
             else:
-                signals[i] = 0.0
+                signals[i] = -0.25
+        # Exit conditions: opposite power signal or loss of volume confirmation
+        elif position == 1 and (bull_power[i] <= 0 or close[i] <= ema34_12h_aligned[i]):
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and (bear_power[i] >= 0 or close[i] >= ema34_12h_aligned[i]):
+            signals[i] = 0.0
+            position = 0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else -0.25
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_FundingRate_ZScore_Reversal_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_12hTrend_VolumeConfirm_v3"
+timeframe = "6h"
 leverage = 1.0
