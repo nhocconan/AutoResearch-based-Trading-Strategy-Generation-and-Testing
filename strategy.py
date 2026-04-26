@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Breakout_1dTrend_VolumeFilter
-Hypothesis: 4h breakout above/below Keltner Channel (EMA20 ± 2*ATR10) in direction of 1d EMA50 trend, confirmed by volume > 1.5x 20-bar MA. Keltner Channels adapt to volatility, providing dynamic support/resistance. Trend filter ensures alignment with higher timeframe momentum. Volume confirmation reduces false breakouts. Designed for 20-40 trades/year (80-160 total over 4 years) to avoid fee drag. Works in both bull and bear markets by following the 1d trend while using volatility-based channels for precise entries.
+1d_Donchian20_Breakout_1wTrend_VolumeConfirmation
+Hypothesis: Daily Donchian(20) breakout in direction of weekly EMA50 trend, confirmed by volume spike (>1.8x 20-bar MA). Donchian channels provide clear structure for breakouts, weekly EMA50 filters for higher timeframe momentum, volume confirmation reduces false signals. Designed for 30-100 total trades over 4 years (7-25/year) to minimize fee drag. Works in both bull and bear markets by following weekly trend while using daily structure for precise entries.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,66 +18,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 4h EMA20 for Keltner middle line
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Daily Donchian(20) channels
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # 4h ATR10 for Keltner width
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])  # same length as close
-    atr10 = pd.Series(tr1).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Keltner Channels: EMA20 ± 2*ATR10
-    keltner_upper = ema_20 + 2.0 * atr10
-    keltner_lower = ema_20 - 2.0 * atr10
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size
     
-    # Warmup: max of calculations (20 for EMA/vol, 10 for ATR, 50 for 1d EMA)
-    start_idx = max(20, 10, 50)
+    # Warmup: max of calculations (20 for Donchian/vol, 50 for EMA)
+    start_idx = max(donchian_window, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        ema_50_val = ema_50_1d_aligned[i]
-        upper = keltner_upper[i]
-        lower = keltner_lower[i]
-        vol_ok = volume_filter[i]
+        ema_50_val = ema_50_1w_aligned[i]
+        upper_channel = donchian_high[i]
+        lower_channel = donchian_low[i]
+        vol_spike = volume_spike[i]
         
-        # Determine 1d trend: bullish if price > EMA50, bearish if price < EMA50
-        bullish_1d = close_val > ema_50_val
-        bearish_1d = close_val < ema_50_val
+        # Determine weekly trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_1w = close_val > ema_50_val
+        bearish_1w = close_val < ema_50_val
         
-        # Entry conditions: breakout of Keltner Channel in trend direction with volume filter
-        long_entry = (close_val > upper) and bullish_1d and vol_ok
-        short_entry = (close_val < lower) and bearish_1d and vol_ok
+        # Entry conditions: breakout of Donchian channel in trend direction with volume
+        long_entry = (close_val > upper_channel) and bullish_1w and vol_spike
+        short_entry = (close_val < lower_channel) and bearish_1w and vol_spike
         
         # Exit conditions: opposite channel touch (or trend reversal)
-        exit_long = (close_val < lower) or not bullish_1d
-        exit_short = (close_val > upper) or not bearish_1d
+        exit_long = (close_val < lower_channel) or not bullish_1w
+        exit_short = (close_val > upper_channel) or not bearish_1w
         
         if long_entry and position != 1:
             signals[i] = base_size
@@ -97,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Keltner_Breakout_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wTrend_VolumeConfirmation"
+timeframe = "1d"
 leverage = 1.0
