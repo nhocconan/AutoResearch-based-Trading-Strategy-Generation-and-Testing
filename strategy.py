@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v1
-Hypothesis: Use 6h timeframe with Camarilla R1/S1 breakouts from prior 1d, filtered by 1d EMA34 trend and volume spike (>2.0x 20-period average). Target 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Discrete sizing 0.25. Works in both bull/bear markets via 1d trend alignment and volume confirmation for high-conviction entries.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation
+Hypothesis: Use prior 1d Camarilla R1/S1 levels for breakout signals on 12h timeframe, confirmed by 1d EMA34 trend direction and volume spike (>1.6x 20-period average). ATR(14) trailing stop (2.0x) for exits. Designed for lower trade frequency (~12-25/year) to minimize fee drag while capturing strong trending moves in both bull and bear markets via 1d trend alignment.
 """
 
 import numpy as np
@@ -33,7 +33,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR(14) on 6h for breakout confirmation
+    # ATR(14) on 12h for breakout confirmation and trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -54,7 +54,7 @@ def generate_signals(prices):
         camarilla_r1 = np.concatenate([[np.nan], camarilla_r1])
         camarilla_s1 = np.concatenate([[np.nan], camarilla_s1])
     
-    # Align Camarilla levels to 6h
+    # Align Camarilla levels to 12h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -97,10 +97,10 @@ def generate_signals(prices):
         low_val = low[i]
         atr_val = atr[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average (strict for low trade frequency)
-        volume_confirmed = vol_val > 2.0 * vol_ma_val
-        # Breakout threshold: price must close beyond Camarilla level by 2.0*ATR (balanced)
-        breakout_threshold = 2.0 * atr_val
+        # Volume confirmation: current volume > 1.6x 20-period average (balanced for lower frequency)
+        volume_confirmed = vol_val > 1.6 * vol_ma_val
+        # Breakout threshold: price must close beyond Camarilla level by 1.5*ATR (balanced)
+        breakout_threshold = 1.5 * atr_val
         
         if position == 0:
             # Long: close above R1 + threshold, uptrend (close > EMA34_1d), volume confirmation
@@ -124,8 +124,8 @@ def generate_signals(prices):
             # Hold long
             signals[i] = 0.25
             highest_since_entry = max(highest_since_entry, high_val)
-            # ATR trailing stop: exit if price drops 2.5*ATR from high (wider stop for 6h)
-            if close_val < highest_since_entry - 2.5 * atr_val:
+            # ATR trailing stop: exit if price drops 2.0*ATR from high
+            if close_val < highest_since_entry - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -146,8 +146,8 @@ def generate_signals(prices):
             # Hold short
             signals[i] = -0.25
             lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR trailing stop: exit if price rises 2.5*ATR from low
-            if close_val > lowest_since_entry + 2.5 * atr_val:
+            # ATR trailing stop: exit if price rises 2.0*ATR from low
+            if close_val > lowest_since_entry + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -167,6 +167,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
