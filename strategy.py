@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R4_S4_Breakout_1wTrend_VolumeSpike
-Hypothesis: On 1d timeframe, Camarilla R4/S4 breakouts aligned with 1w EMA50 trend and volume spikes (>2.0x 20-period MA) capture high-probability continuation moves. Uses discrete position sizing (0.0, ±0.25) and ATR-based trailing stop (2.5x) for exits. Targets 15-25 trades/year by requiring weekly trend alignment, volume confirmation, and Camarilla structure—designed to work in both bull (trend continuation) and bear (trend continuation down) markets. Focus on BTC/ETH as primary symbols.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts aligned with 1d EMA50 trend and volume spikes (>1.5x 20-period MA) capture high-probability continuation moves in both bull and bear markets. Uses discrete position sizing (0.0, ±0.25) and 12h ATR-based trailing stop (2.5x) for exits. Targets 12-30 trades/year by requiring HTF trend alignment, volume confirmation, and Camarilla structure—designed to work in bull (trend continuation) and bear (trend continuation down) markets with minimal overtrading.
 """
 
 import numpy as np
@@ -18,27 +18,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HTF filters
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # Load 1d data ONCE before loop for HTF filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # 1w EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1w ATR(14) for trailing stop
-    tr1 = pd.Series(df_1w['high']).diff().abs()
-    tr2 = (pd.Series(df_1w['high']) - pd.Series(df_1w['close']).shift()).abs()
-    tr3 = (pd.Series(df_1w['low']) - pd.Series(df_1w['close']).shift()).abs()
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = tr_1w.ewm(span=14, adjust=False, min_periods=14).mean()
-    atr_1w_values = atr_1w.values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w_values)
+    # 12h ATR(14) for trailing stop (calculated on primary timeframe)
+    tr1 = pd.Series(high).diff().abs()
+    tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
+    tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = tr_12h.ewm(span=14, adjust=False, min_periods=14).mean()
+    atr_12h_values = atr_12h.values
     
-    # Volume spike filter: volume > 2.0 * 20-period MA on 1d
+    # Volume spike filter: volume > 1.5 * 20-period MA on 12h
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,8 +54,8 @@ def generate_signals(prices):
         high_val = high[i]
         low_val = low[i]
         vol = volume[i]
-        trend_val = ema50_1w_aligned[i]
-        atr_val = atr_1w_aligned[i]
+        trend_val = ema50_1d_aligned[i]
+        atr_val = atr_12h_values[i]
         vol_spike = volume_spike[i]
         
         # Skip if any data not ready
@@ -65,29 +64,29 @@ def generate_signals(prices):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Trend filter: price > 1w EMA50 = uptrend, price < 1w EMA50 = downtrend
+        # Trend filter: price > 1d EMA50 = uptrend, price < 1d EMA50 = downtrend
         is_uptrend = close_val > trend_val
         is_downtrend = close_val < trend_val
         
-        # Calculate Camarilla levels for previous 1d bar
+        # Calculate Camarilla levels for previous 12h bar
         if i >= 1:
             # Use previous bar's high, low, close for today's Camarilla levels
             ph = high[i-1]
             pl = low[i-1]
             pc = close[i-1]
             rng = ph - pl
-            # Camarilla R4 and S4 levels (stronger breakout)
-            r4 = pc + (rng * 1.1 / 2)  # R4 = C + (H-L)*1.1/2
-            s4 = pc - (rng * 1.1 / 2)  # S4 = C - (H-L)*1.1/2
+            # Camarilla R1 and S1 levels (standard breakout)
+            r1 = pc + (rng * 1.1 / 12)  # R1 = C + (H-L)*1.1/12
+            s1 = pc - (rng * 1.1 / 12)  # S1 = C - (H-L)*1.1/12
         else:
-            r4 = high_val
-            s4 = low_val
+            r1 = high_val
+            s1 = low_val
         
         # Camarilla breakout conditions
-        long_breakout = close_val > r4
-        short_breakout = close_val < s4
+        long_breakout = close_val > r1
+        short_breakout = close_val < s1
         
-        # Entry conditions: Camarilla breakout in direction of 1w trend + volume spike
+        # Entry conditions: Camarilla breakout in direction of 1d trend + volume spike
         long_entry = long_breakout and is_uptrend and vol_spike
         short_entry = short_breakout and is_downtrend and vol_spike
         
@@ -136,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R4_S4_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
