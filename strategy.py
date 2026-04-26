@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_RSI2_MeanReversion_1dTrendFilter_VolumeSpike
-Hypothesis: On 6h timeframe, use 2-period RSI for extreme mean reversion signals (RSI<10 for long, RSI>90 for short) only when aligned with 1d EMA50 trend and confirmed by volume spike (>2.0x 20-period average). This strategy targets short-term reversals within the prevailing daily trend, exploiting overextended moves that tend to revert. Discrete sizing 0.25. Target ~15-25 trades/year to minimize fee drag while capturing high-conviction mean reversion opportunities in both bull and bear markets.
+12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1
+Hypothesis: Use weekly Camarilla R1/S1 breakouts with 1w EMA50 trend filter and volume spike (>2.0x 20-period average) for high-conviction entries on 12h timeframe. ATR(14) trailing stop (2.5x) and close-based exits. Discrete sizing 0.25. Target ~15-25 trades/year to minimize fee drag while capturing strong weekly trends. Added ADX(14) regime filter to avoid whipsaws in choppy markets.
 """
 
 import numpy as np
@@ -19,44 +19,86 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Session filter: UTC 8-20 for institutional activity
+    # Session filter: UTC 0-24 (trade all hours on 12h)
     hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    in_session = np.ones(n, dtype=bool)  # 12h: trade all sessions
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for Camarilla calculation and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # RSI(2) on 6h for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # ATR(14) on 12h for breakout confirmation and trailing stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # ADX(14) on 12h for regime filter - avoid choppy markets
+    # Calculate +DM, -DM, TR
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_ma = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_ma = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    plus_di = 100 * plus_dm_ma / tr_ma
+    minus_di = 100 * minus_dm_ma / tr_ma
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Camarilla R1 and S1 from prior 1w bar
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w_arr = df_1w['close'].values
+    
+    if len(high_1w) < 2:
+        camarilla_r1 = np.full_like(close_1w_arr, np.nan)
+        camarilla_s1 = np.full_like(close_1w_arr, np.nan)
+    else:
+        camarilla_r1 = close_1w_arr[:-1] + 1.1 * (high_1w[:-1] - low_1w[:-1]) / 12
+        camarilla_s1 = close_1w_arr[:-1] - 1.1 * (high_1w[:-1] - low_1w[:-1]) / 12
+        camarilla_r1 = np.concatenate([[np.nan], camarilla_r1])
+        camarilla_s1 = np.concatenate([[np.nan], camarilla_s1])
+    
+    # Align Camarilla levels to 12h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
     # Volume average (20-period) for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Warmup: max of RSI(2) (2), 1d EMA (50), volume MA (20)
-    start_idx = max(2, 50, 20)
+    # Warmup: max of volume MA (20), 1w EMA (50), ATR (14), ADX (14)
+    start_idx = max(20, 50, 14, 14)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
+        # Skip if any data not ready or low ADX (choppy market)
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_ma[i]) or
-            not in_session[i]):
+            np.isnan(atr[i]) or
+            np.isnan(adx[i]) or
+            adx[i] < 20):  # Avoid choppy markets (ADX < 20)
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -66,54 +108,86 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        rsi_val = rsi[i]
-        ema_50_1d_val = ema_50_1d_aligned[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
+        r1_val = camarilla_r1_aligned[i]
+        s1_val = camarilla_s1_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_val = volume[i]
         close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
+        atr_val = atr[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average (strict for signal quality)
+        # Volume confirmation: current volume > 2.0x 20-period average (strict for 12h)
         volume_confirmed = vol_val > 2.0 * vol_ma_val
+        # Breakout threshold: price must close beyond Camarilla level by 2.5*ATR (balanced for 12h)
+        breakout_threshold = 2.5 * atr_val
         
         if position == 0:
-            # Long: RSI<10 (extremely oversold) + uptrend (close > EMA50_1d) + volume confirmation
-            long_signal = (rsi_val < 10) and (close_val > ema_50_1d_val) and volume_confirmed
-            # Short: RSI>90 (extremely overbought) + downtrend (close < EMA50_1d) + volume confirmation
-            short_signal = (rsi_val > 90) and (close_val < ema_50_1d_val) and volume_confirmed
+            # Long: close above R1 + threshold, uptrend (close > EMA50_1w), volume confirmation
+            long_signal = (close_val > r1_val + breakout_threshold) and (close_val > ema_50_1w_val) and volume_confirmed
+            # Short: close below S1 - threshold, downtrend (close < EMA50_1w), volume confirmation
+            short_signal = (close_val < s1_val - breakout_threshold) and (close_val < ema_50_1w_val) and volume_confirmed
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
+                entry_price = close_val
+                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
+                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: RSI crosses above 50 (mean reversion complete) or trend reversal
-            if rsi_val > 50 or close_val < ema_50_1d_val:
+            highest_since_entry = max(highest_since_entry, high_val)
+            # ATR trailing stop: exit if price drops 2.5*ATR from high
+            if close_val < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
-            # Exit: close below prior low (failed mean reversion)
-            elif i >= 2 and close_val < low[i-1]:
+                entry_price = 0.0
+                highest_since_entry = 0.0
+            # Exit: price closes below S1
+            elif close_val < s1_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+            # Exit: trend reversal (close below EMA50_1w)
+            elif close_val < ema_50_1w_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: RSI crosses below 50 (mean reversion complete) or trend reversal
-            if rsi_val < 50 or close_val > ema_50_1d_val:
+            lowest_since_entry = min(lowest_since_entry, low_val)
+            # ATR trailing stop: exit if price rises 2.5*ATR from low
+            if close_val > lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
-            # Exit: close above prior high (failed mean reversion)
-            elif i >= 2 and close_val > high[i-1]:
+                entry_price = 0.0
+                lowest_since_entry = 0.0
+            # Exit: price closes above R1
+            elif close_val > r1_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                lowest_since_entry = 0.0
+            # Exit: trend reversal (close above EMA50_1w)
+            elif close_val > ema_50_1w_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                lowest_since_entry = 0.0
     
     return signals
 
-name = "6h_RSI2_MeanReversion_1dTrendFilter_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
