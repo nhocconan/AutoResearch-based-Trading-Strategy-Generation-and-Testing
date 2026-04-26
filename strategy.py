@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: On 6h timeframe, Camarilla R3/S3 breakouts with 1-day EMA34 trend filter and volume confirmation (>1.8x 24-bar avg) capture strong momentum moves in both bull and bear markets. Uses daily trend to reduce whipsaws and volume confirmation to ensure institutional participation. Targets 12-37 trades/year to minimize fee drag while maintaining edge via trend filter and volume confirmation. R3/S3 levels provide stronger breakout signals than R1/S1, reducing false signals.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_ReversalFilter
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1-day EMA34 trend filter and volume confirmation (>1.5x 48-bar avg) capture institutional breakouts. Adds a reversal filter: exit on close crossing EMA34 to avoid whipsaws in ranging markets. Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-37 trades/year to stay within fee drag limits while maintaining edge via trend filter and volume confirmation. Works in both bull and bear markets by following higher timeframe daily trend.
 """
 
 import numpy as np
@@ -30,35 +30,35 @@ def generate_signals(prices):
     
     # Calculate Camarilla levels from previous 1d bar
     # Camarilla: Pivot = (H+L+C)/3, Range = H-L
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_vals = df_1d['close'].values
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    pivot_1d = (high_1d + low_1d + close_1d_vals) / 3.0
     range_1d = high_1d - low_1d
-    r3_1d = close_1d + (range_1d * 1.1 / 4.0)
-    s3_1d = close_1d - (range_1d * 1.1 / 4.0)
+    r1_1d = close_1d_vals + (range_1d * 1.1 / 12.0)
+    s1_1d = close_1d_vals - (range_1d * 1.1 / 12.0)
     
-    # Align Camarilla levels to 6h timeframe (1-bar delay for completed daily bar)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align Camarilla levels to 12h timeframe (1-bar delay for completed daily bar)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume average (24-period = 4h on 6h) for volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume average (48-period = 24h on 12h) for volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start index: need warmup for calculations
-    start_idx = max(24, 34, 2)  # volume MA, daily EMA, 1d data
+    start_idx = max(48, 34, 2)  # volume MA, daily EMA, 1d data
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             # Hold current position or flat
             if position == 0:
@@ -71,22 +71,22 @@ def generate_signals(prices):
         
         # Get aligned values
         ema_34_1d_val = ema_34_1d_aligned[i]
-        r3_1d_val = r3_1d_aligned[i]
-        s3_1d_val = s3_1d_aligned[i]
+        r1_1d_val = r1_1d_aligned[i]
+        s1_1d_val = s1_1d_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_val = volume[i]
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
         
-        # Volume confirmation: current volume > 1.8x 24-period average
-        volume_confirmed = vol_val > 1.8 * vol_ma_val
+        # Volume confirmation: current volume > 1.5x 48-period average
+        volume_confirmed = vol_val > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: price breaks above R3 with uptrend (close > EMA34) and volume confirmation
-            long_signal = (high_val > r3_1d_val) and (close_val > ema_34_1d_val) and volume_confirmed
-            # Short: price breaks below S3 with downtrend (close < EMA34) and volume confirmation
-            short_signal = (low_val < s3_1d_val) and (close_val < ema_34_1d_val) and volume_confirmed
+            # Long: price breaks above R1 with uptrend (close > EMA34) and volume confirmation
+            long_signal = (high_val > r1_1d_val) and (close_val > ema_34_1d_val) and volume_confirmed
+            # Short: price breaks below S1 with downtrend (close < EMA34) and volume confirmation
+            short_signal = (low_val < s1_1d_val) and (close_val < ema_34_1d_val) and volume_confirmed
             
             if long_signal:
                 signals[i] = 0.25
@@ -102,8 +102,8 @@ def generate_signals(prices):
             # Long: hold position
             signals[i] = 0.25
             # Exit conditions:
-            # 1. Opposite breakout: price breaks below S3 (exit long)
-            if low_val < s3_1d_val:
+            # 1. Opposite breakout: price breaks below S1 (exit long)
+            if low_val < s1_1d_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -116,8 +116,8 @@ def generate_signals(prices):
             # Short: hold position
             signals[i] = -0.25
             # Exit conditions:
-            # 1. Opposite breakout: price breaks above R3 (exit short)
-            if high_val > r3_1d_val:
+            # 1. Opposite breakout: price breaks above R1 (exit short)
+            if high_val > r1_1d_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_ReversalFilter"
+timeframe = "12h"
 leverage = 1.0
