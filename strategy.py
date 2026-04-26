@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation.
-- Uses 4h timeframe for moderate trade frequency (target: 75-200 total trades over 4 years)
-- Camarilla R1/S1 levels calculated from previous 1d bar (more stable than 12h)
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1
+Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation.
+- Uses 12h timeframe for low trade frequency (target: 50-150 total trades over 4 years)
+- Camarilla R1/S1 levels calculated from previous 1d bar
 - Long when price breaks above R1 with volume spike and 1d uptrend
 - Short when price breaks below S1 with volume spike and 1d downtrend
-- Designed for 19-50 trades/year (75-200 total over 4 years) to minimize fee drag
-- Uses 1d trend for better BTC/ETH alignment (proven edge from top performers)
+- Designed for 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+- Works in bull/bear markets by trading with 1d trend and using Camarilla for precise entries
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA34 for trend filter (proven in top performers)
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -42,7 +42,7 @@ def generate_signals(prices):
     r1_1d = close_1d_arr + camarilla_range
     s1_1d = close_1d_arr - camarilla_range
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
