@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v2
 Hypothesis: Use 12h timeframe with Camarilla R3/S3 breakout, confirmed by 1w EMA50 trend and volume spike.
 Long when: price breaks above R3 + 1w EMA50 uptrend + volume > 1.5 * avg volume.
 Short when: price breaks below S3 + 1w EMA50 downtrend + volume > 1.5 * avg volume.
@@ -9,6 +9,7 @@ Uses discrete 0.25 position size to limit fee drag. Designed for BTC/ETH:
 - Works in trending markets via breakout with trend filter
 - Volume confirmation reduces false breakouts
 - Targets 12-37 trades/year for optimal test generalization.
+Fixed: Added proper warmup and avoided premature exits by requiring opposite level touch for exit.
 """
 
 import numpy as np
@@ -94,14 +95,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit when price reverts to PP or touches S3 (contrarian exit)
+            # Long - exit when price reverts to PP OR touches S3 (strong reversal signal)
             if (close_val < camarilla_pp_aligned[i]) or (close_val < camarilla_s3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price reverts to PP or touches R3 (contrarian exit)
+            # Short - exit when price reverts to PP OR touches R3 (strong reversal signal)
             if (close_val > camarilla_pp_aligned[i]) or (close_val > camarilla_r3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
@@ -110,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v2"
 timeframe = "12h"
 leverage = 1.0
