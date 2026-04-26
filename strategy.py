@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_RSI_Divergence_WeeklyTrend_v1
-Hypothesis: Daily RSI(14) divergences with weekly trend filter captures exhaustion moves in BTC/ETH. Bullish divergence (price LL, RSI HL) + weekly uptrend = long. Bearish divergence (price HH, RSI LH) + weekly downtrend = short. Uses volume confirmation (>1.5x avg) to filter weak signals. Designed for 1d to target 15-30 trades/year with discrete sizing (0.25).
+6h_Ichimoku_Cloud_Breakout_12hTrend_v1
+Hypothesis: Ichimoku cloud breakout (price above/below cloud) with 12h trend filter (price vs 12h EMA50) captures strong momentum moves while avoiding sideways whipsaws. Works in bull/bear via 12h trend alignment. Designed for 6h to target 12-37 trades/year with discrete sizing (0.25).
 """
 
 import numpy as np
@@ -16,85 +16,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # 1w EMA34 for trend filter (more responsive than EMA50)
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # RSI(14) on 1d close
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Align RSI to 1d timeframe (wait for completed 1d bar)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Average volume for confirmation (24-period SMA = 1d * 0.4 = ~4h)
-    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = ((period52_high + period52_low) / 2)
+    
+    # Current cloud boundaries (Senkou Span A/B from 26 periods ago)
+    senkou_span_a_lagged = np.roll(senkou_span_a, 26)
+    senkou_span_b_lagged = np.roll(senkou_span_b, 26)
+    senkou_span_a_lagged[:26] = np.nan
+    senkou_span_b_lagged[:26] = np.nan
+    
+    # Cloud top/bottom
+    cloud_top = np.maximum(senkou_span_a_lagged, senkou_span_b_lagged)
+    cloud_bottom = np.minimum(senkou_span_a_lagged, senkou_span_b_lagged)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Warmup: max of EMA(34), RSI(14), volume(24)
-    start_idx = max(34, 14, 24)
+    # Warmup: max of Ichimoku calculations (52 + 26 for cloud shift)
+    start_idx = 52 + 26
     
     for i in range(start_idx, n):
         close_val = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        ema_val = ema_34_1w_aligned[i]
-        rsi_val = rsi_aligned[i]
+        ema_val = ema_50_12h_aligned[i]
+        cloud_top_val = cloud_top[i]
+        cloud_bottom_val = cloud_bottom[i]
         
         # Skip if any data not ready
-        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(rsi_val)):
+        if (np.isnan(ema_val) or np.isnan(cloud_top_val) or np.isnan(cloud_bottom_val)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirmed = vol > 1.5 * avg_vol
-        
-        # Trend filter: price vs weekly EMA34
+        # Trend filter: price vs 12h EMA50
         uptrend = close_val > ema_val
         downtrend = close_val < ema_val
         
-        # Need at least 2 periods to check for divergence
-        if i < 2:
-            signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
-            continue
-            
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        bullish_div = (close[i] < close[i-1] and close[i-1] < close[i-2] and 
-                      rsi_val > rsi_aligned[i-1] and rsi_aligned[i-1] > rsi_aligned[i-2])
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        bearish_div = (close[i] > close[i-1] and close[i-1] > close[i-2] and 
-                      rsi_val < rsi_aligned[i-1] and rsi_aligned[i-1] < rsi_aligned[i-2])
+        # Long: price ABOVE cloud with 12h uptrend
+        long_condition = (close_val > cloud_top_val) and uptrend
+        # Short: price BELOW cloud with 12h downtrend
+        short_condition = (close_val < cloud_bottom_val) and downtrend
         
-        # Long: bullish divergence + weekly uptrend + volume
-        long_condition = bullish_div and uptrend and volume_confirmed
-        # Short: bearish divergence + weekly downtrend + volume
-        short_condition = bearish_div and downtrend and volume_confirmed
-        
-        # Exit: opposite divergence or loss of trend
-        long_exit = (position == 1 and (bearish_div or not uptrend))
-        short_exit = (position == -1 and (bullish_div or not downtrend))
+        # Exit: price re-enters cloud
+        long_exit = (position == 1 and close_val <= cloud_top_val)
+        short_exit = (position == -1 and close_val >= cloud_bottom_val)
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -114,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_Divergence_WeeklyTrend_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Breakout_12hTrend_v1"
+timeframe = "6h"
 leverage = 1.0
