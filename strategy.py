@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v8
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter and volume confirmation (2.0x average). Designed for low trade frequency (~30-50/year) to minimize fee drag. Uses discrete position sizing (0.25) and ATR-based stoploss (2.0). Works in bull markets via breakouts with trend and in bear via fade at extremes with volume exhaustion filtering. Focus on BTC/ETH as primary targets.
+1d_WilliamsFractal_Alligator_1wTrend_v1
+Hypothesis: Daily Williams Fractal signals filtered by weekly Alligator trend (Jaw/Teeth/Lips alignment) and volume confirmation. Enters on bullish/bearish fractal breaks when Alligator is aligned (trending) and volume > 1.5x average. Uses ATR-based stoploss. Designed for low frequency (15-30 trades/year) to minimize fee drag in ranging/bear markets. Works in bull via trend-following breaks and in bear via fade at extremes with Alligator misalignment filtering. Focus on BTC/ETH as primary targets.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,60 +18,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Alligator trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate EMA(34) on 1d for trend filter
+    # Calculate Alligator (Williams) on weekly: Jaw(13,8), Teeth(8,5), Lips(5,3)
+    close_1w = df_1w['close'].values
+    jaw = pd.Series(close_1w).ewm(span=13, adjust=False).mean().shift(8).values
+    teeth = pd.Series(close_1w).ewm(span=8, adjust=False).mean().shift(5).values
+    lips = pd.Series(close_1w).ewm(span=5, adjust=False).mean().shift(3).values
+    
+    # Align Alligator to daily (with extra delay for smoothed indicators)
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw, additional_delay_bars=0)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth, additional_delay_bars=0)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips, additional_delay_bars=0)
+    
+    # Get daily data for Williams Fractals and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
+        return np.zeros(n)
+    
+    # Calculate ATR(14) for stoploss
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate ATR(14) for stoploss on 4h
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate volume spike filter: volume > 2.0 * 20-period average (balanced)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate volume spike filter: volume > 1.5 * 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Calculate Camarilla levels from previous 1d bar
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Avoid NaN from shift
-    prev_high = np.where(np.isnan(prev_high), df_1d['high'].values, prev_high)
-    prev_low = np.where(np.isnan(prev_low), df_1d['low'].values, prev_low)
-    prev_close = np.where(np.isnan(prev_close), df_1d['close'].values, prev_close)
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    r1 = pivot + (range_hl * 1.1 / 12.0)
-    s1 = pivot - (range_hl * 1.1 / 12.0)
-    
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate Williams Fractals on daily (requires 2 extra bars for confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Align fractals with 2-bar extra delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of 1d EMA(34), volume MA, ATR
-    start_idx = max(34, 20, 14) + 1
+    # Warmup: max of Alligator setup, ATR, volume MA
+    start_idx = max(50, 14, 50) + 2
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(jaw_aligned[i]) or
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -82,16 +93,17 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        trend_1d_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
-        trend_1d_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
+        # Alligator trend: Jaw > Teeth > Lips = uptrend, reverse = downtrend
+        alligator_up = (jaw_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > lips_aligned[i])
+        alligator_down = (jaw_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < lips_aligned[i])
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above R1 AND 1d trend up AND volume spike
-            long_signal = (close_val > r1_aligned[i]) and trend_1d_up and vol_spike
+            # Long: bullish fractal break AND Alligator uptrend AND volume spike
+            long_signal = bullish_fractal_aligned[i] and alligator_up and vol_spike
             
-            # Short: price breaks below S1 AND 1d trend down AND volume spike
-            short_signal = (close_val < s1_aligned[i]) and trend_1d_down and vol_spike
+            # Short: bearish fractal break AND Alligator downtrend AND volume spike
+            short_signal = bearish_fractal_aligned[i] and alligator_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -106,20 +118,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend flips down OR price hits ATR stoploss
-            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]):
+            # Exit: Alligator flips down OR price hits ATR stoploss
+            if (not alligator_up) or (close_val < entry_price - 2.5 * atr_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend flips up OR price hits ATR stoploss
-            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]):
+            # Exit: Alligator flips up OR price hits ATR stoploss
+            if (not alligator_down) or (close_val > entry_price + 2.5 * atr_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v8"
-timeframe = "4h"
+name = "1d_WilliamsFractal_Alligator_1wTrend_v1"
+timeframe = "1d"
 leverage = 1.0
