@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_HTFVolatilityFilter
-Hypothesis: On 4h timeframe, use Camarilla R3/S3 levels from 1d for breakout entries, filtered by 1d trend direction (close > EMA34) and 1w volatility regime (ATR ratio < 0.8 to avoid high volatility chop). Enter long when price breaks above R3 with 1d uptrend and low volatility regime. Enter short when price breaks below S3 with 1d downtrend and low volatility regime. Uses discrete position size 0.25 to balance capture and drawdown. Designed for 19-30 trades/year on 4h by requiring 1d alignment and volatility filter, reducing overtrading while capturing structured moves in both bull and bear markets.
+1d_KAMA_Trend_RSI_ChopFilter
+Hypothesis: On 1d timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction, combined with RSI(14) for momentum and Choppiness Index(14) for regime filtering. Enter long when price > KAMA, RSI > 50, and CHOP < 61.8 (trending regime). Enter short when price < KAMA, RSI < 50, and CHOP < 61.8. Uses discrete position size 0.25. Designed for 7-25 trades/year on 1d by requiring trending regime (CHOP < 61.8) and alignment of price, KAMA, and RSI, reducing whipsaw in ranging markets while capturing sustained trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,72 +13,67 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    # Get 1w data for volatility filter (ATR ratio)
+    # Get 1w data for HTF trend filter (optional, but can add confluence)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 10 or len(df_1w) < 10:
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    # Camarilla: R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4
-    prev_1d_close = df_1d['close'].shift(1).values
-    prev_1d_high = df_1d['high'].shift(1).values
-    prev_1d_low = df_1d['low'].shift(1).values
+    # Calculate KAMA(10, 2, 30) on close
+    # Efficiency Ratio (ER) = |close - close[10]| / sum(|close - close[1]|) over 10 periods
+    # Smoothing Constant (SC) = [ER * (fastest - slowest) + slowest]^2
+    # where fastest = 2/(2+1), slowest = 2/(30+1)
+    # KAMA[i] = KAMA[i-1] + SC * (price[i] - KAMA[i-1])
     
-    camarilla_range = prev_1d_high - prev_1d_low
-    r3 = prev_1d_close + 1.1 * camarilla_range / 4
-    s3 = prev_1d_close - 1.1 * camarilla_range / 4
+    close_series = pd.Series(close)
+    change = abs(close_series - close_series.shift(10))
+    volatility = close_series.rolling(window=10).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=False)
+    er = change / np.maximum(volatility, 1e-10)
+    fastest = 2.0 / (2 + 1)
+    slowest = 2.0 / (30 + 1)
+    sc = (er * (fastest - slowest) + slowest) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate RSI(14)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / np.maximum(avg_loss, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Choppiness Index(14)
+    # CHOP = 100 * log10(sum(ATR(1) over 14) / (max(high,14) - min(low,14))) / log10(14)
+    tr1 = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+    tr1[0] = high[0] - low[0]  # first TR
+    atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).sum()
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr1 / np.maximum(max_high - min_low, 1e-10)) / np.log10(14)
     
-    # Calculate 1w ATR for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range for 1w
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = np.nan  # First value has no previous close
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate current 4h ATR for volatility ratio
-    tr1_4h = np.abs(high - low)
-    tr2_4h = np.abs(high - np.roll(close, 1))
-    tr3_4h = np.abs(low - np.roll(close, 1))
-    tr1_4h[0] = np.nan
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Volatility regime: ATR ratio (4h/1w) < 0.8 indicates low volatility regime
-    atr_ratio = atr_4h / np.maximum(atr_1w, 1e-10)
-    low_vol_regime = atr_ratio < 0.8
+    # Optional: 1w EMA34 for HTF trend filter (confluence)
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA warmup, ATR warmup
-    start_idx = max(34, 14)
+    # Warmup: need KAMA (need 10 for ER, but we start from 0), RSI(14), CHOP(14)
+    start_idx = max(10, 14, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(atr_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -88,16 +83,27 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1d trend alignment
-        trend_1d_uptrend = close[i] > ema_34_1d_aligned[i]
-        trend_1d_downtrend = close[i] < ema_34_1d_aligned[i]
+        # Regime filter: only trade in trending markets (CHOP < 61.8)
+        trending_regime = chop[i] < 61.8
+        
+        # Price vs KAMA for trend direction
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        
+        # RSI for momentum confirmation
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        
+        # Optional: 1w EMA34 filter for HTF trend alignment
+        htf_uptrend = close[i] > ema_34_1w_aligned[i]
+        htf_downtrend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3 + 1d uptrend + low volatility regime
-            long_signal = (close[i] > r3_aligned[i]) and trend_1d_uptrend and low_vol_regime[i]
+            # Long: price > KAMA, RSI > 50, trending regime, HTF uptrend (optional)
+            long_signal = price_above_kama and rsi_bullish and trending_regime and htf_uptrend
             
-            # Short: price breaks below S3 + 1d downtrend + low volatility regime
-            short_signal = (close[i] < s3_aligned[i]) and trend_1d_downtrend and low_vol_regime[i]
+            # Short: price < KAMA, RSI < 50, trending regime, HTF downtrend (optional)
+            short_signal = price_below_kama and rsi_bearish and trending_regime and htf_downtrend
             
             if long_signal:
                 signals[i] = 0.25
@@ -110,20 +116,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price breaks below S3 OR 1d trend turns down OR volatility spikes
-            if (close[i] < s3_aligned[i] or not trend_1d_uptrend or not low_vol_regime[i]):
+            # Exit: price < KAMA OR RSI < 50 OR regime becomes ranging (CHOP >= 61.8)
+            if (price_below_kama or not rsi_bullish or chop[i] >= 61.8):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price breaks above R3 OR 1d trend turns up OR volatility spikes
-            if (close[i] > r3_aligned[i] or not trend_1d_downtrend or not low_vol_regime[i]):
+            # Exit: price > KAMA OR RSI > 50 OR regime becomes ranging (CHOP >= 61.8)
+            if (price_above_kama or not rsi_bearish or chop[i] >= 61.8):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_HTFVolatilityFilter"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
