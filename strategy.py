@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_PivotSqueeze_Breakout_12hTrend_v1
-Hypothesis: Trade 6h breakouts from Bollinger squeeze on 12h with volume confirmation and 12h EMA50 trend filter. Squeeze = Bollinger Bandwidth < 20th percentile. Breakout = close outside Bollinger Bands (20,2). Uses discrete size 0.25 to limit fee drag. Works in bull/bear via trend filter and squeeze capturing low-volatility precursors to moves.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Trade 4h breakouts from Camarilla R3/S3 levels with 1d EMA34 trend filter and volume confirmation. Works in bull/bear via trend filter; Camarilla levels provide structure in ranging markets. Discrete size 0.30 limits fee drag. Target 20-50 trades/year.
 """
 
 import numpy as np
@@ -18,104 +18,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Bollinger squeeze and trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for Camarilla pivot levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Camarilla pivot levels (R3, S3) from previous 1d bar
+    # Formula: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
+    # Using previous bar's OHLC to avoid look-ahead
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Bollinger Bands (20,2) on 12h
-    close_12h_series = pd.Series(close_12h)
-    ma_20 = close_12h_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_12h_series.rolling(window=20, min_periods=20).std().values
-    upper_bb = ma_20 + 2 * std_20
-    lower_bb = ma_20 - 2 * std_20
-    bandwidth = (upper_bb - lower_bb) / np.maximum(ma_20, 1e-10)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan  # first bar has no previous
     
-    # Squeeze: bandwidth < 20th percentile (lookback 50)
-    bandwidth_series = pd.Series(bandwidth)
-    bandwidth_percentile = bandwidth_series.rolling(window=50, min_periods=30).quantile(0.20).values
-    squeeze = bandwidth < bandwidth_percentile
+    # Calculate Camarilla R3 and S3 for previous 1d bar
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 4
     
-    # 12h EMA50 trend filter
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA34 trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all 12h data to 6h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_12h, squeeze)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_12h, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_12h, lower_bb)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align all 1d data to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 1.5x 20-period average on 6h
+    # Volume confirmation: volume > 2.0x 20-period average on 4h
     volume_series = pd.Series(volume)
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 1.5
+    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need squeeze (50), EMA50 (50), volume MA (20)
-    start_idx = max(50, 50, 20)
+    # Warmup: need EMA34 (34), volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(upper_bb_aligned[i]) or
-            np.isnan(lower_bb_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
             continue
         
-        # 12h trend alignment
-        trend_12h_uptrend = close[i] > ema_50_12h_aligned[i]
-        trend_12h_downtrend = close[i] < ema_50_12h_aligned[i]
+        # 1d trend alignment
+        trend_1d_uptrend = close[i] > ema_34_1d_aligned[i]
+        trend_1d_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper BB + volume squeeze + 12h uptrend
-            long_breakout = (close[i] > upper_bb_aligned[i]) and \
-                           (close[i-1] <= upper_bb_aligned[i-1])
-            long_signal = long_breakout and squeeze_aligned[i] and volume_spike[i] and trend_12h_uptrend
+            # Long: price breaks above R3 + volume spike + 1d uptrend
+            long_breakout = (close[i] > camarilla_r3_aligned[i]) and \
+                           (close[i-1] <= camarilla_r3_aligned[i-1])
+            long_signal = long_breakout and volume_spike[i] and trend_1d_uptrend
             
-            # Short: price breaks below lower BB + volume squeeze + 12h downtrend
-            short_breakout = (close[i] < lower_bb_aligned[i]) and \
-                           (close[i-1] >= lower_bb_aligned[i-1])
-            short_signal = short_breakout and squeeze_aligned[i] and volume_spike[i] and trend_12h_downtrend
+            # Short: price breaks below S3 + volume spike + 1d downtrend
+            short_breakout = (close[i] < camarilla_s3_aligned[i]) and \
+                           (close[i-1] >= camarilla_s3_aligned[i-1])
+            short_signal = short_breakout and volume_spike[i] and trend_1d_downtrend
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
-            # Exit: price touches middle BB OR 12h trend turns down
-            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if (close[i] < middle_bb or not trend_12h_uptrend):
+            signals[i] = 0.30
+            # Exit: price touches S3 level OR 1d trend turns down
+            if (close[i] < camarilla_s3_aligned[i] or not trend_1d_uptrend):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
-            # Exit: price touches middle BB OR 12h trend turns up
-            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if (close[i] > middle_bb or not trend_12h_downtrend):
+            signals[i] = -0.30
+            # Exit: price touches R3 level OR 1d trend turns up
+            if (close[i] > camarilla_r3_aligned[i] or not trend_1d_downtrend):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_PivotSqueeze_Breakout_12hTrend_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
