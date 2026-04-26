@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (2.0x). 
-Optimized for 12h timeframe to target 50-150 total trades over 4 years (12-37/year) by using tight entry conditions. 
+6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3
+Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (2.0x). 
+Optimized for 6h timeframe to target 50-150 total trades over 4 years (12-37/year) by using tight entry conditions.
 Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear via 1d trend alignment.
+Avoids overtrading by requiring volume spike and strong trend regime.
 """
 
 import numpy as np
@@ -95,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "6h"
 leverage = 1.0
