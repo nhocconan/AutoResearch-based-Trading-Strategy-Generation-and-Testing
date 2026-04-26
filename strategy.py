@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hEMA200_Trend_VolumeSpike
-Hypothesis: 1h Camarilla R1/S1 breakouts with 4h EMA200 trend filter and volume confirmation (>2.0x 24-bar average) capture strong trending moves. Uses tighter volume threshold and 4h EMA200 (more reliable than shorter MAs) to reduce false entries. Targets 15-35 trades/year on 1h timeframe.
+6h_Donchian20_Breakout_WeeklyPivot_Direction_v2
+Hypothesis: 6h Donchian(20) breakouts aligned with weekly pivot direction (price above/below weekly pivot) and volume confirmation (>1.5x 24-bar average) capture strong trending moves with fewer false signals. Weekly pivot provides structural support/resistance from higher timeframe, reducing whipsaws in ranging markets. Targets 12-25 trades/year on 6h timeframe.
 """
 
 import numpy as np
@@ -18,121 +18,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for EMA200 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
+    # Load weekly data ONCE before loop for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # 4h EMA200 for trend filter
-    ema200_4h = pd.Series(df_4h['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # Weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    wk_high = df_1w['high'].values
+    wk_low = df_1w['low'].values
+    wk_close = df_1w['close'].values
+    pivot = (wk_high + wk_low + wk_close) / 3.0
+    wk_range = wk_high - wk_low
+    r1 = 2 * pivot - wk_low
+    s1 = 2 * pivot - wk_high
+    r2 = pivot + wk_range
+    s2 = pivot - wk_range
     
-    # ATR(14) for stoploss calculation
-    tr1 = pd.Series(high[1:] - low[1:]).values
-    tr2 = pd.Series(np.abs(high[1:] - close[:-1])).values
-    tr3 = pd.Series(np.abs(low[1:] - close[:-1])).values
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align weekly pivot levels to 6h timeframe (completed weekly bar only)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Volume confirmation: current volume > 2.0 * 24-period average (tighter threshold)
+    # Donchian(20) channels on 6h
+    donchian_window = 20
+    dc_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    dc_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    
+    # Volume confirmation: current volume > 1.5 * 24-period average
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.20
-    entry_price = 0.0
-    highest_since_long = 0.0
-    lowest_since_short = 0.0
+    base_size = 0.25
     
-    # Warmup: max of EMA200 (200), ATR (14), volume MA (24)
-    start_idx = max(200, 14, 24)
+    # Warmup: max of Donchian (20), volume MA (24)
+    start_idx = max(donchian_window, 24)
     
     for i in range(start_idx, n):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        trend_val = ema200_4h_aligned[i]
-        atr_val = atr[i]
-        vol_conf = volume_confirm[i]
         
         # Skip if any data not ready
-        if (np.isnan(trend_val) or np.isnan(atr_val)):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(dc_high[i]) or np.isnan(dc_low[i])):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Calculate Camarilla levels for previous period
-        if i >= 1:
-            # Use previous bar's high, low, close for today's Camarilla levels
-            ph = high[i-1]
-            pl = low[i-1]
-            pc = close[i-1]
-            rng = ph - pl
-            # Camarilla R1 and S1 levels
-            r1 = pc + (rng * 1.1 / 12)
-            s1 = pc - (rng * 1.1 / 12)
-        else:
-            r1 = high_val
-            s1 = low_val
+        # Donchian breakout conditions
+        long_breakout = close_val > dc_high[i]
+        short_breakout = close_val < dc_low[i]
         
-        # Trend filter: price > 4h EMA200 = uptrend, price < 4h EMA200 = downtrend
-        is_uptrend = close_val > trend_val
-        is_downtrend = close_val < trend_val
+        # Weekly pivot direction filter
+        # Long bias: price above weekly pivot and R1
+        # Short bias: price below weekly pivot and S1
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
-        # Camarilla breakout conditions
-        long_breakout = close_val > r1
-        short_breakout = close_val < s1
+        long_filter = close_val > pivot_val and close_val > r1_val
+        short_filter = close_val < pivot_val and close_val < s1_val
         
-        # Entry conditions: Camarilla breakout in direction of 4h trend + volume confirmation
-        long_entry = long_breakout and is_uptrend and vol_conf
-        short_entry = short_breakout and is_downtrend and vol_conf
-        
-        # Update highest/lowest for trailing stop (ATR-based)
-        if position == 1:
-            highest_since_long = max(highest_since_long, high_val)
-        elif position == -1:
-            lowest_since_short = min(lowest_since_short, low_val)
-        elif position == 0:
-            highest_since_long = 0.0
-            lowest_since_short = 0.0
-        
-        # Exit conditions: ATR-based trailing stoploss
-        long_exit = False
-        short_exit = False
-        if position == 1:
-            # Long trailing stop: highest since entry - 2.5 * ATR
-            stop_price = highest_since_long - 2.5 * atr_val
-            long_exit = close_val < stop_price
-        elif position == -1:
-            # Short trailing stop: lowest since entry + 2.5 * ATR
-            stop_price = lowest_since_short + 2.5 * atr_val
-            short_exit = close_val > stop_price
+        # Entry conditions: Donchian breakout in direction of weekly pivot bias + volume confirmation
+        long_entry = long_breakout and long_filter and volume_confirm[i]
+        short_entry = short_breakout and short_filter and volume_confirm[i]
         
         if long_entry and position != 1:
             signals[i] = base_size
             position = 1
-            entry_price = close_val
-            highest_since_long = high_val
         elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
-            entry_price = close_val
-            lowest_since_short = low_val
-        elif long_exit:
+        elif position == 1 and (close_val < pivot_val or close_val < s1_val):
+            # Exit long if price breaks below weekly pivot or S1
             signals[i] = 0.0
             position = 0
-            highest_since_long = 0.0
-        elif short_exit:
+        elif position == -1 and (close_val > pivot_val or close_val > r1_val):
+            # Exit short if price breaks above weekly pivot or R1
             signals[i] = 0.0
             position = 0
-            lowest_since_short = 0.0
         else:
             # Hold position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hEMA200_Trend_VolumeSpike"
-timeframe = "1h"
+name = "6h_Donchian20_Breakout_WeeklyPivot_Direction_v2"
+timeframe = "6h"
 leverage = 1.0
