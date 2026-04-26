@@ -1,75 +1,90 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_ChopFilter
-Hypothesis: On daily timeframe, KAMA trend direction combined with RSI extremes and choppiness regime filter captures sustained moves while avoiding whipsaws in ranging markets. KAMA adapts to market efficiency, RSI<30/>70 identifies exhaustion points in trend, and Choppiness Index >61.8 confirms ranging conditions for mean-reversion exits. Works in bull via trend continuation and in bear via mean-reversion in ranges. Discrete sizing (0.25) limits fee drag. Target: 50-100 trades over 4 years.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA50 trend filter and choppiness regime (CHOP<61.8 = trending) + volume confirmation (1.5x median volume) yield high-probability entries. Uses discrete sizing (0.25) to limit fee drag. Target: 12-37 trades/year (50-150 total over 4 years). Works in bull/bear via 1d trend and regime filters to avoid false breakouts in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === KAMA (Kaufman Adaptive Moving Average) ===
-    # Efficiency Ratio: |net change| / sum(|changes|) over ER_period
-    er_period = 10
-    change = np.abs(np.diff(close, prepend=close[0]))
-    net_change = np.abs(np.subtract(close, np.roll(close, er_period)))
-    net_change[:er_period] = np.nan
+    # Calculate Camarilla levels for 12h (based on previous bar's range)
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    # Sum of absolute changes
-    abs_changes = pd.Series(change).rolling(window=er_period, min_periods=er_period).sum().values
-    er = np.where(abs_changes > 0, net_change / abs_changes, 0)
+    range_hl = prev_high - prev_low
+    r1 = prev_close + range_hl * 1.1 / 12
+    s1 = prev_close - range_hl * 1.1 / 12
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Volume confirmation: volume > 1.5x 30-period median (robust)
+    vol_series = pd.Series(volume)
+    vol_median = vol_series.rolling(window=30, min_periods=30).median().values
+    volume_confirm = volume > (vol_median * 1.5)
     
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[er_period] = close[er_period]  # seed
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Load 1d data for HTF trend and regime filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === RSI(14) ===
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d Choppiness Index (CHOP) for regime filter
+    def choppiness_index(high, low, close, window=14):
+        atr = np.zeros_like(close)
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        atr = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
+        hh = pd.Series(high).rolling(window=window, min_periods=window).max().values
+        ll = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        chop = np.zeros_like(close)
+        for i in range(window, len(close)):
+            if atr[i] > 0 and hh[i] > ll[i]:
+                log_sum = np.log(atr[i] * window / (hh[i] - ll[i]))
+                chop[i] = 100 * log_sum / np.log(window)
+            else:
+                chop[i] = 50.0
+        return chop
     
-    # === Choppiness Index (14) ===
-    chop_period = 14
-    atr = np.zeros(n)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=chop_period, min_periods=chop_period).sum().values
+    chop_1d = choppiness_index(high_1d, low_1d, close_1d, window=14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    hh = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
-    ll = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
+    # Regime: trending when CHOP < 61.8
+    trending_regime = chop_1d_aligned < 61.8
     
-    chop = np.where((hh - ll) != 0, 100 * np.log10(atr / (hh - ll)) / np.log10(chop_period), 50)
-    
-    # === Signals ===
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup period
-    start_idx = max(er_period, rsi_period, chop_period) + 5
+    # Start after warmup (need 30-period for volume median, 50 for EMA, 14 for CHOP)
+    start_idx = max(30, 50, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -79,14 +94,14 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long logic: price above KAMA (uptrend) AND RSI < 30 (oversold) AND chop > 61.8 (ranging -> mean reversion long)
-        long_condition = (close[i] > kama[i]) and (rsi[i] < 30) and (chop[i] > 61.8)
-        # Short logic: price below KAMA (downtrend) AND RSI > 70 (overbought) AND chop > 61.8 (ranging -> mean reversion short)
-        short_condition = (close[i] < kama[i]) and (rsi[i] > 70) and (chop[i] > 61.8)
+        # Long logic: break above R1 with volume confirmation, 1d uptrend, and trending regime
+        long_condition = (close[i] > r1[i]) and volume_confirm[i] and (close[i] > ema_50_1d_aligned[i]) and trending_regime[i]
+        # Short logic: break below S1 with volume confirmation, 1d downtrend, and trending regime
+        short_condition = (close[i] < s1[i]) and volume_confirm[i] and (close[i] < ema_50_1d_aligned[i]) and trending_regime[i]
         
-        # Exit logic: trend reversal (price crosses KAMA) OR chop < 38.2 (strong trend -> follow trend with KAMA)
-        exit_long = (close[i] < kama[i]) or (chop[i] < 38.2)
-        exit_short = (close[i] > kama[i]) or (chop[i] < 38.2)
+        # Exit logic: opposite Camarilla level touch or trend reversal or ranging regime
+        exit_long = (close[i] < s1[i]) or (close[i] < ema_50_1d_aligned[i]) or (not trending_regime[i])
+        exit_short = (close[i] > r1[i]) or (close[i] > ema_50_1d_aligned[i]) or (not trending_regime[i])
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -111,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_ChopFilter"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
