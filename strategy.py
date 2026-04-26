@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_WeeklyPivotFilter
-Hypothesis: On 6h timeframe, enter breakout trades at Camarilla R3/S3 levels with 1d EMA34 trend filter and weekly pivot direction filter. 
-Weekly pivot acts as regime filter: only take longs when price above weekly pivot, shorts when below. 
-This reduces false breakouts in choppy markets and aligns with higher timeframe structure. 
-Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.0, ±0.25) to minimize fee drag.
-Works in bull/bear markets by combining 1d trend with weekly structural bias.
+4h_Donchian20_Breakout_ATRVolumeRegime
+Hypothesis: 4-hour Donchian channel breakout with ATR-based volume confirmation and chop regime filter.
+Enters long when price breaks above upper band with expanding volume and low chop (trending market).
+Enters short when price breaks below lower band with expanding volume and low chop.
+Uses ATR trailing stop for risk management. Discrete position sizing (0.0, ±0.30) minimizes fee churn.
+Designed to work in both bull and bear markets by adapting to regime via chop filter.
+Target: 20-50 trades/year per symbol (<200 total over 4 years).
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,61 +23,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate Camarilla R3/S3 from prior daily bar
-    prior_high = np.roll(df_1d['high'].values, 1)
-    prior_low = np.roll(df_1d['low'].values, 1)
-    prior_close = np.roll(df_1d['close'].values, 1)
-    prior_open = np.roll(df_1d['open'].values, 1)
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    prior_close[0] = np.nan
-    prior_open[0] = np.nan
+    # ATR (14-period) for volatility and stoploss
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    pivot = (prior_high + prior_low + prior_close) / 3.0
-    range_hl = prior_high - prior_low
-    r3 = pivot + range_hl * 1.1 / 4   # R3 level
-    s3 = pivot - range_hl * 1.1 / 4   # S3 level
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Load weekly data for pivot filter
-    df_1w = get_htf_data(prices, '1w')
-    prior_week_high = np.roll(df_1w['high'].values, 1)
-    prior_week_low = np.roll(df_1w['low'].values, 1)
-    prior_week_close = np.roll(df_1w['close'].values, 1)
-    prior_week_high[0] = np.nan
-    prior_week_low[0] = np.nan
-    prior_week_close[0] = np.nan
-    
-    weekly_pivot = (prior_week_high + prior_week_low + prior_week_close) / 3.0
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # Volume confirmation: volume > 1.8 * 20-period EMA volume
+    # Volume confirmation: current volume > 1.5 * 20-period EMA volume
     avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * avg_volume)
+    volume_expanding = volume > (1.5 * avg_volume)
+    
+    # Choppiness regime filter (14-period) - from 1d timeframe to avoid look-ahead
+    df_1d = get_htf_data(prices, '1d')
+    chop_period = 14
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True range for 1d
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2_1d[0] = 0
+    tr3_1d[0] = 0
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    
+    # Sum of true range over chop_period
+    sum_tr = pd.Series(tr_1d).rolling(window=chop_period, min_periods=chop_period).sum().values
+    highest_high_1d = pd.Series(high_1d).rolling(window=chop_period, min_periods=chop_period).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=chop_period, min_periods=chop_period).min().values
+    
+    # Choppiness index: 100 * log10(sum_tr / (highest_high_1d - lowest_low_1d)) / log10(chop_period)
+    denominator = highest_high_1d - lowest_low_1d
+    # Avoid division by zero
+    denominator = np.where(denominator == 0, 1e-10, denominator)
+    chop = 100 * np.log10(sum_tr / denominator) / np.log10(chop_period)
+    
+    # Align chop to 4h timeframe (wait for completed 1d bar + extra delay for chop confirmation)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=0)
+    
+    # Chop regime: < 38.2 = trending (favor breakouts), > 61.8 = ranging (favor mean reversion)
+    # We want trending regime for breakouts
+    trending_regime = chop_aligned < 38.2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.25
+    base_size = 0.30
     
-    # Start after warmup (need 1-day shift + 34-day EMA + 1-week shift)
-    start_idx = max(1 + 34, 1)
+    # Start after warmup (need 20-period lookback + 14-period ATR + chop calculation)
+    start_idx = max(lookback, atr_period, chop_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_expanding[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(trending_regime[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -86,31 +96,25 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long logic: break above R3 + bullish daily trend + above weekly pivot + volume spike
-        if (close[i] > r3_aligned[i] and 
-            close[i] > ema_34_1d_aligned[i] and 
-            close[i] > weekly_pivot_aligned[i] and 
-            volume_spike[i]):
+        # Long logic: break above upper Donchian + volume expanding + trending regime
+        if close[i] > highest_high[i] and volume_expanding[i] and trending_regime[i]:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: break below S3 + bearish daily trend + below weekly pivot + volume spike
-        elif (close[i] < s3_aligned[i] and 
-              close[i] < ema_34_1d_aligned[i] and 
-              close[i] < weekly_pivot_aligned[i] and 
-              volume_spike[i]):
+        # Short logic: break below lower Donchian + volume expanding + trending regime
+        elif close[i] < lowest_low[i] and volume_expanding[i] and trending_regime[i]:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
-        # Exit: price reverts to opposite Camarilla level (R1/S1) for quicker exit
-        elif position == 1 and close[i] < (pivot - range_hl * 1.1 / 12)[i]:  # S1 level
+        # Exit: ATR trailing stop
+        elif position == 1 and close[i] < (highest_high[i] - 2.0 * atr[i]):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > (pivot + range_hl * 1.1 / 12)[i]:  # R1 level
+        elif position == -1 and close[i] > (lowest_low[i] + 2.0 * atr[i]):
             signals[i] = 0.0
             position = 0
         else:
@@ -124,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_WeeklyPivotFilter"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_ATRVolumeRegime"
+timeframe = "4h"
 leverage = 1.0
