@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume regime filter (volume > 1.5x median). 
-Uses 1d timeframe for HTF trend and volatility regime to improve edge in both bull and bear markets.
-Designed for 20-40 trades/year on 4h to minimize fee drag while maintaining edge.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime_v2
+Hypothesis: Refined Camarilla R1/S1 breakout strategy with stricter volume confirmation (volume > 2.0x median) and EMA trend filter to reduce overtrading. Target: 20-30 trades/year on 4h to minimize fee drag while maintaining edge in bull/bear markets via 1d EMA34 trend alignment.
 """
 
 import numpy as np
@@ -41,7 +39,7 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume regime: volume > 1.5x median volume (50-period) for signal validation
+    # Volume regime: volume > 2.0x median volume (50-period) for stricter signal validation
     vol_median = pd.Series(volume).rolling(window=50, min_periods=50).median().values
     
     # ATR(14) for volatility-based stops
@@ -81,8 +79,8 @@ def generate_signals(prices):
         uptrend = close_val > ema_34_1d_val
         downtrend = close_val < ema_34_1d_val
         
-        # Volume regime filter: only trade in high volume environments
-        volume_regime = volume_val > 1.5 * vol_median_val
+        # Volume regime filter: only trade in very high volume environments (stricter)
+        volume_regime = volume_val > 2.0 * vol_median_val
         
         if position == 0:
             # Long: break above R1 with volume regime, and uptrend
@@ -126,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime_v2"
 timeframe = "4h"
 leverage = 1.0
