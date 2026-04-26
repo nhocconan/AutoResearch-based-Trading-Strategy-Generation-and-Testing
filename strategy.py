@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3
-Hypothesis: On 12h timeframe, enter long when price breaks above daily Camarilla R1 AND 1d trend is up (close > EMA34) AND volume > 2x 20-period average volume. Enter short when price breaks below daily Camarilla S1 AND 1d trend is down (close < EMA34) AND volume spike. Exit on trend reversal or retracement to Camarilla midpoint. Uses 1d EMA34 for trend filter to reduce whipsaw vs 12h EMA, targeting 12-37 trades/year on BTC/ETH/SOL.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3
+Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R1 AND 1d trend is up (close > EMA34) AND volume > 2x 20-period average volume. Enter short when price breaks below daily Camarilla S1 AND 1d trend is down (close < EMA34) AND volume spike. Exit on trend reversal. Uses 1d EMA34 for stronger trend filter to reduce whipsaw and overtrading vs shorter EMAs, targeting 75-200 trades over 4 years for better generalization.
 """
 
 import numpy as np
@@ -43,12 +43,10 @@ def generate_signals(prices):
     camarilla_range = prev_high_1d - prev_low_1d
     r1 = prev_close_1d + 1.1 * camarilla_range / 12
     s1 = prev_close_1d - 1.1 * camarilla_range / 12
-    mid = (r1 + s1) / 2  # Camarilla midpoint for exit
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    mid_aligned = align_htf_to_ltf(prices, df_1d, mid)
     
     # Volume confirmation: volume > 2x 20-period average
     volume_series = pd.Series(volume)
@@ -100,20 +98,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend change to downtrend OR price retracing to Camarilla midpoint
-            if not trend_uptrend or close[i] < mid_aligned[i]:
+            # Exit: trend change to downtrend
+            if not trend_uptrend:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend change to uptrend OR price retracing to Camarilla midpoint
-            if not trend_downtrend or close[i] > mid_aligned[i]:
+            # Exit: trend change to uptrend
+            if not trend_downtrend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
