@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v14
-Hypothesis: On 12h timeframe, trade Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation. Daily trend filter provides medium-term directional bias to reduce false breakouts. Volume spike confirms institutional participation. Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25) to minimize fee drag. Works in bull/bear markets via daily trend filter.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: On 4h timeframe, trade Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation. Daily trend filter provides medium-term directional bias to reduce false breakouts. Volume spike confirms institutional participation. Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing (0.25) to minimize fee drag. Works in bull/bear markets via daily trend filter.
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     
     # Get 1d data for EMA(34) trend filter and Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA(34) for trend filter
@@ -36,7 +36,9 @@ def generate_signals(prices):
     typical_price = (prev_high + prev_low + prev_close) / 3.0
     range_hl = prev_high - prev_low
     
-    # Camarilla levels
+    # Camarilla levels (focus on R1/S1 and R3/S3 for breakouts)
+    r1 = typical_price + range_hl * 1.1 / 12.0
+    s1 = typical_price - range_hl * 1.1 / 12.0
     r3 = typical_price + range_hl * 1.1 / 2.0
     s3 = typical_price - range_hl * 1.1 / 2.0
     r4 = typical_price + range_hl * 1.1
@@ -46,8 +48,10 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -63,6 +67,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(r3_aligned[i]) or
             np.isnan(s3_aligned[i]) or
             np.isnan(r4_aligned[i]) or
@@ -81,6 +87,8 @@ def generate_signals(prices):
         high_val = high[i]
         low_val = low[i]
         vol_spike = volume_spike[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
         r4_val = r4_aligned[i]
@@ -91,13 +99,13 @@ def generate_signals(prices):
         downtrend = close_val < ema_34_1d_val
         
         if position == 0:
-            # Long: break above R3 with uptrend and volume spike (continuation)
+            # Long: break above R1 with uptrend and volume spike (continuation)
             # OR break above R4 with volume spike (strong breakout)
-            long_signal = ((high_val > r3_val and uptrend) or (high_val > r4_val)) and vol_spike
+            long_signal = ((high_val > r1_val and uptrend) or (high_val > r4_val)) and vol_spike
             
-            # Short: break below S3 with downtrend and volume spike (continuation)
+            # Short: break below S1 with downtrend and volume spike (continuation)
             # OR break below S4 with volume spike (strong breakout)
-            short_signal = ((low_val < s3_val and downtrend) or (low_val < s4_val)) and vol_spike
+            short_signal = ((low_val < s1_val and downtrend) or (low_val < s4_val)) and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -126,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v14"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
