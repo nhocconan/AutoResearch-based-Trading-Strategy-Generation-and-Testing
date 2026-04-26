@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeRegime
-Hypothesis: Daily Camarilla R1/S1 breakouts with weekly EMA trend filter and volume regime (top 30% volume). 
-Designed for 7-25 trades/year on 1d to minimize fee drag while capturing medium-term swings in both bull and bear markets.
+6h_ADX_Donchian_Breakout_1dTrend_VolumeFilter
+Hypothesis: Combines ADX trend strength (1d) with Donchian(20) breakouts (6h) and volume confirmation.
+ADX > 25 filters for strong trending markets (works in both bull/bear regimes), while Donchian breakouts
+capture momentum. Volume > 1.5x median reduces false breakouts. Designed for 50-150 trades over 4 years
+on BTC/ETH to minimize fee drag while maintaining edge across regimes.
 """
 
 import numpy as np
@@ -19,112 +21,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for HTF trend and Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for HTF trend and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA(50) for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d ADX(14) for trend strength filter
+    # Calculate True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from previous weekly OHLC
-    prev_close_1w = df_1w['close'].shift(1).values
-    prev_high_1w = df_1w['high'].shift(1).values
-    prev_low_1w = df_1w['low'].shift(1).values
+    # Directional Movement
+    up_move = df_1d['high'].diff()
+    down_move = df_1d['low'].diff().multiply(-1)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    camarilla_r1 = prev_close_1w + 1.000/6 * (prev_high_1w - prev_low_1w)
-    camarilla_s1 = prev_close_1w - 1.000/6 * (prev_high_1w - prev_low_1w)
+    # Smoothed DM and TR
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    # Align HTF ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Volume regime: top 30% volume (70th percentile) for confirmation
-    vol_regime = pd.Series(volume).rolling(window=50, min_periods=50).quantile(0.70).values
+    # Donchian(20) channels on 6h
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # ATR(20) for volatility-based stops
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume confirmation: 1.5x median volume (20-period)
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Warmup: max of EMA(50) 1w, volume regime (50), ATR (20)
-    start_idx = max(50, 50, 20)
+    # Warmup: max of ADX calculation (14+14), Donchian (20), volume median (20)
+    start_idx = max(30, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_regime[i]) or
-            np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or
+            np.isnan(vol_median[i])):
             # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_50_1w_val = ema_50_1w_aligned[i]
+        adx_val = adx_1d_aligned[i]
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
         volume_val = volume[i]
-        vol_regime_val = vol_regime[i]
-        atr_val = atr[i]
+        vol_median_val = vol_median[i]
         
-        # Trend filter: price > EMA50 (uptrend) or < EMA50 (downtrend)
-        uptrend = close_val > ema_50_1w_val
-        downtrend = close_val < ema_50_1w_val
-        
-        # Volume confirmation: volume in top 30% regime
-        volume_confirmed = volume_val > vol_regime_val
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Long: break above R1 with volume regime, and uptrend
-            long_signal = (close_val > camarilla_r1_aligned[i]) and \
-                          volume_confirmed and \
-                          uptrend
+            # Long: break above upper Donchian with volume, in strong trend
+            long_signal = (close_val > highest_20[i]) and \
+                          (volume_val > 1.5 * vol_median_val) and \
+                          strong_trend
             
-            # Short: break below S1 with volume regime, and downtrend
-            short_signal = (close_val < camarilla_s1_aligned[i]) and \
-                           volume_confirmed and \
-                           downtrend
+            # Short: break below lower Donchian with volume, in strong trend
+            short_signal = (close_val < lowest_20[i]) and \
+                           (volume_val > 1.5 * vol_median_val) and \
+                           strong_trend
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
-                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            highest_since_entry = max(highest_since_entry, high_val)
-            # ATR trailing stop
-            if close_val < highest_since_entry - 2.5 * atr_val:
+            # Exit: close below lower Donchian (reversal signal)
+            if close_val < lowest_20[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR trailing stop
-            if close_val > lowest_since_entry + 2.5 * atr_val:
+            # Exit: close above upper Donchian (reversal signal)
+            if close_val > highest_20[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeRegime"
-timeframe = "1d"
+name = "6h_ADX_Donchian_Breakout_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
