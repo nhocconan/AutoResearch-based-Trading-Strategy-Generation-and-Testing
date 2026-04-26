@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Channel_Breakout_1wTrend_VolumeConfirmation
-Hypothesis: 1d timeframe strategy using Keltner Channel breakouts with 1-week EMA trend filter and volume confirmation (>1.5x 20-bar MA). Long when price breaks above upper KC in bullish 1w trend + volume spike; short when price breaks below lower KC in bearish 1w trend + volume spike. Exits on opposite KC touch or ATR-based stop (2.0x ATR). Designed for low trade frequency (15-25/year) to minimize fee drag while capturing structured breakouts in both bull and bear markets via trend alignment. Uses discrete position sizing (0.25) to reduce churn.
+6h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike
+Hypothesis: Camarilla R4/S4 breakouts with 12h EMA50 trend filter and volume confirmation (>1.8x 20-bar MA). R4/S4 represent stronger breakout levels than R3/S3, reducing false signals while capturing momentum. Designed for 6h timeframe to balance trade frequency and edge. Works in bull/bear markets by following 12h trend while using Camarilla structure for entries. Volume spike filter reduces whipsaws. Target: 12-30 trades/year (50-120 total over 4 years).
 """
 
 import numpy as np
@@ -18,122 +18,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Load 12h data ONCE before loop for HTF filters
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1w EMA21 for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Previous day's OHLC for Keltner Channel (20-period, 2.0 ATR multiplier)
-    # We need 20-day ATR of the 1d timeframe, but since we're on 1d chart,
-    # we can calculate directly from daily data using HTF helper concept
-    # However, we're on 1d timeframe, so we calculate KC from current 1d data
-    # But to avoid look-ahead, we use previous day's data for KC calculation
+    # Previous day's OHLC for Camarilla levels (using 1d for structure)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # For 1d timeframe, we need to calculate KC based on 20-period lookback
-    # Since we're generating signals for 1d bars, we calculate KC from prior 20 days
-    # We'll use rolling window on the 1d data itself (no HTF needed for KC calc)
-    # But we must ensure we don't use current bar's data in KC calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Calculate 20-period EMA of close (for KC middle line)
-    close_s = pd.Series(close)
-    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels: R4, S4 (stronger breakout levels)
+    rng = high_1d - low_1d
+    camarilla_r4 = close_1d_vals + (rng * 1.1 / 2)  # R4 level
+    camarilla_s4 = close_1d_vals - (rng * 1.1 / 2)  # S4 level
     
-    # Calculate ATR(20) for KC width
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Keltner Channel: Upper = EMA20 + 2.0*ATR20, Lower = EMA20 - 2.0*ATR20
-    kc_upper = ema_20 + 2.0 * atr_20
-    kc_lower = ema_20 - 2.0 * atr_20
-    
-    # Volume confirmation: volume > 1.5x 20-period EMA of volume
-    volume_s = pd.Series(volume)
-    vol_ema_20 = volume_s.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.5)
-    
-    # ATR for stoploss (using same ATR20 as above)
-    atr_val = atr_20  # Reuse ATR20 for stoploss
+    # Volume confirmation: volume > 1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
-    # Warmup: max of calculations (20 for EMA, 20 for ATR, 20 for volume EMA)
-    start_idx = 20
+    # Warmup: max of calculations (20 for vol, 50 for 12h EMA, 1 for camarilla)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_21_1w_aligned[i]) or 
-            np.isnan(ema_20[i]) or 
-            np.isnan(atr_val[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        kc_upper_val = kc_upper[i]
-        kc_lower_val = kc_lower[i]
-        ema_21_1w_val = ema_21_1w_aligned[i]
+        camarilla_r4_val = camarilla_r4_aligned[i]
+        camarilla_s4_val = camarilla_s4_aligned[i]
+        ema_50_val = ema_50_12h_aligned[i]
         vol_spike = volume_spike[i]
-        atr_stop = atr_val[i]
         
-        # Determine 1w trend: bullish if price > EMA21, bearish if price < EMA21
-        bullish_1w = close_val > ema_21_1w_val
-        bearish_1w = close_val < ema_21_1w_val
+        # Determine 12h trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_12h = close_val > ema_50_val
+        bearish_12h = close_val < ema_50_val
         
-        # Entry conditions: breakout of KC in trend direction with volume spike
-        long_entry = (close_val > kc_upper_val) and bullish_1w and vol_spike
-        short_entry = (close_val < kc_lower_val) and bearish_1w and vol_spike
+        # Entry conditions: breakout of Camarilla R4/S4 in trend direction with volume spike
+        long_entry = (close_val > camarilla_r4_val) and bullish_12h and vol_spike
+        short_entry = (close_val < camarilla_s4_val) and bearish_12h and vol_spike
         
         if position == 0:
             # Flat - look for entry
             if long_entry:
                 signals[i] = base_size
                 position = 1
-                entry_price = close_val
             elif short_entry:
                 signals[i] = -base_size
                 position = -1
-                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - check exit conditions
-            exit_signal = False
-            # Exit 1: price touches lower KC (mean reversion)
-            if close_val < kc_lower_val:
-                exit_signal = True
-            # Exit 2: ATR-based stoploss (2.0x ATR below entry)
-            elif close_val < entry_price - 2.0 * atr_stop:
-                exit_signal = True
-            
-            if exit_signal:
+            # Long - exit on mean reversion to mid-point or trend change
+            mid_point = (camarilla_r4_val + camarilla_s4_val) / 2
+            if close_val < mid_point or not bullish_12h:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = base_size
         elif position == -1:
-            # Short - check exit conditions
-            exit_signal = False
-            # Exit 1: price touches upper KC (mean reversion)
-            if close_val > kc_upper_val:
-                exit_signal = True
-            # Exit 2: ATR-based stoploss (2.0x ATR above entry)
-            elif close_val > entry_price + 2.0 * atr_stop:
-                exit_signal = True
-            
-            if exit_signal:
+            # Short - exit on mean reversion to mid-point or trend change
+            mid_point = (camarilla_r4_val + camarilla_s4_val) / 2
+            if close_val > mid_point or not bearish_12h:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_Channel_Breakout_1wTrend_VolumeConfirmation"
-timeframe = "1d"
+name = "6h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
