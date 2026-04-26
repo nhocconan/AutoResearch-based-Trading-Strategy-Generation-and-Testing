@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1
-Hypothesis: On 12h timeframe, use Camarilla R1/S1 from 1d pivot points for breakout entries with 1d trend filter (close > 1d EMA34) and volume confirmation (>2.0x 20-period average). Add choppiness regime filter (CHOP > 61.8 = range, only mean-revert at extremes) to avoid whipsaws in bear markets. Target: 12-37 trades/year. Uses R1/S1 levels (proven edge) with volume/trend confirmation to reduce false breakouts while maintaining edge in both bull and bear regimes.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1
+Hypothesis: On 4h timeframe, use Camarilla R1/S1 from 1d pivot points for breakout entries with 1d EMA34 trend filter and volume confirmation (>2.0x 20-period average). Target: 19-50 trades/year. Uses R1/S1 levels (proven edge) with volume/trend confirmation to reduce false breakouts while maintaining edge in both bull and bear regimes. Volume spike confirms institutional participation, reducing whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -47,7 +47,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels and EMA to 12h timeframe
+    # Align Camarilla levels and EMA to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
@@ -57,42 +57,16 @@ def generate_signals(prices):
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume / np.maximum(volume_ma, 1e-10) > 2.0
     
-    # Choppiness regime filter: CHOP(14) > 61.8 = range (mean revert), CHOP < 38.2 = trending
-    def choppiness_index(high, low, close, window=14):
-        # True range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # prepend NaN for first bar
-        
-        # ATR = smoothed TR (using Wilder's smoothing = EMA with alpha=1/window)
-        atr = pd.Series(tr).ewm(alpha=1/window, adjust=False, min_periods=window).mean().values
-        
-        # Max(high) - Min(low) over window
-        max_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        min_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        hh_ll = max_high - min_low
-        
-        # CHOP = 100 * log10(sum(atr)/hh_ll) / log10(window)
-        sum_atr = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
-        chop = 100 * np.log10(sum_atr / np.maximum(hh_ll, 1e-10)) / np.log10(window)
-        return chop
-    
-    chop = choppiness_index(high, low, close, 14)
-    chop_range = chop > 61.8  # range regime
-    chop_trend = chop < 38.2  # trending regime
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Camarilla (1d EMA34) + volume MA + chop warmup
-    start_idx = max(34, 20, 14)  # 34 for EMA34
+    # Warmup: need Camarilla (1d EMA34) + volume MA
+    start_idx = max(34, 20)  # 34 for EMA34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(chop[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -107,14 +81,14 @@ def generate_signals(prices):
         trend_1d_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 + 1d uptrend + volume spike + NOT in strong range (avoid false breakouts)
+            # Long: price breaks above R1 + 1d uptrend + volume spike
             # Require confirmation: price outside bands for 2 consecutive bars
             long_breakout = (close[i] > camarilla_r1_aligned[i]) and (close[i-1] > camarilla_r1_aligned[i-1])
-            long_signal = long_breakout and trend_1d_uptrend and volume_spike[i] and not chop_range[i]
+            long_signal = long_breakout and trend_1d_uptrend and volume_spike[i]
             
-            # Short: price breaks below S1 + 1d downtrend + volume spike + NOT in strong range
+            # Short: price breaks below S1 + 1d downtrend + volume spike
             short_breakout = (close[i] < camarilla_s1_aligned[i]) and (close[i-1] < camarilla_s1_aligned[i-1])
-            short_signal = short_breakout and trend_1d_downtrend and volume_spike[i] and not chop_range[i]
+            short_signal = short_breakout and trend_1d_downtrend and volume_spike[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -127,20 +101,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price touches S1 OR 1d trend turns down OR chop becomes strong range (revert to mean)
-            if (close[i] < camarilla_s1_aligned[i] or not trend_1d_uptrend or chop_range[i]):
+            # Exit: price touches S1 OR 1d trend turns down
+            if (close[i] < camarilla_s1_aligned[i] or not trend_1d_uptrend):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price touches R1 OR 1d trend turns up OR chop becomes strong range
-            if (close[i] > camarilla_r1_aligned[i] or not trend_1d_downtrend or chop_range[i]):
+            # Exit: price touches R1 OR 1d trend turns up
+            if (close[i] > camarilla_r1_aligned[i] or not trend_1d_downtrend):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
