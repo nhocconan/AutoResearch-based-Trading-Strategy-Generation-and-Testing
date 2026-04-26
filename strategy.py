@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2
-Hypothesis: Tighten entry conditions from prior version by requiring volume > 2.5x 20-bar MA and adding ATR(14) volatility filter (>0.02) to reduce false breakouts. Keep 12h EMA50 trend filter and Camarilla R3/S3 breakouts. Target 15-30 trades/year (60-120 total over 4 years) to minimize fee drag while maintaining edge in bull/bear markets via 12h trend alignment.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and dynamic volume spike (>2.0x 20-bar MA). Uses proven Camarilla structure from DB top performers, with 1d HTF trend to avoid counter-trend trades and volume confirmation to reduce false breakouts. Designed for 20-50 trades/year (80-200 total over 4 years) to minimize fee drag. Works in bull/bear markets by following 1d trend while using Camarilla levels for precise structure-based entries.
 """
 
 import numpy as np
@@ -18,18 +18,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Previous day's OHLC for Camarilla levels (using 1d data)
-    df_1d = get_htf_data(prices, '1d')
+    # Already loaded above as df_1d
     if len(df_1d) < 2:
         return np.zeros(n)
     
@@ -38,7 +38,10 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: R3, R2, R1, PP, S1, S2, S3
+    # Camarilla levels: R3, S3 (using tighter bands for fewer trades)
+    # R3 = Close + ((High-Low) * 1.1/4)
+    # S3 = Close - ((High-Low) * 1.1/4)
+    
     rng = high_1d - low_1d
     camarilla_r3 = close_1d + (rng * 1.1 / 4)
     camarilla_s3 = close_1d - (rng * 1.1 / 4)
@@ -47,33 +50,24 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: volume > 2.5x 20-period average (tighter than 2.0x)
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.5)
-    
-    # ATR(14) volatility filter: only trade when volatility > 0.02 (2%)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    volatility_filter = atr > 0.02 * close  # ATR > 2% of price
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     base_size = 0.25  # Position size
     
-    # Warmup: max of calculations (20 for vol, 50 for ema, 14 for atr, 1 for camarilla)
-    start_idx = max(20, 50, 14)
+    # Warmup: max of calculations (20 for vol, 34 for ema, 1 for camarilla)
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i])):
+            np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             bars_since_entry += 1 if position != 0 else 0
             continue
@@ -81,17 +75,16 @@ def generate_signals(prices):
         close_val = close[i]
         camarilla_r3_val = camarilla_r3_aligned[i]
         camarilla_s3_val = camarilla_s3_aligned[i]
-        ema_50_val = ema_50_12h_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
-        vol_filter = volatility_filter[i]
         
-        # Determine 12h trend: bullish if price > EMA50, bearish if price < EMA50
-        bullish_12h = close_val > ema_50_val
-        bearish_12h = close_val < ema_50_val
+        # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
+        bullish_1d = close_val > ema_34_val
+        bearish_1d = close_val < ema_34_val
         
-        # Entry conditions: breakout of Camarilla R3/S3 in trend direction with volume spike and volatility filter
-        long_entry = (close_val > camarilla_r3_val) and bullish_12h and vol_spike and vol_filter
-        short_entry = (close_val < camarilla_s3_val) and bearish_12h and vol_spike and vol_filter
+        # Entry conditions: breakout of Camarilla R3/S3 in trend direction with volume spike
+        long_entry = (close_val > camarilla_r3_val) and bullish_1d and vol_spike
+        short_entry = (close_val < camarilla_s3_val) and bearish_1d and vol_spike
         
         # Exit conditions: opposite Camarilla level touch (S3 for long, R3 for short)
         exit_long = close_val < camarilla_s3_val
@@ -134,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn"
 timeframe = "4h"
 leverage = 1.0
