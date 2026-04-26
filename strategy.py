@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-In trending markets (price > 1d EMA34), buy R3 breakouts or sell S3 breakdowns with volume > 1.5x average.
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-37 trades/year.
-Works in bull/bear via trend alignment: only trade in direction of 1d trend.
+1d_Donchian20_VolumeSpike_HTFTrend_v1
+Hypothesis: 1d Donchian(20) breakout with 1w HTF trend filter and volume confirmation. 
+Long when price breaks above 20-day high with volume > 1.5x 20-day average and 1w trend up.
+Short when price breaks below 20-day low with volume > 1.5x 20-day average and 1w trend down.
+Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency 
+(7-25/year) to overcome fee drag and work in both bull (breakouts) and bear (breakdowns) markets.
 """
 
 import numpy as np
@@ -21,43 +22,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend and volume average
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA34 for HTF trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    htf_trend = np.where(close > ema_34_1d_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
+    # Calculate 20-period Donchian channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate 20-period volume average for spike detection
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_avg_20)
+    # Calculate 20-period average volume for volume spike filter
+    avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().values
+    volume_spike_threshold = 1.5  # volume must be > 1.5x average
     
-    # Calculate Camarilla levels from previous 12h bar
-    # R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
-    # Using typical Camarilla formula: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
-    # Simplified: range = high - low, R3 = close + range * 1.1/4, S3 = close - range * 1.1/4
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    range_12h = prev_high - prev_low
-    r3 = prev_close + (range_12h * 1.1 / 4)
-    s3 = prev_close - (range_12h * 1.1 / 4)
+    # Calculate 1w EMA50 for HTF trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    htf_trend = np.where(close > ema_50_1w_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for EMA, 20 for volume avg, 1 for Camarilla)
-    start_idx = max(34, 20)
+    # Start after warmup (need 20 for Donchian and volume avg)
+    start_idx = lookback
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or
-            np.isnan(r3[i]) or np.isnan(s3[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(htf_trend[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -67,55 +58,51 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition
-        vol_spike = volume_spike[i]
+        # Check for volume spike
+        volume_spike = volume[i] > (avg_volume[i] * volume_spike_threshold)
         
-        # Trend alignment condition
-        trend_up = htf_trend[i] == 1
-        trend_down = htf_trend[i] == -1
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # break above previous 20-day high
+        breakout_down = close[i] < lowest_low[i-1]  # break below previous 20-day low
         
-        # Breakout conditions
-        breakout_up = close[i] > r3[i]
-        breakout_down = close[i] < s3[i]
+        # Exit conditions: reverse signal or Donchian middle line (optional)
+        exit_long = close[i] < (highest_high[i-1] + lowest_low[i-1]) / 2  # mid-point
+        exit_short = close[i] > (highest_high[i-1] + lowest_low[i-1]) / 2  # mid-point
         
-        # Exit conditions: return to midpoint or opposite Camarilla level
-        midpoint = (r3[i] + s3[i]) / 2
-        exit_long = close[i] < midpoint
-        exit_short = close[i] > midpoint
-        
-        if trend_up and vol_spike and breakout_up:
-            # Long breakout in uptrend with volume spike
-            if position != 1:
+        if htf_trend[i] == 1:  # 1w uptrend - look for longs
+            if breakout_up and volume_spike:
+                if position != 1:
+                    signals[i] = 0.25
+                    position = 1
+                else:
+                    signals[i] = 0.25
+            elif position == 1 and exit_long:
+                signals[i] = 0.0
+                position = 0
+            elif position == 0:
+                signals[i] = 0.0
+            else:  # position == -1, flip to long
                 signals[i] = 0.25
                 position = 1
-            else:
-                signals[i] = 0.25
-        elif trend_down and vol_spike and breakout_down:
-            # Short breakdown in downtrend with volume spike
-            if position != -1:
+                
+        elif htf_trend[i] == -1:  # 1w downtrend - look for shorts
+            if breakout_down and volume_spike:
+                if position != -1:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = -0.25
+            elif position == -1 and exit_short:
+                signals[i] = 0.0
+                position = 0
+            elif position == 0:
+                signals[i] = 0.0
+            else:  # position == 1, flip to short
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = -0.25
-        elif position == 1 and exit_long:
-            # Exit long position
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and exit_short:
-            # Exit short position
-            signals[i] = 0.0
-            position = 0
-        else:
-            # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = 0.25
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_Donchian20_VolumeSpike_HTFTrend_v1"
+timeframe = "1d"
 leverage = 1.0
