@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v1
 Hypothesis: Trade Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation.
-Uses ATR trailing stop (2.0x) and requires price >2.0% from EMA34 to avoid chop. Position size 0.25.
+Uses ATR trailing stop (2.0x) and requires price >1.5% from EMA34 to avoid chop. Position size 0.25.
 Designed for stable performance in both bull and bear markets via confluence: pivot break + HTF trend + volume spike.
 Tight entry conditions target ~100-150 total trades over 4 years to minimize fee drag.
 """
@@ -88,16 +88,16 @@ def generate_signals(prices):
         atr_14_val = atr_14[i]
         
         if position == 0:
-            # Long: break above R1, uptrend (close > EMA34), volume spike, price >2.0% from EMA
+            # Long: break above R1, uptrend (close > EMA34), volume spike, price >1.5% from EMA
             long_signal = (high_val > camarilla_r1_val) and \
                           (close_val > ema_34_1d_val) and \
                           (volume_val > 2.0 * vol_median_val) and \
-                          (np.abs((close_val - ema_34_1d_val) / ema_34_1d_val * 100) > 2.0)
-            # Short: break below S1, downtrend (close < EMA34), volume spike, price >2.0% from EMA
+                          (np.abs((close_val - ema_34_1d_val) / ema_34_1d_val * 100) > 1.5)
+            # Short: break below S1, downtrend (close < EMA34), volume spike, price >1.5% from EMA
             short_signal = (low_val < camarilla_s1_val) and \
                            (close_val < ema_34_1d_val) and \
                            (volume_val > 2.0 * vol_median_val) and \
-                           (np.abs((close_val - ema_34_1d_val) / ema_34_1d_val * 100) > 2.0)
+                           (np.abs((close_val - ema_34_1d_val) / ema_34_1d_val * 100) > 1.5)
             
             if long_signal:
                 signals[i] = 0.25
@@ -136,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
