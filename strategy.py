@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (ATR ratio > 1.5). 
-Camarilla R3/S3 represent stronger support/resistance than R1/S1, reducing false breakouts. 
-Volume spike confirms institutional participation. 1d EMA34 filter ensures alignment with daily trend. 
-Discrete sizing 0.25 limits trade frequency (~20-30/year). Works in bull/bear via trend filter.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (ATR ratio > 1.5). Trade only breakouts aligned with 1d trend during volatility expansion. Uses discrete sizing 0.25 to limit trades (~30/year). Volume spike ensures institutional participation. Works in bull/bear via trend filter and volatility regime.
 """
 
 import numpy as np
@@ -44,8 +41,8 @@ def generate_signals(prices):
     atr_ratio = atr / pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     
     # Calculate previous day's high/low/close for Camarilla levels
-    # For 6h data, 4 periods = 1 day (4 * 6h = 24h)
-    lookback = 4
+    # Use 6-period lookback for 4h data (6*4h = 24h = 1 day)
+    lookback = 6
     prev_high = pd.Series(high).shift(lookback).rolling(window=lookback, min_periods=lookback).max().values
     prev_low = pd.Series(low).shift(lookback).rolling(window=lookback, min_periods=lookback).min().values
     prev_close = pd.Series(close).shift(lookback).rolling(window=lookback, min_periods=lookback).mean().values
@@ -61,7 +58,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of calculations (34 for EMA, 50 for ATR ratio, 4 for Camarilla)
+    # Warmup: max of calculations (50 for ATR ratio, 34 for EMA, 6 for Camarilla)
     start_idx = 50
     
     for i in range(start_idx, n):
@@ -76,7 +73,7 @@ def generate_signals(prices):
         r3_val = camarilla_r3[i]
         s3_val = camarilla_s3[i]
         ema_34_val = ema_34_1d_aligned[i]
-        vol_spike = atr_ratio[i] > 1.5  # volume spike threshold
+        vol_spike = atr_ratio[i] > 1.5  # volume spike
         size = fixed_size
         
         # Entry conditions: Camarilla breakout with volume spike AND aligned with 1d EMA34 trend
@@ -94,12 +91,12 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on Camarilla H4/L4 or trend reversal
-            camarilla_h4 = prev_close + range_val * 1.1 / 2
-            camarilla_l4 = prev_close - range_val * 1.1 / 2
-            h4_val = camarilla_h4[i]
-            l4_val = camarilla_l4[i]
-            if close_val < h4_val and close_val > l4_val:  # back inside H4/L4
+            # Long - exit on Camarilla H3/L3 or trend reversal
+            camarilla_h3 = prev_close + range_val * 1.1 / 4
+            camarilla_l3 = prev_close - range_val * 1.1 / 4
+            h3_val = camarilla_h3[i]
+            l3_val = camarilla_l3[i]
+            if close_val < h3_val and close_val > l3_val:  # back inside H3/L3
                 signals[i] = 0.0
                 position = 0
             elif close_val < ema_34_val:  # trend reversal
@@ -108,12 +105,12 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on Camarilla H4/L4 or trend reversal
-            camarilla_h4 = prev_close + range_val * 1.1 / 2
-            camarilla_l4 = prev_close - range_val * 1.1 / 2
-            h4_val = camarilla_h4[i]
-            l4_val = camarilla_l4[i]
-            if close_val > l4_val and close_val < h4_val:  # back inside H4/L4
+            # Short - exit on Camarilla H3/L3 or trend reversal
+            camarilla_h3 = prev_close + range_val * 1.1 / 4
+            camarilla_l3 = prev_close - range_val * 1.1 / 4
+            h3_val = camarilla_h3[i]
+            l3_val = camarilla_l3[i]
+            if close_val > l3_val and close_val < h3_val:  # back inside H3/L3
                 signals[i] = 0.0
                 position = 0
             elif close_val > ema_34_val:  # trend reversal
@@ -124,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
+timeframe = "4h"
 leverage = 1.0
