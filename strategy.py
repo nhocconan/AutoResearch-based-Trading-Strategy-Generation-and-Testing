@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_ChopFilter_v1
-Hypothesis: On daily timeframe, KAMA trend direction + RSI(14) extreme + Choppiness index regime filter captures sustained moves while avoiding whipsaws in range/chop markets. Works in bull/bear via KAMA's adaptive smoothing. Designed for 1d to target 7-25 trades/year with discrete sizing (0.25).
+6h_WilliamsFractal_Donchian20_1dTrend_VolumeSpike_v1
+Hypothesis: Combine 1d Williams fractal breakouts with 6h Donchian(20) and 1d EMA50 trend filter + volume confirmation.
+Williams fractals provide swing high/low structure; Donchian breakouts catch momentum; 1d EMA50 ensures trend alignment.
+Designed for 6h to target 12-37 trades/year with discrete sizing (0.25). Works in bull/bear via 1d trend filter.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,97 +20,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for regime filter (chop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop for fractals and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # KAMA on 1d close (trend direction)
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=1)  # 10-period volatility
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.full_like(close_1d, np.nan, dtype=float)
-    kama[29] = close_1d[29]  # seed
-    for i in range(30, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
+    # 1d Williams Fractals (need 2-bar confirmation delay)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Align with 2-bar extra delay for fractal confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
-    # Align KAMA to 1d timeframe (already 1d, but using helper for consistency)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1w, kama_1d)  # using 1w as HTF for alignment logic
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # RSI(14) on 1d close
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(14, np.nan), rsi])  # align length
+    # 6h Donchian(20) - using current timeframe prices
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align RSI to 1d timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
-    
-    # Choppiness Index (14) on 1w data
-    atr_1w = []
-    tr_1w = np.maximum(df_1w['high'].values, np.roll(df_1w['close'].values, 1))
-    tr_1w = np.maximum(tr_1w, df_1w['low'].values)
-    tr_1w = np.maximum(tr_1w, np.roll(df_1w['close'].values, 1)) - np.minimum(df_1w['low'].values, np.roll(df_1w['close'].values, 1))
-    tr_1w = np.maximum(tr_1w, np.roll(df_1w['high'].values, 1)) - np.minimum(df_1w['low'].values, np.roll(df_1w['high'].values, 1))
-    tr_1w[0] = df_1w['high'][0] - df_1w['low'][0]  # first bar
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    max_high_1w = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
-    min_low_1w = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(np.sum(atr_1w) / (np.log10(14) * (max_high_1w - min_low_1w)))
-    chop = np.where((max_high_1w - min_low_1w) != 0, chop, 50)
-    
-    # Align Chop to 1d timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Warmup: max of KAMA seed (30), RSI (14), Chop (14)
-    start_idx = 30
+    # Warmup: max of Donchian(20), EMA50(50), volume MA(20)
+    start_idx = max(20, 50, 20)
     
     for i in range(start_idx, n):
-        kama_val = kama_1d_aligned[i]
         close_val = close[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = chop_aligned[i]
+        high_val = high[i]
+        low_val = low[i]
+        ema_val = ema_50_1d_aligned[i]
+        bullish_fractal_val = bullish_fractal_aligned[i]
+        bearish_fractal_val = bearish_fractal_aligned[i]
+        dch_high = donchian_high[i]
+        dch_low = donchian_low[i]
+        vol_spike = volume_spike[i]
         
         # Skip if any data not ready
-        if (np.isnan(kama_val) or np.isnan(rsi_val) or np.isnan(chop_val)):
+        if (np.isnan(ema_val) or np.isnan(bullish_fractal_val) or np.isnan(bearish_fractal_val) or
+            np.isnan(dch_high) or np.isnan(dch_low)):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Trend filter: price vs KAMA
-        uptrend = close_val > kama_val
-        downtrend = close_val < kama_val
+        # Trend filter: price vs 1d EMA50
+        uptrend = close_val > ema_val
+        downtrend = close_val < ema_val
         
-        # RSI extremes: oversold < 30, overbought > 70
-        rsi_oversold = rsi_val < 30
-        rsi_overbought = rsi_val > 70
+        # Long: bullish fractal break above Donchian high with 1d uptrend and volume spike
+        long_condition = (
+            high_val > dch_high and  # break above Donchian high
+            bullish_fractal_val > 0 and  # confirmed bullish fractal
+            uptrend and
+            vol_spike
+        )
+        # Short: bearish fractal break below Donchian low with 1d downtrend and volume spike
+        short_condition = (
+            low_val < dch_low and  # break below Donchian low
+            bearish_fractal_val > 0 and  # confirmed bearish fractal
+            downtrend and
+            vol_spike
+        )
         
-        # Chop regime: chop > 61.8 = range (mean revert), chop < 38.2 = trending (trend follow)
-        chop_range = chop_val > 61.8
-        chop_trending = chop_val < 38.2
-        
-        # Long: price > KAMA (uptrend) + RSI oversold + chop trending (to avoid false signals in strong chop)
-        long_condition = uptrend and rsi_oversold and chop_trending
-        # Short: price < KAMA (downtrend) + RSI overbought + chop trending
-        short_condition = downtrend and rsi_overbought and chop_trending
-        
-        # Exit: opposite RSI extreme or chop becomes range
-        long_exit = (position == 1 and (rsi_val > 70 or chop_range))
-        short_exit = (position == -1 and (rsi_val < 30 or chop_range))
+        # Exit: price re-enters Donchian channel
+        long_exit = (position == 1 and close_val < dch_high)
+        short_exit = (position == -1 and close_val > dch_low)
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -128,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Direction_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_WilliamsFractal_Donchian20_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
