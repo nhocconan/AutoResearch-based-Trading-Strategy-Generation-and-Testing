@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Donchian20_Breakout_TrendFilter
-Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
-- Long when price breaks above 6h Donchian(20) high AND weekly pivot shows bullish bias AND volume > 1.5 * volume_ma(20)
-- Short when price breaks below 6h Donchian(20) low AND weekly pivot shows bearish bias AND volume > 1.5 * volume_ma(20)
-- Weekly pivot bias: bullish if weekly close > weekly pivot, bearish if weekly close < weekly pivot
-- Volume confirmation reduces false breakouts
-- Exit on opposite Donchian level or weekly pivot bias reversal
-- Designed for lower frequency (target 12-37 trades/year on 6h) to minimize fee drag
-- Novelty: Combines Donchian breakout with weekly pivot bias for structural trend alignment
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume confirmation, and ATR-based stoploss.
+- Long when price breaks above Camarilla R1 level AND 1d EMA34 uptrend AND volume > 1.8 * volume_ma(20)
+- Short when price breaks below Camarilla S1 level AND 1d EMA34 downtrend AND volume > 1.8 * volume_ma(20)
+- Uses Camarilla pivot levels from 4h chart for structure-based breakouts
+- 1d EMA34 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws in bear markets
+- Volume spike (1.8x) confirms institutional participation and reduces false breakouts
+- ATR-based stoploss: exit long if price < highest_high_since_entry - 2.5 * ATR(14)
+- ATR-based stoploss: exit short if price > lowest_low_since_entry + 2.5 * ATR(14)
+- Designed for moderate frequency (target 20-50 trades/year on 4h) to minimize fee drag
+- Novelty: Combines proven Camarilla R1/S1 breakout logic with ATR trailing stop for better risk management
 """
 
 import numpy as np
@@ -25,50 +27,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for pivot bias filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    # Need to shift by 1 to avoid look-ahead: use prior week's data for current week's bias
-    weekly_close = np.roll(df_1w['close'].values, 1)
-    weekly_high = np.roll(df_1w['high'].values, 1)
-    weekly_low = np.roll(df_1w['low'].values, 1)
-    weekly_open = np.roll(df_1w['open'].values, 1)
-    # First bar: use first available weekly data
-    weekly_close[0] = df_1w['close'].values[0]
-    weekly_high[0] = df_1w['high'].values[0]
-    weekly_low[0] = df_1w['low'].values[0]
-    weekly_open[0] = df_1w['open'].values[0]
+    # Calculate 1d EMA34 for trend filter (needs completed 1d candle)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Trend: 1 = uptrend (close > EMA34), -1 = downtrend (close < EMA34), 0 = neutral/invalid
+    trend_1d = np.where(ema_34_1d_aligned > 0, 
+                        np.where(close > ema_34_1d_aligned, 1, -1), 
+                        0)
     
-    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Weekly bias: 1 if close > pivot (bullish), -1 if close < pivot (bearish), 0 otherwise
-    weekly_bias_raw = np.where(weekly_close > weekly_pivot, 1, 
-                               np.where(weekly_close < weekly_pivot, -1, 0))
-    # Align to 6h timeframe (wait for weekly bar to close)
-    weekly_bias = align_htf_to_ltf(prices, df_1w, weekly_bias_raw)
+    # Calculate ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 6h Donchian channels (20-period)
-    # Donchian high = max(high, lookback=20)
-    # Donchian low = min(low, lookback=20)
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Camarilla pivot levels on 4h chart (primary timeframe)
+    # Using previous bar's OHLC for Camarilla calculation
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # first bar uses current values
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    # Calculate volume filter: volume > 1.5 * volume_ma(20) for confirmation
+    # Camarilla calculations
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    
+    # Resistance levels (R1, R3)
+    R1 = pivot + (range_hl * 1.1 / 12.0)
+    R3 = pivot + (range_hl * 1.1 / 4.0)
+    # Support levels (S1, S3)
+    S1 = pivot - (range_hl * 1.1 / 12.0)
+    S3 = pivot - (range_hl * 1.1 / 4.0)
+    
+    # Calculate volume filter: volume > 1.8 * volume_ma(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    volume_spike = volume > (1.8 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    # Track highest high since entry for longs, lowest low since entry for shorts
+    highest_since_entry = np.zeros(n)
+    lowest_since_entry = np.zeros(n)
     
-    # Start after warmup (need 20 for Donchian, 20 for volume MA)
-    start_idx = max(lookback, 20)
+    # Start after warmup (need 34 for 1d EMA, 20 for volume MA, 14 for ATR)
+    start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(weekly_bias[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or
+            np.isnan(trend_1d[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -76,37 +92,75 @@ def generate_signals(prices):
                 signals[i] = 0.25
             else:
                 signals[i] = -0.25
+            # Update tracking variables
+            if position == 1:
+                highest_since_entry[i] = max(high[i], highest_since_entry[i-1]) if i > 0 else high[i]
+                lowest_since_entry[i] = lowest_since_entry[i-1] if i > 0 else low[i]
+            elif position == -1:
+                lowest_since_entry[i] = min(low[i], lowest_since_entry[i-1]) if i > 0 else low[i]
+                highest_since_entry[i] = highest_since_entry[i-1] if i > 0 else high[i]
+            else:
+                highest_since_entry[i] = highest_since_entry[i-1] if i > 0 else high[i]
+                lowest_since_entry[i] = lowest_since_entry[i-1] if i > 0 else low[i]
             continue
         
-        # Donchian breakout conditions with weekly bias and volume spike filter
+        # Initialize tracking variables for current bar
+        if i == start_idx:
+            highest_since_entry[i] = high[i]
+            lowest_since_entry[i] = low[i]
+        else:
+            highest_since_entry[i] = highest_since_entry[i-1]
+            lowest_since_entry[i] = lowest_since_entry[i-1]
+        
+        # Update tracking variables based on position
+        if position == 1:
+            highest_since_entry[i] = max(high[i], highest_since_entry[i-1])
+            lowest_since_entry[i] = lowest_since_entry[i-1]
+        elif position == -1:
+            lowest_since_entry[i] = min(low[i], lowest_since_entry[i-1])
+            highest_since_entry[i] = highest_since_entry[i-1]
+        
+        # ATR-based stoploss conditions
+        stop_long = False
+        stop_short = False
+        if position == 1 and highest_since_entry[i] > 0:
+            stop_long = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+        elif position == -1 and lowest_since_entry[i] > 0:
+            stop_short = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+        
+        # Camarilla R1/S1 breakout conditions with trend and volume spike filter
         if position == 0:
-            # Long: Price breaks above Donchian high AND weekly bullish bias AND volume spike
-            if close[i] > donchian_high[i] and weekly_bias[i] == 1 and volume_spike[i]:
+            # Long: Price breaks above Camarilla R1 AND 1d uptrend AND volume spike
+            if close[i] > R1[i] and trend_1d[i] == 1 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low AND weekly bearish bias AND volume spike
-            elif close[i] < donchian_low[i] and weekly_bias[i] == -1 and volume_spike[i]:
+                highest_since_entry[i] = high[i]
+                lowest_since_entry[i] = low[i]
+            # Short: Price breaks below Camarilla S1 AND 1d downtrend AND volume spike
+            elif close[i] < S1[i] and trend_1d[i] == -1 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
+                highest_since_entry[i] = high[i]
+                lowest_since_entry[i] = low[i]
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Price falls below Donchian low OR weekly bias turns bearish
-            if close[i] < donchian_low[i] or weekly_bias[i] == -1:
+            # Exit: Price falls below Camarilla S3 OR 1d trend turns down OR ATR stoploss hit
+            if close[i] < S3[i] or trend_1d[i] == -1 or stop_long:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Price rises above Donchian high OR weekly bias turns bullish
-            if close[i] > donchian_high[i] or weekly_bias[i] == 1:
+            # Exit: Price rises above Camarilla R3 OR 1d trend turns up OR ATR stoploss hit
+            if close[i] > R3[i] or trend_1d[i] == 1 or stop_short:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyPivot_Donchian20_Breakout_TrendFilter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
