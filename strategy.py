@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_HighLow_Breakout_4hTrend_1dVolFilter_v1
-Hypothesis: Trade 1h breakouts of prior session high/low with 4h EMA50 trend filter and 1d volume confirmation (1.5x median). Uses ATR(14) trailing stop (2.0x) and session filter (08-20 UTC). Designed for moderate trade frequency (~20-40/year) by requiring HTF trend alignment and volume confirmation. Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend). Focus on BTC/ETH as primary targets.
+6h_WeeklyPivot_VolumeReversion_v1
+Hypothesis: Trade weekly Camarilla pivot mean reversion on 6h timeframe with volume confirmation. 
+Long when price touches S3 with volume spike (>2x median) and closes above open (bullish rejection).
+Short when price touches R3 with volume spike and closes below open (bearish rejection).
+Uses 1d EMA50 as trend filter: only long when price > EMA50, short when price < EMA50.
+Weekly pivot provides structural support/resistance that works in both bull and bear markets.
+Volume spike confirms institutional interest at pivot levels.
+Target: 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
 """
 
 import numpy as np
@@ -14,142 +20,112 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for HTF trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get 1d data for volume filter
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly Camarilla levels from previous weekly bar
+    # R3 = close + 1.1*(high-low)*1.1/4
+    # S3 = close - 1.1*(high-low)*1.1/4
+    prev_weekly_close = df_1w['close'].shift(1).values
+    prev_weekly_high = df_1w['high'].shift(1).values
+    prev_weekly_low = df_1w['low'].shift(1).values
+    camarilla_r3 = prev_weekly_close + 1.1 * (prev_weekly_high - prev_weekly_low) * 1.1 / 4
+    camarilla_s3 = prev_weekly_close - 1.1 * (prev_weekly_high - prev_weekly_low) * 1.1 / 4
     
-    # 1d median volume for volume filter
-    vol_median_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).median().values
+    # Daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF indicators to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    vol_median_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_1d)
+    # Align HTF data to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # ATR(14) for stop (calculated on 1h)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex
+    # Volume confirmation: 2.0x median volume (balanced for trade frequency)
+    vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    long_stop = 0.0
-    short_stop = 0.0
     
-    # Warmup: max of 4h EMA (50), 1d volume median (20), 1h ATR (14)
-    start_idx = max(50, 20, 14)
+    # Warmup: max of weekly pivot calculation (2), daily EMA (50), volume median (30)
+    start_idx = max(2, 50, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_median_1d_aligned[i]) or 
-            np.isnan(atr_14[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_median[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        ema_50_4h_val = ema_50_4h_aligned[i]
-        vol_median_1d_val = vol_median_1d_aligned[i]
+        camarilla_r3_val = camarilla_r3_aligned[i]
+        camarilla_s3_val = camarilla_s3_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
+        open_val = open_price[i]
         volume_val = volume[i]
-        atr_14_val = atr_14[i]
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)  # UTC 08-20
+        vol_median_val = vol_median[i]
         
-        if position == 0 and in_session:
-            # Calculate prior session high/low (using prior 4h bar for session context)
-            # For simplicity, use prior 20 bars (approx 1 session) high/low
-            lookback = 20
-            if i >= lookback:
-                session_high = np.max(high[i-lookback:i])
-                session_low = np.min(low[i-lookback:i])
-                
-                # Long: break above session high, uptrend (close > EMA50), volume > 1.5x median
-                long_signal = (high_val > session_high) and \
-                              (close_val > ema_50_4h_val) and \
-                              (volume_val > 1.5 * vol_median_1d_val)
-                # Short: break below session low, downtrend (close < EMA50), volume > 1.5x median
-                short_signal = (low_val < session_low) and \
-                               (close_val < ema_50_4h_val) and \
-                               (volume_val > 1.5 * vol_median_1d_val)
-                
-                if long_signal:
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = close_val
-                    long_stop = entry_price - 2.0 * atr_14_val
-                elif short_signal:
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = close_val
-                    short_stop = entry_price + 2.0 * atr_14_val
-                else:
-                    signals[i] = 0.0
+        if position == 0:
+            # Long: price touches S3 with volume spike and bullish rejection (close > open)
+            # Only in uptrend (price > EMA50)
+            long_signal = (low_val <= camarilla_s3_val) and \
+                          (close_val > open_val) and \
+                          (volume_val > 2.0 * vol_median_val) and \
+                          (close_val > ema_50_val)
+            
+            # Short: price touches R3 with volume spike and bearish rejection (close < open)
+            # Only in downtrend (price < EMA50)
+            short_signal = (high_val >= camarilla_r3_val) and \
+                           (close_val < open_val) and \
+                           (volume_val > 2.0 * vol_median_val) and \
+                           (close_val < ema_50_val)
+            
+            if long_signal:
+                signals[i] = 0.25
+                position = 1
+            elif short_signal:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
-        elif position == 0:
-            # Outside session: stay flat
-            signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.20
-            # Update trailing stop: move stop up as price makes new highs
-            long_stop = max(long_stop, high_val - 2.0 * atr_14_val)
-            # Exit: trailing stop hit or trend reversal (close < EMA50)
-            if (low_val < long_stop) or (close_val < ema_50_4h_val):
+            signals[i] = 0.25
+            # Exit conditions: price reaches midpoint (mean reversion target) or trend reversal
+            midpoint = (camarilla_s3_val + camarilla_r3_val) / 2
+            if close_val >= midpoint or close_val < ema_50_val:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.20
-            # Update trailing stop: move stop down as price makes new lows
-            short_stop = min(short_stop, low_val + 2.0 * atr_14_val)
-            # Exit: trailing stop hit or trend reversal (close > EMA50)
-            if (high_val > short_stop) or (close_val > ema_50_4h_val):
+            signals[i] = -0.25
+            # Exit conditions: price reaches midpoint (mean reversion target) or trend reversal
+            midpoint = (camarilla_s3_val + camarilla_r3_val) / 2
+            if close_val <= midpoint or close_val > ema_50_val:
                 signals[i] = 0.0
                 position = 0
-        else:
-            # Outside session with position: hold until exit conditions
-            if position == 1:
-                signals[i] = 0.20
-                long_stop = max(long_stop, high_val - 2.0 * atr_14_val)
-                if (low_val < long_stop) or (close_val < ema_50_4h_val):
-                    signals[i] = 0.0
-                    position = 0
-            elif position == -1:
-                signals[i] = -0.20
-                short_stop = min(short_stop, low_val + 2.0 * atr_14_val)
-                if (high_val > short_stop) or (close_val > ema_50_4h_val):
-                    signals[i] = 0.0
-                    position = 0
     
     return signals
 
-name = "1h_HighLow_Breakout_4hTrend_1dVolFilter_v1"
-timeframe = "1h"
+name = "6h_WeeklyPivot_VolumeReversion_v1"
+timeframe = "6h"
 leverage = 1.0
