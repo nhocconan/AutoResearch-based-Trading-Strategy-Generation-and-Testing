@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeConfirmation
-Hypothesis: Daily Camarilla R1/S1 breakout with 1-week EMA50 trend filter and volume confirmation.
-Enters long when price breaks above R1 with bullish 1w trend and volume spike.
-Enters short when price breaks below S1 with bearish 1w trend and volume spike.
-Exits when price reverses to opposite Camarilla level or 1w trend changes.
-Position sizing fixed at 0.25 to minimize fee churn. Target: 7-25 trades/year on 1d.
-Works in bull/bear by aligning with 1w trend to avoid counter-trend trades.
+6h_Ichimoku_Cloud_Breakout_1dTrend_v4
+Hypothesis: 6h Ichimoku cloud breakout with 1d trend filter and volume confirmation.
+Enters long when price breaks above cloud with bullish 1d trend (price > 1d EMA50) and volume spike.
+Enters short when price breaks below cloud with bearish 1d trend (price < 1d EMA50) and volume spike.
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 trades over 4 years.
+Ichimoku provides dynamic support/resistance via cloud, effective in both bull/bear markets when aligned with higher timeframe trend.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,55 +22,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get 1d data for Camarilla pivot calculation (need previous day's HLC)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate previous day's Camarilla pivot levels (R1, S1)
-    # Need HLC from previous day to avoid look-ahead
-    high_1d_prev = np.roll(df_1d['high'].values, 1)
-    low_1d_prev = np.roll(df_1d['low'].values, 1)
-    close_1d_prev = np.roll(df_1d['close'].values, 1)
-    # First value will be invalid (rolled from last), set to nan
-    high_1d_prev[0] = np.nan
-    low_1d_prev[0] = np.nan
-    close_1d_prev[0] = np.nan
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla pivot calculation
-    pivot = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d = high_1d_prev - low_1d_prev
-    r1 = pivot + (range_1d * 1.0 / 12.0)  # R1 level
-    s1 = pivot - (range_1d * 1.0 / 12.0)  # S1 level
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2.0
     
-    # Align Camarilla levels to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2.0
     
-    # Volume confirmation: volume > 2.0x 20-period MA
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2.0
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2.0
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # Volume confirmation: volume > 1.5x 20-period MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for 1w EMA, 20 for volume MA, 1 for pivot)
-    start_idx = max(50, 20, 1)
+    # Start after warmup (need 52 for Senkou B, 20 for volume MA)
+    start_idx = max(52, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -82,13 +79,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with 1w bullish trend and volume spike
-            if (close[i] > r1_aligned[i] and 
+            # Long: price breaks above cloud with bullish 1d trend and volume spike
+            if (close[i] > cloud_top[i] and 
                 close[i] > ema_50_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with 1w bearish trend and volume spike
-            elif (close[i] < s1_aligned[i] and 
+            # Short: price breaks below cloud with bearish 1d trend and volume spike
+            elif (close[i] < cloud_bottom[i] and 
                   close[i] < ema_50_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -97,20 +94,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price closes below S1 OR 1w trend turns bearish
-            if (close[i] < s1_aligned[i] or close[i] < ema_50_aligned[i]):
+            # Exit: price closes below cloud OR 1d trend turns bearish
+            if (close[i] < cloud_bottom[i] or close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price closes above R1 OR 1w trend turns bullish
-            if (close[i] > r1_aligned[i] or close[i] > ema_50_aligned[i]):
+            # Exit: price closes above cloud OR 1d trend turns bullish
+            if (close[i] > cloud_top[i] or close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeConfirmation"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Breakout_1dTrend_v4"
+timeframe = "6h"
 leverage = 1.0
