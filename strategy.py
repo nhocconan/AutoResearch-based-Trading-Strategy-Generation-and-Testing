@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_v2
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-R1/S1 levels provide more frequent but reliable breakouts than R3/S3 when combined with strong
-1d trend and volume confirmation. In bull markets: price breaks above R1 with 1d uptrend → long.
-In bear markets: price breaks below S1 with 1d downtrend → short. Volume confirmation ensures
-breakouts have genuine participation. Targets 75-200 total trades over 4 years (19-50/year).
+12h_Camarilla_R1S1_Breakout_1dTrend_v1
+Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
+R1/S1 levels act as intraday support/resistance with higher frequency than R3/S3 but still significant.
+In bull markets: price breaks above R1 with 1d uptrend → long continuation.
+In bear markets: price breaks below S1 with 1d downtrend → short continuation.
+Volume confirmation ensures breakouts have participation.
+Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -33,7 +34,7 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
-    # Using R1/S1 for breakout entries (more frequent than R3/S3)
+    # Using R1/S1 for breakout entries
     # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     # Where C = (H+L+Close)/3 of previous day
     prev_high = df_1d['high'].shift(1).values
@@ -50,19 +51,19 @@ def generate_signals(prices):
     r1 = pivot + (range_hl * 1.1 / 12.0)
     s1 = pivot - (range_hl * 1.1 / 12.0)
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 12h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average (approx 5d average on 4h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 1.5 * 24-period average (2d average on 12h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of 1d EMA(34), volume MA(20), and need 1d data
-    start_idx = max(34, 20) + 1
+    # Warmup: max of 1d EMA(34), volume MA(24), and need 1d data
+    start_idx = max(34, 24) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -116,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_v1"
+timeframe = "12h"
 leverage = 1.0
