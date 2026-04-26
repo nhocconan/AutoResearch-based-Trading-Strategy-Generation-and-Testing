@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirmation
-Hypothesis: On 1d timeframe, Camarilla R1/S1 breakouts with 1w EMA50 trend filter and volume confirmation capture institutional moves in both bull and bear markets. Camarilla levels derived from prior 1d range provide high-probability reversal/breakout zones. Volume confirmation ensures breakout validity. Targets 7-25 trades/year to minimize fee drag while maintaining edge via trend filter and volume confirmation.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v2
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation capture institutional moves. Tightened volume threshold (2.0x avg) and added ATR-based stoploss to reduce trades to target range (50-150/4 years). Works in bull/bear via trend filter and volatility-adjusted stops.
 """
 
 import numpy as np
@@ -18,57 +18,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate EMA50 on 1w for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for HTF trend and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate EMA34 on 1d for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate ATR(14) on 12h for stoploss
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     # Calculate Camarilla levels from prior 1d bar (H1, L1, C1)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Camarilla R1, S1 from previous day: R1 = C + 1.1*(H-L)/12, S1 = C - 1.1*(H-L)/12
     if len(high_1d) < 2:
-        camarilla_r1 = np.full_like(close_1d, np.nan)
-        camarilla_s1 = np.full_like(close_1d, np.nan)
+        camarilla_r1 = np.full_like(close_1d_arr, np.nan)
+        camarilla_s1 = np.full_like(close_1d_arr, np.nan)
     else:
-        camarilla_r1 = close_1d[:-1] + 1.1 * (high_1d[:-1] - low_1d[:-1]) / 12
-        camarilla_s1 = close_1d[:-1] - 1.1 * (high_1d[:-1] - low_1d[:-1]) / 12
-        # Shift to align with current day (prepend NaN for first day)
+        camarilla_r1 = close_1d_arr[:-1] + 1.1 * (high_1d[:-1] - low_1d[:-1]) / 12
+        camarilla_s1 = close_1d_arr[:-1] - 1.1 * (high_1d[:-1] - low_1d[:-1]) / 12
         camarilla_r1 = np.concatenate([[np.nan], camarilla_r1])
         camarilla_s1 = np.concatenate([[np.nan], camarilla_s1])
     
-    # Align Camarilla levels to 1d timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume average (20-period = 20 days on 1d) for volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (10-period = 5 days on 12h) for volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    atr_stop = 0.0
     
     # Start index: need warmup for calculations
-    start_idx = max(20, 50)  # volume MA, 1w EMA
+    start_idx = max(10, 14, 34)  # volume MA, ATR, 1d EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i]) or 
+            np.isnan(atr[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -79,7 +84,7 @@ def generate_signals(prices):
             continue
         
         # Get aligned values
-        ema_50_1w_val = ema_50_1w_aligned[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
         r1_val = camarilla_r1_aligned[i]
         s1_val = camarilla_s1_aligned[i]
         vol_ma_val = vol_ma[i]
@@ -87,57 +92,76 @@ def generate_signals(prices):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
+        atr_val = atr[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = vol_val > 1.5 * vol_ma_val
+        # Volume confirmation: current volume > 2.0x 10-period average (tighter)
+        volume_confirmed = vol_val > 2.0 * vol_ma_val
         
         if position == 0:
-            # Long: price breaks above R1 with uptrend (close > EMA50) and volume confirmation
-            long_signal = (high_val > r1_val) and (close_val > ema_50_1w_val) and volume_confirmed
-            # Short: price breaks below S1 with downtrend (close < EMA50) and volume confirmation
-            short_signal = (low_val < s1_val) and (close_val < ema_50_1w_val) and volume_confirmed
+            # Long: price breaks above R1 with uptrend (close > EMA34) and volume confirmation
+            long_signal = (high_val > r1_val) and (close_val > ema_34_1d_val) and volume_confirmed
+            # Short: price breaks below S1 with downtrend (close < EMA34) and volume confirmation
+            short_signal = (low_val < s1_val) and (close_val < ema_34_1d_val) and volume_confirmed
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
+                atr_stop = entry_price - 2.5 * atr_val  # 2.5x ATR stop
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
+                atr_stop = entry_price + 2.5 * atr_val  # 2.5x ATR stop
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
             # Exit conditions:
-            # 1. Opposite breakout: price breaks below S1 (exit long)
-            if low_val < s1_val:
+            # 1. ATR stoploss
+            if low_val <= atr_stop:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # 2. Trend reversal: close crosses below EMA50
-            elif close_val < ema_50_1w_val:
+                atr_stop = 0.0
+            # 2. Opposite breakout: price breaks below S1 (exit long)
+            elif low_val < s1_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+                atr_stop = 0.0
+            # 3. Trend reversal: close crosses below EMA34
+            elif close_val < ema_34_1d_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                atr_stop = 0.0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
             # Exit conditions:
-            # 1. Opposite breakout: price breaks above R1 (exit short)
-            if high_val > r1_val:
+            # 1. ATR stoploss
+            if high_val >= atr_stop:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # 2. Trend reversal: close crosses above EMA50
-            elif close_val > ema_50_1w_val:
+                atr_stop = 0.0
+            # 2. Opposite breakout: price breaks above R1 (exit short)
+            elif high_val > r1_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+                atr_stop = 0.0
+            # 3. Trend reversal: close crosses above EMA34
+            elif close_val > ema_34_1d_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                atr_stop = 0.0
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirmation"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeConfirmation_v2"
+timeframe = "12h"
 leverage = 1.0
