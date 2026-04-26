@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike (ATR ratio > 1.3). Trade only breakouts aligned with 4h trend during volatility expansion. Uses discrete sizing 0.20 to limit trades (~25/year). Volume spike ensures institutional participation. Works in bull/bear via trend filter and volatility regime.
+1h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 1h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume spike (ATR ratio > 1.3). 
+Trade only breakouts aligned with 1d trend during volatility expansion. 
+Uses discrete sizing 0.20 to limit trades (~20/year). Volume spike ensures institutional participation. 
+1d trend filter works in bull/bear markets by only taking trend-aligned breakouts.
 """
 
 import numpy as np
@@ -18,16 +21,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for HTF trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data ONCE before loop for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    close_4h_series = pd.Series(close_4h)
-    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate ATR(14) for volume regime
     atr_period = 14
@@ -65,18 +68,18 @@ def generate_signals(prices):
         # Skip if any data not ready
         if (np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]) or
             np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_ratio[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r1_val = camarilla_r1[i]
         s1_val = camarilla_s1[i]
-        ema_50_val = ema_50_4h_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
         vol_spike = atr_ratio[i] > 1.3  # volume spike
         size = fixed_size
         
-        # Entry conditions: Camarilla breakout with volume spike AND aligned with 4h EMA50 trend
+        # Entry conditions: Camarilla breakout with volume spike AND aligned with 1d EMA50 trend
         long_entry = (close_val > r1_val) and vol_spike and (close_val > ema_50_val)
         short_entry = (close_val < s1_val) and vol_spike and (close_val < ema_50_val)
         
@@ -121,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike"
+name = "1h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
 timeframe = "1h"
 leverage = 1.0
