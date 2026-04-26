@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: On 12h timeframe, price breaking Camarilla R1/S1 levels in the direction of 1d EMA34 trend with volume confirmation (>1.5x 20-period MA) captures high-probability trend continuation moves. The 1d EMA34 acts as a dynamic trend filter, while Camarilla levels provide precise entry/exit zones. Volume spike confirms institutional participation. Designed for 12-37 trades/year with discrete sizing (±0.30) and ATR-based trailing stop (2.0x) to minimize fee drag and work in both bull/bear markets with BTC/ETH edge.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
+Hypothesis: On 4h timeframe, price breaking Camarilla R1/S1 levels in the direction of 1d EMA34 trend with volume confirmation (>1.5x 20-period MA) captures high-probability trend continuation moves. The 1d EMA34 acts as a dynamic trend filter, while Camarilla levels provide precise entry/exit zones. Volume spike confirms institutional participation. Designed for 19-50 trades/year with discrete sizing (±0.30) and ATR-based trailing stop (2.0x) to minimize fee drag and work in both bull/bear markets with BTC/ETH edge.
 """
 
 import numpy as np
@@ -33,7 +33,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + daily_range * 1.1 / 12
     camarilla_s1 = close_1d - daily_range * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -42,15 +42,15 @@ def generate_signals(prices):
     ema_34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # 12h ATR(20) for trailing stop
+    # 4h ATR(20) for trailing stop
     tr1 = pd.Series(high).diff().abs()
     tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
     tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_12h = tr_12h.ewm(span=20, adjust=False, min_periods=20).mean()
-    atr_12h_values = atr_12h.values
+    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_4h = tr_4h.ewm(span=20, adjust=False, min_periods=20).mean()
+    atr_4h_values = atr_4h.values
     
-    # Volume spike filter: volume > 1.5 * 20-period MA on 12h
+    # Volume spike filter: volume > 1.5 * 20-period MA on 4h
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (volume_ma * 1.5)
     
@@ -61,7 +61,7 @@ def generate_signals(prices):
     lowest_since_short = 0.0
     
     # Warmup: max of EMA (34), ATR (20), volume MA (20) + time for 1d alignment
-    start_idx = max(34, 20, 20) + 16  # +16 to ensure 1d bar completion (12h -> 1d: 2 bars per day)
+    start_idx = max(34, 20, 20) + 6  # +6 to ensure 1d bar completion (4h -> 1d: 6 bars per day)
     
     for i in range(start_idx, n):
         close_val = close[i]
@@ -72,7 +72,7 @@ def generate_signals(prices):
         s1_val = camarilla_s1_aligned[i]
         ema_val = ema_34_aligned[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_12h_values[i]
+        atr_val = atr_4h_values[i]
         
         # Skip if any data not ready (NaN from alignment or calculation)
         if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema_val) or 
@@ -135,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
