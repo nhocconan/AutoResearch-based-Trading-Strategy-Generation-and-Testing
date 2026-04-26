@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: 12h breakout above/below Camarilla R3/S3 levels derived from 1d OHLC, in direction of 1d EMA34 trend, confirmed by volume spike (>1.5x 20-bar MA). Camarilla levels provide high-probability reversal/breakout zones. 1d trend filter ensures we trade with the higher timeframe momentum. Volume confirmation reduces false breakouts. Designed for 12-37 trades/year (50-150 total over 4 years) to avoid fee drag. Works in both bull and bear markets by following the 1d trend while using Camarilla structure for precise entries.
+4h_Donchian20_Breakout_1dTrend_VolumeConfirmation_v2
+Hypothesis: 4h breakout above/below 20-period Donchian channels in direction of 1d EMA34 trend, confirmed by volume spike (>1.5x 20-bar MA). Uses Donchian breakouts (proven edge from DB) with 1d trend filter to avoid counter-trend trades. Volume confirmation reduces false breakouts. Added 4-bar cooldown after exits to prevent whipsaw. Designed for 19-50 trades/year (75-200 total over 4 years) to avoid fee drag. Works in both bull and bear markets by following the 1d trend while using Donchian structure for precise entries.
 """
 
 import numpy as np
@@ -18,29 +18,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels and trend filter
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d OHLC for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels: R3, S3 from previous 1d bar
-    # R3 = close + 1.1*(high - low)/2
-    # S3 = close - 1.1*(high - low)/2
-    camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
-    
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    
     # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Donchian channels (20-period) on 4h
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,24 +39,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
+    bars_since_exit = 0  # cooldown counter
     base_size = 0.25  # Position size
     
-    # Warmup: max of calculations (20 for vol, 34 for ema)
-    start_idx = max(20, 34)
+    # Warmup: max of calculations (20 for Donchian, 20 for vol, 34 for ema)
+    start_idx = max(20, 20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(high_ma[i]) or 
+            np.isnan(low_ma[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
-            bars_since_entry += 1 if position != 0 else 0
+            if position != 0:
+                bars_since_entry += 1
+            else:
+                bars_since_exit += 1
             continue
         
         close_val = close[i]
-        r3_val = camarilla_r3_aligned[i]
-        s3_val = camarilla_s3_aligned[i]
+        high_ma_val = high_ma[i]
+        low_ma_val = low_ma[i]
         ema_34_val = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         
@@ -74,36 +68,44 @@ def generate_signals(prices):
         bullish_1d = close_val > ema_34_val
         bearish_1d = close_val < ema_34_val
         
-        # Entry conditions: breakout of Camarilla R3/S3 in trend direction with volume
-        long_entry = (close_val > r3_val) and bullish_1d and vol_spike
-        short_entry = (close_val < s3_val) and bearish_1d and vol_spike
+        # Entry conditions: breakout of Donchian channel in trend direction with volume
+        long_entry = (close_val > high_ma_val) and bullish_1d and vol_spike
+        short_entry = (close_val < low_ma_val) and bearish_1d and vol_spike
         
-        # Exit conditions: opposite Camarilla level touch (or trend reversal)
-        exit_long = (close_val < s3_val) or not bullish_1d
-        exit_short = (close_val > r3_val) or not bearish_1d
+        # Exit conditions: opposite Donchian channel touch (or trend reversal)
+        exit_long = (close_val < low_ma_val) or not bullish_1d
+        exit_short = (close_val > high_ma_val) or not bearish_1d
         
-        # Minimum holding period: 2 bars
-        min_hold = 2
+        # Minimum holding period: 3 bars
+        min_hold = 3
+        # Cooldown period after exit: 4 bars to prevent whipsaw
+        cooldown = 4
         
         if position == 0:
-            # Flat - look for entry
-            if long_entry:
-                signals[i] = base_size
-                position = 1
-                bars_since_entry = 0
-            elif short_entry:
-                signals[i] = -base_size
-                position = -1
-                bars_since_entry = 0
+            # Flat - look for entry only if cooldown period passed
+            if bars_since_exit >= cooldown:
+                if long_entry:
+                    signals[i] = base_size
+                    position = 1
+                    bars_since_entry = 0
+                    bars_since_exit = 0
+                elif short_entry:
+                    signals[i] = -base_size
+                    position = -1
+                    bars_since_entry = 0
+                    bars_since_exit = 0
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
-                bars_since_entry = 0
+            bars_since_exit += 1 if position == 0 else 0
         elif position == 1:
             # Long - check exit conditions only after minimum hold
             if bars_since_entry >= min_hold and exit_long:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = base_size
                 bars_since_entry += 1
@@ -113,12 +115,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = -base_size
                 bars_since_entry += 1
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeConfirmation_v2"
+timeframe = "4h"
 leverage = 1.0
