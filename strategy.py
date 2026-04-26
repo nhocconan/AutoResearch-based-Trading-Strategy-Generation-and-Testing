@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirmed_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1w EMA50 trend filter and volume confirmation produce high-probability trades in both bull and bear markets. The 1w EMA50 establishes the primary trend, while Camarilla levels provide precise entry/exit points. Volume confirmation reduces false breakouts. Target: 50-150 total trades over 4 years (12-37/year).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike produce high-probability trades. The 1d EMA34 establishes the primary trend, while Camarilla levels provide precise entry/exit points. Volume confirmation reduces false breakouts. Designed for BTC/ETH with controlled trade frequency (~20-50/year) to minimize fee drag and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,54 +18,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HTF trend filter (EMA50) and Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for HTF trend filter (EMA34) and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1w Camarilla levels (R1, S1, R3, S3)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_shifted = np.concatenate([[np.nan], close_1w[:-1]])  # previous week close
+    # Calculate 1d Camarilla levels (R1, S1, R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_shifted = np.concatenate([[np.nan], close_1d[:-1]])  # previous day close
     
-    # True range for previous week
-    tr_1w = np.maximum(
-        high_1w[1:] - low_1w[1:],
+    # True range for previous day
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
         np.maximum(
-            np.abs(high_1w[1:] - close_1w_shifted[1:]),
-            np.abs(low_1w[1:] - close_1w_shifted[1:])
+            np.abs(high_1d[1:] - close_1d_shifted[1:]),
+            np.abs(low_1d[1:] - close_1d_shifted[1:])
         )
     )
-    tr_1w = np.concatenate([[np.nan], tr_1w])
+    tr_1d = np.concatenate([[np.nan], tr_1d])
     
-    # Camarilla calculation uses previous week's OHLC
-    camarilla_range = high_1w - low_1w
-    r1 = close_1w_shifted + 1.1 * camarilla_range / 12
-    s1 = close_1w_shifted - 1.1 * camarilla_range / 12
-    r3 = close_1w_shifted + 1.1 * camarilla_range / 4
-    s3 = close_1w_shifted - 1.1 * camarilla_range / 4
+    # Camarilla calculation uses previous day's OHLC
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d_shifted + 1.1 * camarilla_range / 12
+    s1 = close_1d_shifted - 1.1 * camarilla_range / 12
+    r3 = close_1d_shifted + 1.1 * camarilla_range / 4
+    s3 = close_1d_shifted - 1.1 * camarilla_range / 4
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 12h volume confirmation: volume > 2.0x 20-period average
+    # 4h volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for EMA, 20 for volume MA)
-    start_idx = max(50, 20)
+    # Start after warmup (need 34 for EMA, 20 for volume MA)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
             np.isnan(r3_aligned[i]) or
@@ -80,9 +80,9 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1w trend filter (EMA50)
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # 1d trend filter (EMA34)
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation
         volume_spike = volume[i] > 2.0 * vol_ma_20[i]
@@ -125,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirmed_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
