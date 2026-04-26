@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_VolumeWeightedRSI_PivotReversal_v1
-Hypothesis: Use 1d pivot points with volume-weighted RSI on 6h to identify mean reversion extremes.
-Long when price touches S1/S2 AND VW-RSI < 30, short when touches R1/R2 AND VW-RSI > 70.
-Volume-weighted RSI reduces false signals during low-volume periods. Works in ranging markets (2021-2024) and 
-bear markets (2025+) by fading overextended moves at institutional pivot levels.
-Target: 80-120 total trades over 4 years = 20-30/year.
+12h_Camarilla_R4S4_Breakout_1wTrend_v1
+Hypothesis: Use 1d Camarilla R4/S4 breakouts with 1w EMA(34) trend filter on 12h timeframe.
+Long when price breaks above R4 AND volume confirmation AND 1w uptrend.
+Short when price breaks below S4 AND volume confirmation AND 1w downtrend.
+Exit on failed breakout or trend reversal. Designed for fewer trades (target: 50-150/4 years) to avoid fee drag.
+Works in bull markets (continuation breakouts) and bear markets (continuation breakdowns) via 1w trend filter.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,12 +22,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation
+    # Get 1d data for Camarilla calculation (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d pivot points (standard floor)
+    # Get 1w data for trend filter (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    # Calculate EMA(34) on 1w for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
+    # Where C = (H+L+Close)/3 of previous day
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -39,57 +51,29 @@ def generate_signals(prices):
     
     pivot = (prev_high + prev_low + prev_close) / 3.0
     range_hl = prev_high - prev_low
-    r1 = pivot * 2 - prev_low
-    s1 = pivot * 2 - prev_high
-    r2 = pivot + range_hl
-    s2 = pivot - range_hl
+    r4 = pivot + (range_hl * 1.1 / 2.0)
+    s4 = pivot - (range_hl * 1.1 / 2.0)
     
-    # Align pivot levels to 6h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Align Camarilla levels to 12h
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume-weighted RSI (6h)
-    def rsi(close_prices, period=14):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        # Volume-weighted average gain/loss
-        vol_ratio = volume / (np.mean(volume) + 1e-8)
-        vol_ratio = np.clip(vol_ratio, 0.1, 5.0)  # Prevent extreme weights
-        
-        avg_gain = np.zeros_like(gain)
-        avg_loss = np.zeros_like(loss)
-        
-        # Wilder's smoothing with volume weighting
-        avg_gain[period] = np.mean(gain[1:period+1] * vol_ratio[1:period+1]) / np.mean(vol_ratio[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1] * vol_ratio[1:period+1]) / np.mean(vol_ratio[1:period+1])
-        
-        for i in range(period+1, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i] * vol_ratio[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i] * vol_ratio[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_vals = 100 - (100 / (1 + rs))
-        return rsi_vals
-    
-    rsi_vals = rsi(close, 14)
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup
-    start_idx = max(30, 14) + 1
+    # Warmup: max of 1w EMA(34), volume MA(20), and need 1d data
+    start_idx = max(34, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi_vals[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(s2_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(vol_ma[i]) or
+            np.isnan(r4_aligned[i]) or
+            np.isnan(s4_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -100,18 +84,16 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        rsi_val = rsi_vals[i]
+        vol_conf = volume_confirm[i]
+        trend_up = close_val > ema_34_1w_aligned[i]   # 1w uptrend
+        trend_down = close_val < ema_34_1w_aligned[i]  # 1w downtrend
         
         if position == 0:
-            # Long: price at S1/S2 AND oversold VW-RSI
-            long_signal = ((abs(close_val - s1_aligned[i]) < (s1_aligned[i] - s2_aligned[i]) * 0.1) or
-                          (abs(close_val - s2_aligned[i]) < (s1_aligned[i] - s2_aligned[i]) * 0.1)) and \
-                         (rsi_val < 30)
+            # Long: price breaks above R4 AND volume confirm AND 1w uptrend
+            long_signal = (close_val > r4_aligned[i]) and vol_conf and trend_up
             
-            # Short: price at R1/R2 AND overbought VW-RSI
-            short_signal = ((abs(close_val - r1_aligned[i]) < (r2_aligned[i] - r1_aligned[i]) * 0.1) or
-                           (abs(close_val - r2_aligned[i]) < (r2_aligned[i] - r1_aligned[i]) * 0.1)) and \
-                          (rsi_val > 70)
+            # Short: price breaks below S4 AND volume confirm AND 1w downtrend
+            short_signal = (close_val < s4_aligned[i]) and vol_conf and trend_down
             
             if long_signal:
                 signals[i] = 0.25
@@ -124,20 +106,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price moves above pivot OR RSI > 50 (mean reversion complete)
-            if (close_val > pivot[i]) or (rsi_val > 50):
+            # Exit: price drops below R4 (failed breakout) OR 1w trend flips down
+            if (close_val < r4_aligned[i]) or (not trend_up):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price moves below pivot OR RSI < 50 (mean reversion complete)
-            if (close_val < pivot[i]) or (rsi_val < 50):
+            # Exit: price rises above S4 (failed breakdown) OR 1w trend flips up
+            if (close_val > s4_aligned[i]) or (not trend_down):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_VolumeWeightedRSI_PivotReversal_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R4S4_Breakout_1wTrend_v1"
+timeframe = "12h"
 leverage = 1.0
