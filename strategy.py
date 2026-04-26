@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_RSI2_Extreme_Reversal_1dTrendFilter_VolumeSpike_v1
-Hypothesis: 6h RSI(2) extreme reversals with 1-day trend filter and volume spike confirmation.
-Long when RSI(2) < 5 (extremely oversold) in 1-day uptrend with volume > 2x 20-period average.
-Short when RSI(2) > 95 (extremely overbought) in 1-day downtrend with volume > 2x 20-period average.
-Uses 1-day EMA50 as trend filter to ensure we only trade mean reversions in the direction of the primary trend.
-RSI(2) captures short-term exhaustion moves that tend to reverse quickly, especially when aligned with higher timeframe trend.
-Designed for 12-37 trades/year (50-150 over 4 years) by requiring confluence of extreme RSI, 1-day trend, and volume spike.
-Works in bull/bear via 1-day trend filter: only takes long reversions in uptrend, short in downtrend.
+12h_Camarilla_R3_S3_Breakout_1dTrend_ChopFilter_v1
+Hypothesis: 12h Camarilla pivot R3/S3 breakout with 1-day trend filter and choppiness regime filter.
+In trending markets (price > 1-day EMA34), long R3 breakout or short S3 breakout when market is not choppy (CHOP < 61.8).
+R3/S3 represent solid breakout levels, reducing false signals.
+Uses 1-day trend filter to ensure we trade with the primary trend.
+Choppiness filter avoids whipsaws in ranging markets.
+Designed for 12-37 trades/year (50-150 over 4 years) by requiring confluence of breakout, trend, and low chop.
+Works in bull/bear via 1-day trend filter: only longs in uptrend, shorts in downtrend.
 Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
@@ -17,44 +17,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Load 1d data ONCE before loop for HTF trend and typical price
+    # Load 1d data ONCE before loop for HTF trend and Camarilla
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50 for HTF trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    htf_trend = np.where(close > ema_50_1d_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
+    # Calculate 1d EMA34 for HTF trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    htf_trend = np.where(close > ema_34_1d_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
     
-    # Calculate RSI(2) on 6h close
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_2 = 100 - (100 / (1 + rs))
+    # Calculate Camarilla pivot levels from 1d data
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    R3_1d = typical_price_1d + (1.1/4) * (df_1d['high'] - df_1d['low'])  # R3 level
+    S3_1d = typical_price_1d - (1.1/4) * (df_1d['high'] - df_1d['low'])  # S3 level
     
-    # Calculate 20-period volume average for spike detection
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 12h timeframe
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d.values)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d.values)
+    
+    # Calculate choppiness index on 1d to filter ranging markets
+    def calculate_choppiness(high_arr, low_arr, close_arr, period=14):
+        """Calculate Choppiness Index (CHOP)"""
+        atr_sum = np.zeros(len(close_arr))
+        true_range = np.maximum(high_arr - low_arr,
+                               np.maximum(np.abs(high_arr - np.roll(close_arr, 1)),
+                                          np.abs(low_arr - np.roll(close_arr, 1))))
+        true_range[0] = high_arr[0] - low_arr[0]  # First TR
+        
+        # Calculate ATR using Wilder's smoothing (equivalent to RMA)
+        atr = np.zeros(len(close_arr))
+        atr[period-1] = np.mean(true_range[:period])
+        for i in range(period, len(close_arr)):
+            atr[i] = (atr[i-1] * (period-1) + true_range[i]) / period
+        
+        # Calculate highest high and lowest low over period
+        highest_high = np.zeros(len(close_arr))
+        lowest_low = np.zeros(len(close_arr))
+        for i in range(len(close_arr)):
+            if i < period:
+                highest_high[i] = np.max(high_arr[:i+1])
+                lowest_low[i] = np.min(low_arr[:i+1])
+            else:
+                highest_high[i] = np.max(high_arr[i-period+1:i+1])
+                lowest_low[i] = np.min(low_arr[i-period+1:i+1])
+        
+        # CHOP = 100 * log10(sum(ATR)/ (HHH - LLL)) / log10(period)
+        chop = np.full(len(close_arr), np.nan)
+        for i in range(period-1, len(close_arr)):
+            atr_sum_period = np.sum(atr[i-period+1:i+1])
+            hh_ll = highest_high[i] - lowest_low[i]
+            if hh_ll > 0:
+                chop[i] = 100 * np.log10(atr_sum_period / hh_ll) / np.log10(period)
+        return chop
+    
+    chop_1d = calculate_choppiness(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 2 for RSI, 20 for volume MA)
-    start_idx = max(2, 20)
+    # Start after warmup (need 34 for EMA, 14 for CHOP)
+    start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi_2[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_1d_aligned[i]) or 
+            np.isnan(S3_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -64,20 +98,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition
-        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Chop filter: only trade when market is not too choppy (CHOP < 61.8 = trending)
+        not_choppy = chop_1d_aligned[i] < 61.8
         
-        # Extreme RSI reversal conditions with trend filter
-        if htf_trend[i] == 1:  # Uptrend on 1d
-            # Long reversal from extreme oversold with volume spike
-            if rsi_2[i] < 5 and volume_spike:
+        # Breakout conditions with trend filter
+        if htf_trend[i] == 1 and not_choppy:  # Uptrend on 1d and not choppy
+            # Long breakout above R3
+            if close[i] > R3_1d_aligned[i]:
                 if position != 1:
                     signals[i] = 0.25
                     position = 1
                 else:
                     signals[i] = 0.25
-            # Exit long if RSI returns to neutral (50) or we get overbought signal
-            elif position == 1 and (rsi_2[i] > 50 or rsi_2[i] > 70):
+            # Exit long if price falls below S3 (reversal signal)
+            elif position == 1 and close[i] < S3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,16 +122,16 @@ def generate_signals(prices):
                     signals[i] = 0.25
                 else:
                     signals[i] = -0.25
-        elif htf_trend[i] == -1:  # Downtrend on 1d
-            # Short reversal from extreme overbought with volume spike
-            if rsi_2[i] > 95 and volume_spike:
+        elif htf_trend[i] == -1 and not_choppy:  # Downtrend on 1d and not choppy
+            # Short breakdown below S3
+            if close[i] < S3_1d_aligned[i]:
                 if position != -1:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = -0.25
-            # Exit short if RSI returns to neutral (50) or we get oversold signal
-            elif position == -1 and (rsi_2[i] < 50 or rsi_2[i] < 30):
+            # Exit short if price rises above R3 (reversal signal)
+            elif position == -1 and close[i] > R3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,7 +143,7 @@ def generate_signals(prices):
                 else:
                     signals[i] = -0.25
         else:
-            # Should not happen with our trend calculation
+            # Either no trend or choppy market - hold flat or current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -119,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI2_Extreme_Reversal_1dTrendFilter_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
