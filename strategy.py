@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_RegimeFilter
-Hypothesis: 4h Camarilla R1/S1 breakouts filtered by 1d EMA34 trend and ADX regime (ADX>25) capture strong trending moves while avoiding choppy markets. Uses ATR trailing stop (2.5x) and discrete position sizing (0.0, ±0.25) to minimize fee churn. Targets 15-30 trades/year on 4h timeframe. Works in both bull and bear markets by following the 1d trend direction only and avoiding low-adx regimes.
+12h_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeConfirm
+Hypothesis: 12h Camarilla R1/S1 breakouts filtered by weekly EMA50 trend and volume confirmation capture strong trending moves while avoiding false breakouts. Uses ATR trailing stop (2.0x) and discrete position sizing (0.0, ±0.25) to minimize fee churn. Targets 12-30 trades/year on 12h timeframe. Weekly EMA50 filter ensures alignment with major trend, reducing whipsaws in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,34 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34 trend filter and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load weekly data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # 1d ADX(14) for regime filter
-    # Calculate True Range
-    tr1 = pd.Series(df_1d['high']).diff().abs()
-    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['close']).shift()).abs()
-    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close']).shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    # Calculate Directional Movement
-    plus_dm = pd.Series(df_1d['high']).diff()
-    minus_dm = pd.Series(df_1d['low']).diff().abs() * -1
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    # Smooth TR and DM
-    atr_1d = tr.ewm(span=14, adjust=False, min_periods=14).mean()
-    plus_di_1d = 100 * (plus_dm.ewm(span=14, adjust=False, min_periods=14).mean() / atr_1d)
-    minus_di_1d = 100 * (minus_dm.ewm(span=14, adjust=False, min_periods=14).mean() / atr_1d)
-    dx_1d = 100 * (abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)).replace([np.inf, -np.inf], 0.0).fillna(0)
-    adx_1d = dx_1d.ewm(span=14, adjust=False, min_periods=14).mean()
-    adx_1d_values = adx_1d.values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_values)
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # ATR(14) for stoploss calculation
     tr1 = pd.Series(high[1:] - low[1:]).values
@@ -54,6 +34,9 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # Volume average (20-period) for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
@@ -61,25 +44,26 @@ def generate_signals(prices):
     highest_since_long = 0.0
     lowest_since_short = 0.0
     
-    # Warmup: max of EMA34 (34), ADX (14+14), ATR (14)
-    start_idx = max(34, 28, 14)
+    # Warmup: max of EMA50 (50), ATR (14), volume MA (20)
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        trend_val = ema34_1d_aligned[i]
-        adx_val = adx_1d_aligned[i]
+        vol_val = volume[i]
+        trend_val = ema50_1w_aligned[i]
         atr_val = atr[i]
+        vol_ma_val = vol_ma[i]
         
         # Skip if any data not ready
-        if (np.isnan(trend_val) or np.isnan(adx_val) or np.isnan(atr_val)):
+        if (np.isnan(trend_val) or np.isnan(atr_val) or np.isnan(vol_ma_val)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        is_trending = adx_val > 25
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = vol_val > 1.5 * vol_ma_val
         
         # Calculate Camarilla levels for previous period
         if i >= 1:
@@ -95,7 +79,7 @@ def generate_signals(prices):
             r1 = high_val
             s1 = low_val
         
-        # Trend filter: price > 1d EMA34 = uptrend, price < 1d EMA34 = downtrend
+        # Trend filter: price > weekly EMA50 = uptrend, price < weekly EMA50 = downtrend
         is_uptrend = close_val > trend_val
         is_downtrend = close_val < trend_val
         
@@ -103,9 +87,9 @@ def generate_signals(prices):
         long_breakout = close_val > r1
         short_breakout = close_val < s1
         
-        # Entry conditions: Camarilla breakout in direction of 1d trend + trending regime
-        long_entry = long_breakout and is_uptrend and is_trending
-        short_entry = short_breakout and is_downtrend and is_trending
+        # Entry conditions: Camarilla breakout in direction of weekly trend + volume confirmation
+        long_entry = long_breakout and is_uptrend and volume_confirm
+        short_entry = short_breakout and is_downtrend and volume_confirm
         
         # Update highest/lowest for trailing stop (ATR-based)
         if position == 1:
@@ -120,12 +104,12 @@ def generate_signals(prices):
         long_exit = False
         short_exit = False
         if position == 1:
-            # Long trailing stop: highest since entry - 2.5 * ATR
-            stop_price = highest_since_long - 2.5 * atr_val
+            # Long trailing stop: highest since entry - 2.0 * ATR
+            stop_price = highest_since_long - 2.0 * atr_val
             long_exit = close_val < stop_price
         elif position == -1:
-            # Short trailing stop: lowest since entry + 2.5 * ATR
-            stop_price = lowest_since_short + 2.5 * atr_val
+            # Short trailing stop: lowest since entry + 2.0 * ATR
+            stop_price = lowest_since_short + 2.0 * atr_val
             short_exit = close_val > stop_price
         
         if long_entry and position != 1:
@@ -152,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_RegimeFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
