@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_Regime_v1
-Hypothesis: On 6h timeframe, Elder Ray (Bull/Bear Power) identifies institutional buying/selling pressure. 
-Bull Power = High - EMA13, Bear Power = EMA13 - Low. 
-Go long when Bull Power > 0 and rising (bullish momentum) AND price > 1d EMA50 (uptrend filter).
-Go short when Bear Power > 0 and rising (bearish momentum) AND price < 1d EMA50 (downtrend filter).
-Use 1d EMA50 as regime filter to align with daily trend. 
-ATR-based stoploss (2*ATR) manages risk. Discrete sizing (0.25) limits fee drag.
-Works in bull markets (long when Bull Power strong) and bear markets (short when Bear Power strong).
+12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1
+Hypothesis: On 12h timeframe, trade long when price breaks above Camarilla R1 level with volume spike and above 1d EMA34 trend, short when breaks below S1 with volume spike and below 1d EMA34. Uses discrete sizing (0.25) to limit fee drag. Camarilla R1/S1 levels from 1d provide structure, volume spike confirms momentum, 1d EMA34 ensures trend alignment. ATR-based stoploss (2*ATR) manages risk. Designed to work in both bull and bear markets by aligning with 1d trend and using volatility-based stops. Target timeframe 12h reduces trade frequency to avoid fee drag.
 """
 
 import numpy as np
@@ -24,50 +18,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 regime filter
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
+    # Calculate 1d EMA34
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Elder Ray calculations (6h timeframe)
-    ema_period = 13
-    ema_13 = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    bull_power = high - ema_13  # Bull Power: High - EMA
-    bear_power = ema_13 - low   # Bear Power: EMA - Low
+    # Calculate Camarilla levels from prior 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Slope of Bull/Bear Power (momentum confirmation)
-    bull_power_slope = bull_power - np.roll(bull_power, 1)
-    bear_power_slope = bear_power - np.roll(bear_power, 1)
-    bull_power_slope[0] = 0
-    bear_power_slope[0] = 0
+    # True range for prior 1d bar
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = close_1d[0]  # first bar
+    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - prev_close_1d), np.abs(low_1d - prev_close_1d)))
+    atr_1d = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values  # Wilder's ATR
     
-    # ATR for stoploss (6h ATR)
+    # Camarilla levels: based on prior bar's range (R1/S1 are standard breakout levels)
+    hl_range_1d = high_1d - low_1d
+    r1_1d = close_1d + 1.0833 * hl_range_1d  # R1 level
+    s1_1d = close_1d - 1.0833 * hl_range_1d  # S1 level
+    
+    # Align HTF indicators to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # ATR for stoploss calculation (12h ATR)
     atr_period = 14
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
+    tr[0] = high[0] - low[0]  # first bar
     atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
+    
+    # Volume spike: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of EMA13 (13), EMA50 1d (50), ATR (14)
-    start_idx = max(13, 50, 14) + 1
+    # Warmup: max of EMA34 (34), ATR (14), volume MA (20)
+    start_idx = max(34, 14, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(bull_power_slope[i]) or
-            np.isnan(bear_power_slope[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or
+            np.isnan(s1_1d_aligned[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -77,21 +82,19 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        ema_13_val = ema_13[i]
-        bull_power_val = bull_power[i]
-        bear_power_val = bear_power[i]
-        bull_power_slope_val = bull_power_slope[i]
-        bear_power_slope_val = bear_power_slope[i]
-        ema_50_1d_val = ema_50_1d_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
+        r1_val = r1_1d_aligned[i]
+        s1_val = s1_1d_aligned[i]
         close_val = close[i]
         atr_val = atr[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: Bull Power > 0 and rising (bullish momentum) AND price > 1d EMA50 (uptrend)
-            long_signal = (bull_power_val > 0) and (bull_power_slope_val > 0) and (close_val > ema_50_1d_val)
+            # Long: price breaks above R1, above 1d EMA34, with volume spike
+            long_signal = (close_val > r1_val) and (close_val > ema_34_val) and vol_spike
             
-            # Short: Bear Power > 0 and rising (bearish momentum) AND price < 1d EMA50 (downtrend)
-            short_signal = (bear_power_val > 0) and (bear_power_slope_val > 0) and (close_val < ema_50_1d_val)
+            # Short: price breaks below S1, below 1d EMA34, with volume spike
+            short_signal = (close_val < s1_val) and (close_val < ema_34_val) and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -106,20 +109,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Bull Power becomes negative OR ATR stoploss (2*ATR below entry)
-            if (bull_power_val <= 0) or (close_val < entry_price - 2.0 * atr_val):
+            # Exit: price breaks below S1 OR ATR stoploss (2*ATR below entry)
+            if (close_val < s1_val) or (close_val < entry_price - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Bear Power becomes negative OR ATR stoploss (2*ATR above entry)
-            if (bear_power_val <= 0) or (close_val > entry_price + 2.0 * atr_val):
+            # Exit: price breaks above R1 OR ATR stoploss (2*ATR above entry)
+            if (close_val > r1_val) or (close_val > entry_price + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_Regime_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
