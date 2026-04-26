@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: Camarilla R1/S1 breakouts on 4h timeframe with 1d EMA34 trend filter and volume confirmation (>2.0x 20-bar average) capture strong trending moves in BTC/ETH. Uses discrete sizing (0.25) to target 20-50 trades/year. Works in bull/bear by only taking breakouts aligned with 1d trend. Includes ATR-based stoploss (2.0 ATR) for risk control.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: Camarilla R1/S1 breakouts on 12h timeframe with 1d EMA34 trend filter and volume confirmation (>2.0x 20-bar average) capture strong trending moves. Uses ATR-based stoploss (2.0) and discrete sizing (0.25) to target 12-25 trades/year. Works in bull/bear by only taking breakouts aligned with 1d trend. R1/S1 levels provide good breakout signals with moderate frequency. 12h timeframe balances trade frequency and signal quality for sustainable performance.
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # 1d EMA34 for trend filter
@@ -60,9 +60,9 @@ def generate_signals(prices):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Calculate Camarilla levels for today (using previous day's OHLC)
+        # Calculate Camarilla levels for today (using previous bar's OHLC)
         if i >= 1:
-            # Use previous day's OHLC for Camarilla calculation
+            # Use previous bar's OHLC for Camarilla calculation
             prev_high = high[i-1]
             prev_low = low[i-1]
             prev_close = close[i-1]
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
