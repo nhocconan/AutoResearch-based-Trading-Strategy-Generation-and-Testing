@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_EMA_Crossover_VolumeRegime_HTFTrend
-Hypothesis: 6h EMA(9,21) crossover with volume regime filter (volume > 1.5x 50-period median) and 1d trend filter (price > EMA50).
-Enters long on bullish crossover when volume is elevated and 1d trend is bullish.
-Enters short on bearish crossover when volume is elevated and 1d trend is bearish.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d trend filter (price > EMA50) and volume regime (volume > 1.5x 50-period median). 
+Enters long on close above R1 when 1d trend bullish and volume elevated. 
+Enters short on close below S1 when 1d trend bearish and volume elevated.
 Uses discrete position sizing (0.25) to minimize churn. Designed for 50-150 total trades over 4 years.
 Works in both bull and bear markets by following 1d trend filter.
 """
@@ -22,11 +22,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMAs on primary timeframe (6h)
-    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate Camarilla levels for 12h timeframe using prior bar's OHLC
+    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    # Use prior bar to avoid look-ahead
+    prior_high = np.roll(high, 1)
+    prior_low = np.roll(low, 1)
+    prior_close = np.roll(close, 1)
+    prior_high[0] = high[0]  # first bar uses current
+    prior_low[0] = low[0]
+    prior_close[0] = close[0]
     
-    # Volume regime: volume > 1.5x 50-period median (using rolling median via percentile)
+    camarilla_range = prior_high - prior_low
+    r1 = prior_close + camarilla_range * 1.1 / 12
+    s1 = prior_close - camarilla_range * 1.1 / 12
+    
+    # Volume regime: volume > 1.5x 50-period median
     volume_series = pd.Series(volume)
     vol_median = volume_series.rolling(window=50, min_periods=50).median().values
     volume_regime = volume > (1.5 * vol_median)
@@ -41,13 +51,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 21-period EMA and 50-period volume median)
-    start_idx = max(21, 50)
+    # Start after warmup (need 50-period volume median and prior bar)
+    start_idx = max(50, 1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_9[i]) or np.isnan(ema_21[i]) or 
-            np.isnan(vol_median[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(vol_median[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -57,30 +67,25 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Bullish crossover: EMA9 crosses above EMA21
-        bullish_cross = ema_9[i] > ema_21[i] and ema_9[i-1] <= ema_21[i-1]
-        # Bearish crossover: EMA9 crosses below EMA21
-        bearish_cross = ema_9[i] < ema_21[i] and ema_9[i-1] >= ema_21[i-1]
-        
-        # Long logic: bullish crossover + volume regime + bullish 1d trend
-        if bullish_cross and volume_regime[i] and close[i] > ema_50_1d_aligned[i]:
+        # Long logic: close above R1 + volume regime + bullish 1d trend
+        if close[i] > r1[i] and volume_regime[i] and close[i] > ema_50_1d_aligned[i]:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: bearish crossover + volume regime + bearish 1d trend
-        elif bearish_cross and volume_regime[i] and close[i] < ema_50_1d_aligned[i]:
+        # Short logic: close below S1 + volume regime + bearish 1d trend
+        elif close[i] < s1[i] and volume_regime[i] and close[i] < ema_50_1d_aligned[i]:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
-        # Exit: opposite crossover
-        elif position == 1 and bearish_cross:
+        # Exit: opposite Camarilla level touch
+        elif position == 1 and close[i] < s1[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and bullish_cross:
+        elif position == -1 and close[i] > r1[i]:
             signals[i] = 0.0
             position = 0
         else:
@@ -94,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA_Crossover_VolumeRegime_HTFTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
