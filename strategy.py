@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime_v2
-Hypothesis: Refined Camarilla R1/S1 breakout strategy with stricter volume confirmation (volume > 2.0x median) and EMA trend filter to reduce overtrading. Target: 20-30 trades/year on 4h to minimize fee drag while maintaining edge in bull/bear markets via 1d EMA34 trend alignment.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation (>1.8x median) to capture multi-day momentum. Designed for lower trade frequency (target: 12-30/year) to minimize fee drag while working in both bull/bear markets via trend alignment. Uses discrete position sizing (0.25) and ATR trailing stop.
 """
 
 import numpy as np
@@ -34,12 +34,12 @@ def generate_signals(prices):
     camarilla_r1 = prev_close_1d + 1.000/6 * (prev_high_1d - prev_low_1d)
     camarilla_s1 = prev_close_1d - 1.000/6 * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume regime: volume > 2.0x median volume (50-period) for stricter signal validation
+    # Volume regime: volume > 1.8x median volume (50-period) for confirmation
     vol_median = pd.Series(volume).rolling(window=50, min_periods=50).median().values
     
     # ATR(14) for volatility-based stops
@@ -79,8 +79,8 @@ def generate_signals(prices):
         uptrend = close_val > ema_34_1d_val
         downtrend = close_val < ema_34_1d_val
         
-        # Volume regime filter: only trade in very high volume environments (stricter)
-        volume_regime = volume_val > 2.0 * vol_median_val
+        # Volume regime filter: only trade in high volume environments
+        volume_regime = volume_val > 1.8 * vol_median_val
         
         if position == 0:
             # Long: break above R1 with volume regime, and uptrend
@@ -124,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeRegime_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
