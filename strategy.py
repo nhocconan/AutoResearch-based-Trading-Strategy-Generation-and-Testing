@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_ChopRegime_v1
-Hypothesis: TRIX momentum + volume spike confirmation + choppiness regime filter on 4h. Uses TRIX(12) crossing zero for trend changes with volume > 2.5x average to confirm institutional participation. Chop(14) > 61.8 for ranging markets (mean reversion at extremes) and Chop < 38.2 for trending markets (breakout continuation). Designed for low trade frequency (target 20-50/year) with discrete sizing (0.25) to minimize fee drag. Works in bull markets via breakout continuation and in bear markets via mean reversion in ranges, adapting to regime automatically.
+12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike confirmation. Uses discrete position sizing (0.25) to balance return and drawdown. Designed for low trade frequency (target 12-37/year) to overcome fee drag in ranging/bear markets like 2025+. Works in both bull (breakouts with trend) and bear (fade at extremes with volume exhaustion) via volume spike filter that captures institutional participation. Added tighter volume confirmation (3.0x average) and ATR stoploss (2.0x) to reduce trade frequency and improve Sharpe.
 """
 
 import numpy as np
@@ -18,50 +18,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX(12) - triple smoothed EMA rate of change
-    close_s = pd.Series(close)
-    ema1 = close_s.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3.pct_change(periods=1))  # % change of triple smoothed EMA
-    trix_values = trix.values
+    # Get 1d data for EMA trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate ATR(14) for stoploss
+    # Calculate EMA(34) on 1d for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate ATR(14) for stoploss on 12h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter: volume > 2.5 * 20-period average
+    # Calculate volume spike filter: volume > 3.0 * 20-period average (tighter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (3.0 * vol_ma)
     
-    # Calculate Choppiness Index(14)
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_14 = highest_high - lowest_low
-    # Avoid division by zero and log of zero
-    chop_raw = np.where((range_14 > 0) & (atr_14 > 0), 
-                        100 * np.log10(atr_14) / np.log10(range_14) / np.log10(14), 
-                        50.0)  # neutral when undefined
-    chop_values = chop_raw
+    # Calculate Camarilla levels from previous 1d bar
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Avoid NaN from shift
+    prev_high = np.where(np.isnan(prev_high), df_1d['high'].values, prev_high)
+    prev_low = np.where(np.isnan(prev_low), df_1d['low'].values, prev_low)
+    prev_close = np.where(np.isnan(prev_close), df_1d['close'].values, prev_close)
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    r1 = pivot + (range_hl * 1.1 / 12.0)
+    s1 = pivot - (range_hl * 1.1 / 12.0)
+    
+    # Align Camarilla levels to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of TRIX warmup (~36), ATR(14), volume MA(20), chop(14)
-    start_idx = max(36, 14, 20, 14) + 1
+    # Warmup: max of 1d EMA(34), volume MA, ATR
+    start_idx = max(34, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix_values[i]) or
-            np.isnan(atr[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma[i]) or
-            np.isnan(chop_values[i])):
+            np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -72,26 +82,16 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        trix_val = trix_values[i]
+        trend_1d_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
+        trend_1d_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
         vol_spike = volume_spike[i]
-        chop_val = chop_values[i]
-        
-        # Regime definitions
-        is_ranging = chop_val > 61.8   # Chop > 61.8 = ranging/mean revert
-        is_trending = chop_val < 38.2  # Chop < 38.2 = trending/breakout
         
         if position == 0:
-            # Long conditions:
-            # In trending market: TRIX crosses above zero with volume spike (breakout continuation)
-            # In ranging market: TRIX crosses above zero from negative with volume spike (mean reversion long)
-            trix_cross_up = (trix_values[i-1] <= 0) and (trix_val > 0)
-            long_signal = trix_cross_up and vol_spike and (is_trending or is_ranging)
+            # Long: price breaks above R1 AND 1d trend up AND volume spike
+            long_signal = (close_val > r1_aligned[i]) and trend_1d_up and vol_spike
             
-            # Short conditions:
-            # In trending market: TRIX crosses below zero with volume spike (breakdown continuation)
-            # In ranging market: TRIX crosses below zero from positive with volume spike (mean reversion short)
-            trix_cross_down = (trix_values[i-1] >= 0) and (trix_val < 0)
-            short_signal = trix_cross_down and vol_spike and (is_trending or is_ranging)
+            # Short: price breaks below S1 AND 1d trend down AND volume spike
+            short_signal = (close_val < s1_aligned[i]) and trend_1d_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -106,22 +106,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: TRIX crosses below zero OR ATR stoploss hit
-            trix_cross_down = (trix_values[i-1] >= 0) and (trix_val < 0)
-            if trix_cross_down or (close_val < entry_price - 2.0 * atr[i]):
+            # Exit: trend flips down OR price hits ATR stoploss
+            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: TRIX crosses above zero OR ATR stoploss hit
-            trix_cross_up = (trix_values[i-1] <= 0) and (trix_val > 0)
-            if trix_cross_up or (close_val > entry_price + 2.0 * atr[i]):
+            # Exit: trend flips up OR price hits ATR stoploss
+            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_ChopRegime_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
