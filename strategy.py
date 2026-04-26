@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: On 12h timeframe, use Camarilla R1/S1 breakouts from prior 1d with 1d EMA34 trend filter and volume spike (>1.8x 20-period average) for high-conviction entries. ATR(14) trailing stop (2.0x) and close-based exits. Discrete sizing 0.25. Target ~20-30 trades/year to minimize fee drag while capturing strong trending moves. Works in both bull/bear via trend filter and volume confirmation.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v4_HybridRegime
+Hypothesis: Combines Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike (>1.8x) as core signal.
+Adds adaptive regime filter using Bollinger Band width percentile (20,2) to avoid low-volatility whipsaws and high-volatility chop.
+Uses ATR(14) trailing stop (2.0x) and discrete position sizing 0.25 to minimize fee drift.
+Designed for 4h timeframe to capture institutional moves with <40 trades/year per symbol.
+Works in bull via breakout momentum and in bear via short breakdowns with trend alignment.
 """
 
 import numpy as np
@@ -33,12 +37,23 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR(14) on 12h for breakout confirmation and trailing stop
+    # ATR(14) on 4h for breakout confirmation and trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Bollinger Band width (20,2) on 4h for adaptive regime filter
+    bb_ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_ma + 2 * bb_std
+    bb_lower = bb_ma - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_ma  # Normalized width
+    
+    # Regime: avoid extreme low volatility (whipsaw) and extreme high volatility (chop)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=100).rank(pct=True).values
+    regime_ok = (bb_width_percentile > 0.1) & (bb_width_percentile < 0.9)  # Avoid deciles 1-2 and 9-10
     
     # Camarilla R1 and S1 from prior 1d bar
     high_1d = df_1d['high'].values
@@ -54,7 +69,7 @@ def generate_signals(prices):
         camarilla_r1 = np.concatenate([[np.nan], camarilla_r1])
         camarilla_s1 = np.concatenate([[np.nan], camarilla_s1])
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -67,17 +82,19 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup: max of volume MA (20), 1d EMA (34), ATR (14)
-    start_idx = max(20, 34, 14)
+    # Warmup: max of volume MA (20), 1d EMA (34), ATR (14), BB width percentile (100)
+    start_idx = max(20, 34, 14, 100)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
+        # Skip if any data not ready or outside session or regime filter fails
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_ma[i]) or
             np.isnan(atr[i]) or
-            not in_session[i]):
+            np.isnan(bb_width_percentile[i]) or
+            not in_session[i] or
+            not regime_ok[i]):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -167,6 +184,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v4_HybridRegime"
+timeframe = "4h"
 leverage = 1.0
