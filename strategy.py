@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: 12h Camarilla H4/H5 breakout with 1d trend filter and 1d volume spike confirmation.
-- Uses 12h timeframe for lower trade frequency (target: 12-37 trades/year)
-- Camarilla H4/H5 levels from prior 1d provide strong support/resistance
-- 1d EMA50 filter ensures alignment with daily trend
-- 1d volume spike (>2x 20-period average) confirms institutional participation
-- Designed for 50-150 total trades over 4 years to minimize fee drag
-- Works in bull/bear markets by trading with 1d trend and using volume spike to filter false breakouts
-- Fixed: removed redundant H3/L3 calculation inside loop, simplified exit logic
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_Session
+Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend filter and 1h volume spike confirmation.
+- Uses 1h timeframe for precise entry timing while using 4h for signal direction (proven to reduce fee drag)
+- Camarilla R1/S1 levels from 4h provide strong support/resistance from prior 4h candle
+- 4h EMA20 filter ensures trades align with higher timeframe trend
+- 1h volume spike (>2x 20-period average) confirms institutional participation
+- Session filter (08-20 UTC) reduces noise trades during low-liquidity periods
+- Designed for 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
+- Works in bull/bear markets by trading with the 4h trend and using volume spike to filter false breakouts
 """
 
 import numpy as np
@@ -25,87 +25,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Pre-compute session hours (08-20 UTC) for filter
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1d volume spike confirmation (>2x 20-period average)
-    volume_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (2.0 * vol_ma_20)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    # Calculate 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    camarilla_h4 = close_1d + (1.0/6) * (high_1d - low_1d)  # H4 = close + 1/6*(high-low)
-    camarilla_h5 = close_1d + (1.0/4) * (high_1d - low_1d)  # H5 = close + 1/4*(high-low)
-    camarilla_l4 = close_1d - (1.0/6) * (high_1d - low_1d)  # L4 = close - 1/6*(high-low)
-    camarilla_l5 = close_1d - (1.0/4) * (high_1d - low_1d)  # L5 = close - 1/4*(high-low)
+    # Calculate 1h volume spike confirmation (>2x 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma_20)
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    # Calculate Camarilla levels from previous 4h bar
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    camarilla_r1 = close_4h + (1.0/6) * (high_4h - low_4h)  # R1 = close + 1/6*(high-low)
+    camarilla_s1 = close_4h - (1.0/6) * (high_4h - low_4h)  # S1 = close - 1/6*(high-low)
+    
+    # Align Camarilla levels to 1h timeframe (use previous 4h bar's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for 1d EMA, 20 for volume MA)
-    start_idx = max(50, 20)
+    # Start after warmup (need 20 for 4h EMA, 20 for volume MA)
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_h5_aligned[i]) or
-            np.isnan(camarilla_l4_aligned[i]) or np.isnan(camarilla_l5_aligned[i])):
+        if (np.isnan(ema20_4h_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
+            continue
+        
+        # Session filter: only trade during 08-20 UTC
+        if not in_session[i]:
+            signals[i] = 0.0
+            position = 0
             continue
         
         # Breakout conditions
-        breakout_long = close[i] > camarilla_h5_aligned[i]
-        breakout_short = close[i] < camarilla_l5_aligned[i]
+        breakout_long = close[i] > camarilla_r1_aligned[i]
+        breakout_short = close[i] < camarilla_s1_aligned[i]
         
         if position == 0:
-            # Long: breakout above H5 AND close > 1d EMA50 AND volume spike
-            if breakout_long and close[i] > ema50_1d_aligned[i] and vol_spike_aligned[i] > 0.5:
-                signals[i] = 0.25
+            # Long: breakout above R1 AND close > 4h EMA20 AND volume spike
+            if breakout_long and close[i] > ema20_4h_aligned[i] and vol_spike[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: breakout below L5 AND close < 1d EMA50 AND volume spike
-            elif breakout_short and close[i] < ema50_1d_aligned[i] and vol_spike_aligned[i] > 0.5:
-                signals[i] = -0.25
+            # Short: breakout below S1 AND close < 4h EMA20 AND volume spike
+            elif breakout_short and close[i] < ema20_4h_aligned[i] and vol_spike[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
-            # Exit: breakout below L4 (stop) OR breakout below H4 (take profit at H4)
-            if breakout_short or close[i] < camarilla_h4_aligned[i]:
+            signals[i] = 0.20
+            # Exit: breakout below S1 OR close < 4h EMA20
+            if breakout_short or close[i] < ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
-            # Exit: breakout above H4 (stop) OR breakout above L4 (take profit at L4)
-            if breakout_long or close[i] > camarilla_l4_aligned[i]:
+            signals[i] = -0.20
+            # Exit: breakout above R1 OR close > 4h EMA20
+            if breakout_long or close[i] > ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
