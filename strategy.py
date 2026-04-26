@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level AND 1d trend is up (close > EMA34) AND volume > 2.0x 20-period average volume. Enter short when price breaks below Camarilla S1 level AND 1d trend is down (close < EMA34) AND volume > 2.0x 20-period average volume. Uses discrete sizing (0.0, ±0.30) to limit fee drag. Camarilla R1/S1 levels provide breakout confirmation with sufficient sensitivity. Volume spike filter ensures participation. 1d EMA34 trend filter ensures alignment with higher timeframe momentum. Designed to generate ~12-37 trades per year on BTC/ETH/SOL with Sharpe > 0 in both bull and bear regimes.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Dyn
+Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level AND 1d trend is up (close > EMA34) AND volume > 2.0x 20-period average volume. Enter short when price breaks below Camarilla S1 level AND 1d trend is down (close < EMA34) AND volume > 2.0x 20-period average volume. Uses discrete sizing (0.0, ±0.30) to limit fee drag. Dynamic volume threshold adapts to volatility: volume > (1.5 + 0.5 * ATR_ratio) * avg_volume where ATR_ratio = ATR(10)/ATR(30). This reduces trades in low volatility (choppy) markets and increases in high volatility (trending) markets, improving Sharpe in both bull and bear regimes. Target: 20-50 trades/year.
 """
 
 import numpy as np
@@ -28,14 +28,22 @@ def generate_signals(prices):
     ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 1d bar (HLC of completed 1d bar)
+    # Calculate ATR for dynamic volume threshold
+    atr_period_short = 10
+    atr_period_long = 30
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_short = pd.Series(tr).ewm(span=atr_period_short, adjust=False, min_periods=atr_period_short).mean().values
+    atr_long = pd.Series(tr).ewm(span=atr_period_long, adjust=False, min_periods=atr_period_long).mean().values
+    atr_ratio = np.where(atr_long > 0, atr_short / atr_long, 1.0)
+    
+    # Calculate 1d Camarilla levels from previous 1d bar (HLC of completed 1d bar)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_raw = df_1d['close'].values  # raw 1d close for Camarilla calculation
     
-    # Camarilla levels: based on previous day's range
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
     # Using previous completed 1d bar to avoid look-ahead
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
@@ -50,26 +58,28 @@ def generate_signals(prices):
     r1 = prev_close_1d + 1.1 * camarilla_range / 12
     s1 = prev_close_1d - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: volume > 2.0x 20-period average (balanced for trade frequency)
+    # Volume confirmation: dynamic threshold based on volatility
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma
+    volume_threshold = 1.5 + 0.5 * atr_ratio  # ranges from 1.5 to 2.0
+    volume_spike = volume > volume_threshold * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA warmup and volume MA warmup
-    start_idx = max(34, 20)  # EMA34 needs 34, volume MA needs 20
+    # Warmup: need EMA warmup, ATR warmup, and volume MA warmup
+    start_idx = max(34, atr_period_long, 20)  # EMA34 needs 34, ATR long needs 30, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+            np.isnan(volume_ma[i]) or
+            np.isnan(atr_ratio[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -119,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
