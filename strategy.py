@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolumeSpike
-Hypothesis: Camarilla R1/S1 breakouts on 1h with 4h EMA50 trend filter and 1d volume spike confirmation.
-Long when price breaks above R1, 4h EMA50 up, 1d volume > 1.5x average.
-Short when price breaks below S1, 4h EMA50 down, 1d volume > 1.5x average.
-Uses ATR-based trailing stop (2.0x ATR) for risk management.
-Designed for 1h timeframe with tight entries (15-37/year) to avoid fee drag while capturing breakouts in both bull and bear markets.
-Uses discrete position sizing (0.20) to minimize fee churn.
+6h_RSI2_MeanReversion_1dTrendFilter_VolumeSpike
+Hypothesis: RSI(2) extreme mean reversion on 6h timeframe, filtered by 1d EMA50 trend and volume spike (>2x average).
+Long when RSI(2) < 10 and price > 1d EMA50 and volume > 2x average.
+Short when RSI(2) > 90 and price < 1d EMA50 and volume > 2x average.
+Exit on RSI(2) crossing back to neutral (40-60 range) or opposite extreme.
+Uses discrete position sizing (0.25) to minimize fee churn.
+Designed for low trade frequency (12-37/year) to avoid fee drag while capturing short-term reversals in trending markets.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,127 +23,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Get 1d data for volume spike filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d volume average for spike detection
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels for 1h (using previous day's OHLC)
-    # We'll approximate using rolling window of 24*4 = 96 periods (previous day)
-    lookback = 96  # 24 hours * 4 (1h periods per 4h) = 96 for previous day
+    # RSI(2) on 6h timeframe
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(span=2, adjust=False, min_periods=2).mean().values
+    loss_ma = pd.Series(loss).ewm(span=2, adjust=False, min_periods=2).mean().values
+    rs = np.divide(gain_ma, loss_ma, out=np.zeros_like(gain_ma), where=loss_ma!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate pivot and levels using previous day's OHLC
-    # For each bar, use OHLC from 96 bars ago to simulate previous day
+    # Volume confirmation: 2x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    long_stop = 0.0
-    short_stop = 0.0
     
-    # Warmup: max of 4h EMA (50), 1d volume MA (20), lookback (96)
-    start_idx = max(50, 20, 96)
+    # Warmup: max of 1d EMA (50), RSI (2), volume MA (20)
+    start_idx = max(50, 2, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        ema_50_4h_val = ema_50_4h_aligned[i]
-        vol_ma_1d_val = vol_ma_1d_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
+        rsi_val = rsi[i]
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
         volume_val = volume[i]
-        
-        # Get previous day's OHLC (96 bars ago for 1h data)
-        prev_idx = i - lookback
-        if prev_idx < 0:
-            # Not enough data for previous day, hold
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = 0.20
-            else:
-                signals[i] = -0.20
-            continue
-            
-        prev_high = high[prev_idx:prev_idx+lookback].max()
-        prev_low = low[prev_idx:prev_idx+lookback].min()
-        prev_close = close[prev_idx:prev_idx+lookback].mean()  # approximate close
-        
-        # Calculate Camarilla levels
-        pivot = (prev_high + prev_low + prev_close) / 3
-        range_val = prev_high - prev_low
-        r1 = pivot + (range_val * 1.1 / 12)
-        s1 = pivot - (range_val * 1.1 / 12)
-        
-        # Volume spike condition: current 1h volume > 1.5 * 1d average volume
-        volume_spike = volume_val > 1.5 * vol_ma_1d_val
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above R1, 4h EMA50 up, volume spike
-            long_signal = (close_val > r1) and (ema_50_4h_val > ema_50_4h_aligned[i-1]) and volume_spike
-            # Short: price breaks below S1, 4h EMA50 down, volume spike
-            short_signal = (close_val < s1) and (ema_50_4h_val < ema_50_4h_aligned[i-1]) and volume_spike
+            # Long: RSI(2) < 10, uptrend, volume spike
+            long_signal = (rsi_val < 10) and (close_val > ema_50_1d_val) and (volume_val > 2.0 * vol_ma_val)
+            # Short: RSI(2) > 90, downtrend, volume spike
+            short_signal = (rsi_val > 90) and (close_val < ema_50_1d_val) and (volume_val > 2.0 * vol_ma_val)
             
             if long_signal:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                long_stop = entry_price - 2.0 * ((high_val - low_val) * 0.5)  # approximate ATR
             elif short_signal:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                short_stop = entry_price + 2.0 * ((high_val - low_val) * 0.5)  # approximate ATR
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.20
-            # Update trailing stop: move stop up as price makes new highs
-            atr_approx = (high_val - low_val) * 0.5
-            long_stop = max(long_stop, high_val - 2.0 * atr_approx)
-            # Exit: trailing stop hit or trend reversal
-            if (low_val < long_stop) or (ema_50_4h_val < ema_50_4h_aligned[i-1]):
+            signals[i] = 0.25
+            # Exit: RSI(2) crosses back above 40 (mean reversion complete) or opposite extreme
+            if (rsi_val > 40) or (rsi_val > 90):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.20
-            # Update trailing stop: move stop down as price makes new lows
-            atr_approx = (high_val - low_val) * 0.5
-            short_stop = min(short_stop, low_val + 2.0 * atr_approx)
-            # Exit: trailing stop hit or trend reversal
-            if (high_val > short_stop) or (ema_50_4h_val > ema_50_4h_aligned[i-1]):
+            signals[i] = -0.25
+            # Exit: RSI(2) crosses back below 60 (mean reversion complete) or opposite extreme
+            if (rsi_val < 60) or (rsi_val < 10):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolumeSpike"
-timeframe = "1h"
+name = "6h_RSI2_MeanReversion_1dTrendFilter_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
