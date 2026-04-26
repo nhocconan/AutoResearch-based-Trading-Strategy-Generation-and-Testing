@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts filtered by 1d EMA34 trend and volume confirmation capture institutional breakout moves. Long when price breaks above R1 in bullish 1d trend with volume confirmation; short when price breaks below S1 in bearish 1d trend with volume confirmation. Uses discrete sizing (±0.25) and targets 12-37 trades/year. Works in both bull/bear markets by only trading in direction of higher-timeframe trend.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts filtered by 1d EMA34 trend and volume confirmation capture institutional breakout moves in both bull and bear markets. Only trade in direction of higher-timeframe trend to avoid counter-trend whipsaws. Uses discrete sizing (±0.25) and targets 20-50 trades/year. Volume confirmation ensures breakouts have participation. Trend filter avoids false breakouts in ranging markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -28,7 +28,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate previous day's Camarilla levels (using 1d data shifted by 1)
+    # Calculate previous day's Camarilla levels (using 1d data)
     prev_high = df_1d['high'].shift(1).values  # Shift to get previous day
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -38,7 +38,7 @@ def generate_signals(prices):
     r1 = prev_close + camarilla_range * 1.1 / 12
     s1 = prev_close - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -50,8 +50,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Warmup: max of calculations (20 for volume MA, 1d shift, 1d EMA34 alignment)
-    start_idx = max(20, 1) + 34  # +34 to ensure 1d EMA34 warmup
+    # Warmup: max of calculations (20 for volume MA, 1 for shift, 34 for EMA)
+    start_idx = max(20, 1, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready (NaN from calculation)
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
