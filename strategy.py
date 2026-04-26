@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1
-Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter and volume spike confirmation.
-Uses 12h primary with 1d HTF for trend alignment. Targets 12-37 trades/year to minimize fee drag.
+4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v2
+Hypothesis: 4-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter and volume spike confirmation.
+Uses 4h primary with 1d HTF for trend alignment. Targets 20-30 trades/year to minimize fee drag.
 Works in bull via breakouts above R1 with 1d uptrend, in bear via breakdowns below S1 with 1d downtrend.
-Volume spike (>2x 20-bar MA) confirms conviction. Discrete sizing (0.0, ±0.25) reduces churn.
+Volume spike (>2x 20-bar MA) confirms conviction. ATR-based stoploss controls downside. Discrete sizing (0.0, ±0.25) reduces churn.
 """
 
 import numpy as np
@@ -31,7 +31,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for stoploss on 12h
+    # Calculate ATR(14) for stoploss on 4h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
