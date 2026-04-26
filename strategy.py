@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_12hEMA50_Trend_VolumeConfirm_v2
-Hypothesis: Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation captures strong directional moves with controlled trade frequency (~25-40 trades/year). Works in bull/bear by only taking breakouts in direction of 12h trend. Uses discrete sizing (0.25) to minimize fee churn. Added stricter volume confirmation (2.0x) and trend strength filter (price > 1.005 * EMA for long, < 0.995 * EMA for short) to reduce whipsaws.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d trend filter and volume spike captures strong directional moves in both bull/bear markets. Uses discrete sizing (0.25) and strict volume confirmation (2.0x) to limit trades to 12-37/year. Works by only taking breakouts aligned with 1d trend, reducing whipsaw.
 """
 
 import numpy as np
@@ -18,22 +18,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Load 1d data ONCE before loop for Camarilla levels
+    # Load 1d data ONCE before loop for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    # We need to shift by 1 to use previous completed day
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Previous day's OHLC for Camarilla calculation (use 1d data)
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -43,7 +37,7 @@ def generate_signals(prices):
     r1 = prev_close + camarilla_range * 1.1 / 12
     s1 = prev_close - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -55,14 +49,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Warmup: max of EMA50 (50), volume MA (20)
-    start_idx = max(50, 20)
+    # Warmup: max of EMA34 (34), volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         close_val = close[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        trend_val = ema50_12h_aligned[i]
+        trend_val = ema34_1d_aligned[i]
         vol_conf = volume_confirm[i]
         
         # Skip if any data not ready
@@ -71,17 +65,15 @@ def generate_signals(prices):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Trend filter with strength: price > 1.005 * EMA50 = strong uptrend, price < 0.995 * EMA50 = strong downtrend
-        is_strong_uptrend = close_val > (trend_val * 1.005)
-        is_strong_downtrend = close_val < (trend_val * 0.995)
-        
-        # Entry conditions: Camarilla breakout in direction of strong trend + volume
-        long_condition = (close_val > r1_val) and is_strong_uptrend and vol_conf
-        short_condition = (close_val < s1_val) and is_strong_downtrend and vol_conf
-        
-        # Exit conditions: opposite Camarilla level touch or trend reversal (weaker trend filter for exit)
+        # Trend filter: price > EMA34 = uptrend, price < EMA34 = downtrend
         is_uptrend = close_val > trend_val
         is_downtrend = close_val < trend_val
+        
+        # Entry conditions: Camarilla breakout in direction of trend + volume
+        long_condition = (close_val > r1_val) and is_uptrend and vol_conf
+        short_condition = (close_val < s1_val) and is_downtrend and vol_conf
+        
+        # Exit conditions: opposite Camarilla level touch or trend reversal
         long_exit = (position == 1 and (close_val < s1_val or not is_uptrend))
         short_exit = (position == -1 and (close_val > r1_val or not is_downtrend))
         
@@ -103,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA50_Trend_VolumeConfirm_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
