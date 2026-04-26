@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1-week EMA50 trend filter and volume confirmation produce fewer, higher-quality trades. Using 1-week trend avoids whipsaws during 2022 bear market while capturing major trends. Volume filter ensures breakout conviction. Target: 50-120 total trades over 4 years (12-30/year).
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
+Hypothesis: On daily timeframe, Camarilla R1/S1 breakouts with weekly EMA50 trend filter and volume spike filter capture sustained moves in both bull and bear markets. The weekly trend filter ensures alignment with higher timeframe momentum, reducing whipsaws. Target: 30-80 total trades over 4 years (7-20/year).
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,30 +26,29 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Load 1d data ONCE before loop for Camarilla levels (R1, S1)
+    # Calculate 1d Camarilla levels (R1, S1) from previous day's OHLC
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d Camarilla levels (R1, S1) using previous 1d's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    close_1d_shifted = np.concatenate([[np.nan], close_1d[:-1]])  # previous 1d close
+    close_1d_prev = np.concatenate([[np.nan], close_1d[:-1]])  # previous 1d close
     
+    # Camarilla calculation uses previous 1d's OHLC
     camarilla_range = high_1d - low_1d
-    r1 = close_1d_shifted + 1.1 * camarilla_range / 12
-    s1 = close_1d_shifted - 1.1 * camarilla_range / 12
+    r1 = close_1d_prev + 1.1 * camarilla_range / 12
+    s1 = close_1d_prev - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 1d timeframe (same resolution, but still use align for safety)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 12h volume confirmation: volume > 1.8x 20-period average
+    # 1d volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for 1w EMA, 20 for volume MA)
+    # Start after warmup (need 50 for weekly EMA, 20 for volume MA)
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
@@ -72,7 +71,7 @@ def generate_signals(prices):
         downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Volume confirmation
-        volume_spike = volume[i] > 1.8 * vol_ma_20[i]
+        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         # Camarilla breakout conditions
         breakout_r1 = close[i] > r1_aligned[i]
@@ -110,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
