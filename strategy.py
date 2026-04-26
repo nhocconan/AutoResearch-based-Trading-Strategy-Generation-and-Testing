@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 1-day EMA34 trend filter and volume spike capture high-probability momentum moves in both bull and bear markets. The 1-day EMA34 provides a stable trend filter that adapts to changing market conditions, while volume confirmation ensures breakouts have conviction. Targeting 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3
+Hypothesis: Camarilla R1/S1 breakouts on 4h with 1-day EMA34 trend filter and volume spike capture high-probability momentum moves in both bull and bear markets. Added minimum holding period of 4 bars (16h) to reduce churn and fee drift, targeting 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -49,6 +49,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0  # track holding period
     
     # Start after warmup (need sufficient data for all indicators)
     start_idx = max(100, 34, 20)
@@ -65,6 +66,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
             else:
                 signals[i] = -0.25
+            bars_since_entry += 1
             continue
         
         # 1d trend filter (EMA34)
@@ -72,26 +74,32 @@ def generate_signals(prices):
         downtrend = close[i] < ema_34_aligned[i]
         
         # Long logic: price breaks above R1 with volume spike + in uptrend
-        if close[i] > r1_aligned[i] and volume_spike[i] and uptrend:
+        if close[i] > r1_aligned[i] and volume_spike[i] and uptrend and bars_since_entry >= 4:
             if position != 1:
                 signals[i] = 0.25
                 position = 1
+                bars_since_entry = 0
             else:
                 signals[i] = 0.25
+                bars_since_entry += 1
         # Short logic: price breaks below S1 with volume spike + in downtrend
-        elif close[i] < s1_aligned[i] and volume_spike[i] and downtrend:
+        elif close[i] < s1_aligned[i] and volume_spike[i] and downtrend and bars_since_entry >= 4:
             if position != -1:
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
             else:
                 signals[i] = -0.25
+                bars_since_entry += 1
         # Exit conditions: price returns to opposite level or trend weakens
         elif position == 1 and (close[i] < s1_aligned[i] or not uptrend):
             signals[i] = 0.0
             position = 0
+            bars_since_entry = 0
         elif position == -1 and (close[i] > r1_aligned[i] or not downtrend):
             signals[i] = 0.0
             position = 0
+            bars_since_entry = 0
         else:
             # Hold current position
             if position == 0:
@@ -100,9 +108,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             else:
                 signals[i] = -0.25
+            bars_since_entry += 1
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
