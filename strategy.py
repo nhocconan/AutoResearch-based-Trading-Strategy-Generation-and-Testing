@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_1wTrend_ATRStop_v1
-Hypothesis: On daily timeframe, trade Camarilla R1/S1 breakouts aligned with weekly EMA50 trend and confirmed by volume spike (>2.0x 20-day average). Uses ATR-based trailing stop. Camarilla levels provide institutional support/resistance, weekly EMA50 filters major trend direction, volume confirms breakout strength. Works in bull markets (long at R1 breakout) and bear markets (short at S1 breakdown). Target: 30-100 total trades over 4 years = 7-25/year.
+12h_Camarilla_R1_S1_Breakout_1d_EMA34_Trend_VolumeSpike_ATRStop_v1
+Hypothesis: On 12h timeframe, trade Camarilla R1/S1 breakouts only when aligned with 1d EMA34 trend and confirmed by volume spike (>2.0x 20-bar average). Uses ATR-based trailing stop. Camarilla levels provide institutional support/resistance, EMA34 filters trend direction, volume confirms breakout strength. Works in both bull (long at R1 breakout) and bear (short at S1 breakdown) markets. Target: 50-150 total trades over 4 years = 12-37/year.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,31 +18,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate EMA50 on weekly for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get daily data for Camarilla calculation
+    # Get 1d data for EMA34 trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla R1 and S1 from previous daily bar (HLC of daily)
+    # Calculate EMA34 on 1d for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Camarilla levels from previous 1d bar (HLC of daily)
     # Camarilla: R1 = C + ((H-L)*1.1/12), S1 = C - ((H-L)*1.1/12)
+    # We use the previous completed 1d bar's HLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
     
-    camarilla_r1_1d = close_1d + ((high_1d - low_1d) * 1.1 / 12)
-    camarilla_s1_1d = close_1d - ((high_1d - low_1d) * 1.1 / 12)
+    # Calculate Camarilla R1 and S1 for each 1d bar
+    # R1 = close + ((high - low) * 1.1 / 12)
+    # S1 = close - ((high - low) * 1.1 / 12)
+    camarilla_r1_1d = close_1d_arr + ((high_1d - low_1d) * 1.1 / 12)
+    camarilla_s1_1d = close_1d_arr - ((high_1d - low_1d) * 1.1 / 12)
     
-    # Align Camarilla levels to daily timeframe (no extra delay needed as based on completed daily bar)
+    # Align Camarilla levels to 12h timeframe (extra delay not needed as these are based on completed 1d bar)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
@@ -62,12 +61,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0  # for trailing stop
     lowest_since_entry = 0.0
     
-    # Warmup: max of EMA50 (50), ATR (14), volume MA (20)
-    start_idx = max(50, 14, 20) + 1
+    # Warmup: max of EMA34 (34), ATR (14), volume MA (20)
+    start_idx = max(34, 14, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(camarilla_r1_aligned[i]) or
@@ -81,7 +80,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        ema_50_val = ema_50_1w_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
@@ -91,11 +90,11 @@ def generate_signals(prices):
         s1_level = camarilla_s1_aligned[i]
         
         if position == 0:
-            # Long: Break above R1, above weekly EMA50, with volume spike
-            long_signal = (high_val > r1_level) and (close_val > ema_50_val) and vol_spike
+            # Long: Break above R1, above 1d EMA34, with volume spike
+            long_signal = (high_val > r1_level) and (close_val > ema_34_val) and vol_spike
             
-            # Short: Break below S1, below weekly EMA50, with volume spike
-            short_signal = (low_val < s1_level) and (close_val < ema_50_val) and vol_spike
+            # Short: Break below S1, below 1d EMA34, with volume spike
+            short_signal = (low_val < s1_level) and (close_val < ema_34_val) and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -113,21 +112,21 @@ def generate_signals(prices):
             # Hold long
             signals[i] = 0.25
             highest_since_entry = max(highest_since_entry, close_val)
-            # Exit: Close below weekly EMA50 (trend change) OR trailing stop (2.5*ATR below high)
-            if (close_val < ema_50_val) or (close_val < highest_since_entry - 2.5 * atr_val):
+            # Exit: Close below EMA34 (trend change) OR trailing stop (2.5*ATR below high)
+            if (close_val < ema_34_val) or (close_val < highest_since_entry - 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
             lowest_since_entry = min(lowest_since_entry, close_val)
-            # Exit: Close above weekly EMA50 (trend change) OR trailing stop (2.5*ATR above low)
-            if (close_val > ema_50_val) or (close_val > lowest_since_entry + 2.5 * atr_val):
+            # Exit: Close above EMA34 (trend change) OR trailing stop (2.5*ATR above low)
+            if (close_val > ema_34_val) or (close_val > lowest_since_entry + 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_ATRStop_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1d_EMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
