@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_ZeroLag_MA_Combo
-Hypothesis: Combine Elder Ray (Bull/Bear Power) with ZeroLag MA on 6h timeframe, filtered by 12h trend (EMA50). 
-Elder Ray identifies institutional buying/selling pressure, ZeroLag MA reduces lag for timely entries, 
-and 12h EMA50 ensures we trade with higher timeframe trend. Discrete sizing 0.25 targets ~12-37 trades/year.
-Works in bull/bear via 12h trend filter and avoids whipsaws via Elder Ray confirmation.
+12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation on 12h timeframe.
+Only trade in direction of 1d trend (EMA34) with volume > 1.5x 20-period median volume. Uses discrete sizing 0.25 to target 12-37 trades/year.
+Works in bull/bear via 1d trend filter and avoids choppy markets via volume confirmation.
 """
 
 import numpy as np
@@ -21,93 +20,105 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 and EMA21 for ZeroLag MA (6h)
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate Camarilla levels from prior 1d bar (using get_htf_data ensures proper alignment)
+    # We'll use the prior completed 1d bar's high, low, close
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ZeroLag MA: 2*EMA - EMA(EMA)
-    zl_ema13 = 2 * ema13 - pd.Series(ema13).ewm(span=13, adjust=False, min_periods=13).mean().values
-    zl_ema21 = 2 * ema21 - pd.Series(ema21).ewm(span=21, adjust=False, min_periods=21).mean().values
-    zlma = (zl_ema13 + zl_ema21) / 2
+    # Calculate Camarilla R3, S3, R4, S4 for each 1d bar
+    # R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low)
+    # S3 = close - 1.125*(high-low), S4 = close - 1.5*(high-low)
+    rng = high_1d - low_1d
+    r4 = close_1d + 1.5 * rng
+    r3 = close_1d + 1.125 * rng
+    s3 = close_1d - 1.125 * rng
+    s4 = close_1d - 1.5 * rng
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13_for_elder = ema13  # reuse EMA13
-    bull_power = high - ema13_for_elder
-    bear_power = low - ema13_for_elder
+    # Align to 12h timeframe (wait for 1d bar to close)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Smooth Elder Ray with 5-period EMA to reduce noise
-    bull_power_smooth = pd.Series(bull_power).ewm(span=5, adjust=False, min_periods=5).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Volume spike: volume > 1.5x 20-period median volume
+    volume_series = pd.Series(volume)
+    vol_median_20 = volume_series.rolling(window=20, min_periods=20).median().values
+    volume_spike = volume > (1.5 * vol_median_20)
     
     # Fixed position size to control trade frequency
     fixed_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Warmup: need 21 for EMA21, 5 for smoothing
-    start_idx = 21
+    # Warmup: need 34 for 1d EMA, 20 for volume median
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(zlma[i]) or
-            np.isnan(bull_power_smooth[i]) or
-            np.isnan(bear_power_smooth[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(r3_12h[i]) or
+            np.isnan(s3_12h[i]) or
+            np.isnan(r4_12h[i]) or
+            np.isnan(s4_12h[i]) or
+            np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        zlma_val = zlma[i]
-        bull_val = bull_power_smooth[i]
-        bear_val = bear_power_smooth[i]
-        ema_50_12h_val = ema_50_12h_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
+        vol_spike = volume_spike[i]
         size = fixed_size
         
         if position == 0:
             # Flat - look for entry
-            # Long: price > ZLMA, Bull Power > 0, Bear Power < 0, and 12h uptrend (close > EMA50)
-            long_entry = (close_val > zlma_val) and (bull_val > 0) and (bear_val < 0) and (close_val > ema_50_12h_val)
-            # Short: price < ZLMA, Bull Power < 0, Bear Power > 0, and 12h downtrend (close < EMA50)
-            short_entry = (close_val < zlma_val) and (bull_val < 0) and (bear_val > 0) and (close_val < ema_50_12h_val)
+            # Long: price > R3 and volume spike, in uptrend (close > EMA34)
+            long_entry = (close_val > r3_12h[i]) and vol_spike and (close_val > ema_34_val)
+            # Short: price < S3 and volume spike, in downtrend (close < EMA34)
+            short_entry = (close_val < s3_12h[i]) and vol_spike and (close_val < ema_34_val)
             
             if long_entry:
                 signals[i] = size
                 position = 1
+                entry_price = close_val
             elif short_entry:
                 signals[i] = -size
                 position = -1
+                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on trend reversal or Elder Ray divergence
-            if (close_val < ema_50_12h_val) or (bull_val < 0) or (bear_val > 0):
+            # Long - exit on trend reversal or at R4 (take profit)
+            if close_val < ema_34_val or close_val > r4_12h[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on trend reversal or Elder Ray divergence
-            if (close_val > ema_50_12h_val) or (bull_val > 0) or (bear_val < 0):
+            # Short - exit on trend reversal or at S4 (take profit)
+            if close_val > ema_34_val or close_val < s4_12h[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "6h_ElderRay_ZeroLag_MA_Combo"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
