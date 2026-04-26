@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_TRIX_VolumeSpike_ChopRegime_v1
-Hypothesis: TRIX (triple-smoothed EMA) momentum with volume confirmation and choppiness regime filter captures sustained moves while avoiding whipsaws. Long when TRIX rising above zero with volume spike in trending market (CHOP < 38.2); short when TRIX falling below zero with volume spike in trending market. Uses 1w EMA50 for higher timeframe trend alignment. Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag while capturing strong momentum in both bull and bear markets.
+4h_KAMA_Direction_RSI_ChopFilter_v2
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets. RSI filters overextended conditions, while Choppiness Index identifies ranging vs trending regimes. In trending regimes (CHOP < 38.2), follow KAMA direction. In ranging regimes (CHOP > 61.8), fade extreme RSI readings. Volume confirmation ensures institutional participation. Designed for 4h timeframe with discrete position sizing to minimize fee drag while capturing sustained moves.
 """
 
 import numpy as np
@@ -18,64 +18,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for HTF regime filters
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA50 for higher timeframe trend filter
-    if len(df_1w) < 50:
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on 4h close
+    # Efficiency Ratio = |net change| / sum of absolute changes
+    change = np.abs(np.diff(close, n=1))
+    volatility = np.sum(change.reshape(-1, 10), axis=1)  # 10-period volatility
+    volatility = np.concatenate([np.full(9, np.nan), volatility])  # align lengths
+    er = np.abs(np.diff(close, n=10)) / volatility
+    er = np.concatenate([np.full(10, np.nan), er])  # align lengths
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(14, np.nan), rsi[14:]])  # align
+    
+    # Calculate Choppiness Index on 1d data
+    if len(df_1d) < 20:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate TRIX (15-period triple EMA of ROC)
-    # TRIX = EMA(EMA(EMA(ROC), 15), 15), 15) * 100
-    if len(close) < 15:
-        return np.zeros(n)
-    roc = np.diff(np.log(close), prepend=np.log(close[0]))  # approximate ROC
-    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3 * 100
-    
-    # Calculate 1d ATR(14) for choppiness indicator
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    high_1w = df_1d['high'].values
-    low_1w = df_1d['low'].values
-    close_1w = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Choppiness Index: CHOP = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    max_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    denominator = max_high - min_low
-    # Avoid division by zero
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    chop = 100 * np.log10(pd.Series(atr).rolling(window=14, min_periods=14).sum().values / denominator) / np.log10(14)
+    atr_1d = []
+    for i in range(1, len(df_1d)):
+        tr = max(df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+                 abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+                 abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1]))
+        atr_1d.append(tr)
+    atr_1d = np.array(atr_1d)
+    atr_1d = np.concatenate([[np.nan], atr_1d])  # align
+    # Sum of ATR over 14 periods
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    # Max high - min low over 14 periods
+    max_h = df_1d['high'].rolling(window=14, min_periods=14).max().values
+    min_l = df_1d['low'].rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_atr_14 / (max_h - min_l + 1e-10)) / np.log10(14)
+    chop = np.concatenate([np.full(13, np.nan), chop[13:]])  # align
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Volume spike detection (volume > 2.0x 20-period EMA)
+    # Volume confirmation: volume > 20-period EMA
     volume_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (volume_ema * 2.0)
+    volume_ok = volume > volume_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need sufficient data for all indicators)
-    start_idx = max(100, 50, 15, 14, 20)
+    start_idx = max(50, 34, 20)  # ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(trix[i]) or
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
             np.isnan(chop_aligned[i])):
             # Hold current position
             if position == 0:
@@ -86,32 +91,46 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Higher timeframe trend filter (1w EMA50)
-        uptrend_htf = close[i] > ema_50_1w_aligned[i]
-        downtrend_htf = close[i] < ema_50_1w_aligned[i]
+        # Regime filters
+        trending = chop_aligned[i] < 38.2
+        ranging = chop_aligned[i] > 61.8
         
-        # Regime filter: trending market (CHOP < 38.2)
-        trending_market = chop_aligned[i] < 38.2
+        # Volume confirmation
+        vol_confirmed = volume_ok[i]
         
-        # Long logic: TRIX rising above zero with volume spike in uptrend + trending market
-        if trix[i] > 0 and trix[i] > trix[i-1] and volume_spike[i] and uptrend_htf and trending_market:
-            if position != 1:
-                signals[i] = 0.25
-                position = 1
-            else:
-                signals[i] = 0.25
-        # Short logic: TRIX falling below zero with volume spike in downtrend + trending market
-        elif trix[i] < 0 and trix[i] < trix[i-1] and volume_spike[i] and downtrend_htf and trending_market:
-            if position != -1:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = -0.25
-        # Exit conditions: TRIX crosses zero or trend weakens or market becomes choppy
-        elif position == 1 and (trix[i] <= 0 or not uptrend_htf or not trending_market):
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and (trix[i] >= 0 or not downtrend_htf or not trending_market):
+        # Long logic
+        long_signal = False
+        if trending and vol_confirmed:
+            # In trending regime, follow KAMA direction
+            if close[i] > kama[i]:
+                long_signal = True
+        elif ranging and vol_confirmed:
+            # In ranging regime, fade extreme RSI (mean reversion)
+            if rsi[i] < 30:  # oversold
+                long_signal = True
+        
+        # Short logic
+        short_signal = False
+        if trending and vol_confirmed:
+            # In trending regime, follow KAMA direction
+            if close[i] < kama[i]:
+                short_signal = True
+        elif ranging and vol_confirmed:
+            # In ranging regime, fade extreme RSI (mean reversion)
+            if rsi[i] > 70:  # overbought
+                short_signal = True
+        
+        # Exit logic: opposite signal or regime change to extreme chop
+        exit_long = position == 1 and (short_signal or chop_aligned[i] > 61.8)
+        exit_short = position == -1 and (long_signal or chop_aligned[i] > 61.8)
+        
+        if long_signal and position != 1:
+            signals[i] = 0.25
+            position = 1
+        elif short_signal and position != -1:
+            signals[i] = -0.25
+            position = -1
+        elif exit_long or exit_short:
             signals[i] = 0.0
             position = 0
         else:
@@ -125,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_TRIX_VolumeSpike_ChopRegime_v1"
-timeframe = "12h"
+name = "4h_KAMA_Direction_RSI_ChopFilter_v2"
+timeframe = "4h"
 leverage = 1.0
