@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian20_Breakout_WeeklyTrend_VolumeSpike_v1
-Hypothesis: Daily Donchian(20) breakout in direction of weekly EMA50 trend with volume confirmation.
-Weekly Donchian channels provide robust structural support/resistance less prone to whipsaw than intraday levels.
-Weekly EMA50 trend filter ensures alignment with higher timeframe momentum, reducing counter-trend trades.
-Volume confirmation adds conviction filter. Discrete sizing (0.25) limits fee drag.
-Target: 30-100 total trades over 4 years (7-25/year) by requiring weekly alignment, Donchian breakout, trend alignment, and volume.
-Works in both bull and bear markets by only trading with the weekly trend and requiring volume confirmation to avoid false breakouts.
+6h_Ichimoku_Cloud_Twist_12hTrend_v1
+Hypothesis: 6h Ichimoku TK cross with 12h cloud filter and volume confirmation.
+In bull markets: price above cloud + TK cross up = momentum continuation.
+In bear markets: price below cloud + TK cross down = trend acceleration.
+The 12h cloud acts as a higher timeframe trend filter to avoid counter-trend whipsaws.
+Volume confirmation ensures breakout conviction. Discrete sizing (0.25) limits fee drag.
+Target: 50-150 total trades over 4 years (12-37/year) by requiring TK cross, cloud alignment, and volume spike.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,40 +23,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for HTF Donchian and EMA
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop for HTF Ichimoku cloud
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly Donchian channels (20-period high/low)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate 12h Ichimoku components
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Weekly Donchian upper and lower bands (20-period)
-    dh_20 = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
-    dl_20 = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2.0
     
-    # Weekly EMA50 for trend filter
-    weekly_ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2.0
     
-    # Align HTF indicators to daily timeframe (completed weekly bars only)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, dh_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, dl_20)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_50)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2.0
     
-    # Daily volume confirmation: volume > 2.0x 20-period average
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2.0
+    
+    # Align HTF Ichimoku components to 6h timeframe (completed 12h bars only)
+    tenkan_aligned = align_htf_to_ltf(prices, df_12h, tenkan_sen)
+    kijun_aligned = align_htf_to_ltf(prices, df_12h, kijun_sen)
+    span_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_a)
+    span_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_b)
+    
+    # 6h volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 for Donchian and volume MA, 50 for EMA)
-    start_idx = max(20, 50)
+    # Start after warmup (need 20 for volume MA, 52 for Senkou B)
+    start_idx = max(20, 52)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or
+        if (np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or
+            np.isnan(span_a_aligned[i]) or
+            np.isnan(span_b_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             # Hold current position
             if position == 0:
@@ -67,26 +79,28 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (strict to reduce trades)
-        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume spike condition
+        volume_spike = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_above = close[i] > donchian_high_aligned[i]  # Break above weekly Donchian high
-        breakout_below = close[i] < donchian_low_aligned[i]   # Break below weekly Donchian low
+        # Ichimoku TK cross conditions
+        tk_cross_up = tenkan_aligned[i] > kijun_aligned[i]  # Tenkan crosses above Kijun
+        tk_cross_down = tenkan_aligned[i] < kijun_aligned[i]  # Tenkan crosses below Kijun
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Cloud conditions: price above/both spans (bullish) or below/both spans (bearish)
+        cloud_top = np.maximum(span_a_aligned[i], span_b_aligned[i])
+        cloud_bottom = np.minimum(span_a_aligned[i], span_b_aligned[i])
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
         
-        if breakout_above and volume_spike and uptrend:
-            # Long signal: Weekly Donchian breakout with volume, in weekly uptrend
+        if tk_cross_up and price_above_cloud and volume_spike:
+            # Long signal: TK cross up + price above cloud + volume spike
             if position != 1:
                 signals[i] = 0.25
                 position = 1
             else:
                 signals[i] = 0.25
-        elif breakout_below and volume_spike and downtrend:
-            # Short signal: Weekly Donchian breakout with volume, in weekly downtrend
+        elif tk_cross_down and price_below_cloud and volume_spike:
+            # Short signal: TK cross down + price below cloud + volume spike
             if position != -1:
                 signals[i] = -0.25
                 position = -1
@@ -103,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian20_Breakout_WeeklyTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Twist_12hTrend_v1"
+timeframe = "6h"
 leverage = 1.0
