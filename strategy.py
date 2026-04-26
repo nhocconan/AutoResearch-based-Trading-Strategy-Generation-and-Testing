@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_Session
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA20 trend filter, volume spike (>2.0x median), and session filter (08-20 UTC). Enters long when price breaks above R1 with volume confirmation, bullish 4h trend, and active session. Enters short when price breaks below S1 with volume confirmation, bearish 4h trend, and active session. Exits on opposite breakout. Uses discrete position sizing (0.20) to minimize churn. Target: 60-150 total trades over 4 years. Works in both bull and bear markets by following 4h trend filter and avoiding low-volume, off-session noise.
+12h_Camarilla_R1_S1_Breakout_1dTrend_ChopExit
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and choppiness regime filter (CHOP > 50). 
+Enter long when price breaks above R1 with volume confirmation (>1.5x median), bullish 1d trend, and choppy market. 
+Enter short when price breaks below S1 with volume confirmation, bearish 1d trend, and choppy market. 
+Exit when chop regime ends (CHOP <= 50) or opposite breakout occurs. 
+Uses discrete position sizing (0.25) to minimize churn. Target: 50-150 trades over 4 years. 
+Designed to work in both bull and bear markets by following 1d trend and avoiding strong trends via chop filter.
 """
 
 import numpy as np
@@ -10,67 +15,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Calculate Camarilla levels for 1h (based on previous 1h bar)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 2:
+    # Calculate Camarilla levels for 12h (based on previous 12h bar)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    h_1h = df_1h['high'].values
-    l_1h = df_1h['low'].values
-    c_1h = df_1h['close'].values
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
     
     # Previous bar's values for level calculation (to avoid look-ahead)
-    h_1h_prev = np.roll(h_1h, 1)
-    l_1h_prev = np.roll(l_1h, 1)
-    c_1h_prev = np.roll(c_1h, 1)
-    h_1h_prev[0] = np.nan
-    l_1h_prev[0] = np.nan
-    c_1h_prev[0] = np.nan
+    h_12h_prev = np.roll(h_12h, 1)
+    l_12h_prev = np.roll(l_12h, 1)
+    c_12h_prev = np.roll(c_12h, 1)
+    h_12h_prev[0] = np.nan
+    l_12h_prev[0] = np.nan
+    c_12h_prev[0] = np.nan
     
     # Calculate Camarilla R1 and S1 levels
-    rng_1h = h_1h_prev - l_1h_prev
-    r1_1h = c_1h_prev + (rng_1h * 1.1 / 12)
-    s1_1h = c_1h_prev - (rng_1h * 1.1 / 12)
+    rng_12h = h_12h_prev - l_12h_prev
+    r1_12h = c_12h_prev + (rng_12h * 1.1 / 12)
+    s1_12h = c_12h_prev - (rng_12h * 1.1 / 12)
     
-    # Align to 1h primary timeframe
-    r1_1h_aligned = align_htf_to_ltf(prices, df_1h, r1_1h)
-    s1_1h_aligned = align_htf_to_ltf(prices, df_1h, s1_1h)
+    # Align to 12h primary timeframe
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
-    # Volume confirmation: volume > 2.0x 20-period median
+    # Volume confirmation: volume > 1.5x 50-period median
     volume_series = pd.Series(volume)
-    vol_median = volume_series.rolling(window=20, min_periods=20).median().values
-    volume_spike = volume > (2.0 * vol_median)
+    vol_median = volume_series.rolling(window=50, min_periods=50).median().values
+    volume_confirm = volume > (1.5 * vol_median)
     
-    # Load 4h data for HTF trend filter (EMA20)
+    # Load 1d data for HTF trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Choppiness regime filter (14-period) - use 4h data for higher frequency chop reading
     df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Session filter: 08-20 UTC (inclusive)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    if len(df_4h) < 20:
+        chop_aligned = np.full(n, 50.0)  # neutral default
+    else:
+        high_4h = df_4h['high'].values
+        low_4h = df_4h['low'].values
+        close_4h = df_4h['close'].values
+        tr = np.maximum(high_4h[1:] - low_4h[1:], np.maximum(np.abs(high_4h[1:] - close_4h[:-1]), np.abs(low_4h[1:] - close_4h[:-1])))
+        tr = np.concatenate([[np.nan], tr])
+        atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+        highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+        lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+        chop = 100 * np.log10(atr_14 * 14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
+        chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.20
+    base_size = 0.25
     
-    # Start after warmup (need 20-period volume median, 20-period EMA)
-    start_idx = 20
+    # Start after warmup (need 50-period volume median, 50-period EMA, 14-period chop)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_1h_aligned[i]) or np.isnan(s1_1h_aligned[i]) or 
-            np.isnan(vol_median[i]) or np.isnan(ema_20_4h_aligned[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(vol_median[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -80,36 +96,28 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Only trade during active session (08-20 UTC)
-        if not in_session[i]:
-            # Hold current position outside session
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
-            continue
+        # Only trade in choppy markets (CHOP > 50 indicates ranging/mean reverting conditions)
+        in_choppy_regime = chop_aligned[i] > 50
         
-        # Long logic: price breaks above R1 + volume spike + bullish 4h trend + in session
-        if close[i] > r1_1h_aligned[i] and volume_spike[i] and close[i] > ema_20_4h_aligned[i]:
+        # Long logic: price breaks above R1 + volume confirmation + bullish 1d trend + choppy regime
+        if close[i] > r1_12h_aligned[i] and volume_confirm[i] and close[i] > ema_50_1d_aligned[i] and in_choppy_regime:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: price breaks below S1 + volume spike + bearish 4h trend + in session
-        elif close[i] < s1_1h_aligned[i] and volume_spike[i] and close[i] < ema_20_4h_aligned[i]:
+        # Short logic: price breaks below S1 + volume confirmation + bearish 1d trend + choppy regime
+        elif close[i] < s1_12h_aligned[i] and volume_confirm[i] and close[i] < ema_50_1d_aligned[i] and in_choppy_regime:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
-        # Exit: opposite breakout (price returns to the other level)
-        elif position == 1 and close[i] < s1_1h_aligned[i]:
+        # Exit: chop regime ends OR opposite breakout
+        elif position == 1 and (not in_choppy_regime or close[i] < s1_12h_aligned[i]):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > r1_1h_aligned[i]:
+        elif position == -1 and (not in_choppy_regime or close[i] > r1_12h_aligned[i]):
             signals[i] = 0.0
             position = 0
         else:
@@ -123,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_Session"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_ChopExit"
+timeframe = "12h"
 leverage = 1.0
