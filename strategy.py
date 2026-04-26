@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_12hTrend_VolumeSpike_v1
-Hypothesis: On 4h timeframe, trade long when price breaks above Camarilla R1 level and short when breaks below S1 level, 
-filtered by 12h EMA50 trend and volume spike. Camarilla levels provide intraday support/resistance derived from prior day's range.
-12h EMA50 acts as higher-timeframe trend filter. Volume spike confirms institutional participation. 
-Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing (0.30) to minimize fee drag.
-Works in bull/bear markets via 12h trend filter and volatility-based stops.
+1d_KAMA_Trend_RSI_ChopFilter_v1
+Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
+combined with RSI(14) for momentum and Choppiness Index(14) for regime filtering.
+Long when KAMA slopes up, RSI > 50, and CHOP < 61.8 (trending regime).
+Short when KAMA slopes down, RSI < 50, and CHOP < 61.8.
+Uses weekly EMA200 as higher-timeframe trend filter to avoid counter-trend trades.
+Designed for 30-100 total trades over 4 years (7-25/year) with discrete sizing (0.25) to minimize fee drag.
+Works in bull markets via trend alignment and in bear markets via short side + regime filter.
 """
 
 import numpy as np
@@ -22,106 +24,135 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # KAMA parameters
+    fast_sc = 0.666  # 2/(2+1)
+    slow_sc = 0.0645 # 2/(30+1)
+    
+    # Calculate Efficiency Ratio and SMA for KAMA
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    
+    # Proper ER calculation: |net change| / sum(|abs change|) over lookback
+    er_lookback = 10
+    net_change = np.abs(np.subtract(close[er_lookback:], close[:-er_lookback]))
+    sum_abs_change = np.zeros_like(close)
+    for i in range(er_lookback, len(close)):
+        sum_abs_change[i] = np.sum(np.abs(np.diff(close[i-er_lookback:i+1])))
+    
+    # Avoid division by zero
+    er = np.zeros_like(close)
+    mask = sum_abs_change != 0
+    er[mask] = net_change[mask-er_lookback+1] / sum_abs_change[mask] if er_lookback > 0 else 0
+    er = np.where(np.isnan(er), 0, er)
+    
+    # Smoothing constant
+    sc = np.square(er * (fast_sc - slow_sc) + slow_sc)
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[er_lookback] = close[er_lookback]  # seed
+    for i in range(er_lookback + 1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI(14)
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(np.isnan(rsi), 50, rsi)  # default to neutral
+    
+    # Choppiness Index(14)
+    chop_period = 14
+    atr_temp = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    atr_temp[0] = high[0] - low[0]  # first period
+    tr_sum = pd.Series(atr_temp).rolling(window=chop_period, min_periods=chop_period).sum().values
+    highest_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
+    lowest_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
+    
+    chop = np.zeros_like(close)
+    mask = (highest_high - lowest_low) != 0
+    chop[mask] = 100 * np.log10(tr_sum[mask] / (highest_high[mask] - lowest_low[mask])) / np.log10(chop_period)
+    chop = np.where(np.isnan(chop), 50, chop)  # default to middle
+    
+    # Get weekly data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Get 1d data for Camarilla levels (based on prior 1d bar's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from prior 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True range for prior 1d bar
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # first bar
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - prev_close_1d), np.abs(low_1d - prev_close_1d)))
-    atr_1d = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values  # Wilder's ATR
-    
-    # Camarilla levels: based on prior day's range
-    # R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), R2 = close + 0.75*(high-low), R1 = close + 0.5*(high-low)
-    # S1 = close - 0.5*(high-low), S2 = close - 0.75*(high-low), S3 = close - 1.125*(high-low), S4 = close - 1.5*(high-low)
-    hl_range_1d = high_1d - low_1d
-    r1_1d = close_1d + 0.5 * hl_range_1d
-    s1_1d = close_1d - 0.5 * hl_range_1d
-    
-    # Align HTF indicators to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume spike: current volume > 2.0 * 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of EMA50 (50), volume MA (20), and Camarilla needs 1d data
-    start_idx = max(50, 20) + 1
+    # Warmup: max of KAMA lookback, RSI period, Chop period, WMA period
+    start_idx = max(er_lookback + 1, rsi_period, chop_period, 200) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(chop[i]) or
+            np.isnan(ema_200_1w_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
             continue
         
-        ema_50_val = ema_50_12h_aligned[i]
-        r1_val = r1_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
+        kama_val = kama[i]
+        kama_prev = kama[i-1]
+        rsi_val = rsi[i]
+        chop_val = chop[i]
         close_val = close[i]
-        vol_spike = volume_spike[i]
+        ema_200_val = ema_200_1w_aligned[i]
+        
+        # KAMA slope: rising if current > previous
+        kama_rising = kama_val > kama_prev
+        kama_falling = kama_val < kama_prev
         
         if position == 0:
-            # Long: price breaks above R1, above 12h EMA50, volume spike
-            long_signal = (close_val > r1_val) and (close_val > ema_50_val) and vol_spike
+            # Long: KAMA rising, RSI > 50, CHOP < 61.8 (trending), price above weekly EMA200
+            long_signal = kama_rising and (rsi_val > 50) and (chop_val < 61.8) and (close_val > ema_200_val)
             
-            # Short: price breaks below S1, below 12h EMA50, volume spike
-            short_signal = (close_val < s1_val) and (close_val < ema_50_val) and vol_spike
+            # Short: KAMA falling, RSI < 50, CHOP < 61.8 (trending), price below weekly EMA200
+            short_signal = kama_falling and (rsi_val < 50) and (chop_val < 61.8) and (close_val < ema_200_val)
             
             if long_signal:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             elif short_signal:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.30
-            # Exit: price breaks below S1 OR below 12h EMA50
-            if (close_val < s1_val) or (close_val < ema_50_val):
+            signals[i] = 0.25
+            # Exit: KAMA falling OR RSI < 40 OR CHOP > 61.8 (choppy) OR price below weekly EMA200
+            if (kama_falling) or (rsi_val < 40) or (chop_val > 61.8) or (close_val < ema_200_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.30
-            # Exit: price breaks above R1 OR above 12h EMA50
-            if (close_val > r1_val) or (close_val > ema_50_val):
+            signals[i] = -0.25
+            # Exit: KAMA rising OR RSI > 60 OR CHOP > 61.8 (choppy) OR price above weekly EMA200
+            if (kama_rising) or (rsi_val > 60) or (chop_val > 61.8) or (close_val > ema_200_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
