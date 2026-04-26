@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Donchian20_Breakout_WeeklyTrend_VolumeConfirm_ATRStop
-Hypothesis: Trade weekly Donchian(20) breakouts on daily timeframe with weekly EMA50 trend filter and volume confirmation (1.5x average) for low trade frequency (~10-25/year). Uses ATR trailing stop (2.0). Works in bull markets (breakouts with trend) and bear markets (short breakdowns against trend). Focus on BTC/ETH as primary targets.
+6h_ElderRay_Alligator_1dTrend_v1
+Hypothesis: Combine Elder Ray (Bull/Bear Power) with Williams Alligator on 6h, filtered by 1d EMA50 trend. Elder Ray measures bull/bear power via EMA13, Alligator (JAW/TEETH/LIPS) provides trend/filter. Only trade when both agree and aligned with 1d trend. Designed for low frequency (~20-40/year) by requiring triple confluence: Elder Ray signal + Alligator alignment + 1d trend filter. Works in bull (long when bull power >0, price above Alligator, 1d uptrend) and bear (short when bear power <0, price below Alligator, 1d downtrend).
 """
 
 import numpy as np
@@ -16,49 +16,53 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for HTF filters
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly EMA(50) for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian(20) on daily: highest high/lowest low of past 20 days (excluding current)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # 6h EMA13 for Elder Ray (Bull/Bear Power)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
     
-    # Align weekly indicators to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Williams Alligator on 6h: SMAs shifted
+    # Jaw: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars
+    # Lips: 5-period SMMA shifted 3 bars
+    # Using EMA as proxy for SMMA (similar smoothing)
+    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().shift(3).values
     
-    # Volume confirmation: 1.5x average volume (tighter for fewer trades)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for stop (14-period on daily)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Alligator alignment: Mouth open (Lips > Teeth > Jaw) for uptrend, inverse for downtrend
+    # We'll use the relation: if Lips > Jaw => bullish bias, Lips < Jaw => bearish bias
+    # More precise: Mouth open up when Lips > Teeth and Teeth > Jaw
+    # Mouth open down when Lips < Teeth and Teeth < Jaw
+    alligator_bull = (lips > teeth) & (teeth > jaw)
+    alligator_bear = (lips < teeth) & (teeth < jaw)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    long_stop = 0.0
-    short_stop = 0.0
     
-    # Warmup: max of weekly EMA (50), Donchian lookback (20), volume MA (20), daily ATR (14)
-    start_idx = max(50, 20, 20, 14)
+    # Warmup: max of 1d EMA (50), 6h EMA13 (13), Alligator shifts (max 8)
+    start_idx = max(50, 13, 8)  # 50 from 1d EMA, 13 from EMA13, 8 from Jaw shift
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(atr_14[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(ema13[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(jaw[i]) or 
+            np.isnan(teeth[i]) or 
+            np.isnan(lips[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -68,55 +72,46 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        ema_50_1w_val = ema_50_1w_aligned[i]
-        highest_20_val = highest_20[i]
-        lowest_20_val = lowest_20[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
+        bull_power_val = bull_power[i]
+        bear_power_val = bear_power[i]
+        alligator_bull_val = alligator_bull[i]
+        alligator_bear_val = alligator_bear[i]
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        volume_val = volume[i]
-        vol_ma_val = vol_ma[i]
-        atr_14_val = atr_14[i]
         
         if position == 0:
-            # Long: break above highest_20, uptrend (close > EMA50), volume spike
-            long_signal = (high_val > highest_20_val) and (close_val > ema_50_1w_val) and (volume_val > 1.5 * vol_ma_val)
-            # Short: break below lowest_20, downtrend (close < EMA50), volume spike
-            short_signal = (low_val < lowest_20_val) and (close_val < ema_50_1w_val) and (volume_val > 1.5 * vol_ma_val)
+            # Long: Bull Power > 0, Alligator bullish alignment, 1d uptrend (close > EMA50)
+            long_signal = (bull_power_val > 0) and alligator_bull_val and (close_val > ema_50_1d_val)
+            # Short: Bear Power < 0, Alligator bearish alignment, 1d downtrend (close < EMA50)
+            short_signal = (bear_power_val < 0) and alligator_bear_val and (close_val < ema_50_1d_val)
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-                long_stop = entry_price - 2.0 * atr_14_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
-                short_stop = entry_price + 2.0 * atr_14_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Update trailing stop: move stop up as price makes new highs
-            long_stop = max(long_stop, high_val - 2.0 * atr_14_val)
-            # Exit: trailing stop hit or trend reversal (close < EMA50)
-            if (low_val < long_stop) or (close_val < ema_50_1w_val):
+            # Exit: any condition fails
+            if not ((bull_power_val > 0) and alligator_bull_val and (close_val > ema_50_1d_val)):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Update trailing stop: move stop down as price makes new lows
-            short_stop = min(short_stop, low_val + 2.0 * atr_14_val)
-            # Exit: trailing stop hit or trend reversal (close > EMA50)
-            if (high_val > short_stop) or (close_val > ema_50_1w_val):
+            # Exit: any condition fails
+            if not ((bear_power_val < 0) and alligator_bear_val and (close_val < ema_50_1d_val)):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Weekly_Donchian20_Breakout_WeeklyTrend_VolumeConfirm_ATRStop"
-timeframe = "1d"
+name = "6h_ElderRay_Alligator_1dTrend_v1"
+timeframe = "6h"
 leverage = 1.0
