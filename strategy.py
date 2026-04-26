@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTRIX_Trend_VolumeSpike_v1
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts aligned with 1d TRIX trend filter and volume confirmation capture strong trends while avoiding whipsaws. TRIX (triple-smoothed EMA) filters noise and identifies sustained momentum. Volume conviction ensures breakouts have follow-through. Target: 75-200 total trades over 4 years (19-50/year).
+1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_VolumeSpike_v1
+Hypothesis: On 1d timeframe, Camarilla R1/S1 breakouts aligned with 1w EMA34 trend filter and volume confirmation capture multi-week trends while avoiding whipsaws. The 1w EMA provides smooth long-term trend direction suitable for daily charts, and volume ensures breakout conviction. Designed for low trade frequency (<25/year) to minimize fee drag in bear markets like 2025.
 """
 
 import numpy as np
@@ -18,47 +18,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend filter (TRIX) and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop for HTF trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d TRIX for trend filter (triple-smoothed EMA)
-    close_1d = df_1d['close'].values
-    # First EMA
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # Second EMA
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # Third EMA (TRIX)
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # TRIX = percentage change in third EMA
-    trix = np.full_like(close_1d, np.nan)
-    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate 1d Camarilla levels (R1, S1) using previous 1d's OHLC
+    df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_shifted = np.concatenate([[np.nan], close_1d[:-1]])  # previous 1d close
+    close_1d = df_1d['close'].values
+    
+    # Previous 1d close for Camarilla calculation
+    prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
     
     camarilla_range = high_1d - low_1d
-    r1 = close_1d_shifted + 1.1 * camarilla_range / 12
-    s1 = close_1d_shifted - 1.1 * camarilla_range / 12
+    r1 = prev_close_1d + 1.1 * camarilla_range / 12
+    s1 = prev_close_1d - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 1d timeframe (no alignment needed as already 1d)
+    r1_aligned = r1  # Already on 1d timeframe
+    s1_aligned = s1  # Already on 1d timeframe
     
-    # 4h volume confirmation: volume > 2.0x 20-period average
+    # 1d volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need sufficient data for TRIX and volume MA)
-    start_idx = max(35, 20)
+    # Start after warmup (need sufficient data for EMA and volume MA)
+    start_idx = max(40, 20)  # 1w EMA34 needs 34 bars + buffer
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix_aligned[i]) or 
+        if (np.isnan(ema_1w_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma_20[i])):
@@ -71,9 +67,9 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1d trend filter (TRIX)
-        uptrend = trix_aligned[i] > 0
-        downtrend = trix_aligned[i] < 0
+        # 1w trend filter (EMA34)
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
         # Volume confirmation
         volume_spike = volume[i] > 2.0 * vol_ma_20[i]
@@ -114,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTRIX_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
