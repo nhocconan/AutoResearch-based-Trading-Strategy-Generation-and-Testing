@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1-week EMA50 trend filter and volume confirmation (>1.8x avg) provides high-probability directional signals with lower trade frequency suitable for 12h. R1/S1 represent the innermost Camarilla levels, capturing meaningful breakouts from the previous day's range. Weekly trend filter avoids whipsaws during counter-trend moves while volume confirmation ensures institutional participation. Discrete sizing (0.0, ±0.25) minimizes fee churn. Targets 50-150 total trades over 4 years (12-37/year) for optimal 12h frequency. Works in both bull (long when price > weekly EMA50 + R1 breakout) and bear (short when price < weekly EMA50 + S1 breakdown) markets.
+1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirm_v1
+Hypothesis: On daily timeframe, Camarilla R3/S3 breakouts with 1-week EMA50 trend filter and volume confirmation (>1.8x avg) captures institutional participation while reducing noise. Works in bull markets (long when price > 1w EMA50 + R3 breakout) and bear markets (short when price < 1w EMA50 + S3 breakdown). Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Targets 30-100 trades over 4 years (7-25/year) for optimal 1d frequency. 1w trend filter avoids whipsaws while volume spike confirms institutional participation. Designed to generate sufficient trades on BTC/ETH while keeping fee drag manageable.
 """
 
 import numpy as np
@@ -28,42 +28,39 @@ def generate_signals(prices):
     ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get daily data for Camarilla pivot levels (based on previous day)
+    # Get daily data for Camarilla pivot levels (previous day)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:  # need at least 2 days for previous day data
+    if len(df_1d) < 2:  # need at least previous day
         return np.zeros(n)
     
-    # Calculate 1d OHLC for Camarilla pivot levels (previous day)
+    # Calculate daily OHLC for Camarilla pivot levels (previous day)
     o_1d = df_1d['open'].values
     h_1d = df_1d['high'].values
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = c_1d + (h_1d - l_1d) * 1.1 / 12
-    camarilla_s1 = c_1d - (h_1d - l_1d) * 1.1 / 12
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    camarilla_r3 = c_1d + (h_1d - l_1d) * 1.1 / 4
+    camarilla_s3 = c_1d - (h_1d - l_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to 1d timeframe (previous day's levels apply to current day)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Align weekly EMA50 to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume ratio (current / 30-period average) for spike confirmation
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume ratio (current / 20-period average) for spike confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.maximum(vol_ma, 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup: need EMA warmup + volume MA
-    start_idx = max(50, 30)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ratio[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -76,14 +73,14 @@ def generate_signals(prices):
         vol_confirmed = vol_ratio[i] > 1.8  # volume at least 1.8x average
         
         if position == 0:
-            # Long: price > weekly EMA50 + breaks above R1 + volume
+            # Long: price > weekly EMA50 + breaks above R3 + volume
             long_signal = (close[i] > ema_50_1w_aligned[i] and 
-                          close[i] > camarilla_r1_aligned[i] and 
+                          close[i] > camarilla_r3_aligned[i] and 
                           vol_confirmed)
             
-            # Short: price < weekly EMA50 + breaks below S1 + volume
+            # Short: price < weekly EMA50 + breaks below S3 + volume
             short_signal = (close[i] < ema_50_1w_aligned[i] and 
-                           close[i] < camarilla_s1_aligned[i] and 
+                           close[i] < camarilla_s3_aligned[i] and 
                            vol_confirmed)
             
             if long_signal:
@@ -97,20 +94,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price closes below weekly EMA50 OR breaks below S1 (reversal)
-            if close[i] < ema_50_1w_aligned[i] or close[i] < camarilla_s1_aligned[i]:
+            # Exit: price closes below weekly EMA50 OR breaks below S3 (reversal)
+            if close[i] < ema_50_1w_aligned[i] or close[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price closes above weekly EMA50 OR breaks above R1 (reversal)
-            if close[i] > ema_50_1w_aligned[i] or close[i] > camarilla_r1_aligned[i]:
+            # Exit: price closes above weekly EMA50 OR breaks above R3 (reversal)
+            if close[i] > ema_50_1w_aligned[i] or close[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
