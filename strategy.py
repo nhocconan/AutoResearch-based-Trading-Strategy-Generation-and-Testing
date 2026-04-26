@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_VolumeSpike
+4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_VolumeConfirm
 Hypothesis: Camarilla R1/S1 breakouts with 1d EMA34 trend filter and choppiness regime filter (CHOP<61.8) on 4h timeframe.
-Only takes trades in trending, low-chop environments with volume confirmation (>1.8x 20-bar avg volume).
-Designed for low trade frequency (20-50/year) with discrete sizing (0.30) to minimize fee drag.
+Only takes trades in trending, low-chop environments with volume confirmation (>1.6x 20-bar avg volume).
+Designed for low trade frequency (19-50/year) with discrete sizing (0.25) to minimize fee drag.
 Works in both bull/bear: trend filter adapts to market direction, chop filter avoids whipsaws in ranging markets.
 """
 
@@ -45,7 +45,7 @@ def generate_signals(prices):
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: 1.8x average volume
+    # Volume confirmation: 1.6x average volume (slightly reduced from 1.8 to increase signal rate moderately)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for stop (14-period)
@@ -84,9 +84,9 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
             continue
         
         ema_34_1d_val = ema_34_1d_aligned[i]
@@ -105,17 +105,17 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: break above R1, uptrend (close > 1d EMA34), volume spike, good regime
-            long_signal = (high_val > R1_val) and (close_val > ema_34_1d_val) and (volume_val > 1.8 * vol_ma_val) and regime_filter
+            long_signal = (high_val > R1_val) and (close_val > ema_34_1d_val) and (volume_val > 1.6 * vol_ma_val) and regime_filter
             # Short: break below S1, downtrend (close < 1d EMA34), volume spike, good regime
-            short_signal = (low_val < S1_val) and (close_val < ema_34_1d_val) and (volume_val > 1.8 * vol_ma_val) and regime_filter
+            short_signal = (low_val < S1_val) and (close_val < ema_34_1d_val) and (volume_val > 1.6 * vol_ma_val) and regime_filter
             
             if long_signal:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_val
                 long_stop = entry_price - 2.0 * atr_val
             elif short_signal:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_val
                 short_stop = entry_price + 2.0 * atr_val
@@ -123,7 +123,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.30
+            signals[i] = 0.25
             # Update trailing stop: move stop up as price makes new highs
             long_stop = max(long_stop, high_val - 2.0 * atr_val)
             # Exit: trailing stop hit or trend reversal (price < 1d EMA34) or regime becomes too choppy
@@ -132,7 +132,7 @@ def generate_signals(prices):
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.30
+            signals[i] = -0.25
             # Update trailing stop: move stop down as price makes new lows
             short_stop = min(short_stop, low_val + 2.0 * atr_val)
             # Exit: trailing stop hit or trend reversal (price > 1d EMA34) or regime becomes too choppy
@@ -142,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_VolumeSpike"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
