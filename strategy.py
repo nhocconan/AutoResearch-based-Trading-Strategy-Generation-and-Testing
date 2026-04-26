@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1
-Hypothesis: Camarilla R1/S1 breakouts on 4h timeframe with 1d EMA34 trend filter and volume confirmation (>2.0x 20-bar average) capture strong trending moves. Uses discrete sizing (0.25) to target 20-50 trades/year. Works in bull/bear by only taking breakouts aligned with 1d trend. R1/S1 levels provide frequent but reliable signals when combined with trend and volume filters.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Camarilla R1/S1 breakouts on 4h timeframe with 1d EMA34 trend filter and volume confirmation (>2.0x 20-bar average) capture strong trending moves in BTC/ETH. Uses discrete sizing (0.25) to target 20-50 trades/year. Works in bull/bear by only taking breakouts aligned with 1d trend. Includes ATR-based stoploss (2.0 ATR) for risk control.
 """
 
 import numpy as np
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
