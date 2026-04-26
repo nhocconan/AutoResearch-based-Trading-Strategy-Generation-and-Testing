@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike (>1.8x average volume). Uses discrete position sizing (0.25) to minimize fee churn. Works in both bull and bear markets by following the 1d trend direction, confirmed by volume to avoid false breakouts. Targets 50-150 trades over 4 years (12-37/year) by using tight entry conditions.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter and volume spike (>2x average volume) provides tighter, higher-probability entries than R3/S3. Uses discrete position sizing (0.25) to minimize fee churn. Exits when price retests the broken Camarilla level (R1 for longs, S1 for shorts) or reverses across the 1d EMA34. Works in both bull and bear markets by following the 1d trend direction, confirmed by volume to avoid false breakouts. Tighter entry reduces trade frequency vs R3/S3 while maintaining edge.
 """
 
 import numpy as np
@@ -32,11 +32,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R1 and S1 levels (tighter than R3/S3 for fewer trades)
+    # Camarilla R1 and S1 levels (tighter than R3/S3)
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe (1 bar delay for completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (1 bar delay for completed 1d bar)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -74,8 +74,8 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 1.8x average volume (strong breakout)
-        volume_confirmed = vol > 1.8 * avg_vol
+        # Volume confirmation: current volume > 2x average volume (strong breakout)
+        volume_confirmed = vol > 2.0 * avg_vol
         
         # Long logic: price breaks above Camarilla R1 with 1d uptrend and volume confirmation
         long_condition = (close_val > r1_val) and (close_val > ema_val) and volume_confirmed
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
