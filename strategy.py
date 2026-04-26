@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Trend_1dRegime_v1
-Hypothesis: Ichimoku cloud (TK cross + price/cloud relationship) with 1d ADX regime filter on 6h timeframe. 
-Only trade when 1d ADX > 25 (trending market) to avoid whipsaws in ranging conditions. 
-TK cross provides timely entries, cloud acts as dynamic support/resistance. 
-Designed for 12-37 trades/year by requiring strong trend alignment and clear Ichimoku signals.
-Works in both bull and bear markets by only trading with the higher timeframe trend regime.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_ChopRegime_v2
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and choppiness regime filter on 12h timeframe. Targets 12-37 trades/year by avoiding choppy markets (CHOP > 61.8) and only trading with the higher timeframe trend. Uses ATR trailing stop (2.0x) for risk management. Designed to work in both bull and bear markets by only trading with the daily trend and avoiding low-conviction, choppy conditions.
 """
 
 import numpy as np
@@ -21,132 +17,140 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for HTF regime filter (ADX)
+    # Get 1d data for HTF trend and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ADX(14) for regime filter - only trade in trending markets
-    # Calculate True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate Camarilla levels from previous 1d OHLC
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
     
-    # Smoothed DM and ATR
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    camarilla_r1 = prev_close_1d + (1.0/6) * (prev_high_1d - prev_low_1d)
+    camarilla_s1 = prev_close_1d - (1.0/6) * (prev_high_1d - prev_low_1d)
     
-    # Align HTF ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align HTF indicators to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Ichimoku components on 6h (primary timeframe)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_9 = 9
-    high_9 = pd.Series(high).rolling(window=period_9, min_periods=period_9).max().values
-    low_9 = pd.Series(low).rolling(window=period_9, min_periods=period_9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Choppiness Index (CHOP) on 1d timeframe - regime filter
+    # CHOP > 61.8 = ranging/choppy market (avoid), CHOP < 38.2 = trending market (favor)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_26 = 26
-    high_26 = pd.Series(high).rolling(window=period_26, min_periods=period_26).max().values
-    low_26 = pd.Series(low).rolling(window=period_26, min_periods=period_26).min().values
-    kijun = (high_26 + low_26) / 2
+    # True Range for 1d
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = high_1d[0] - low_1d[0]
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
+    # Sum of TR over 14 periods
+    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period_52 = 52
-    high_52 = pd.Series(high).rolling(window=period_52, min_periods=period_52).max().values
-    low_52 = pd.Series(low).rolling(window=period_52, min_periods=period_52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Chikou Span (Lagging Span): close shifted 26 periods behind
-    # Not used for entry as it's lagging
+    # Choppiness Index: CHOP = 100 * LOG10(sumTR14 / (HH14 - LL14)) / LOG10(14)
+    range_14 = hh_14 - ll_14
+    # Avoid division by zero
+    range_14 = np.where(range_14 == 0, 1e-10, range_14)
+    chop_ratio = sum_tr_14 / range_14
+    chop_ratio = np.where(np.isnan(chop_ratio) | np.isinf(chop_ratio), 100, chop_ratio)
+    chop_1d = 100 * np.log10(chop_ratio) / np.log10(14)
+    
+    # Align CHOP to 12h timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # ATR(14) for volatility-based stops on 12h
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Warmup: max of Ichimoku periods (52) and 1d ADX (14+14+14=42 for smoothing)
-    start_idx = max(52, 42)
+    # Warmup: max of EMA(34) 1d, CHOP calculation (14)
+    start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(atr[i])):
+            # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        tenkan_val = tenkan[i]
-        kijun_val = kijun[i]
-        senkou_a_val = senkou_a[i]
-        senkou_b_val = senkou_b[i]
-        adx_val = adx_1d_aligned[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
         close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
+        chop_val = chop_1d_aligned[i]
+        atr_val = atr[i]
         
-        # Regime filter: only trade when 1d ADX > 25 (trending market)
-        trending_market = adx_val > 25
+        # Trend filter: price > EMA34 (uptrend) or < EMA34 (downtrend)
+        uptrend = close_val > ema_34_1d_val
+        downtrend = close_val < ema_34_1d_val
         
-        # Ichimoku signals
-        # Bullish: price above cloud AND Tenkan crosses above Kijun
-        # Bearish: price below cloud AND Tenkan crosses below Kijun
-        # Cloud top/bottom
-        cloud_top = max(senkou_a_val, senkou_b_val)
-        cloud_bottom = min(senkou_a_val, senkou_b_val)
-        
-        price_above_cloud = close_val > cloud_top
-        price_below_cloud = close_val < cloud_bottom
-        
-        # TK cross (need previous values)
-        tenkan_prev = tenkan[i-1]
-        kijun_prev = kijun[i-1]
-        tk_cross_bull = tenkan_val > kijun_val and tenkan_prev <= kijun_prev
-        tk_cross_bear = tenkan_val < kijun_val and tenkan_prev >= kijun_prev
+        # Regime filter: only trade in trending markets (CHOP < 61.8)
+        trending_regime = chop_val < 61.8
         
         if position == 0:
-            # Long: price above cloud + TK cross bull + trending market
-            long_signal = price_above_cloud and tk_cross_bull and trending_market
+            # Long: break above R1 with trending regime, and uptrend
+            long_signal = (close_val > camarilla_r1_aligned[i]) and \
+                          trending_regime and \
+                          uptrend
             
-            # Short: price below cloud + TK cross bear + trending market
-            short_signal = price_below_cloud and tk_cross_bear and trending_market
+            # Short: break below S1 with trending regime, and downtrend
+            short_signal = (close_val < camarilla_s1_aligned[i]) and \
+                           trending_regime and \
+                           downtrend
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
+                entry_price = close_val
+                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
+                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price falls below cloud base OR Tenkan crosses below Kijun
-            if close_val < cloud_bottom or (tenkan_val < kijun_val and tenkan_prev >= kijun_prev):
+            highest_since_entry = max(highest_since_entry, high_val)
+            # ATR trailing stop
+            if close_val < highest_since_entry - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price rises above cloud top OR Tenkan crosses above Kijun
-            if close_val > cloud_top or (tenkan_val > kijun_val and tenkan_prev <= kijun_prev):
+            lowest_since_entry = min(lowest_since_entry, low_val)
+            # ATR trailing stop
+            if close_val > lowest_since_entry + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Trend_1dRegime_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_ChopRegime_v2"
+timeframe = "12h"
 leverage = 1.0
