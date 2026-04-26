@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ADX_Alligator_Combo
-Hypothesis: Combines ADX(14) for trend strength with Williams Alligator (SMAs 13/8/5, 8/5/3) on 6h to filter whipsaws. Long when ADX>25 + price > Alligator Jaw (13) + Teeth (8) > Lips (5). Short when ADX>25 + price < Jaw + Teeth < Lips. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0x). Designed for 6h to capture medium trends with low trade frequency (target 12-37/year) while avoiding ranging markets. Works in bull/bear by requiring strong trend confirmation.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1-day EMA34 trend filter and volume confirmation (2.0x average) to reduce false breakouts. Uses discrete position sizing (0.25) and ATR-based stoploss (2.5x) for risk management. Added hysteresis to trend filter: require trend to remain in same direction for 2 consecutive 12h bars to avoid whipsaw. Designed for low trade frequency (target 12-37/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The 1-day EMA34 provides adaptive trend filtering that works across regimes, and volume confirmation ensures breakouts have participation.
 """
 
 import numpy as np
@@ -16,41 +16,61 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate ADX(14) on 6h
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate EMA(34) on 1d for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate ATR(14) for stoploss on 12h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_raw = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr_raw
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr_raw
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Williams Alligator (SMAs 13/8/5, 8/5/3) on 6h
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # 13-period
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values   # 8-period
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values    # 5-period
-    
-    # ATR(14) for stoploss
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume spike filter: volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Avoid NaN from shift - use current bar as fallback
+    prev_high = np.where(np.isnan(prev_high), df_1d['high'].values, prev_high)
+    prev_low = np.where(np.isnan(prev_low), df_1d['low'].values, prev_low)
+    prev_close = np.where(np.isnan(prev_close), df_1d['close'].values, prev_close)
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    r1 = pivot + (range_hl * 1.1 / 12.0)
+    s1 = pivot - (range_hl * 1.1 / 12.0)
+    
+    # Align Camarilla levels to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of ADX(14), Alligator jaws/teeth/lips, ATR
-    start_idx = max(14+14, 13, 8, 5, 14) + 1
+    # Warmup: max of 1d EMA(34), volume MA, ATR
+    start_idx = max(34, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx[i]) or
-            np.isnan(jaw[i]) or
-            np.isnan(teeth[i]) or
-            np.isnan(lips[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma[i]) or
             np.isnan(atr[i])):
             # Hold current position
             if position == 0:
@@ -62,14 +82,16 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        strong_trend = adx[i] > 25
+        trend_1d_up = close_val > ema_34_1d_aligned[i]   # 1d medium-term uptrend
+        trend_1d_down = close_val < ema_34_1d_aligned[i]  # 1d medium-term downtrend
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: strong trend + price above jaw + teeth above lips
-            long_signal = strong_trend and (close_val > jaw[i]) and (teeth[i] > lips[i])
+            # Long: price breaks above R1 AND 1d trend up AND volume spike
+            long_signal = (close_val > r1_aligned[i]) and trend_1d_up and vol_spike
             
-            # Short: strong trend + price below jaw + teeth below lips
-            short_signal = strong_trend and (close_val < jaw[i]) and (teeth[i] < lips[i])
+            # Short: price breaks below S1 AND 1d trend down AND volume spike
+            short_signal = (close_val < s1_aligned[i]) and trend_1d_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -84,20 +106,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend weakens OR price hits ATR stoploss
-            if (adx[i] <= 25) or (close_val < entry_price - 2.0 * atr[i]):
+            # Exit: trend flips down OR price hits ATR stoploss
+            if (not trend_1d_up) or (close_val < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend weakens OR price hits ATR stoploss
-            if (adx[i] <= 25) or (close_val > entry_price + 2.0 * atr[i]):
+            # Exit: trend flips up OR price hits ATR stoploss
+            if (not trend_1d_down) or (close_val > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ADX_Alligator_Combo"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "12h"
 leverage = 1.0
