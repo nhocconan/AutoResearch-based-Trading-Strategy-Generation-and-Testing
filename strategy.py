@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian20_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Daily Donchian(20) breakout with 1-week EMA20 trend filter and volume spike confirmation.
-- Long when price breaks above daily Donchian(20) high AND 1w EMA20 uptrend AND volume > 2.0 * volume_ma(20)
-- Short when price breaks below daily Donchian(20) low AND 1w EMA20 downtrend AND volume > 2.0 * volume_ma(20)
-- Uses Donchian channels from completed daily bars for structure-based breakouts
-- 1-week EMA20 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws in bear markets
-- Volume spike (2.0x) confirms institutional participation and reduces false breakouts
-- Designed for low frequency (target 7-25 trades/year) to minimize fee drag on 1d timeframe
-- Exit on opposite Donchian level touch or trend reversal
-- Novelty: Applies proven Donchian+HTF trend+volume pattern to 1d/1w timeframe for BTC/ETH edge in bull/bear markets
+6h_Camarilla_R3_S3_Fade_1dTrend_VolumeSpike_v1
+Hypothesis: 6h Camarilla R3/S3 fade strategy with 1d EMA34 trend filter and volume spike confirmation.
+- Fade at Camarilla R3/S3 levels when price rejects these levels in the direction of 1d trend
+- Long when price crosses above S3 (support) AND 1d EMA34 uptrend AND volume > 2.0 * volume_ma(20)
+- Short when price crosses below R3 (resistance) AND 1d EMA34 downtrend AND volume > 2.0 * volume_ma(20)
+- Uses Camarilla pivot levels calculated from prior 1d completed bar for intraday mean reversion
+- 1d EMA34 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws
+- Volume spike (2.0x) confirms institutional participation and reduces false signals
+- Designed for moderate frequency (target 12-37 trades/year) to minimize fee drag on 6h timeframe
+- Exit on opposite Camarilla level (R3/S3) touch or trend reversal
+- Novelty: Camarilla fade at R3/S3 levels (not breakouts) with HTF trend and volume confirmation for BTC/ETH edge
 """
 
 import numpy as np
@@ -18,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need enough data for calculations
+    if n < 50:  # Need enough data for calculations
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,43 +27,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Donchian levels (structure)
+    # Load 1d data ONCE before loop for Camarilla pivot levels (structure)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian(20) levels from prior daily bar (completed bar only)
-    lookback = 20
-    donch_high = pd.Series(df_1d['high'].values).rolling(window=lookback, min_periods=lookback).max().values
-    donch_low = pd.Series(df_1d['low'].values).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Camarilla pivot levels from prior 1d bar (completed bar only)
+    # Camarilla levels: based on previous day's high, low, close
+    # R4 = close + ((high - low) * 1.1/2)
+    # R3 = close + ((high - low) * 1.1/4)
+    # S3 = close - ((high - low) * 1.1/4)
+    # S4 = close - ((high - low) * 1.1/2)
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # Align Donchian levels to daily timeframe (no additional delay needed for structure)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    # Calculate Camarilla levels
+    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
     
-    # Load weekly data ONCE before loop for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
+    # Align Camarilla levels to 1d timeframe (no additional delay needed for structure)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate 1w EMA20 for trend filter (needs completed 1w candle)
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    # Trend: 1 = uptrend (close > EMA20), -1 = downtrend (close < EMA20), 0 = neutral/invalid
-    trend_1w = np.where(ema_20_1w_aligned > 0, 
-                        np.where(close > ema_20_1w_aligned, 1, -1), 
+    # Load 1d data ONCE before loop for trend filter (HTF)
+    # Calculate 1d EMA34 for trend filter (needs completed 1d candle)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Trend: 1 = uptrend (close > EMA34), -1 = downtrend (close < EMA34), 0 = neutral/invalid
+    trend_1d = np.where(ema_34_1d_aligned > 0, 
+                        np.where(close > ema_34_1d_aligned, 1, -1), 
                         0)
     
-    # Calculate volume filter: volume > 2.0 * volume_ma(20) for confirmation (stricter for 1d)
+    # Calculate volume filter: volume > 2.0 * volume_ma(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 for EMA, 20 for Donchian and volume MA)
-    start_idx = max(20, 20)
+    # Start after warmup (need 34 for EMA, 20 for volume MA)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(trend_1w[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(trend_1d[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -72,14 +80,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Donchian breakout conditions with trend and volume spike filter
+        # Camarilla R3/S3 fade conditions with trend and volume spike filter
         if position == 0:
-            # Long: Price breaks above Donchian high AND 1w uptrend AND volume spike
-            if close[i] > donch_high_aligned[i] and trend_1w[i] == 1 and volume_spike[i]:
+            # Long: Price crosses above S3 (support) AND 1d uptrend AND volume spike
+            if close[i] > camarilla_s3_aligned[i] and close[i-1] <= camarilla_s3_aligned[i-1] and trend_1d[i] == 1 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low AND 1w downtrend AND volume spike
-            elif close[i] < donch_low_aligned[i] and trend_1w[i] == -1 and volume_spike[i]:
+            # Short: Price crosses below R3 (resistance) AND 1d downtrend AND volume spike
+            elif close[i] < camarilla_r3_aligned[i] and close[i-1] >= camarilla_r3_aligned[i-1] and trend_1d[i] == -1 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -87,20 +95,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Price falls below Donchian low OR 1w trend turns down
-            if close[i] < donch_low_aligned[i] or trend_1w[i] == -1:
+            # Exit: Price falls below S3 (support) OR 1d trend turns down
+            if close[i] < camarilla_s3_aligned[i] or trend_1d[i] == -1:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Price rises above Donchian high OR 1w trend turns up
-            if close[i] > donch_high_aligned[i] or trend_1w[i] == 1:
+            # Exit: Price rises above R3 (resistance) OR 1d trend turns up
+            if close[i] > camarilla_r3_aligned[i] or trend_1d[i] == 1:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WeeklyDonchian20_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Fade_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
