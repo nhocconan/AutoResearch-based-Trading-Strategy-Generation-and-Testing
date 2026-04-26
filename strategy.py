@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1
-Hypothesis: On 4h timeframe, price breaking Camarilla R3/S3 levels with 1d EMA34 trend alignment and volume confirmation provides robust breakout signals. Uses ATR-based stoploss (2.0x) and discrete sizing (0.0, ±0.25) to control risk and minimize fee churn. Targets 75-200 trades over 4 years (19-50/year) to stay within optimal trade frequency for 4h timeframe. Designed to work in both bull (trend following) and bear (mean reversion via regime filter) markets by requiring alignment with higher timeframe trend.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_RegimeFilter_v1
+Hypothesis: On 4h timeframe, price breaking Camarilla R3/S3 levels with 1d EMA34 trend alignment and volume confirmation provides robust breakout signals. Adds a chop regime filter (ADX<20) to avoid whipsaws in ranging markets. Uses ATR-based stoploss (2.0x) and discrete sizing (0.0, ±0.25) to control risk. Targets 75-200 trades over 4 years to stay within optimal trade frequency for 4h timeframe. Designed to work in both bull (trend following) and bear (mean reversion via regime filter) markets by requiring alignment with higher timeframe trend and chop filter.
 """
 
 import numpy as np
@@ -39,6 +39,25 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.maximum(vol_ma, 1e-10)  # avoid division by zero
     
+    # Calculate ADX(14) for regime filter (choppy when ADX<20)
+    # True Range
+    tr_arr = np.concatenate([[np.nan], np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))])
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Smoothed TR, +DM, -DM
+    tr_period = pd.Series(tr_arr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / np.maximum(tr_period, 1e-10)
+    minus_di = 100 * minus_dm_smooth / np.maximum(tr_period, 1e-10)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.maximum(plus_di + minus_di, 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
     # Calculate Camarilla levels from previous 4h bar
     prev_high = np.concatenate([[np.nan], high[:-1]])
     prev_low = np.concatenate([[np.nan], low[:-1]])
@@ -51,8 +70,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of 1d EMA(34), ATR(14), volume MA(20)
-    start_idx = max(34, 14, 20) + 1
+    # Warmup: max of 1d EMA(34), ATR(14), volume MA(20), ADX(14)
+    start_idx = max(34, 14, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -60,7 +79,8 @@ def generate_signals(prices):
             np.isnan(atr[i]) or
             np.isnan(vol_ratio[i]) or
             np.isnan(camarilla_r3[i]) or
-            np.isnan(camarilla_s3[i])):
+            np.isnan(camarilla_s3[i]) or
+            np.isnan(adx[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -74,13 +94,14 @@ def generate_signals(prices):
         vol_confirmed = vol_ratio[i] > 2.0  # volume at least 2.0x average
         trend_1d_up = close_val > ema_34_1d_aligned[i]
         trend_1d_down = close_val < ema_34_1d_aligned[i]
+        chop_regime = adx[i] < 20  # choppy market (avoid breakouts)
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 AND 1d trend up AND volume confirmation
-            long_signal = (close_val > camarilla_r3[i]) and trend_1d_up and vol_confirmed
+            # Long: price breaks above Camarilla R3 AND 1d trend up AND volume confirmation AND not choppy
+            long_signal = (close_val > camarilla_r3[i]) and trend_1d_up and vol_confirmed and (not chop_regime)
             
-            # Short: price breaks below Camarilla S3 AND 1d trend down AND volume confirmation
-            short_signal = (close_val < camarilla_s3[i]) and trend_1d_down and vol_confirmed
+            # Short: price breaks below Camarilla S3 AND 1d trend down AND volume confirmation AND not choppy
+            short_signal = (close_val < camarilla_s3[i]) and trend_1d_down and vol_confirmed and (not chop_regime)
             
             if long_signal:
                 signals[i] = 0.25
@@ -95,20 +116,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend flips down OR price hits ATR stoploss
-            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]):
+            # Exit: trend flips down OR price hits ATR stoploss OR chop regime enters
+            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]) or chop_regime:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend flips up OR price hits ATR stoploss
-            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]):
+            # Exit: trend flips up OR price hits ATR stoploss OR chop regime enters
+            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]) or chop_regime:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_RegimeFilter_v1"
 timeframe = "4h"
 leverage = 1.0
