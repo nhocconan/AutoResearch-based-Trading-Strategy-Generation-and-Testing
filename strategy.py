@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Keltner_Donchian_Squeeze_Breakout_12hTrend_VolumeSpike
-Hypothesis: 6-hour volatility squeeze (Keltner width < Donchian width) followed by breakout in direction of 12h EMA50 trend with volume confirmation. Works in bull/bear by using 12h trend filter and breakouts from low volatility periods. Targets 12-30 trades/year to minimize fee drag while capturing explosive moves after consolidation.
+4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v3
+Hypothesis: 4-hour Camarilla R3/S3 level breakout with daily EMA34 trend filter and volume confirmation (1.8x average). Uses discrete position sizing (0.30) and ATR-based stoploss (2.0x) for risk management. Adds a choppiness regime filter (CHOP > 61.8 = range, avoid breakouts in chop) to reduce false signals and fee drag. Designed for moderate trade frequency (target 20-50/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The daily EMA34 provides strong trend filtering that works across regimes, and volume confirmation ensures breakouts have participation. Focuses on BTC and ETH as primary targets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,109 +18,134 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get daily data for HTF filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 12h for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate EMA(34) on daily for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(20) for Keltner channels
+    # Calculate ATR(14) for stoploss on 4h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate EMA(20) for Keltner middle line
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel width: 2 * ATR(20)
-    keltner_width = 2.0 * atr
-    
-    # Donchian Channel width: (20-period high - 20-period low)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_width = high_20 - low_20
-    
-    # Volatility squeeze: Keltner width < Donchian width (low volatility)
-    volatility_squeeze = keltner_width < donchian_width
-    
-    # Donchian breakout levels
-    donchian_high = high_20
-    donchian_low = low_20
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Calculate volume spike filter: volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
+    
+    # Calculate Camarilla levels from previous daily bar
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    # We need previous day's H, L, C
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla R3 and S3
+    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    
+    # Align Camarilla levels to 4h (use previous day's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate Choppiness Index on 4h for regime filter
+    def calculate_chop(high, low, close, window=14):
+        """Calculate Choppiness Index: higher = more choppy/ranging"""
+        atr_sum = np.zeros(len(close))
+        for i in range(len(close)):
+            if i == 0:
+                atr_sum[i] = 0
+            else:
+                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+                atr_sum[i] = atr_sum[i-1] + tr
+        
+        max_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
+        min_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        
+        chop = np.zeros(len(close))
+        for i in range(len(close)):
+            if i < window - 1 or atr_sum[i] == 0:
+                chop[i] = 50  # neutral
+            else:
+                log_sum = np.log10(atr_sum[i] / window)
+                log_range = np.log10((max_high[i] - min_low[i]) / window)
+                chop[i] = 100 * log_sum / log_range if log_range != 0 else 50
+        return chop
+    
+    chop = calculate_chop(high, low, close, window=14)
+    chop_threshold = 61.8  # Above this = choppy/ranging market (avoid breakouts)
+    no_chop = chop < chop_threshold  # Only trade when NOT choppy
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of 12h EMA(50), ATR(20), EMA(20), Donchian(20)
-    start_idx = max(50, 20, 20) + 1
+    # Warmup: max of daily EMA(34), volume MA, ATR, chop calculation
+    start_idx = max(34, 20, 14, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(vol_ma[i]) or
             np.isnan(atr[i]) or
-            np.isnan(ema_20[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i])):
+            np.isnan(chop[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
             continue
         
         close_val = close[i]
-        trend_12h_up = close_val > ema_50_12h_aligned[i]   # 12h uptrend
-        trend_12h_down = close_val < ema_50_12h_aligned[i]  # 12h downtrend
-        squeeze = volatility_squeeze[i]
+        trend_1d_up = close_val > ema_34_1d_aligned[i]   # Daily uptrend
+        trend_1d_down = close_val < ema_34_1d_aligned[i]  # Daily downtrend
         vol_spike = volume_spike[i]
+        not_choppy = no_chop[i]
         
         if position == 0:
-            # Long: Donchian breakout above AND 12h trend up AND volatility squeeze AND volume spike
-            long_signal = (close_val > donchian_high[i]) and trend_12h_up and squeeze and vol_spike
+            # Long: price breaks above Camarilla R3 AND daily trend up AND volume spike AND not choppy
+            long_signal = (close_val > camarilla_r3_aligned[i]) and trend_1d_up and vol_spike and not_choppy
             
-            # Short: Donchian breakdown below AND 12h trend down AND volatility squeeze AND volume spike
-            short_signal = (close_val < donchian_low[i]) and trend_12h_down and squeeze and vol_spike
+            # Short: price breaks below Camarilla S3 AND daily trend down AND volume spike AND not choppy
+            short_signal = (close_val < camarilla_s3_aligned[i]) and trend_1d_down and vol_spike and not_choppy
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = close_val
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
-            # Exit: 12h trend flips down OR price retracement to EMA(20)
-            if (not trend_12h_up) or (close_val < ema_20[i]):
+            signals[i] = 0.30
+            # Exit: trend flips down OR price hits ATR stoploss OR chop increases significantly
+            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]) or (chop[i] > chop_threshold + 10):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
-            # Exit: 12h trend flips up OR price retracement to EMA(20)
-            if (not trend_12h_down) or (close_val > ema_20[i]):
+            signals[i] = -0.30
+            # Exit: trend flips up OR price hits ATR stoploss OR chop increases significantly
+            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]) or (chop[i] > chop_threshold + 10):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Keltner_Donchian_Squeeze_Breakout_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v3"
+timeframe = "4h"
 leverage = 1.0
