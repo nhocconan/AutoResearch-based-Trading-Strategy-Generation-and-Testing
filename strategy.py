@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_WilliamsVixFix_v1
-Hypothesis: Williams Vix Fix (WVF) identifies volatility spikes and market extremes on 6h timeframe.
-- Long when WVF > 0.8 and price closes above 20-period EMA (fear exhaustion bounce)
-- Short when WVF > 0.8 and price closes below 20-period EMA (fear continuation)
-- Uses 12h EMA50 as trend filter to avoid counter-trend whipsaws
-- Volume confirmation: require volume > 1.5x 20-period average
-- Designed for low trade frequency (target: 12-30 trades/year) with clear volatility-based edge
-- Works in both bull (catch panic bounces) and bear (catch fear continuations) markets
+4h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v1
+Hypothesis: 4h Camarilla pivot breakout with 1d trend filter (EMA34) and ADX regime filter to avoid whipsaws in ranging markets.
+- Uses 4h timeframe targeting 75-200 total trades over 4 years (19-50/year)
+- Camarilla R1/S1 from previous 1d bar (more stable than lower timeframes)
+- Long when price breaks above R1 with volume spike, 1d uptrend, and ADX > 25 (trending market)
+- Short when price breaks below S1 with volume spike, 1d downtrend, and ADX > 25
+- ADX filter avoids ranging markets where breakouts fail, improving win rate in both bull and bear
+- Discrete position sizing (0.25) to minimize fee churn
 """
 
 import numpy as np
@@ -24,46 +24,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data ONCE before loop for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Williams Vix Fix: measures volatility spikes like VIX but for crypto
-    # WVF = ((Highest Close in lookback - Low) / (Highest Close in lookback - Lowest Low in lookback)) * 100
-    lookback = 22  # Similar to VIX calculation period
-    highest_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Avoid division by zero
-    denominator = highest_close - lowest_low
-    denominator = np.where(denominator == 0, 1e-10, denominator)
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1_1d = close_1d_arr + camarilla_range
+    s1_1d = close_1d_arr - camarilla_range
     
-    wvf = ((highest_close - low) / denominator) * 100
-    # Normalize to 0-1 range for easier thresholding
-    wvf_normalized = wvf / 100.0
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 20-period EMA for entry timing
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume confirmation: 20-period average
+    # Calculate volume spike (20-period volume average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 1.5)  # Volume at least 1.5x average
+    volume_spike = volume > (vol_ma20 * 2.0)  # Volume at least 2x average
+    
+    # Calculate ADX on 1d for regime filtering (trending vs ranging)
+    # ADX calculation: +DI, -DI, DX, then smoothed ADX
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high_1d[0] - low_1d[0]  # First TR
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # +DI and -DI
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    # Avoid division by zero
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 22 for WVF, 20 for EMA/volume, 50 for 12h EMA)
-    start_idx = max(22, 20, 50)
+    # Start after warmup (need 20 for volume MA, 34 for EMA, 14 for ADX/TR)
+    start_idx = max(20, 34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(wvf_normalized[i]) or 
-            np.isnan(ema20[i]) or np.isnan(ema50_12h_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -73,24 +107,24 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Williams Vix Fix extreme reading (>0.8 = high fear/volatility)
-        wvf_extreme = wvf_normalized[i] > 0.8
+        # Camarilla breakout conditions with volume confirmation and regime filter
+        price_above_r1 = close[i] > r1_aligned[i]
+        price_below_s1 = close[i] < s1_aligned[i]
         
-        # Price relative to 20-period EMA
-        price_above_ema = close[i] > ema20[i]
-        price_below_ema = close[i] < ema20[i]
+        # 1d trend filter
+        trend_up = close[i] > ema34_1d_aligned[i]
+        trend_down = close[i] < ema34_1d_aligned[i]
         
-        # 12h trend filter
-        trend_up = close[i] > ema50_12h_aligned[i]
-        trend_down = close[i] < ema50_12h_aligned[i]
+        # ADX filter: only trade when market is trending (ADX > 25)
+        trending_market = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: extreme fear + price above EMA20 + uptrend on 12h + volume spike
-            if wvf_extreme and price_above_ema and trend_up and volume_spike[i]:
+            # Long: price breaks above R1 AND volume spike AND 1d uptrend AND trending market
+            if price_above_r1 and volume_spike[i] and trend_up and trending_market:
                 signals[i] = 0.25
                 position = 1
-            # Short: extreme fear + price below EMA20 + downtrend on 12h + volume spike
-            elif wvf_extreme and price_below_ema and trend_down and volume_spike[i]:
+            # Short: price breaks below S1 AND volume spike AND 1d downtrend AND trending market
+            elif price_below_s1 and volume_spike[i] and trend_down and trending_market:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -98,20 +132,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: fear subsides (WVF < 0.5) OR price falls below EMA20 OR trend turns down
-            if (wvf_normalized[i] < 0.5) or (close[i] < ema20[i]) or (not trend_up):
+            # Exit: price falls below S1 OR 1d trend turns down OR market becomes ranging (ADX < 20)
+            if price_below_s1 or not trend_up or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: fear subsides (WVF < 0.5) OR price rises above EMA20 OR trend turns up
-            if (wvf_normalized[i] < 0.5) or (close[i] > ema20[i]) or (not trend_down):
+            # Exit: price rises above R1 OR 1d trend turns up OR market becomes ranging (ADX < 20)
+            if price_above_r1 or not trend_down or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WilliamsVixFix_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v1"
+timeframe = "4h"
 leverage = 1.0
