@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Direction_1dTrend_VolumeConfirm_v1
-Hypothesis: Weekly pivot points (PP, R1, S1) provide key support/resistance levels. 
-Price breaking above R1 with 1d uptrend and volume confirmation signals bullish continuation.
-Price breaking below S1 with 1d downtrend and volume confirmation signals bearish continuation.
-Uses 6h timeframe to capture multi-day moves with tight entry conditions (target: 12-37 trades/year).
-Works in both bull/bear markets by following the 1d trend direction.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d trend filter, volume spike, and choppiness regime filter captures strong directional moves while avoiding chop. Uses discrete sizing (0.25) and strict volume confirmation (2.0x) to limit trades to 12-37/year. Works by only taking breakouts aligned with 1d trend in non-choppy markets, reducing whipsaw in both bull/bear regimes.
 """
 
 import numpy as np
@@ -22,12 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Load daily data ONCE before loop for trend filter
+    # Load 1d data ONCE before loop for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -36,42 +27,54 @@ def generate_signals(prices):
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Previous week's OHLC for weekly pivot calculation (use 1w data)
-    prev_week_close = df_1w['close'].shift(1).values
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
+    # Previous day's OHLC for Camarilla calculation (use 1d data)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Weekly Pivot Points: PP = (H+L+C)/3, R1 = (2*PP) - L, S1 = (2*PP) - H
-    weekly_pp = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    weekly_r1 = (2 * weekly_pp) - prev_week_low
-    weekly_s1 = (2 * weekly_pp) - prev_week_high
+    # Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
     
-    # Align weekly pivot levels to 6h timeframe
-    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average (stricter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.8)
+    volume_confirm = volume > (vol_ma * 2.0)
+    
+    # Choppiness regime filter on 1d: CHOP > 61.8 = choppy (avoid), CHOP < 38.2 = trending (favor)
+    # Calculate True Range and sum over 14 periods
+    tr1 = np.abs(df_1d['high'] - df_1d['low'])
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(atr14 / np.log(14)) / np.log(12)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Define regimes: chop > 61.8 = choppy (avoid trading), else trending
+    not_choppy = chop_aligned < 61.8  # Only trade when not choppy
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Warmup: max of EMA34 (34), volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: max of EMA34 (34), volume MA (20), CHOP (14)
+    start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         close_val = close[i]
-        r1_val = weekly_r1_aligned[i]
-        s1_val = weekly_s1_aligned[i]
-        pp_val = weekly_pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         trend_val = ema34_1d_aligned[i]
         vol_conf = volume_confirm[i]
+        chop_regime = not_choppy[i]
         
         # Skip if any data not ready
-        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(pp_val) or np.isnan(trend_val)):
+        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(trend_val) or np.isnan(chop_regime)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
@@ -80,13 +83,13 @@ def generate_signals(prices):
         is_uptrend = close_val > trend_val
         is_downtrend = close_val < trend_val
         
-        # Entry conditions: Weekly pivot breakout in direction of trend + volume
-        long_condition = (close_val > r1_val) and is_uptrend and vol_conf
-        short_condition = (close_val < s1_val) and is_downtrend and vol_conf
+        # Entry conditions: Camarilla breakout in direction of trend + volume + not choppy
+        long_condition = (close_val > r1_val) and is_uptrend and vol_conf and chop_regime
+        short_condition = (close_val < s1_val) and is_downtrend and vol_conf and chop_regime
         
-        # Exit conditions: price crosses weekly pivot point or trend reversal
-        long_exit = (position == 1 and (close_val < pp_val or not is_uptrend))
-        short_exit = (position == -1 and (close_val > pp_val or not is_downtrend))
+        # Exit conditions: opposite Camarilla level touch or trend reversal or choppy regime
+        long_exit = (position == 1 and (close_val < s1_val or not is_uptrend or not chop_regime))
+        short_exit = (position == -1 and (close_val > r1_val or not is_downtrend or not chop_regime))
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -106,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Direction_1dTrend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
