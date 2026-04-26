@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_VolumeSpike_RegimeAdaptive_Donchian
-Hypothesis: On 6h timeframe, combine Donchian breakout with volatility regime filter (ATR ratio) and volume spike confirmation.
-In high volatility regime (ATR(7)/ATR(30) > 1.5), trade breakouts; in low volatility regime, fade at bands.
-Volume spike (>2x 20 EMA volume) confirms institutional participation.
-Designed for 50-150 total trades over 4 years with discrete position sizing (0.0, ±0.25).
-Adapts to both trending and ranging markets via volatility regime detection.
+12h_Camarilla_R1S1_Breakout_1dTrend_VolumeFilter
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Only long when price breaks above R1 and close > 1d EMA34, short when breaks below S1 and close < 1d EMA34.
+Volume spike (>1.5x 20-period EMA volume) confirms institutional interest.
+Designed for 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.0, ±0.25).
+Camarilla pivot levels provide intraday support/resistance that work in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,34 +22,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA34 for trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR for volatility regime
-    tr1 = pd.Series(high).rolling(window=2).max().values - pd.Series(low).rolling(window=2).min().values
-    tr2 = abs(pd.Series(high).rolling(window=2).max().values - pd.Series(close).shift(1).rolling(window=2).min().values)
-    tr3 = abs(pd.Series(low).rolling(window=2).min().values - pd.Series(close).shift(1).rolling(window=2).max().values)
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr7 / (atr30 + 1e-10)
-    
-    # Volume confirmation: volume > 2.0 * 20-period EMA volume
+    # Volume confirmation: volume > 1.5 * 20-period EMA volume (12h timeframe)
     avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * avg_volume)
+    volume_spike = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup
-    start_idx = 30
+    # Start after warmup for volume EMA
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(period20_high[i]) or np.isnan(period20_low[i]) or 
-            np.isnan(atr_ratio[i]) or np.isnan(volume_spike[i])):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -59,27 +51,37 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Regime logic: high volatility = breakout, low volatility = mean reversion
-        if atr_ratio[i] > 1.5:  # High volatility regime - trade breakouts
-            # Long breakout: price breaks above upper Donchian + volume spike
-            if close[i] > period20_high[i] and volume_spike[i]:
+        # Calculate Camarilla levels for today (using previous day's OHLC)
+        # Camarilla uses previous day's high, low, close
+        if i >= 2:  # Need at least 2 bars for previous day (12h timeframe = 2 bars per day)
+            prev_high = high[i-2]  # Previous day high
+            prev_low = low[i-2]    # Previous day low
+            prev_close = close[i-2] # Previous day close
+            
+            # Camarilla R1, S1 levels
+            rang = prev_high - prev_low
+            r1 = prev_close + rang * 1.1 / 12
+            s1 = prev_close - rang * 1.1 / 12
+            
+            # Long logic: break above R1 + close > 1d EMA34 + volume spike
+            if close[i] > r1 and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 if position != 1:
                     signals[i] = base_size
                     position = 1
                 else:
                     signals[i] = base_size
-            # Short breakout: price breaks below lower Donchian + volume spike
-            elif close[i] < period20_low[i] and volume_spike[i]:
+            # Short logic: break below S1 + close < 1d EMA34 + volume spike
+            elif close[i] < s1 and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 if position != -1:
                     signals[i] = -base_size
                     position = -1
                 else:
                     signals[i] = -base_size
-            # Exit: price returns to middle of channel
-            elif position == 1 and close[i] < (period20_high[i] + period20_low[i]) / 2:
+            # Exit: price returns to previous day's close (mean reversion to midpoint)
+            elif position == 1 and close[i] < prev_close:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and close[i] > (period20_high[i] + period20_low[i]) / 2:
+            elif position == -1 and close[i] > prev_close:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,39 +92,13 @@ def generate_signals(prices):
                     signals[i] = base_size
                 else:
                     signals[i] = -base_size
-        else:  # Low volatility regime - fade at bands
-            # Long fade: price touches lower band + volume spike (contrarian)
-            if close[i] <= period20_low[i] and volume_spike[i]:
-                if position != 1:
-                    signals[i] = base_size
-                    position = 1
-                else:
-                    signals[i] = base_size
-            # Short fade: price touches upper band + volume spike (contrarian)
-            elif close[i] >= period20_high[i] and volume_spike[i]:
-                if position != -1:
-                    signals[i] = -base_size
-                    position = -1
-                else:
-                    signals[i] = -base_size
-            # Exit: price returns to middle of channel
-            elif position == 1 and close[i] >= (period20_high[i] + period20_low[i]) / 2:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and close[i] <= (period20_high[i] + period20_low[i]) / 2:
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold current position
-                if position == 0:
-                    signals[i] = 0.0
-                elif position == 1:
-                    signals[i] = base_size
-                else:
-                    signals[i] = -base_size
+        else:
+            # Not enough data for Camarilla calculation, hold flat
+            signals[i] = 0.0
+            position = 0
     
     return signals
 
-name = "6h_VolumeSpike_RegimeAdaptive_Donchian"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
