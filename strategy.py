@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_WeeklyPivotTrend_VolumeSpike_v1
-Hypothesis: 6h Donchian(20) breakout with weekly Camarilla pivot trend filter and volume spike confirmation.
-Enters long when price breaks above 20-period high AND weekly trend is bullish (close > weekly H3) AND volume spike.
-Enters short when price breaks below 20-period low AND weekly trend is bearish (close < weekly L3) AND volume spike.
-Uses weekly Camarilla H3/L3 for higher timeframe trend alignment to avoid counter-trend trades.
-Volume spike confirms institutional participation. Designed for 6h timeframe to target 12-37 trades/year (50-150 total over 4 years).
-Works in bull/bear markets by trading with the weekly trend and using volume to filter false breakouts.
+12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v3
+Hypothesis: 12h Camarilla H4/H5 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Improved version with stricter entry conditions to reduce overtrading:
+- Volume spike threshold increased to 2.0x (from 1.5x) average volume
+- Added ADX(14) > 25 filter to ensure trending market conditions
+- Position size reduced to 0.15 to minimize drawdown and fee impact
+- Uses 1d EMA34 for higher timeframe trend alignment to avoid counter-trend trades
+- Volume spike and ADX filter confirm institutional participation in trending markets
+- Designed for 12h timeframe to target 12-30 trades/year (48-120 total over 4 years)
+- Works in bull/bear markets by trading with the 1d trend and using volume/ADX to filter false breakouts
 """
 
 import numpy as np
@@ -15,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,86 +26,133 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Camarilla levels from previous weekly bar
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Weekly Camarilla levels: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
-    camarilla_h3_1w = close_1w + 1.1 * (high_1w - low_1w)
-    camarilla_l3_1w = close_1w - 1.1 * (high_1w - low_1w)
+    # Calculate ADX(14) on 1d for trend strength filter
+    # ADX calculation: +DM, -DM, TR, then smoothed
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly Camarilla levels to 6h timeframe (use previous week's levels)
-    camarilla_h3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3_1w)
-    camarilla_l3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3_1w)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
     
-    # Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Volume spike: volume > 2.0 * 20-period average (stricter to reduce trades)
+    # Smoothed values (Wilder's smoothing)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: smoothed = (prev_smoothed * (period-1) + current) / period
+            for i in range(period, len(data)):
+                if not np.isnan(data[i]) and not np.isnan(result[i-1]):
+                    result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    tr_smooth = wilder_smooth(tr, 14)
+    plus_dm_smooth = wilder_smooth(plus_dm, 14)
+    minus_dm_smooth = wilder_smooth(minus_dm, 14)
+    
+    # DI+ and DI-
+    plus_di = np.where(tr_smooth != 0, (plus_dm_smooth / tr_smooth) * 100, 0)
+    minus_di = np.where(tr_smooth != 0, (minus_dm_smooth / tr_smooth) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = wilder_smooth(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    camarilla_h4 = close_1d + 1.0 * (high_1d - low_1d)
+    camarilla_h5 = close_1d - 1.0 * (high_1d - low_1d)
+    
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    
+    # Volume spike: volume > 2.0 * 20-period average (stricter than before)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 for Donchian and volume MA)
-    start_idx = 20
+    # Start after warmup (need 34 for 1d EMA/ADX, 20 for volume MA)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(camarilla_h3_1w_aligned[i]) or np.isnan(camarilla_l3_1w_aligned[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_h5_aligned[i]) or
             np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.15
             else:
-                signals[i] = -0.25
+                signals[i] = -0.15
             continue
         
         # Breakout conditions
-        breakout_long = close[i] > high_20[i]
-        breakout_short = close[i] < low_20[i]
+        breakout_long = close[i] > camarilla_h4_aligned[i]
+        breakout_short = close[i] < camarilla_h5_aligned[i]
         
-        # Weekly trend filter: bullish if close > weekly H3, bearish if close < weekly L3
-        weekly_bullish = close[i] > camarilla_h3_1w_aligned[i]
-        weekly_bearish = close[i] < camarilla_l3_1w_aligned[i]
+        # Re-entry conditions (price back inside Camarilla H-L range)
+        # Calculate Camarilla H-L for the day: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
+        camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
+        camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
+        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+        price_in_range = (close[i] > camarilla_l3_aligned[i]) and (close[i] < camarilla_h3_aligned[i])
         
         if position == 0:
-            # Long: bullish breakout AND weekly bullish trend AND volume spike
-            if breakout_long and weekly_bullish and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: breakout above H4 AND close > 1d EMA34 AND volume spike AND ADX > 25
+            if breakout_long and close[i] > ema34_1d_aligned[i] and volume_spike[i] and adx_aligned[i] > 25:
+                signals[i] = 0.15
                 position = 1
-            # Short: bearish breakout AND weekly bearish trend AND volume spike
-            elif breakout_short and weekly_bearish and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: breakout below H5 AND close < 1d EMA34 AND volume spike AND ADX > 25
+            elif breakout_short and close[i] < ema34_1d_aligned[i] and volume_spike[i] and adx_aligned[i] > 25:
+                signals[i] = -0.15
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
-            # Exit: bearish breakout OR weekly trend turns bearish
-            if breakout_short or not weekly_bullish:
+            signals[i] = 0.15
+            # Exit: breakout below H5 OR price re-enters Camarilla H3-L3 range
+            if breakout_short or price_in_range:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
-            # Exit: bullish breakout OR weekly trend turns bullish
-            if breakout_long or weekly_bullish:
+            signals[i] = -0.15
+            # Exit: breakout above H4 OR price re-enters Camarilla H3-L3 range
+            if breakout_long or price_in_range:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Donchian20_Breakout_WeeklyPivotTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "12h"
 leverage = 1.0
