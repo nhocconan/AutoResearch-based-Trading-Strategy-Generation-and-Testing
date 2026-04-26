@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ATRStop
-Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe with 1d EMA34 trend filter and volume confirmation (>2.0x 20-bar average) capture strong trending moves. Uses discrete sizing (0.25) to target 12-37 trades/year. Works in bull/bear by only taking breakouts aligned with 1d trend. ATR-based stoploss controls drawdown. R3/S3 levels provide stronger breakout signals than R1/S1, reducing whipsaw in ranging markets. Target timeframe 12h as specified.
+4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts on 4h timeframe with 12h EMA50 trend filter and volume confirmation (>2.0x 20-bar average) capture strong trending moves. Uses discrete sizing (0.25) to target 20-50 trades/year. Works in bull/bear by only taking breakouts aligned with 12h trend. ATR-based stoploss controls drawdown. R3/S3 levels provide stronger breakout signals than R1/S1, reducing whipsaw in ranging markets.
 """
 
 import numpy as np
@@ -18,14 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # ATR(14) for stoploss calculation
     tr1 = pd.Series(high[1:] - low[1:]).values
@@ -43,14 +43,14 @@ def generate_signals(prices):
     base_size = 0.25
     entry_price = 0.0
     
-    # Warmup: max of EMA34 (34), ATR (14), volume MA (20)
-    start_idx = max(34, 14, 20)
+    # Warmup: max of EMA50 (50), ATR (14), volume MA (20)
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        trend_val = ema34_1d_aligned[i]
+        trend_val = ema50_12h_aligned[i]
         atr_val = atr[i]
         vol_conf = volume_confirm[i]
         
@@ -60,9 +60,9 @@ def generate_signals(prices):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Calculate Camarilla levels for today (using previous day's OHLC)
+        # Calculate Camarilla levels for today (using previous bar's OHLC)
         if i >= 1:
-            # Use previous day's OHLC for Camarilla calculation
+            # Use previous bar's OHLC for Camarilla calculation
             prev_high = high[i-1]
             prev_low = low[i-1]
             prev_close = close[i-1]
@@ -75,7 +75,7 @@ def generate_signals(prices):
             r3 = close_val
             s3 = close_val
         
-        # Trend filter: price > 1d EMA34 = uptrend, price < 1d EMA34 = downtrend
+        # Trend filter: price > 12h EMA50 = uptrend, price < 12h EMA50 = downtrend
         is_uptrend = close_val > trend_val
         is_downtrend = close_val < trend_val
         
@@ -83,7 +83,7 @@ def generate_signals(prices):
         long_breakout = close_val > r3
         short_breakout = close_val < s3
         
-        # Entry conditions: Camarilla breakout in direction of 1d trend + volume
+        # Entry conditions: Camarilla breakout in direction of 12h trend + volume
         long_entry = long_breakout and is_uptrend and vol_conf
         short_entry = short_breakout and is_downtrend and vol_conf
         
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ATRStop"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
