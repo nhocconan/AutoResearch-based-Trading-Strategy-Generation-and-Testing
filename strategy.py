@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter_v4
-Hypothesis: Refined 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike (2.0x), and choppiness regime filter (CHOP > 61.8 = range for mean reversion). 
-This strategy targets 50-150 trades over 4 years by requiring confluence of trend, volume, and regime conditions. 
-Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear via 1d trend alignment and chop filter to avoid whipsaws in strong trends.
-Adds minimum holding period of 3 bars to reduce churn and improve test generalization.
+6h_Supertrend_ADX_Regime_Adaptive_v1
+Hypothesis: 6h Supertrend with ADX regime filter and dynamic position sizing. In trending markets (ADX>25), follow Supertrend direction. In ranging markets (ADX<20), mean revert at Supertrend extremes. Uses 1d HTF trend alignment for higher timeframe context. Targets 50-150 trades over 4 years by requiring regime alignment and trend confirmation. Works in bull/bear via adaptive logic: trend following in strong trends, mean reversion in chop. Discrete position sizing (0.25) minimizes fee churn.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,59 +18,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter, Camarilla levels, and chop filter
+    # Load 1d data ONCE before loop for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    # Trend: 1 = uptrend (close > EMA34), -1 = downtrend (close < EMA34), 0 = invalid
-    trend_1d = np.where(ema_34_1d_aligned > 0, 
-                        np.where(close > ema_34_1d_aligned, 1, -1), 
-                        0)
+    # Calculate ATR for Supertrend (using 10-period ATR, multiplier 3.0)
+    atr_period = 10
+    atr_mult = 3.0
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
-    # Calculate Camarilla pivot levels from 1d OHLC (using previous day)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    upperband = hl2 + (atr_mult * atr)
+    lowerband = hl2 - (atr_mult * atr)
     
-    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    supertrend[0] = upperband[0]
+    direction[0] = 1
     
-    # Volume filter: volume > 2.0 * volume_ma(20) for stricter confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    for i in range(1, n):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = max(lowerband[i], supertrend[i-1])
+            direction[i] = 1
+        else:
+            supertrend[i] = min(upperband[i], supertrend[i-1])
+            direction[i] = -1
     
-    # Choppiness Index filter on 1d timeframe (range market when CHOP > 61.8)
-    atr_14 = pd.Series(np.maximum.reduce([
-        df_1d['high'] - df_1d['low'],
-        abs(df_1d['high'] - df_1d['close'].shift(1)),
-        abs(df_1d['low'] - df_1d['close'].shift(1))
-    ])).rolling(window=14, min_periods=14).mean().values
+    # ADX calculation for regime filtering
+    adx_period = 14
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    sum_tr = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        else:
+            plus_dm[i] = 0
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+        else:
+            minus_dm[i] = 0
     
-    chop = 100 * np.log10(sum_tr / np.log10(14)) / np.log10((highest_high - lowest_low))
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    chop_range = chop_aligned > 61.8  # Range market condition for mean reversion
+    tr_14 = pd.Series(tr).rolling(window=adx_period, min_periods=adx_period).mean().values
+    plus_di_14 = 100 * (pd.Series(plus_dm).ewm(span=adx_period, min_periods=adx_period, adjust=False).mean().values / tr_14)
+    minus_di_14 = 100 * (pd.Series(minus_dm).ewm(span=adx_period, min_periods=adx_period, adjust=False).mean().values / tr_14)
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx = pd.Series(dx).ewm(span=adx_period, min_periods=adx_period, adjust=False).mean().values
+    
+    # Calculate 1d EMA50 for HTF trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    htf_trend = np.where(close > ema_50_1d_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0  # Track holding period
     
-    # Start after warmup (need 34 for EMA, 20 for volume MA, 14 for chop)
-    start_idx = max(34, 20, 14)
+    # Start after warmup (need 50 for EMA, 14 for ADX/Supertrend)
+    start_idx = max(50, adx_period, atr_period)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(trend_1d[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(adx[i]) or np.isnan(supertrend[i]) or
+            np.isnan(direction[i]) or np.isnan(htf_trend[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -81,45 +99,68 @@ def generate_signals(prices):
                 signals[i] = 0.25
             else:
                 signals[i] = -0.25
-            bars_since_entry += 1
             continue
         
-        # Camarilla R3/S3 breakout conditions with volume, trend, and chop confirmation
-        if position == 0:
-            # Long: Price breaks above Camarilla R3 AND 1d uptrend AND volume spike AND chop > 61.8 (range)
-            if close[i] > camarilla_r3_aligned[i] and trend_1d[i] == 1 and volume_spike[i] and chop_range[i]:
-                signals[i] = 0.25
-                position = 1
-                bars_since_entry = 0
-            # Short: Price breaks below Camarilla S3 AND 1d downtrend AND volume spike AND chop > 61.8 (range)
-            elif close[i] < camarilla_s3_aligned[i] and trend_1d[i] == -1 and volume_spike[i] and chop_range[i]:
-                signals[i] = -0.25
-                position = -1
-                bars_since_entry = 0
+        # Regime-based logic
+        if adx[i] > 25:  # Trending regime
+            # Follow Supertrend direction aligned with HTF trend
+            if direction[i] == 1 and htf_trend[i] == 1:  # Uptrend alignment
+                if position != 1:
+                    signals[i] = 0.25
+                    position = 1
+                else:
+                    signals[i] = 0.25
+            elif direction[i] == -1 and htf_trend[i] == -1:  # Downtrend alignment
+                if position != -1:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = 0.0
-                bars_since_entry = 0
-        elif position == 1:
-            # Hold long
-            signals[i] = 0.25
-            bars_since_entry += 1
-            # Exit: Price falls below Camarilla S3 OR 1d trend turns down OR min holding period (3 bars) exceeded
-            if (close[i] < camarilla_s3_aligned[i] or trend_1d[i] == -1) and bars_since_entry >= 3:
+                # Regime mismatch - exit
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
-        elif position == -1:
-            # Hold short
-            signals[i] = -0.25
-            bars_since_entry += 1
-            # Exit: Price rises above Camarilla R3 OR 1d trend turns up OR min holding period (3 bars) exceeded
-            if (close[i] > camarilla_r3_aligned[i] or trend_1d[i] == 1) and bars_since_entry >= 3:
+        elif adx[i] < 20:  # Ranging regime
+            # Mean revert at Supertrend extremes
+            if close[i] < lowerband[i] and htf_trend[i] == 1:  # Long mean reversion in uptrend HTF
+                if position != 1:
+                    signals[i] = 0.25
+                    position = 1
+                else:
+                    signals[i] = 0.25
+            elif close[i] > upperband[i] and htf_trend[i] == -1:  # Short mean reversion in downtrend HTF
+                if position != -1:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = -0.25
+            else:
+                # Exit mean reversion position when price returns to Supertrend
+                if position == 1 and close[i] > supertrend[i]:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and close[i] < supertrend[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    # Hold current position
+                    if position == 0:
+                        signals[i] = 0.0
+                    elif position == 1:
+                        signals[i] = 0.25
+                    else:
+                        signals[i] = -0.25
+        else:  # Transition regime (20 <= ADX <= 25)
+            # Hold current position or stay flat
+            if position == 0:
                 signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter_v4"
-timeframe = "12h"
+name = "6h_Supertrend_ADX_Regime_Adaptive_v1"
+timeframe = "6h"
 leverage = 1.0
