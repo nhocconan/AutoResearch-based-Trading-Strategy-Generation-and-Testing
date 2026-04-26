@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: On 4h timeframe, use Camarilla R1/S1 levels from 1d for breakout entries, filtered by 1d trend direction (close > EMA34) and volume spike (>2.0x 20-period average). Enter long when price breaks above R1 with 1d uptrend and volume spike. Enter short when price breaks below S1 with 1d downtrend and volume spike. Uses discrete position size 0.25 to balance capture and drawdown. Designed for 19-50 trades/year on 4h by requiring daily alignment and volume confirmation, reducing overtrading while capturing structured moves in both bull and bear markets.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: On 4h timeframe, use Camarilla R1/S1 levels from 1d for breakout entries, filtered by 1d trend direction (close > EMA34) and volume spike (>2.0x 20-period average). Enter long when price breaks above R1 with 1d uptrend and volume spike. Enter short when price breaks below S1 with 1d downtrend and volume spike. Uses discrete position size 0.25 to balance capture and drawdown. Designed for 20-50 trades/year on 4h by requiring daily alignment and volume confirmation, reducing overtrading while capturing structured moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
