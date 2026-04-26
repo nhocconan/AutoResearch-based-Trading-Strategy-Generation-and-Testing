@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2
-Hypothesis: Refined Camarilla R1/S1 breakout with stricter volume confirmation (>2.5x 20-median) and 1d EMA34 trend filter.
-Added minimum holding period of 3 bars to reduce churn and fees. Uses discrete sizing (0.25) to minimize fee drag.
-Target: 75-150 trades over 4 years. Works in bull via breakout continuation and in bear by avoiding counter-trend trades via daily EMA filter.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike (>2.5x 20-median) for ETH/BTC.
+Works in bull via breakout continuation and in bear by avoiding counter-trend trades via daily EMA filter.
+Designed for low trade frequency (12-37/year) to minimize fee drag. Uses discrete sizing (0.25).
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for 4h (based on previous bar's range)
+    # Calculate Camarilla levels for 12h (based on previous bar's range)
     prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
@@ -31,10 +31,8 @@ def generate_signals(prices):
     range_hl = prev_high - prev_low
     r1 = prev_close + range_hl * 1.1 / 12
     s1 = prev_close - range_hl * 1.1 / 12
-    r3 = prev_close + range_hl * 1.1 / 4
-    s3 = prev_close - range_hl * 1.1 / 4
     
-    # Volume confirmation: volume > 2.5x 20-period median (robust to outliers, stricter)
+    # Volume confirmation: volume > 2.5x 20-period median (robust to outliers)
     vol_series = pd.Series(volume)
     vol_median = vol_series.rolling(window=20, min_periods=20).median().values
     volume_spike = volume > (vol_median * 2.5)
@@ -119,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
