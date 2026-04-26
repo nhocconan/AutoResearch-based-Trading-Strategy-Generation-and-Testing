@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v3
+12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v4
 Hypothesis: 12h Camarilla H4/H5 breakout with 1d EMA34 trend filter and volume spike confirmation.
 Improved version with stricter entry conditions to reduce overtrading:
-- Volume spike threshold increased to 2.0x (from 1.5x) average volume
-- Added ADX(14) > 25 filter to ensure trending market conditions
-- Position size reduced to 0.15 to minimize drawdown and fee impact
+- Volume spike threshold increased to 2.5x (from 2.0x) average volume to reduce false signals
+- Added ADX(14) > 30 filter (from 25) to ensure stronger trending market conditions
+- Position size set to 0.25 to balance profit potential and drawdown control
 - Uses 1d EMA34 for higher timeframe trend alignment to avoid counter-trend trades
 - Volume spike and ADX filter confirm institutional participation in trending markets
 - Designed for 12h timeframe to target 12-30 trades/year (48-120 total over 4 years)
@@ -35,7 +35,6 @@ def generate_signals(prices):
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Calculate ADX(14) on 1d for trend strength filter
-    # ADX calculation: +DM, -DM, TR, then smoothed
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -88,9 +87,9 @@ def generate_signals(prices):
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
     
-    # Volume spike: volume > 2.0 * 20-period average (stricter than before)
+    # Volume spike: volume > 2.5 * 20-period average (stricter than before)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (2.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -108,9 +107,9 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.15
+                signals[i] = 0.25
             else:
-                signals[i] = -0.15
+                signals[i] = -0.25
             continue
         
         # Breakout conditions
@@ -126,26 +125,26 @@ def generate_signals(prices):
         price_in_range = (close[i] > camarilla_l3_aligned[i]) and (close[i] < camarilla_h3_aligned[i])
         
         if position == 0:
-            # Long: breakout above H4 AND close > 1d EMA34 AND volume spike AND ADX > 25
-            if breakout_long and close[i] > ema34_1d_aligned[i] and volume_spike[i] and adx_aligned[i] > 25:
-                signals[i] = 0.15
+            # Long: breakout above H4 AND close > 1d EMA34 AND volume spike AND ADX > 30
+            if breakout_long and close[i] > ema34_1d_aligned[i] and volume_spike[i] and adx_aligned[i] > 30:
+                signals[i] = 0.25
                 position = 1
-            # Short: breakout below H5 AND close < 1d EMA34 AND volume spike AND ADX > 25
-            elif breakout_short and close[i] < ema34_1d_aligned[i] and volume_spike[i] and adx_aligned[i] > 25:
-                signals[i] = -0.15
+            # Short: breakout below H5 AND close < 1d EMA34 AND volume spike AND ADX > 30
+            elif breakout_short and close[i] < ema34_1d_aligned[i] and volume_spike[i] and adx_aligned[i] > 30:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.15
+            signals[i] = 0.25
             # Exit: breakout below H5 OR price re-enters Camarilla H3-L3 range
             if breakout_short or price_in_range:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.15
+            signals[i] = -0.25
             # Exit: breakout above H4 OR price re-enters Camarilla H3-L3 range
             if breakout_long or price_in_range:
                 signals[i] = 0.0
@@ -153,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v3"
+name = "12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v4"
 timeframe = "12h"
 leverage = 1.0
