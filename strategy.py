@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R1/S1 breakouts from 1d combined with 1d trend filter (price vs EMA34) and volume confirmation (>2x average) on 4h timeframe captures institutional moves while avoiding counter-trend whipsaws. Works in bull/bear via 1d trend alignment. Designed for 4h to target 19-50 trades/year with discrete sizing (0.25).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakouts from 1d with 4h EMA50 trend filter and volume confirmation (>2x average) captures strong intraday moves aligned with daily trend. Uses 4h timeframe to target 20-50 trades/year with discrete sizing (0.30). Works in bull/bear via daily trend alignment.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels and trend filter
+    # Load 1d data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -48,13 +48,13 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Average volume for confirmation (24-period SMA = 1d on 4h chart)
+    # Average volume for confirmation (24-period SMA = 1d * 2/3 = 16h)
     avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    base_size = 0.25
+    base_size = 0.30
     
     # Warmup: max of EMA(34), volume(24)
     start_idx = max(34, 24)
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
