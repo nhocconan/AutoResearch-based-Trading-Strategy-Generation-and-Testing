@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 4-hour Camarilla R1/S1 breakout with daily EMA34 trend filter and volume spike confirmation.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: 12-hour Camarilla R1/S1 breakout with daily EMA34 trend filter and volume spike confirmation.
 Enters long when price breaks above R1 with bullish daily trend and volume spike.
 Enters short when price breaks below S1 with bearish daily trend and volume spike.
-Uses discrete position sizing (0.0, ±0.30) to minimize fee churn. Designed for 75-200 total trades over 4 years.
+Uses discrete position sizing (0.0, ±0.30) to minimize fee churn. Designed for 50-150 total trades over 4 years.
 Works in both bull and bear markets by following the daily trend direction only.
+Fixed: Removed NaN handling in loop, simplified exit logic, added proper warmup.
 """
 
 import numpy as np
@@ -42,7 +43,7 @@ def generate_signals(prices):
     r1 = pivot + range_hl * 1.1 / 12
     s1 = pivot - range_hl * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -63,18 +64,6 @@ def generate_signals(prices):
     start_idx = 1 + 34
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
-            # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
-            continue
-        
         # Long logic: break above R1 + bullish daily trend + volume spike
         if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
             if position != 1:
@@ -107,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
