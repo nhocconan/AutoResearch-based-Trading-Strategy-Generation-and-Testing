@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_HT
-Hypothesis: Daily Camarilla R1/S1 breakouts with weekly trend filter and volume confirmation (>2.0x 20-bar MA). Uses weekly EMA50 for trend direction to avoid whipsaws in ranging markets. Target: 15-25 trades/year on BTC/ETH. Works in both bull/bear by following weekly trend while using Camarilla structure for precise entries. Volume spike reduces false breakouts.
+6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_HT
+Hypothesis: Camarilla R4/S4 breakouts with 1d EMA50 trend filter and volume confirmation (>2.0x 20-bar MA). Uses wider breakout levels (R4/S4) to capture strong momentum moves while maintaining low trade frequency (target: 15-30 trades/year). Works in bull/bear markets by following 1d trend while using Camarilla structure for precise entries. Volume spike filter reduces whipsaws. Designed for BTC/ETH with SOL as secondary confirmation.
 """
 
 import numpy as np
@@ -18,34 +18,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Load 1d data ONCE before loop for Camarilla levels
+    # Load 1d data ONCE before loop for HTF filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla levels (R1/S1 = standard breakout levels)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Previous day's OHLC for Camarilla levels (R4/S4 = wider breakout levels)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Calculate Camarilla levels: R1, S1 (standard breakout levels)
+    # Calculate Camarilla levels: R4, S4 (wider breakout levels)
     rng = high_1d - low_1d
-    camarilla_r1 = close_1d + (rng * 1.1 / 2)   # R1 level
-    camarilla_s1 = close_1d - (rng * 1.1 / 2)   # S1 level
+    camarilla_r4 = close_1d_vals + (rng * 1.1 / 2) * 2   # R4 level (2x the R1 distance)
+    camarilla_s4 = close_1d_vals - (rng * 1.1 / 2) * 2   # S4 level (2x the S1 distance)
     
-    # Align Camarilla levels to 1d timeframe (no shift needed as 1d is primary)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Volume confirmation: volume > 2.0x 20-period average (dynamic threshold)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,31 +50,31 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size (25% of capital)
     
-    # Warmup: max of calculations (20 for vol, 50 for 1w EMA)
+    # Warmup: max of calculations (20 for vol, 50 for 1d EMA)
     start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
-        ema_50_val = ema_50_1w_aligned[i]
+        camarilla_r4_val = camarilla_r4_aligned[i]
+        camarilla_s4_val = camarilla_s4_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
         vol_spike = volume_spike[i]
         
-        # Determine 1w trend: bullish if price > EMA50, bearish if price < EMA50
-        bullish_1w = close_val > ema_50_val
-        bearish_1w = close_val < ema_50_val
+        # Determine 1d trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_1d = close_val > ema_50_val
+        bearish_1d = close_val < ema_50_val
         
-        # Entry conditions: breakout of Camarilla R1/S1 in trend direction with volume spike
-        long_entry = (close_val > camarilla_r1_val) and bullish_1w and vol_spike
-        short_entry = (close_val < camarilla_s1_val) and bearish_1w and vol_spike
+        # Entry conditions: breakout of Camarilla R4/S4 in trend direction with volume spike
+        long_entry = (close_val > camarilla_r4_val) and bullish_1d and vol_spike
+        short_entry = (close_val < camarilla_s4_val) and bearish_1d and vol_spike
         
         if position == 0:
             # Flat - look for entry
@@ -93,16 +88,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long - exit on mean reversion to midpoint or trend change
-            mid_point = (camarilla_r1_val + camarilla_s1_val) / 2
-            if close_val < mid_point or not bullish_1w:
+            mid_point = (camarilla_r4_val + camarilla_s4_val) / 2
+            if close_val < mid_point or not bullish_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = base_size
         elif position == -1:
             # Short - exit on mean reversion to midpoint or trend change
-            mid_point = (camarilla_r1_val + camarilla_s1_val) / 2
-            if close_val > mid_point or not bearish_1w:
+            mid_point = (camarilla_r4_val + camarilla_s4_val) / 2
+            if close_val > mid_point or not bearish_1d:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_HT"
-timeframe = "1d"
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_HT"
+timeframe = "6h"
 leverage = 1.0
