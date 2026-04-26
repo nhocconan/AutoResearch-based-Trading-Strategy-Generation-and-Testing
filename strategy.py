@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with daily trend filter (price > daily EMA34 for long, < for short) and volume confirmation (>1.5x avg) provides robust directional signals. Works in bull markets (long when price > daily EMA34 + R1 breakout) and bear markets (short when price < daily EMA34 + S1 breakdown). Uses discrete sizing (0.0, ±0.30) to minimize fee churn. Targets 50-150 trades over 4 years (12-37/year) for optimal 12h frequency. Daily trend filter avoids whipsaws in counter-trend breakouts while volume confirmation ensures institutional participation.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with daily EMA34 trend filter and volume confirmation (>1.5x avg) provides robust directional signals with controlled frequency. Works in bull markets (long when price > daily EMA34 + R1 breakout) and bear markets (short when price < daily EMA34 + S1 breakdown). Discrete sizing (0.0, ±0.25) minimizes fee churn. Targets 20-50 trades/year per symbol for optimal 4h frequency. Daily trend filter avoids whipsaws in counter-trend breakouts while volume spike confirms institutional participation.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF trend filter and Camarilla pivot levels (same timeframe for efficiency)
+    # Get daily data for HTF trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:  # need enough for EMA34
         return np.zeros(n)
@@ -38,7 +38,7 @@ def generate_signals(prices):
     camarilla_r1 = c_1d + (h_1d - l_1d) * 1.1 / 12
     camarilla_s1 = c_1d - (h_1d - l_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -60,9 +60,9 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
             continue
         
         vol_confirmed = vol_ratio[i] > 1.5  # volume at least 1.5x average
@@ -79,23 +79,23 @@ def generate_signals(prices):
                            vol_confirmed)
             
             if long_signal:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             elif short_signal:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.30
+            signals[i] = 0.25
             # Exit: price closes below daily EMA34 OR breaks below S1 (reversal)
             if close[i] < ema_34_1d_aligned[i] or close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.30
+            signals[i] = -0.25
             # Exit: price closes above daily EMA34 OR breaks above R1 (reversal)
             if close[i] > ema_34_1d_aligned[i] or close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
