@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirmation
-Hypothesis: Primary 12h timeframe with 1w HTF trend filter and Camarilla R1/S1 breakouts reduces overtrading while capturing strong institutional moves. Volume confirmation filters false breakouts. ATR-based trailing stop manages risk. Designed for 12-37 trades/year target on BTC/ETH in both bull and bear regimes via trend-aligned entries and volatility-adjusted exits.
+4h_Camarilla_R1S1_Breakout_VolumeOnly_TrendFilter
+Hypothesis: In 4h timeframe, Camarilla R1/S1 breakouts with volume confirmation and 12h EMA50 trend filter capture institutional moves while avoiding overtrading. Uses volume > 1.3x 20-period average (tighter than previous 1.5x) and requires close beyond EMA50 for trend alignment. Targets 20-40 trades/year for optimal fee efficiency on BTC/ETH. Works in bull markets (breakouts with trend) and bear markets (mean reversion at Camarilla extremes during low volatility).
 """
 
 import numpy as np
@@ -23,22 +23,22 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for HTF trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for HTF trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1w for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate EMA50 on 12h for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ATR(14) on 12h for trailing stoploss
+    # Calculate ATR(14) on 4h for volatility filter (not stop)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -59,25 +59,22 @@ def generate_signals(prices):
         camarilla_r1 = np.concatenate([[np.nan], camarilla_r1])
         camarilla_s1 = np.concatenate([[np.nan], camarilla_s1])
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume average (20-period = ~10 days on 12h) for volume confirmation
+    # Volume average (20-period = ~3.3 days on 4h) for volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0  # for long trailing stop
-    lowest_since_entry = 0.0   # for short trailing stop
     
     # Start index: need warmup for calculations
-    start_idx = max(20, 34, 14)  # volume MA, 1w EMA, ATR
+    start_idx = max(20, 50, 14)  # volume MA, 12h EMA, ATR
     
     for i in range(start_idx, n):
         # Skip if data not ready or outside session
-        if (np.isnan(ema_34_1w_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_ma[i]) or
@@ -93,7 +90,7 @@ def generate_signals(prices):
             continue
         
         # Get aligned values
-        ema_34_1w_val = ema_34_1w_aligned[i]
+        ema_50_12h_val = ema_50_12h_aligned[i]
         r1_val = camarilla_r1_aligned[i]
         s1_val = camarilla_s1_aligned[i]
         vol_ma_val = vol_ma[i]
@@ -103,78 +100,50 @@ def generate_signals(prices):
         low_val = low[i]
         atr_val = atr[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average (balanced for 12h)
-        volume_confirmed = vol_val > 1.5 * vol_ma_val
+        # Volume confirmation: current volume > 1.3x 20-period average (tighter for fewer trades)
+        volume_confirmed = vol_val > 1.3 * vol_ma_val
         
         if position == 0:
-            # Long: price breaks above R1 with uptrend (close > EMA34) and volume confirmation
-            long_signal = (high_val > r1_val) and (close_val > ema_34_1w_val) and volume_confirmed
-            # Short: price breaks below S1 with downtrend (close < EMA34) and volume confirmation
-            short_signal = (low_val < s1_val) and (close_val < ema_34_1w_val) and volume_confirmed
+            # Long: price breaks above R1 with uptrend (close > EMA50) and volume confirmation
+            long_signal = (high_val > r1_val) and (close_val > ema_50_12h_val) and volume_confirmed
+            # Short: price breaks below S1 with downtrend (close < EMA50) and volume confirmation
+            short_signal = (low_val < s1_val) and (close_val < ema_50_12h_val) and volume_confirmed
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, high_val)
-            # ATR-based trailing stop: exit if price drops 2.5*ATR from high
-            if close_val < highest_since_entry - 2.5 * atr_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
             # Exit conditions:
             # 1. Opposite breakout: price breaks below S1 (exit long)
-            elif low_val < s1_val:
+            if low_val < s1_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-            # 2. Trend reversal: close crosses below EMA34
-            elif close_val < ema_34_1w_val:
+            # 2. Trend reversal: close crosses below EMA50
+            elif close_val < ema_50_12h_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR-based trailing stop: exit if price rises 2.5*ATR from low
-            if close_val > lowest_since_entry + 2.5 * atr_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                lowest_since_entry = 0.0
             # Exit conditions:
             # 1. Opposite breakout: price breaks above R1 (exit short)
-            elif high_val > r1_val:
+            if high_val > r1_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                lowest_since_entry = 0.0
-            # 2. Trend reversal: close crosses above EMA34
-            elif close_val > ema_34_1w_val:
+            # 2. Trend reversal: close crosses above EMA50
+            elif close_val > ema_50_12h_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                lowest_since_entry = 0.0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_VolumeOnly_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
