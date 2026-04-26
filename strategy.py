@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_ATRStop_v3
-Hypothesis: On 12h timeframe, trade breakouts above/below daily Camarilla R1/S1 only when aligned with 1d EMA50 trend (not EMA34) and confirmed by volume spike (>1.8x 20-bar average). Uses ATR(14) stoploss at 2.5x ATR for wider stops in volatile 12h candles. Discrete sizing at 0.25 to limit fee drag. Target: 12-37 trades/year on BTC/ETH/SOL.
+4h_Camarilla_R1S1_Breakout_1dEMA50_Trend_VolumeSpike
+Hypothesis: On 4h timeframe, trade breakouts above/below daily Camarilla R1/S1 only when aligned with 1d EMA50 trend and confirmed by volume spike (>1.8x 20-bar average). Uses ATR(14) stoploss at 2.0x ATR. Discrete sizing at 0.25 to limit fee drag. Target: 20-50 trades/year on BTC/ETH/SOL.
 """
 
 import numpy as np
@@ -43,21 +43,21 @@ def generate_signals(prices):
     r1 = close_prev + range_val * 1.1 / 12
     s1 = close_prev - range_val * 1.1 / 12
     
-    # Calculate 1d EMA50 for trend filter (more stable than EMA34)
+    # Calculate 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align all HTF indicators to 12h timeframe
+    # Align all HTF indicators to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # ATR for stoploss calculation (12h ATR)
+    # ATR for stoploss calculation (4h ATR)
     atr_period = 14
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]  # first bar
     atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
-    # Volume spike: current volume > 1.8 * 20-period average (slightly looser for 12h)
+    # Volume spike: current volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.8 * vol_ma)
     
@@ -111,20 +111,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price breaks below S1 OR ATR stoploss (2.5*ATR below entry)
-            if (close_val < s1_val) or (close_val < entry_price - 2.5 * atr_val):
+            # Exit: price breaks below S1 OR ATR stoploss (2.0*ATR below entry)
+            if (close_val < s1_val) or (close_val < entry_price - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price breaks above R1 OR ATR stoploss (2.5*ATR above entry)
-            if (close_val > r1_val) or (close_val > entry_price + 2.5 * atr_val):
+            # Exit: price breaks above R1 OR ATR stoploss (2.0*ATR above entry)
+            if (close_val > r1_val) or (close_val > entry_price + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_ATRStop_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA50_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
