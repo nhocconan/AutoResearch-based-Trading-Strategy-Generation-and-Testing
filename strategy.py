@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_VolumeSpike_HTFTrend
-Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation (ATR ratio > 1.2). Camarilla levels provide intraday support/resistance; breakout above R3 or below S3 with volume and 1d trend alignment captures strong momentum moves. Discrete sizing 0.25 limits trades to ~20-50/year. Works in bull/bear via 1d trend filter.
+4h_Donchian20_Breakout_ATR_Volume_Trend
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (ATR ratio > 1.3). Donchian channels provide robust structure; breakouts with volume and trend alignment capture strong momentum. Discrete sizing 0.25 limits trades to ~20-40/year. Works in bull/bear via 1d trend filter.
 """
 
 import numpy as np
@@ -40,20 +40,12 @@ def generate_signals(prices):
     # Calculate ATR ratio (current ATR / 50-period ATR) for volume regime
     atr_ratio = atr / pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     
-    # Calculate Camarilla levels from previous day (using 1d OHLC)
-    # Camarilla: based on previous day's range
-    close_prev = df_1d['close'].shift(1).values
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    
-    # Avoid look-ahead: use previous day's data to compute today's levels
-    range_prev = high_prev - low_prev
-    camarilla_r3 = close_prev + range_prev * 1.1 / 4
-    camarilla_s3 = close_prev - range_prev * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe (1d -> 4h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate Donchian(20) channels from 4h data (using lookback window)
+    lookback = 20
+    # Upper channel: highest high of last 20 periods (excluding current)
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    # Lower channel: lowest low of last 20 periods (excluding current)
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
     
     # Fixed position size to control trade frequency
     fixed_size = 0.25
@@ -61,30 +53,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 50 for ATR ratio and EMA alignment, plus 1 for Camarilla shift
+    # Warmup: need 50 for ATR ratio, 20 for Donchian, plus 1 for shifts
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(atr_ratio[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i])):
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         ema_50_val = ema_50_1d_aligned[i]
-        vol_spike = atr_ratio[i] > 1.2  # volume regime
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
+        vol_spike = atr_ratio[i] > 1.3  # volume regime
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         size = fixed_size
         
-        # Entry conditions: Camarilla R3/S3 breakout with volume spike AND aligned with 1d EMA50 trend
-        # Long: price breaks above R3 (bullish breakout)
-        # Short: price breaks below S3 (bearish breakout)
-        long_entry = (close_val > camarilla_r3_val) and vol_spike and (close_val > ema_50_val)
-        short_entry = (close_val < camarilla_s3_val) and vol_spike and (close_val < ema_50_val)
+        # Entry conditions: Donchian breakout with volume spike AND aligned with 1d EMA50 trend
+        # Long: price breaks above upper channel (bullish breakout)
+        # Short: price breaks below lower channel (bearish breakout)
+        long_entry = (close_val > upper_channel) and vol_spike and (close_val > ema_50_val)
+        short_entry = (close_val < lower_channel) and vol_spike and (close_val < ema_50_val)
         
         if position == 0:
             # Flat - look for entry
@@ -97,32 +89,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit when price re-enters Camarilla H3-L3 range or trend reversal
-            # H3 = close_prev + range_prev * 1.1/2, L3 = close_prev - range_prev * 1.1/2
-            camarilla_h3 = close_prev + range_prev * 1.1 / 2
-            camarilla_l3 = close_prev - range_prev * 1.1 / 2
-            camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-            camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-            
-            h3_val = camarilla_h3_aligned[i]
-            l3_val = camarilla_l3_aligned[i]
-            
-            if (close_val < h3_val and close_val > l3_val) or close_val < ema_50_val:  # back inside H3-L3 or trend reversal
+            # Long - exit when price re-enters Donchian channel or trend reversal
+            if (close_val < upper_channel and close_val > lower_channel) or close_val < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price re-enters Camarilla H3-L3 range or trend reversal
-            camarilla_h3 = close_prev + range_prev * 1.1 / 2
-            camarilla_l3 = close_prev - range_prev * 1.1 / 2
-            camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-            camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-            
-            h3_val = camarilla_h3_aligned[i]
-            l3_val = camarilla_l3_aligned[i]
-            
-            if (close_val > l3_val and close_val < h3_val) or close_val > ema_50_val:  # back inside H3-L3 or trend reversal
+            # Short - exit when price re-enters Donchian channel or trend reversal
+            if (close_val > lower_channel and close_val < upper_channel) or close_val > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_VolumeSpike_HTFTrend"
+name = "4h_Donchian20_Breakout_ATR_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
