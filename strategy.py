@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_v1
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above R1/S1 (tight breakout) AND 1d close > EMA(34) AND volume spike.
+12h_Camarilla_R1S1_Breakout_1dTrend_v1
+Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above R1/S1 AND 1d close > EMA(34) AND volume spike.
 Short when price breaks below S1/R1 AND 1d close < EMA(34) AND volume spike.
-Targets 75-200 total trades over 4 years (19-50/year). Works in bull (breakouts continue) and bear (breakdowns continue) via 1d trend filter.
+Targets 50-150 total trades over 4 years (12-37/year). Works in bull (breakouts continue) and bear (breakdowns continue) via 1d trend filter.
 """
 
 import numpy as np
@@ -49,11 +49,11 @@ def generate_signals(prices):
     r1 = pivot + (range_hl * 1.1 / 12.0)
     s1 = pivot - (range_hl * 1.1 / 12.0)
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 12h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (stricter for lower frequency)
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_ma)
     
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_v1"
+timeframe = "12h"
 leverage = 1.0
