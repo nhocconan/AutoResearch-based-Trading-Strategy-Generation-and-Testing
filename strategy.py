@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_FundingRate_Contrarian_v1
-Hypothesis: Funding rate mean reversion on BTC/ETH (works in both bull/bear). Short when funding > 0.03%, long when funding < -0.03%. Uses 1h for entry timing and 4h/1d HTF for regime filter (avoid counter-trend in strong moves). Low trade frequency (~20-40/year) minimizes fee drag. Discrete sizing 0.20.
+6h_WeeklyPivot_Donchian_Breakout_v1
+Hypothesis: Combine weekly pivot direction (long above weekly PP, short below) with 6h Donchian(20) breakout and volume confirmation (>1.5x average volume). Weekly pivot provides robust trend filter that works in both bull/bear markets, while Donchian breakouts capture momentum. Volume confirmation avoids false breakouts. Discrete position sizing (0.25) minimizes fee churn. Target 12-37 trades/year on 6h timeframe.
 """
 
 import numpy as np
@@ -10,53 +10,66 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 50:  # Need warmup for Donchian, volume
         return np.zeros(n)
-    
-    # Load funding rate data (assumed available via mtf_data or precomputed)
-    # For now, simulate funding rate proxy using price momentum (to be replaced with actual funding)
-    # Actual implementation would load funding parquet: df_fund = pd.read_parquet('data/processed/funding/BTCUSDT.parquet')
-    # Since funding data not directly accessible in generate_signals, we use price-based proxy
-    # Proxy: funding ≈ (price - vwap) scaled (simplified)
-    # In reality, replace this with actual funding rate load
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # VWAP approximation for funding proxy
-    vwap = (close * volume).cumsum() / volume.cumsum()
-    vwap = np.where(volume.cumsum() == 0, 0, vwap)
-    funding_proxy = (close - vwap) / vwap  # Simplified proxy
-    
-    # Load 4h and 1d data for regime filter
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    # Load weekly data for pivot calculation and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h EMA50 for trend regime
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly pivot points (using prior completed weekly bar)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA34 for stronger trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly pivot point (PP) and support/resistance levels
+    weekly_pp = (high_1w + low_1w + close_1w) / 3.0
+    weekly_r1 = 2 * weekly_pp - low_1w
+    weekly_s1 = 2 * weekly_pp - high_1w
+    
+    # Align weekly pivot levels to 6h timeframe (1 bar delay for completed weekly bar)
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # Calculate Donchian channels (20-period) on 6h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Calculate average volume for confirmation (20-period SMA)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.20
+    base_size = 0.25
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
-    start_idx = 50
+    # Start after warmup (need 20 for Donchian, 20 for volume)
+    start_idx = max(lookback, 20)
     
     for i in range(start_idx, n):
-        if not (8 <= hours[i] <= 20):
-            # Outside session: flatten
+        # Get current values
+        close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        pp_val = weekly_pp_aligned[i]
+        r1_val = weekly_r1_aligned[i]
+        s1_val = weekly_s1_aligned[i]
+        upper_donch = highest_high[i]
+        lower_donch = lowest_low[i]
+        
+        # Skip if any data not ready
+        if (np.isnan(pp_val) or np.isnan(avg_vol) or np.isnan(upper_donch) or 
+            np.isnan(lower_donch)):
+            # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -65,31 +78,24 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        fp = funding_proxy[i]
-        ema_4h = ema_50_4h_aligned[i]
-        ema_1d = ema_34_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = vol > 1.5 * avg_vol
         
-        if np.isnan(fp) or np.isnan(ema_4h) or np.isnan(ema_1d):
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
-            continue
+        # Long logic: price above weekly PP AND breaks above Donchian upper with volume confirmation
+        long_condition = (close_val > pp_val) and (high_val > upper_donch) and volume_confirmed
+        # Short logic: price below weekly PP AND breaks below Donchian lower with volume confirmation
+        short_condition = (close_val < pp_val) and (low_val < lower_donch) and volume_confirmed
         
-        # Entry: funding extreme + price vs EMA filter
-        long_entry = (fp < -0.0003) and (close[i] > ema_4h) and (close[i] > ema_1d)
-        short_entry = (fp > 0.0003) and (close[i] < ema_4h) and (close[i] < ema_1d)
+        # Exit logic: 
+        # Long exit: price crosses below weekly PP (trend change) OR retouches Donchian lower (failed breakout)
+        long_exit = (position == 1 and (close_val < pp_val or low_val <= lower_donch))
+        # Short exit: price crosses above weekly PP (trend change) OR retouches Donchian upper (failed breakout)
+        short_exit = (position == -1 and (close_val > pp_val or high_val >= upper_donch))
         
-        # Exit: funding reverts to neutral or trend fails
-        long_exit = (position == 1 and (fp > -0.0001 or close[i] < ema_4h))
-        short_exit = (position == -1 and (fp < 0.0001 or close[i] > ema_4h))
-        
-        if long_entry and position != 1:
+        if long_condition and position != 1:
             signals[i] = base_size
             position = 1
-        elif short_entry and position != -1:
+        elif short_condition and position != -1:
             signals[i] = -base_size
             position = -1
         elif long_exit:
@@ -99,7 +105,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             position = 0
         else:
-            # Hold
+            # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -109,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_FundingRate_Contrarian_v1"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Donchian_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
