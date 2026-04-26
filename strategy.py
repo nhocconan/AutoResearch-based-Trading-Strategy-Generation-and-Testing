@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike, and choppiness regime filter.
-Long when: price > R3 + 1d EMA34 uptrend + volume spike + CHOP > 61.8 (ranging market for mean reversion breakout).
-Short when: price < S3 + 1d EMA34 downtrend + volume spike + CHOP > 61.8.
-Exit: price reverts to Camarilla PP (pivot point).
-Uses discrete 0.25 position size. Targets 12-37 trades/year to avoid fee drag.
-Works in both bull and bear markets via volatility expansion breakouts in ranging regimes.
+1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: Daily timeframe Camarilla R3/S3 breakout with 1-week EMA50 trend filter and volume spike confirmation.
+Long when: price breaks above R3 + 1w EMA50 uptrend + volume > 2.0 * avg volume.
+Short when: price breaks below S3 + 1w EMA50 downtrend + volume > 2.0 * avg volume.
+Exit when: price reverts to Camarilla midpoint (PP) or touches opposite Camarilla level.
+Uses discrete 0.25 position size. Targets 7-25 trades/year on 1d timeframe for optimal test generalization.
+Works in both bull and bear markets via trend filter + volume confirmation to avoid false breakouts.
 """
 
 import numpy as np
@@ -29,7 +29,7 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values  # shift(1) for previous day
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
@@ -38,40 +38,34 @@ def generate_signals(prices):
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     camarilla_pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 12h timeframe (wait for completed 1d bar)
+    # Align to 1d timeframe (wait for completed 1d bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Volume spike: current volume > 1.5 * 20-period average
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume spike: current volume > 2.0 * 20-period average (stricter to reduce trades)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_avg)
-    
-    # Choppiness Index: CHOP > 61.8 = ranging market (good for breakout mean reversion)
-    # CHOP = 100 * log10(sum(ATR(1)) / (max(high,n) - min(low,n))) / log10(n)
-    tr1 = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr1[0] = 0
-    atr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (max_high - min_low + 1e-10)) / np.log10(14)
-    chop_filter = chop > 61.8  # ranging market
+    volume_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 20 for volume avg, 34 for 1d EMA, 14 for CHOP
-    start_idx = max(20, 34, 14)
+    # Warmup: need 20 for volume avg, 50 for 1w EMA
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(camarilla_pp_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(chop_filter[i])):
+            np.isnan(camarilla_pp_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
@@ -79,17 +73,15 @@ def generate_signals(prices):
         size = 0.25  # Fixed position size
         
         if position == 0:
-            # Flat - look for breakout with trend, volume, and chop filter
-            # Long: break above R3 + 1d EMA34 uptrend + volume spike + chop > 61.8
+            # Flat - look for breakout with trend and volume confirmation
+            # Long: break above R3 + 1w EMA50 uptrend + volume spike
             long_entry = (close_val > camarilla_r3_aligned[i]) and \
-                       (ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]) and \
-                       volume_spike[i] and \
-                       chop_filter[i]
-            # Short: break below S3 + 1d EMA34 downtrend + volume spike + chop > 61.8
+                       (ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]) and \
+                       volume_spike[i]
+            # Short: break below S3 + 1w EMA50 downtrend + volume spike
             short_entry = (close_val < camarilla_s3_aligned[i]) and \
-                        (ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]) and \
-                        volume_spike[i] and \
-                        chop_filter[i]
+                        (ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]) and \
+                        volume_spike[i]
             
             if long_entry:
                 signals[i] = size
@@ -100,15 +92,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit when price reverts to PP (mean reversion in ranging market)
-            if close_val < camarilla_pp_aligned[i]:
+            # Long - exit when price reverts to PP or touches S3 (contrarian exit)
+            if (close_val < camarilla_pp_aligned[i]) or (close_val < camarilla_s3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price reverts to PP (mean reversion in ranging market)
-            if close_val > camarilla_pp_aligned[i]:
+            # Short - exit when price reverts to PP or touches R3 (contrarian exit)
+            if (close_val > camarilla_pp_aligned[i]) or (close_val > camarilla_r3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
