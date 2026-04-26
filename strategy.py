@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1dTrendFilter_v1
-Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1d EMA34 trend filter.
-- Long when Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA34 (uptrend)
-- Short when Bear Power < 0 AND Bull Power > 0 AND price < 1d EMA34 (downtrend)
-- Uses 13-period EMA for power calculations (standard Elder Ray)
-- Trend filter avoids counter-trend trades in strong markets
-- Designed for low frequency (target: 50-150 total trades over 4 years) with strong BTC/ETH edge
-- Works in both bull and bear markets by following 1d trend
+12h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v1
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter, ADX>25 for trend strength, and volume spike confirmation.
+- Uses 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
+- Long when price breaks above R1 with volume spike, 1d uptrend (EMA34), and ADX>25
+- Short when price breaks below S1 with volume spike, 1d downtrend (EMA34), and ADX>25
+- Camarilla levels derived from previous 1d OHLC for structure-aware entries
+- ADX filter ensures we only trade in trending markets, avoiding whipsaws in ranges
+- Volume spike confirms institutional participation
+- Designed for low trade frequency with proven edge on BTC/ETH from historical data
 """
 
 import numpy as np
@@ -22,33 +23,81 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Load 1d data ONCE before loop for Camarilla levels, EMA34, and ADX
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Calculate 1d EMA34 for trend filter
     ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Elder Ray components on 6h data
-    # Bull Power = High - EMA13(close)
-    # Bear Power = Low - EMA13(close)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate ADX on 1d for trend strength filter
+    # ADX calculation: +DM, -DM, TR, then smoothed
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high_1d[0] - low_1d[0]  # First TR
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        result = np.zeros_like(values)
+        result[period-1] = np.nansum(values[:period])  # First value is simple average
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    period = 14
+    atr_1d = wilders_smoothing(tr, period)
+    plus_di_1d = 100 * wilders_smoothing(plus_dm, period) / atr_1d
+    minus_di_1d = 100 * wilders_smoothing(minus_dm, period) / atr_1d
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
+    adx_1d = wilders_smoothing(dx, period)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate volume spike (20-period volume average on 12h)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 2.0)  # Volume at least 2x average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for 1d EMA, 13 for EMA13)
-    start_idx = max(34, 13)
+    # Start after warmup (need 34+14 for EMA34 and ADX, 20 for volume MA)
+    start_idx = max(34 + 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(adx_1d_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -58,21 +107,24 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Elder Ray conditions with 1d trend filter
-        bull_positive = bull_power[i] > 0
-        bear_negative = bear_power[i] < 0
+        # Camarilla breakout conditions with volume confirmation and trend filters
+        price_above_R1 = close[i] > R1_aligned[i]
+        price_below_S1 = close[i] < S1_aligned[i]
         
         # 1d trend filter
         trend_up = close[i] > ema34_1d_aligned[i]
         trend_down = close[i] < ema34_1d_aligned[i]
         
+        # ADX filter: only trade when trend is strong (ADX > 25)
+        strong_trend = adx_1d_aligned[i] > 25.0
+        
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power < 0 AND 1d uptrend
-            if bull_positive and bear_negative and trend_up:
+            # Long: price breaks above R1 AND volume spike AND 1d uptrend AND strong trend
+            if price_above_R1 and volume_spike[i] and trend_up and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND Bull Power > 0 AND 1d downtrend
-            elif bear_negative and bull_positive and trend_down:
+            # Short: price breaks below S1 AND volume spike AND 1d downtrend AND strong trend
+            elif price_below_S1 and volume_spike[i] and trend_down and strong_trend:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -80,20 +132,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Bull Power <= 0 OR Bear Power >= 0 OR 1d trend turns down
-            if not (bull_positive and bear_negative) or not trend_up:
+            # Exit: price falls below S1 OR 1d trend turns down OR trend weakens
+            if price_below_S1 or not trend_up or not strong_trend:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Bear Power >= 0 OR Bull Power <= 0 OR 1d trend turns up
-            if not (bear_negative and bull_positive) or not trend_down:
+            # Exit: price rises above R1 OR 1d trend turns up OR trend weakens
+            if price_above_R1 or not trend_down or not strong_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1dTrendFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v1"
+timeframe = "12h"
 leverage = 1.0
