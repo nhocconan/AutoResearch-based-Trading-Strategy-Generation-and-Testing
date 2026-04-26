@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dEMA34_RegimeFilter_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike confirmation, and choppiness regime filter (CHOP > 61.8 = range -> mean reversion, CHOP < 38.2 = trending -> trend follow). Uses ATR-based stoploss. Designed for low trade frequency (<50/year) to avoid fee drag while capturing strong trending moves in both bull and bear markets.
+12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_RegimeFilter
+Hypothesis: On 12h timeframe, Camarilla R3/S3 breakouts with 1-week EMA50 trend filter, volume spike confirmation (2.0x 20-period MA), and choppiness regime filter (CHOP < 38.2 = trending -> follow breakout, CHOP > 61.8 = range -> mean reversion at extremes). Uses ATR-based stoploss (2.5x). Designed for low trade frequency (<30/year) to minimize fee drag while capturing strong moves in both bull and bear markets via regime-adaptive logic.
 """
 
 import numpy as np
@@ -18,15 +18,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for EMA50 trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
     # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
@@ -37,7 +42,7 @@ def generate_signals(prices):
     R3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
     S3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels
+    # Align Camarilla levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
@@ -55,18 +60,21 @@ def generate_signals(prices):
     chop_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(chop_sum / (highest_high - lowest_low)) / np.log10(14)
+    # Avoid division by zero
+    range_hl = highest_high - lowest_low
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    chop = 100 * np.log10(chop_sum / range_hl) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of 1d EMA (34), volume MA (20), ATR (14), CHOP (14)
-    start_idx = max(34, 20, 14, 14)
+    # Warmup: max of 1w EMA (50), volume MA (20), ATR (14), CHOP (14)
+    start_idx = max(50, 20, 14, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or 
             np.isnan(vol_ma[i]) or 
@@ -81,7 +89,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        ema_34_1d_val = ema_34_1d_aligned[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
         R3_val = R3_aligned[i]
         S3_val = S3_aligned[i]
         close_val = close[i]
@@ -100,10 +108,10 @@ def generate_signals(prices):
             # In trending regime: follow trend with breakout
             # In ranging regime: mean reversion at extremes
             if is_trending:
-                # Long: price breaks above R3 with volume confirmation and uptrend
-                long_signal = (high_val > R3_val) and (volume_val > 2.0 * vol_ma_val) and (close_val > ema_34_1d_val)
-                # Short: price breaks below S3 with volume confirmation and downtrend
-                short_signal = (low_val < S3_val) and (volume_val > 2.0 * vol_ma_val) and (close_val < ema_34_1d_val)
+                # Long: price breaks above R3 with volume confirmation and uptrend (price > 1w EMA50)
+                long_signal = (high_val > R3_val) and (volume_val > 2.0 * vol_ma_val) and (close_val > ema_50_1w_val)
+                # Short: price breaks below S3 with volume confirmation and downtrend (price < 1w EMA50)
+                short_signal = (low_val < S3_val) and (volume_val > 2.0 * vol_ma_val) and (close_val < ema_50_1w_val)
             else:  # ranging regime
                 # Long: price rejects below S3 (mean reversion up) with volume confirmation
                 long_signal = (low_val < S3_val) and (close_val > S3_val) and (volume_val > 2.0 * vol_ma_val)
@@ -125,7 +133,7 @@ def generate_signals(prices):
             signals[i] = 0.25
             # Exit: ATR stoploss or trend reversal or ranging regime exit signal
             if (close_val < entry_price - 2.5 * atr_val or 
-                close_val < ema_34_1d_val or
+                close_val < ema_50_1w_val or
                 (is_ranging and close_val < (R3_val + S3_val) / 2)):  # exit at midpoint in ranging
                 signals[i] = 0.0
                 position = 0
@@ -134,13 +142,13 @@ def generate_signals(prices):
             signals[i] = -0.25
             # Exit: ATR stoploss or trend reversal or ranging regime exit signal
             if (close_val > entry_price + 2.5 * atr_val or 
-                close_val > ema_34_1d_val or
+                close_val > ema_50_1w_val or
                 (is_ranging and close_val > (R3_val + S3_val) / 2)):  # exit at midpoint in ranging
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_RegimeFilter_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_RegimeFilter"
+timeframe = "12h"
 leverage = 1.0
