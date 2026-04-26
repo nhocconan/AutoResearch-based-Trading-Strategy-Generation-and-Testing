@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_WeeklyTrend_VolumeConfirm_v1
-Hypothesis: On 1d timeframe, enter long when price breaks above Camarilla R1 level AND weekly trend is up (weekly close > weekly EMA34) AND volume > 1.5x 20-day average volume. Enter short when price breaks below Camarilla S1 level AND weekly trend is down (weekly close < weekly EMA34) AND volume > 1.5x 20-day average volume. Uses discrete sizing (0.0, ±0.25) to limit fee drag. Camarilla R1/S1 levels provide breakout confirmation with weekly EMA34 trend filter for alignment with higher timeframe momentum. Volume spike ensures participation. Designed to generate ~15-25 trades per year on BTC/ETH/SOL with Sharpe > 0 in both bull and bear regimes.
+6h_Keltner_Breakout_Volume_Regime_v1
+Hypothesis: On 6h timeframe, enter long when price breaks above Keltner upper band (EMA20 + 2*ATR10) AND volume > 1.5x 20-period average volume AND ADX(14) > 25 (trending regime). Enter short when price breaks below Keltner lower band (EMA20 - 2*ATR10) AND volume spike AND ADX > 25. Uses discrete sizing (0.0, ±0.25) to limit fee drag. Keltner channels adapt to volatility, reducing false breakouts in choppy markets. Volume confirmation ensures participation. ADX filter ensures we only trade in trending regimes, avoiding whipsaws in ranges. Designed to generate ~15-25 trades per year on BTC/ETH/SOL with Sharpe > 0 in both bull and bear regimes.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,58 +18,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:  # need at least previous bar for Camarilla and EMA
-        return np.zeros(n)
+    # Calculate EMA20 for Keltner middle band
+    close_s = pd.Series(close)
+    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema_34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate ATR(10) for Keltner bands
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate Camarilla levels from previous weekly bar (HLC of completed weekly bar)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_raw = df_1w['close'].values  # raw weekly close for Camarilla calculation
+    # Keltner bands
+    keltner_upper = ema_20 + 2.0 * atr_10
+    keltner_lower = ema_20 - 2.0 * atr_10
     
-    # Camarilla levels: based on previous week's range
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
-    # Using previous completed weekly bar to avoid look-ahead
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w_raw, 1)
-    
-    # First bar has no previous bar, set to NaN
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
-    prev_close_1w[0] = np.nan
-    
-    camarilla_range = prev_high_1w - prev_low_1w
-    r1 = prev_close_1w + 1.1 * camarilla_range / 12
-    s1 = prev_close_1w - 1.1 * camarilla_range / 12
-    
-    # Align Camarilla levels to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Volume confirmation: volume > 1.5x 20-period average (balanced for trade frequency)
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 1.5 * volume_ma
+    
+    # ADX(14) for trend regime filter
+    # +DM and -DM
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed +DM, -DM, TR
+    tr_rma = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_rma = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_rma = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # +DI and -DI
+    plus_di = 100 * plus_dm_rma / tr_rma
+    minus_di = 100 * minus_dm_rma / tr_rma
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Trend regime: ADX > 25
+    trending_regime = adx > 25.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA warmup and volume MA warmup
-    start_idx = max(34, 20)  # EMA34 needs 34, volume MA needs 20
+    # Warmup: need EMA20, ATR10, volume MA, ADX warmup
+    start_idx = max(20, 10, 20, 14*2)  # ~28 bars
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(keltner_upper[i]) or 
+            np.isnan(keltner_lower[i]) or 
+            np.isnan(volume_ma[i]) or 
+            np.isnan(adx[i]) or 
+            np.isnan(trending_regime[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -80,19 +85,15 @@ def generate_signals(prices):
             continue
         
         # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakout_down = close[i] < s1_aligned[i]
-        
-        # Weekly trend filter
-        trend_uptrend = close[i] > ema_34_1w_aligned[i]
-        trend_downtrend = close[i] < ema_34_1w_aligned[i]
+        breakout_up = close[i] > keltner_upper[i]
+        breakout_down = close[i] < keltner_lower[i]
         
         if position == 0:
-            # Long: breakout above R1 + volume spike + weekly uptrend
-            long_signal = breakout_up and volume_spike[i] and trend_uptrend
+            # Long: breakout above upper band + volume spike + trending regime
+            long_signal = breakout_up and volume_spike[i] and trending_regime[i]
             
-            # Short: breakout below S1 + volume spike + weekly downtrend
-            short_signal = breakout_down and volume_spike[i] and trend_downtrend
+            # Short: breakout below lower band + volume spike + trending regime
+            short_signal = breakout_down and volume_spike[i] and trending_regime[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -105,20 +106,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price falls below R1 OR trend change to downtrend
-            if close[i] < r1_aligned[i] or not trend_uptrend:
+            # Exit: price falls below middle band OR ADX drops below 20 (regime change)
+            if close[i] < ema_20[i] or adx[i] < 20.0:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price rises above S1 OR trend change to uptrend
-            if close[i] > s1_aligned[i] or not trend_downtrend:
+            # Exit: price rises above middle band OR ADX drops below 20 (regime change)
+            if close[i] > ema_20[i] or adx[i] < 20.0:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Keltner_Breakout_Volume_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
