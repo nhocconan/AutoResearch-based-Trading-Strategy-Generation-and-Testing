@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3S3_Breakout_1wEMA34_Trend_ATRStop_v1
-Hypothesis: Trade daily Camarilla R3/S3 breakouts with weekly EMA34 trend filter and ATR-based trailing stop.
-Uses wider R3/S3 levels for fewer, higher-quality breakouts. Weekly EMA34 ensures trading with dominant long-term trend.
-ATR trailing stop manages risk and captures trends. Designed for low trade frequency (target: 30-100 total trades over 4 years)
-to minimize fee drag and improve generalization to bear markets (2025+).
+6h_Camarilla_R4S4_Breakout_1dEMA34_Trend_v1
+Hypothesis: Trade 6h Camarilla R4/S4 breakouts with 1d EMA34 trend filter. 
+R4/S4 levels represent stronger breakout points than R3/S3, reducing false signals.
+Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes with trend filter).
+Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+Uses discrete position sizing (0.0, ±0.25) to reduce fee churn.
 """
 
 import numpy as np
@@ -20,27 +21,18 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate EMA(34) on 1w for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate ATR(14) for stoploss
-    tr1 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
-    tr1 = np.concatenate([[0], tr1])  # align length
-    atr = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA(34) on 1d for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
+    # R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -52,28 +44,24 @@ def generate_signals(prices):
     
     pivot = (prev_high + prev_low + prev_close) / 3.0
     range_hl = prev_high - prev_low
-    r3 = pivot + (range_hl * 1.1 / 4.0)
-    s3 = pivot - (range_hl * 1.1 / 4.0)
+    r4 = pivot + (range_hl * 1.1 / 2.0)
+    s4 = pivot - (range_hl * 1.1 / 2.0)
     
-    # Align Camarilla levels to 1d
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 6h
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Warmup: max of 1w EMA(34), ATR(14)
-    start_idx = max(34, 14) + 1
+    # Warmup: max of 1d EMA(34)
+    start_idx = 34 + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(r4_aligned[i]) or
+            np.isnan(s4_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -84,55 +72,41 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        trend_1w_up = close_val > ema_34_1w_aligned[i]   # 1w uptrend
-        trend_1w_down = close_val < ema_34_1w_aligned[i]  # 1w downtrend
+        trend_1d_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
+        trend_1d_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: price breaks above R3 AND 1w trend up
-            long_signal = (close_val > r3_aligned[i]) and trend_1w_up
+            # Long: price breaks above R4 AND 1d trend up
+            long_signal = (close_val > r4_aligned[i]) and trend_1d_up
             
-            # Short: price breaks below S3 AND 1w trend down
-            short_signal = (close_val < s3_aligned[i]) and trend_1w_down
+            # Short: price breaks below S4 AND 1d trend down
+            short_signal = (close_val < s4_aligned[i]) and trend_1d_down
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            highest_since_entry = max(highest_since_entry, close_val)
-            # ATR trailing stop: exit if price drops 2.0 * ATR from highest since entry
-            if close_val < highest_since_entry - 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Alternative exit: trend flips down
-            elif not trend_1w_up:
+            # Exit: trend flips down
+            if not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            lowest_since_entry = min(lowest_since_entry, close_val)
-            # ATR trailing stop: exit if price rises 2.0 * ATR from lowest since entry
-            if close_val > lowest_since_entry + 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Alternative exit: trend flips up
-            elif not trend_1w_down:
+            # Exit: trend flips up
+            if not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA34_Trend_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R4S4_Breakout_1dEMA34_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
