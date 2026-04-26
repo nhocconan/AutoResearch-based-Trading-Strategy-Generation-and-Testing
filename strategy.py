@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume spike (2.0x median) only. Designed for ~15-37 trades/year to balance edge and fee drag. Works in bull/bear via trend filter. Uses ATR(14) trailing stop (2.0x ATR) for risk control.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume spike (2.0x median) only. Designed for ~150 trades/year to balance edge and fee drag. Works in bull/bear via trend filter. Uses ATR(14) trailing stop (2.0x ATR) for risk control.
 """
 
 import numpy as np
@@ -34,7 +34,7 @@ def generate_signals(prices):
     camarilla_r1 = prev_close_1d + 1.000/6 * (prev_high_1d - prev_low_1d)
     camarilla_s1 = prev_close_1d - 1.000/6 * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
