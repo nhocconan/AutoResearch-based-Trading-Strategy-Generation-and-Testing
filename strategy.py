@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kumo_Twist_1dTrend_v1
-Hypothesis: Trade Ichimoku Kumo Twist (Senkou Span A/B cross) on 6h with 1d EMA50 trend filter and volume confirmation (1.8x median). Kumo Twist signals trend acceleration. Only trade in direction of 1d EMA50 trend to reduce whipsaws. Target: 12-25 trades/year on 6h. Works in bull/bear by adapting to trend and using volume confirmation to filter false Kumo Twists.
+12h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA50 trend filter and volume confirmation (2.0x median). Only trade in direction of 1d EMA50 trend to reduce whipsaws. Target: 12-37 trades/year on 12h. Works in bull/bear by adapting to trend and using volume confirmation to avoid false breakouts.
 """
 
 import numpy as np
@@ -18,98 +18,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend and Ichimoku calculation
+    # Get 1d data for HTF trend and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need 26*2 for Ichimoku
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Ichimoku components on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous 1d OHLC
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    camarilla_r1 = prev_close_1d + 1.000/6 * (prev_high_1d - prev_low_1d)
+    camarilla_s1 = prev_close_1d - 1.000/6 * (prev_high_1d - prev_low_1d)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Kumo Twist: Senkou Span A crosses Senkou Span B
-    # Bullish twist: Senkou Span A crosses above Senkou Span B
-    # Bearish twist: Senkou Span A crosses below Senkou Span B
-    senkou_span_a_shift = np.roll(senkou_span_a, 1)
-    senkou_span_b_shift = np.roll(senkou_span_b, 1)
-    senkou_span_a_shift[0] = np.nan
-    senkou_span_b_shift[0] = np.nan
-    
-    bullish_twist = (senkou_span_a > senkou_span_b) & (senkou_span_a_shift <= senkou_span_b_shift)
-    bearish_twist = (senkou_span_a < senkou_span_b) & (senkou_span_a_shift >= senkou_span_b_shift)
-    
-    # Align HTF indicators to 6h timeframe
+    # Align HTF indicators to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    bullish_twist_aligned = align_htf_to_ltf(prices, df_1d, bullish_twist.astype(float))
-    bearish_twist_aligned = align_htf_to_ltf(prices, df_1d, bearish_twist.astype(float))
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume confirmation: 1.8x median volume (20-period) for signal
+    # Volume confirmation: 2.0x median volume (20-period) for signal
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of EMA(50) 1d, Ichimoku (52), volume median (20)
-    start_idx = max(50, 52, 20)
+    # Warmup: max of EMA(50) 1d, volume median (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_median[i]) or
-            np.isnan(bullish_twist_aligned[i]) or
-            np.isnan(bearish_twist_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or
-            np.isnan(senkou_span_b_aligned[i])):
+            np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i])):
             # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         ema_50_1d_val = ema_50_1d_aligned[i]
         close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
         volume_val = volume[i]
         vol_median_val = vol_median[i]
-        bullish_twist_val = bullish_twist_aligned[i] > 0.5
-        bearish_twist_val = bearish_twist_aligned[i] > 0.5
-        span_a = senkou_span_a_aligned[i]
-        span_b = senkou_span_b_aligned[i]
         
         # Trend filter: price > EMA50 (uptrend) or < EMA50 (downtrend)
         uptrend = close_val > ema_50_1d_val
         downtrend = close_val < ema_50_1d_val
         
         if position == 0:
-            # Long: bullish Kumo twist with volume spike, and uptrend
-            long_signal = bullish_twist_val and \
-                          (volume_val > 1.8 * vol_median_val) and \
+            # Long: break above R1 with volume spike, and uptrend
+            long_signal = (close_val > camarilla_r1_aligned[i]) and \
+                          (volume_val > 2.0 * vol_median_val) and \
                           uptrend
             
-            # Short: bearish Kumo twist with volume spike, and downtrend
-            short_signal = bearish_twist_val and \
-                           (volume_val > 1.8 * vol_median_val) and \
+            # Short: break below S1 with volume spike, and downtrend
+            short_signal = (close_val < camarilla_s1_aligned[i]) and \
+                           (volume_val > 2.0 * vol_median_val) and \
                            downtrend
             
             if long_signal:
@@ -121,20 +89,22 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Hold long: exit when price closes below Kumo (Senkou Span A)
+            # Hold long
             signals[i] = 0.25
-            if close_val < span_a:
+            # Exit: close below EMA50 or volume drops below median (loss of momentum)
+            if close_val < ema_50_1d_val or volume_val < vol_median_val:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Hold short: exit when price closes above Kumo (Senkou Span B)
+            # Hold short
             signals[i] = -0.25
-            if close_val > span_b:
+            # Exit: close above EMA50 or volume drops below median (loss of momentum)
+            if close_val > ema_50_1d_val or volume_val < vol_median_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Twist_1dTrend_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
