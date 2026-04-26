@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_ChopRegime_v1
-Hypothesis: Donchian(20) breakouts on 4h with volume confirmation and choppiness regime filter capture strong momentum moves while avoiding whipsaws in ranging markets. Volume > 1.5x 20-period EMA confirms breakout strength. Choppiness Index > 61.8 indicates ranging (mean reversion), < 38.2 indicates trending (breakout continuation). Designed for 20-50 trades/year to minimize fee drag while maintaining edge in both bull and bear markets.
+4h_KAMA_Direction_RSI_ChopFilter_v1
+Hypothesis: KAMA (adaptive trend) filters noise, RSI(14) extremes provide mean-reversion entries, and Choppiness Index (CHOP) regime filter ensures trades occur only in trending (CHOP < 38.2) or ranging (CHOP > 61.8) markets as appropriate. Designed for 4h timeframe to target 20-50 trades/year with discrete sizing (0.25) to minimize fee drag while capturing moves in both bull and bear regimes via adaptive trend and mean-reversion logic.
 """
 
 import numpy as np
@@ -10,64 +10,69 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF regime filter
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d ATR(14) for Choppiness Index
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([np.array([0.0]), tr])  # align length
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Choppiness Index: 100 * log10(sum(atr_14,14) / (max(high,14)-min(low,14))) / log10(14)
-    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    denominator = max_high - min_low
+    # === KAMA Calculation (adaptive trend) ===
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close[t] - close[t-1]| over 10
     # Avoid division by zero
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    chop = 100 * np.log10(atr_sum / denominator) / np.log10(14)
+    er = np.divide(change, volatility, out=np.zeros_like(change, dtype=float), where=volatility!=0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # KAMA initialization and calculation
+    kama = np.full_like(close, np.nan, dtype=float)
+    kama[9] = close[9]  # seed at index 9 (10th element)
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Align Chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # === RSI(14) Calculation ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Donchian(20) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Volume spike detection on 4h (volume > 1.5x 20-period EMA)
-    volume_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (volume_ema * 1.5)
+    # === Choppiness Index (CHOP) Calculation ===
+    # True Range over 14 periods
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period TR = high - low
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    chop = np.divide(
+        np.log10(atr14 / (hh14 - ll14)) * 100,
+        np.log10(14),
+        out=np.zeros_like(atr14),
+        where=(hh14 - ll14)!=0
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(lookback, 20, 14)
+    # Start after warmup (max of all lookbacks: KAMA needs 10, RSI 14, CHOP 14)
+    start_idx = 14
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(chop[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -77,31 +82,53 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Regime filter: Chop < 38.2 = trending (favor breakouts), Chop > 61.8 = ranging (avoid breakouts)
-        trending_regime = chop_aligned[i] < 38.2
-        ranging_regime = chop_aligned[i] > 61.8
+        # Regime filters
+        trending_market = chop[i] < 38.2   # CHOP < 38.2 = trending
+        ranging_market = chop[i] > 61.8    # CHOP > 61.8 = ranging
         
-        # Long logic: price breaks above Donchian high + volume spike + trending regime
-        if high[i] > highest_high[i] and volume_spike[i] and trending_regime:
-            if position != 1:
-                signals[i] = 0.25
-                position = 1
-            else:
-                signals[i] = 0.25
-        # Short logic: price breaks below Donchian low + volume spike + trending regime
-        elif low[i] < lowest_low[i] and volume_spike[i] and trending_regime:
-            if position != -1:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = -0.25
-        # Exit conditions: price returns to opposite Donchian level or regime shifts to ranging
-        elif position == 1 and (low[i] < lowest_low[i] or ranging_regime):
+        # Long logic: 
+        # - In trending market: buy when price > KAMA (trend follow)
+        # - In ranging market: buy when RSI < 30 (oversold mean reversion)
+        long_signal = False
+        if trending_market and close[i] > kama[i]:
+            long_signal = True
+        elif ranging_market and rsi[i] < 30:
+            long_signal = True
+        
+        # Short logic:
+        # - In trending market: sell when price < KAMA (trend follow)
+        # - In ranging market: sell when RSI > 70 (overbought mean reversion)
+        short_signal = False
+        if trending_market and close[i] < kama[i]:
+            short_signal = True
+        elif ranging_market and rsi[i] > 70:
+            short_signal = True
+        
+        # Exit logic: reverse signal or regime change to opposite extreme
+        exit_long = False
+        exit_short = False
+        if position == 1:
+            # Exit long if: short signal OR regime shifts to strong ranging (CHOP > 70) 
+            if short_signal or chop[i] > 70:
+                exit_long = True
+        elif position == -1:
+            # Exit short if: long signal OR regime shifts to strong ranging (CHOP > 70)
+            if long_signal or chop[i] > 70:
+                exit_short = True
+        
+        # Update signals and position
+        if exit_long:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (high[i] > highest_high[i] or ranging_regime):
+        elif exit_short:
             signals[i] = 0.0
             position = 0
+        elif long_signal and position != 1:
+            signals[i] = 0.25
+            position = 1
+        elif short_signal and position != -1:
+            signals[i] = -0.25
+            position = -1
         else:
             # Hold current position
             if position == 0:
@@ -113,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ChopRegime_v1"
+name = "4h_KAMA_Direction_RSI_ChopFilter_v1"
 timeframe = "4h"
 leverage = 1.0
