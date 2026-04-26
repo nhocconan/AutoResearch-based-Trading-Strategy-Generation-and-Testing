@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_VWAP_Reversion_4hTrend
-Hypothesis: In 1h timeframe, price tends to revert to VWAP during strong 4h trends. 
-Enter long when price crosses below VWAP in 4h uptrend, short when above VWAP in 4h downtrend.
-Exit when price returns to VWAP or 4h trend reverses. Uses session filter (08-20 UTC) 
-to avoid low-volume periods. Targets 15-35 trades/year with discrete sizing (0.0, ±0.20) 
-to minimize fee drag. Works in bull/bear by following 4h trend direction only.
+6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: 6h Camarilla R3/S3 breakouts filtered by 1w EMA50 trend and volume spike (volume > 1.5 * 20-period MA) capture strong medium-term trend moves while avoiding choppy markets. Uses ATR trailing stop (2.5x) and discrete position sizing (0.0, ±0.25) to minimize fee churn. Targets 12-37 trades/year on 6h timeframe. Works in both bull and bear markets by following the 1w trend direction only and requiring volume confirmation to avoid false breakouts.
 """
 
 import numpy as np
@@ -22,91 +18,123 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend and VWAP reference
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h VWAP (typical price * volume cumsum)
-    typical_price_4h = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3.0
-    vwap_4h = (typical_price_4h * df_4h['volume']).cumsum() / df_4h['volume'].cumsum()
-    vwap_4h_values = vwap_4h.values
+    # 1w EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 4h EMA20 for trend filter
-    ema20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 6h ATR(14) for stoploss calculation
+    tr1 = pd.Series(high).diff().abs()
+    tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
+    tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_6h = tr.ewm(span=14, adjust=False, min_periods=14).mean()
+    atr_6h_values = atr_6h.values
     
-    # Align HTF indicators to 1h timeframe (completed 4h bar only)
-    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h_values)
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    
-    # 1h VWAP for entry timing
-    typical_price = (high + low + close) / 3.0
-    vwap = pd.Series(typical_price * volume).cumsum() / pd.Series(volume).cumsum()
-    vwap_values = vwap.values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume spike filter: volume > 1.5 * 20-period MA on 6h
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.20
+    base_size = 0.25
+    entry_price = 0.0
+    highest_since_long = 0.0
+    lowest_since_short = 0.0
     
-    # Warmup: max of 4h EMA20 (20), 1h VWAP needs volume
-    start_idx = 20
+    # Warmup: max of EMA50 (50), ATR (14), volume MA (20)
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            # Hold current position or flat
-            signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
-            continue
-            
         close_val = close[i]
-        vwap_1h_val = vwap_values[i]
-        vwap_4h_val = vwap_4h_aligned[i]
-        ema20_4h_val = ema20_4h_aligned[i]
+        high_val = high[i]
+        low_val = low[i]
+        vol = volume[i]
+        trend_val = ema50_1w_aligned[i]
+        atr_val = atr_6h_values[i]
+        vol_spike = volume_spike[i]
         
         # Skip if any data not ready
-        if (np.isnan(vwap_4h_val) or np.isnan(ema20_4h_val) or np.isnan(vwap_1h_val)):
+        if (np.isnan(trend_val) or np.isnan(atr_val)):
+            # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # 4h trend filter: price > EMA20 = uptrend, price < EMA20 = downtrend
-        is_uptrend = close_val > ema20_4h_val
-        is_downtrend = close_val < ema20_4h_val
+        # Trend filter: price > 1w EMA50 = uptrend, price < 1w EMA50 = downtrend
+        is_uptrend = close_val > trend_val
+        is_downtrend = close_val < trend_val
         
-        # 1h VWAP reversion signals
-        vwap_dev_1h = close_val - vwap_1h_val  # positive = above VWAP
+        # Calculate Camarilla levels for previous 6h bar
+        if i >= 1:
+            # Use previous bar's high, low, close for today's Camarilla levels
+            ph = high[i-1]
+            pl = low[i-1]
+            pc = close[i-1]
+            rng = ph - pl
+            # Camarilla R3 and S3 levels
+            r3 = pc + (rng * 1.1 / 4)
+            s3 = pc - (rng * 1.1 / 4)
+        else:
+            r3 = high_val
+            s3 = low_val
         
-        # Entry: price deviates from 1h VWAP in opposite direction of 4h trend
-        # In 4h uptrend, look for 1h price below VWAP (mean reversion long)
-        # In 4h downtrend, look for 1h price above VWAP (mean reversion short)
-        long_entry = is_uptrend and (vwap_dev_1h < -0.001)  # slightly below VWAP
-        short_entry = is_downtrend and (vwap_dev_1h > 0.001)  # slightly above VWAP
+        # Camarilla breakout conditions
+        long_breakout = close_val > r3
+        short_breakout = close_val < s3
         
-        # Exit: price returns to 1h VWAP or 4h trend reverses
-        long_exit = (vwap_dev_1h > -0.0005) or not is_uptrend  # near VWAP or trend change
-        short_exit = (vwap_dev_1h < 0.0005) or not is_downtrend  # near VWAP or trend change
+        # Entry conditions: Camarilla breakout in direction of 1w trend + volume spike
+        long_entry = long_breakout and is_uptrend and vol_spike
+        short_entry = short_breakout and is_downtrend and vol_spike
+        
+        # Update highest/lowest for trailing stop (ATR-based)
+        if position == 1:
+            highest_since_long = max(highest_since_long, high_val)
+        elif position == -1:
+            lowest_since_short = min(lowest_since_short, low_val)
+        elif position == 0:
+            highest_since_long = 0.0
+            lowest_since_short = 0.0
+        
+        # Exit conditions: ATR-based trailing stoploss (wider for 6h)
+        long_exit = False
+        short_exit = False
+        if position == 1:
+            # Long trailing stop: highest since entry - 2.5 * ATR
+            stop_price = highest_since_long - 2.5 * atr_val
+            long_exit = close_val < stop_price
+        elif position == -1:
+            # Short trailing stop: lowest since entry + 2.5 * ATR
+            stop_price = lowest_since_short + 2.5 * atr_val
+            short_exit = close_val > stop_price
         
         if long_entry and position != 1:
             signals[i] = base_size
             position = 1
+            entry_price = close_val
+            highest_since_long = high_val
         elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
-        elif long_exit and position == 1:
+            entry_price = close_val
+            lowest_since_short = low_val
+        elif long_exit:
             signals[i] = 0.0
             position = 0
-        elif short_exit and position == -1:
+            highest_since_long = 0.0
+        elif short_exit:
             signals[i] = 0.0
             position = 0
+            lowest_since_short = 0.0
         else:
             # Hold position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
     
     return signals
 
-name = "1h_VWAP_Reversion_4hTrend"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
