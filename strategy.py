@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeTrend_ATRStop_v1
-Hypothesis: On 4h timeframe, trade Donchian(20) breakouts with volume confirmation and EMA50 trend filter. Uses ATR-based stoploss and discrete position sizing (0.25) to limit fee drag. Designed to work in both bull and bear markets via trend filter and volatility-based stops. Targets 20-50 trades/year to avoid overtrading.
+12h_Camarilla_R1S1_Breakout_1dTrend_1wRegime_v1
+Hypothesis: On 12h timeframe, trade Camarilla R1/S1 breakouts from prior 12h bar with 1d EMA50 trend filter and 1w chop regime filter. Target 12-37 trades/year by requiring confluence of HTF trend alignment, low-chop regime, and price structure breakout. Designed to work in both bull and bear markets via trend filter and regime avoidance of sideways chop.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,32 +18,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for HTF trend (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for HTF trend (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate ATR(14) for stoploss and volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = high[0] - close[0]
-    tr3[0] = low[0] - close[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Get 12h data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous 12h bar (HLC of prior 12h)
+    cam_high = pd.Series(df_12h['high'].values).shift(1).values
+    cam_low = pd.Series(df_12h['low'].values).shift(1).values
+    cam_close = pd.Series(df_12h['close'].values).shift(1).values
     
-    # Volume confirmation: volume > 1.5 * 20-period average volume
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * avg_volume)
+    # Camarilla R1, S1 levels (core breakout levels)
+    R1 = cam_close + (cam_high - cam_low) * 1.1 / 12
+    S1 = cam_close - (cam_high - cam_low) * 1.1 / 12
+    
+    # Get 1w data for chop regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    # Choppiness Index (CHOP) on 1w: high CHOP = ranging market (avoid), low CHOP = trending (favor)
+    # CHOP = 100 * log10(sum(ATR over n) / (log(n) * (max(high) - min(low)))) / log10(n)
+    atr_1w = np.maximum(df_1w['high'].values - df_1w['low'].values,
+                        np.maximum(np.abs(df_1w['high'].values - np.roll(df_1w['close'].values, 1)),
+                                   np.abs(df_1w['low'].values - np.roll(df_1w['close'].values, 1))))
+    atr_1w[0] = df_1w['high'].values[0] - df_1w['low'].values[0]
+    atr_sum = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (np.log(14) * (max_high - min_low))) / np.log10(14)
+    
+    # Align HTF indicators to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,42 +68,45 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup: max of EMA(50) 4h, Donchian(20), ATR(14)
-    start_idx = max(50, 20, 14)
+    # Warmup: max of EMA(50) 1d, Camarilla (need 2 bars for shift), CHOP (14)
+    start_idx = max(50, 2, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
+            np.isnan(chop_aligned[i])):
+            # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_50_4h_val = ema_50_4h_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        donch_high_val = donch_high[i]
-        donch_low_val = donch_low[i]
-        atr_val = atr[i]
-        vol_filter = volume_filter[i]
+        chop_val = chop_aligned[i]
+        r1_val = R1_aligned[i]
+        s1_val = S1_aligned[i]
         
-        # Trend filter
-        uptrend = close_val > ema_50_4h_val
-        downtrend = close_val < ema_50_4h_val
+        # Trend filter: price > EMA50 (uptrend) or < EMA50 (downtrend)
+        uptrend = close_val > ema_50_1d_val
+        downtrend = close_val < ema_50_1d_val
+        
+        # Regime filter: only trade when market is trending (CHOP < 38.2) or moderately choppy (CHOP < 50)
+        # Avoid strong ranging markets (CHOP > 61.8)
+        regime_filter = chop_val < 50.0
         
         if position == 0:
-            # Long: break above Donchian high with uptrend and volume
-            long_signal = (close_val > donch_high_val) and \
+            # Long: break above R1 with uptrend and favorable regime
+            long_signal = (close_val > r1_val) and \
                           uptrend and \
-                          vol_filter
+                          regime_filter
             
-            # Short: break below Donchian low with downtrend and volume
-            short_signal = (close_val < donch_low_val) and \
+            # Short: break below S1 with downtrend and favorable regime
+            short_signal = (close_val < s1_val) and \
                            downtrend and \
-                           vol_filter
+                           regime_filter
             
             if long_signal:
                 signals[i] = 0.25
@@ -104,21 +124,21 @@ def generate_signals(prices):
             # Hold long
             signals[i] = 0.25
             highest_since_entry = max(highest_since_entry, high_val)
-            # ATR-based stoploss: exit if price drops 2.5 * ATR from highest
-            if close_val < (highest_since_entry - 2.5 * atr_val):
+            # Exit if market becomes strongly ranging
+            if chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
             lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR-based stoploss: exit if price rises 2.5 * ATR from lowest
-            if close_val > (lowest_since_entry + 2.5 * atr_val):
+            # Exit if market becomes strongly ranging
+            if chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeTrend_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_1wRegime_v1"
+timeframe = "12h"
 leverage = 1.0
