@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R4/S4 breakouts with 1d EMA34 trend filter and volume confirmation (>1.8x 20-bar MA) on 12h timeframe. R4/S4 represent stronger breakout levels than R3/S3, reducing false signals while capturing momentum. Designed for 12h timeframe to balance trade frequency and edge. Works in bull/bear markets by following 1d trend while using Camarilla structure for entries. Volume spike filter reduces whipsaws. Target: 12-30 trades/year (50-120 total over 4 years).
+6h_ElderRay_ZeroLag_MA_Regime
+Hypothesis: Elder Ray (Bull/Bear Power) combined with Zero Lag Moving Average crossover on 1d trend filter. Bull Power = High - EMA(13), Bear Power = EMA(13) - Low. Enter long when Bull Power > 0 and ZLMA crosses above signal line in uptrend (1d close > 1w EMA50). Enter short when Bear Power > 0 and ZLMA crosses below signal line in downtrend (1d close < 1w EMA50). Uses volume confirmation (>1.5x 20-bar MA) to reduce whipsaws. Designed for 6h timeframe to capture momentum with controlled frequency (target: 15-25 trades/year). Works in bull/bear markets by following 1d/1w trend while using Elder Ray for entry timing and ZLMA for reduced-lag signals.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,63 +18,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF filters
+    # Load 1d and 1w data ONCE before loop for HTF filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
+    # 1d EMA13 for Elder Ray
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Previous day's OHLC for Camarilla levels (using 1d for structure)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla levels: R4, S4 (stronger breakout levels)
-    rng = high_1d - low_1d
-    camarilla_r4 = close_1d_vals + (rng * 1.1 / 2)  # R4 level
-    camarilla_s4 = close_1d_vals - (rng * 1.1 / 2)  # S4 level
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema_13_1d_aligned
+    bear_power = ema_13_1d_aligned - low
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Zero Lag Moving Average (ZLMA) on 6h close
+    # ZLMA = EMA(close, Lag) where Lag = (period-1)/2
+    period = 21
+    lag = int((period - 1) / 2)
+    ema1 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False, min_periods=period).mean().values
+    zlma = 2 * ema1 - ema2  # Zero Lag MA
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Signal line: EMA of ZLMA
+    signal_line = pd.Series(zlma).ewm(span=9, adjust=False, min_periods=9).mean().values
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size (25% of capital)
     
-    # Warmup: max of calculations (20 for vol, 34 for 1d EMA, 1 for camarilla)
-    start_idx = max(20, 34)
+    # Warmup: max of calculations (21 for ZLMA, 13 for EMA13, 50 for 1w EMA, 20 for vol)
+    start_idx = max(21, 13, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(zlma[i]) or np.isnan(signal_line[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        close_val = close[i]
-        camarilla_r4_val = camarilla_r4_aligned[i]
-        camarilla_s4_val = camarilla_s4_aligned[i]
-        ema_34_val = ema_34_1d_aligned[i]
-        vol_spike = volume_spike[i]
+        # Determine 1w trend: bullish if 1d close > 1w EMA50, bearish if 1d close < 1w EMA50
+        # Use close price as proxy for 1d close in 6h timeframe (aligned)
+        bullish_1w = close[i] > ema_50_1w_aligned[i]
+        bearish_1w = close[i] < ema_50_1w_aligned[i]
         
-        # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
-        bullish_1d = close_val > ema_34_val
-        bearish_1d = close_val < ema_34_val
+        # ZLMA crossover signals
+        zlma_cross_above = zlma[i] > signal_line[i] and zlma[i-1] <= signal_line[i-1]
+        zlma_cross_below = zlma[i] < signal_line[i] and zlma[i-1] >= signal_line[i-1]
         
-        # Entry conditions: breakout of Camarilla R4/S4 in trend direction with volume spike
-        long_entry = (close_val > camarilla_r4_val) and bullish_1d and vol_spike
-        short_entry = (close_val < camarilla_s4_val) and bearish_1d and vol_spike
+        # Entry conditions
+        long_entry = bull_power[i] > 0 and zlma_cross_above and bullish_1w and volume_spike[i]
+        short_entry = bear_power[i] > 0 and zlma_cross_below and bearish_1w and volume_spike[i]
         
         if position == 0:
             # Flat - look for entry
@@ -87,17 +92,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on mean reversion to mid-point or trend change
-            mid_point = (camarilla_r4_val + camarilla_s4_val) / 2
-            if close_val < mid_point or not bullish_1d:
+            # Long - exit on ZLMA cross below or trend change
+            if zlma_cross_below or not bullish_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = base_size
         elif position == -1:
-            # Short - exit on mean reversion to mid-point or trend change
-            mid_point = (camarilla_r4_val + camarilla_s4_val) / 2
-            if close_val > mid_point or not bearish_1d:
+            # Short - exit on ZLMA cross above or trend change
+            if zlma_cross_above or not bearish_1w:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_ElderRay_ZeroLag_MA_Regime"
+timeframe = "6h"
 leverage = 1.0
