@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter
-Hypothesis: On 4h timeframe, price breaking Camarilla R1/S1 levels with 1d EMA34 trend alignment and volume confirmation provides edge. Choppiness Index (CHOP) filter avoids whipsaws in ranging markets. In bull markets: 1d EMA34 uptrend + R1 breakout with volume = long setup. In bear markets: 1d EMA34 downtrend + S1 breakdown with volume = short setup. CHOP > 61.8 avoids range-bound false breakouts. Discrete sizing (0.0, ±0.25) minimizes fee churn. Targets ~25-35 trades/year (~100-140 over 4 years) to avoid fee drag on 4h timeframe. ATR-based stoploss (2.0x) manages risk.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter
+Hypothesis: On 12h timeframe, price breaking Camarilla R1/S1 levels with 1d EMA34 trend alignment and volume confirmation provides edge. Choppiness Index (CHOP) filter avoids whipsaws in ranging markets. In bull markets: 1d EMA34 uptrend + R1 breakout with volume = long setup. In bear markets: 1d EMA34 downtrend + S1 breakdown with volume = short setup. CHOP > 61.8 avoids range-bound false breakouts. Discrete sizing (0.0, ±0.25) minimizes fee churn. Targets ~12-37 trades/year (~50-150 over 4 years) to avoid fee drag on 12h timeframe. ATR-based stoploss (2.0x) manages risk.
 """
 
 import numpy as np
@@ -28,7 +28,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for stoploss on 4h
+    # Calculate ATR(14) for stoploss on 12h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -39,7 +39,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.maximum(vol_ma, 1e-10)  # avoid division by zero
     
-    # Calculate Choppiness Index (CHOP) on 4h for regime filter
+    # Calculate Choppiness Index (CHOP) on 12h for regime filter
     def calculate_chop(high_arr, low_arr, close_arr, window=14):
         # True Range
         tr1 = high_arr[1:] - low_arr[1:]
@@ -65,7 +65,7 @@ def generate_signals(prices):
     
     chop = calculate_chop(high, low, close, window=14)
     
-    # Calculate Camarilla levels from previous 4h bar
+    # Calculate Camarilla levels from previous 12h bar
     prev_high = np.concatenate([[np.nan], high[:-1]])
     prev_low = np.concatenate([[np.nan], low[:-1]])
     prev_close = np.concatenate([[np.nan], close[:-1]])
@@ -137,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
