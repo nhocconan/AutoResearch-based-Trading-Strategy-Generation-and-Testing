@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime_ADX_v2
-Hypothesis: Refined version of strategy #94480 with tighter volume confirmation (3.0x avg) and higher ADX threshold (30) to reduce overtrading while maintaining edge. Targets 15-25 trades/year for better test generalization. Long when price breaks above R3 in bullish 1d trend with extreme volume spike and strong trending regime; short when breaks below S3 in bearish 1d trend. Uses discrete sizing (±0.30) to limit churn.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts on 12h filtered by 1d EMA34 trend and volume spike captures strong institutional moves with controlled trade frequency. Long when price breaks above R3 in bullish 1d trend with volume confirmation; short when breaks below S3 in bearish 1d trend. Uses discrete sizing (±0.30) to limit churn and targets 12-37 trades/year for robust test performance.
 """
 
 import numpy as np
@@ -42,66 +42,25 @@ def generate_signals(prices):
     r3 = prev_close + camarilla_range * 1.1 / 4
     s3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: volume > 3.0x 20-period average (tighter filter)
+    # Volume confirmation: volume > 2.0x 20-period average (tight filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 3.0)
-    
-    # ADX regime filter: only trade in strongly trending markets (ADX > 30)
-    # Calculate ADX on 4h data
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        plus_dm[i] = max(high[i] - high[i-1], 0) if high[i] - high[i-1] > high[i-1] - low[i] else 0
-        minus_dm[i] = max(high[i-1] - low[i], 0) if high[i-1] - low[i] > high[i] - high[i-1] else 0
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    atr = np.zeros(n)
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    adx = np.zeros(n)
-    
-    # Initial values
-    atr[period] = np.mean(tr[1:period+1])
-    plus_dm_smooth = np.sum(plus_dm[1:period+1])
-    minus_dm_smooth = np.sum(minus_dm[1:period+1])
-    
-    for i in range(period+1, n):
-        atr[i] = atr[i-1] * (1 - alpha) + alpha * tr[i]
-        plus_dm_smooth = plus_dm_smooth * (1 - alpha) + alpha * plus_dm[i]
-        minus_dm_smooth = minus_dm_smooth * (1 - alpha) + alpha * minus_dm[i]
-        plus_di[i] = 100 * plus_dm_smooth / atr[i] if atr[i] != 0 else 0
-        minus_di[i] = 100 * minus_dm_smooth / atr[i] if atr[i] != 0 else 0
-        dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) != 0 else 0
-    
-    # Smooth DX to get ADX
-    adx[period*2] = np.mean(dx[period+1:period*2+1]) if len(dx[period+1:period*2+1]) > 0 else 0
-    for i in range(period*2+1, n):
-        adx[i] = adx[i-1] * (1 - alpha) + alpha * dx[i]
-    
-    adx_aligned = adx  # Already on 4h timeframe
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.30
     
-    # Warmup: max of calculations (20 for volume MA, 1 for shift, 34 for EMA, 28 for ADX)
-    start_idx = max(20, 1, 34, 28)
+    # Warmup: max of calculations (20 for volume MA, 1 for shift, 34 for EMA)
+    start_idx = max(20, 1, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready (NaN from calculation)
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(adx_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
@@ -111,30 +70,26 @@ def generate_signals(prices):
         s3_val = s3_aligned[i]
         ema_34_val = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
-        adx_val = adx_aligned[i]
         
         # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
         bullish_1d = close_val > ema_34_val
         bearish_1d = close_val < ema_34_val
         
-        # Regime filter: only trade in strongly trending markets (ADX > 30)
-        trending_regime = adx_val > 30
+        # Entry conditions: price breaks above/below Camarilla levels in direction of 1d trend with volume confirmation
+        long_entry = (close_val > r3_val) and bullish_1d and vol_spike
+        short_entry = (close_val < s3_val) and bearish_1d and vol_spike
         
-        # Entry conditions: price breaks above/below Camarilla levels in direction of 1d trend with volume confirmation and trending regime
-        long_entry = (close_val > r3_val) and bullish_1d and vol_spike and trending_regime
-        short_entry = (close_val < s3_val) and bearish_1d and vol_spike and trending_regime
-        
-        # Exit conditions: price returns inside Camarilla levels or trend reversal or regime change
+        # Exit conditions: price returns inside Camarilla levels or trend reversal
         if long_entry and position != 1:
             signals[i] = base_size
             position = 1
         elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
-        elif position == 1 and (close_val < r3_val or not bullish_1d or not trending_regime):
+        elif position == 1 and (close_val < r3_val or not bullish_1d):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close_val > s3_val or not bearish_1d or not trending_regime):
+        elif position == -1 and (close_val > s3_val or not bearish_1d):
             signals[i] = 0.0
             position = 0
         else:
@@ -143,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime_ADX_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
