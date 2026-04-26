@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: Trade Camarilla pivot (R1/S1) breakouts on 12h with 1d EMA34 trend filter and volume spike confirmation.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1
+Hypothesis: Trade Camarilla pivot (R1/S1) breakouts on 4h with 1d EMA34 trend filter and volume spike confirmation.
 Uses 1d EMA34 for slower trend adaptation to reduce whipsaws, and 2.0x volume spike for confirmation.
-Only trade in trending markets (ADX > 20) to avoid chop. Designed for 12-37 trades/year on 12h timeframe.
+Only trade in trending markets (ADX > 20) to avoid chop. Designed for 15-30 trades/year.
 Works in bull/bear markets by following 1d EMA34 trend and filtering ranging regimes via ADX.
 """
 
@@ -37,7 +37,7 @@ def generate_signals(prices):
     camarilla_r1 = prev_close_1d + 1.125 * (prev_high_1d - prev_low_1d)
     camarilla_s1 = prev_close_1d - 1.125 * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
@@ -46,7 +46,7 @@ def generate_signals(prices):
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     # ADX(14) for regime filter - trending when > 20
-    # Calculate ADX using 12h data
+    # Calculate ADX using 4h data
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
     tr = np.zeros(n)
@@ -145,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
