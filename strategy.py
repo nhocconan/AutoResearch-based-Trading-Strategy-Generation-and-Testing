@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v2
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and ADX>25 for trend strength.
-- Uses 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-- Long when price breaks above R1 with 1d uptrend (EMA34) and ADX>25
-- Short when price breaks below S1 with 1d downtrend (EMA34) and ADX>25
-- Volume spike confirmation removed to reduce trade frequency and focus on structure + trend
+4h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v1
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter, ADX>25 for trend strength, and volume spike confirmation.
+- Uses 4h timeframe targeting 75-200 total trades over 4 years (19-50/year)
+- Long when price breaks above R1 with volume spike, 1d uptrend (EMA34), and ADX>25
+- Short when price breaks below S1 with volume spike, 1d downtrend (EMA34), and ADX>25
+- Camarilla levels derived from previous 1d OHLC for structure-aware entries
+- ADX filter ensures we only trade in trending markets, avoiding whipsaws in ranges
+- Volume spike confirms institutional participation
 - Designed for low trade frequency with proven edge on BTC/ETH from historical data
 """
 
@@ -21,6 +23,7 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Load 1d data ONCE before loop for Camarilla levels, EMA34, and ADX
     df_1d = get_htf_data(prices, '1d')
@@ -34,7 +37,7 @@ def generate_signals(prices):
     R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
@@ -80,10 +83,14 @@ def generate_signals(prices):
     adx_1d = wilders_smoothing(dx, period)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
+    # Calculate volume spike (20-period volume average on 4h)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 2.0)  # Volume at least 2x average
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34+14 for EMA34 and ADX)
+    # Start after warmup (need 34+14 for EMA34 and ADX, 20 for volume MA)
     start_idx = max(34 + 14, 20)
     
     for i in range(start_idx, n):
@@ -100,7 +107,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Camarilla breakout conditions with trend filters
+        # Camarilla breakout conditions with volume confirmation and trend filters
         price_above_R1 = close[i] > R1_aligned[i]
         price_below_S1 = close[i] < S1_aligned[i]
         
@@ -112,12 +119,12 @@ def generate_signals(prices):
         strong_trend = adx_1d_aligned[i] > 25.0
         
         if position == 0:
-            # Long: price breaks above R1 AND 1d uptrend AND strong trend
-            if price_above_R1 and trend_up and strong_trend:
+            # Long: price breaks above R1 AND volume spike AND 1d uptrend AND strong trend
+            if price_above_R1 and volume_spike[i] and trend_up and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND 1d downtrend AND strong trend
-            elif price_below_S1 and trend_down and strong_trend:
+            # Short: price breaks below S1 AND volume spike AND 1d downtrend AND strong trend
+            elif price_below_S1 and volume_spike[i] and trend_down and strong_trend:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -139,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter_v1"
+timeframe = "4h"
 leverage = 1.0
