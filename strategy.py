@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R2_S2_Breakout_1dTrend_VolumeSpike_RegimeFilter_v1
-Hypothesis: On 6h timeframe, use Camarilla R2/S2 from 1d pivot points for breakout entries with 1d trend filter (close > 1d EMA34) and volume confirmation (>2.0x 20-period average). Add choppiness regime filter (CHOP > 61.8 = range, only mean-revert at extremes) to avoid whipsaws in bear markets. Target: 12-35 trades/year. Uses tighter R2/S2 levels (vs R1/S1) to reduce false breakouts while maintaining edge in both bull and bear regimes via volume/trend confirmation.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1
+Hypothesis: On 12h timeframe, use Camarilla R1/S1 from 1d pivot points for breakout entries with 1d trend filter (close > 1d EMA34) and volume confirmation (>2.0x 20-period average). Add choppiness regime filter (CHOP > 61.8 = range, only mean-revert at extremes) to avoid whipsaws in bear markets. Target: 12-37 trades/year. Uses tight R1/S1 levels for high-probability breakouts in both bull and bear regimes via volume/trend confirmation.
 """
 
 import numpy as np
@@ -28,9 +28,9 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels R2/S2 (based on previous 1d bar's range)
-    # Camarilla R2 = close + 1.1*(high - low)/6
-    # Camarilla S2 = close - 1.1*(high - low)/6
+    # Calculate Camarilla levels R1/S1 (based on previous 1d bar's range)
+    # Camarilla R1 = close + 1.1*(high - low)/12
+    # Camarilla S1 = close - 1.1*(high - low)/12
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
     prev_close_1d = np.roll(close_1d, 1)
@@ -40,16 +40,16 @@ def generate_signals(prices):
     prev_low_1d[0] = np.nan
     prev_close_1d[0] = np.nan
     
-    camarilla_r2 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 6
-    camarilla_s2 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 6
+    camarilla_r1 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 12
+    camarilla_s1 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 12
     
     # Calculate 1d EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels and EMA to 6h timeframe
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    # Align Camarilla levels and EMA to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: volume > 2.0x 20-period average
@@ -91,7 +91,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r2_aligned[i]) or np.isnan(camarilla_s2_aligned[i]) or
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(chop[i])):
             # Hold current position
             if position == 0:
@@ -107,13 +107,13 @@ def generate_signals(prices):
         trend_1d_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R2 + 1d uptrend + volume spike + NOT in strong range (avoid false breakouts)
+            # Long: price breaks above R1 + 1d uptrend + volume spike + NOT in strong range (avoid false breakouts)
             # Require confirmation: price outside bands for 2 consecutive bars
-            long_breakout = (close[i] > camarilla_r2_aligned[i]) and (close[i-1] > camarilla_r2_aligned[i-1])
+            long_breakout = (close[i] > camarilla_r1_aligned[i]) and (close[i-1] > camarilla_r1_aligned[i-1])
             long_signal = long_breakout and trend_1d_uptrend and volume_spike[i] and not chop_range[i]
             
-            # Short: price breaks below S2 + 1d downtrend + volume spike + NOT in strong range
-            short_breakout = (close[i] < camarilla_s2_aligned[i]) and (close[i-1] < camarilla_s2_aligned[i-1])
+            # Short: price breaks below S1 + 1d downtrend + volume spike + NOT in strong range
+            short_breakout = (close[i] < camarilla_s1_aligned[i]) and (close[i-1] < camarilla_s1_aligned[i-1])
             short_signal = short_breakout and trend_1d_downtrend and volume_spike[i] and not chop_range[i]
             
             if long_signal:
@@ -127,20 +127,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price touches S2 OR 1d trend turns down OR chop becomes strong range (revert to mean)
-            if (close[i] < camarilla_s2_aligned[i] or not trend_1d_uptrend or chop_range[i]):
+            # Exit: price touches S1 OR 1d trend turns down OR chop becomes strong range (revert to mean)
+            if (close[i] < camarilla_s1_aligned[i] or not trend_1d_uptrend or chop_range[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price touches R2 OR 1d trend turns up OR chop becomes strong range
-            if (close[i] > camarilla_r2_aligned[i] or not trend_1d_downtrend or chop_range[i]):
+            # Exit: price touches R1 OR 1d trend turns up OR chop becomes strong range
+            if (close[i] > camarilla_r1_aligned[i] or not trend_1d_downtrend or chop_range[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R2_S2_Breakout_1dTrend_VolumeSpike_RegimeFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
