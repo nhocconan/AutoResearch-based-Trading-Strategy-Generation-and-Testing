@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1wTrend_VolumeConfirmation_v1
-Hypothesis: 6-hour Camarilla R3/S3 breakout with weekly EMA50 trend filter and volume confirmation (2.0x average). Uses discrete position sizing (0.25) and ATR-based stoploss (2.5x) for risk management. Weekly EMA50 provides robust multi-month trend filtering that works across bull/bear cycles. Volume confirmation ensures breakouts have institutional participation. Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag on 6h timeframe.
+12h_Camarilla_R1S1_Breakout_1wTrend_Filter_VolumeSpike_v1
+Hypothesis: 12-hour Camarilla R1/S1 level breakout with weekly EMA50 trend filter and volume confirmation (2.0x average). Uses discrete position sizing (0.25) and ATR-based stoploss (2.5x) for risk management. Targets 12-37 trades/year by requiring confluence of breakout, HTF trend, and volume spike. Designed to work in both bull and bear markets via strict weekly trend filter that avoids counter-trend entries.
 """
 
 import numpy as np
@@ -33,15 +33,15 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ATR(14) for stoploss on 6h
+    # Calculate ATR(14) for stoploss on 12h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter: volume > 2.0 * 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Calculate volume spike filter: volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     # Calculate Camarilla levels from previous daily bar
@@ -49,26 +49,26 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla R3 and S3
-    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    # Camarilla R1 = C + ((H-L)*1.1/6), S1 = C - ((H-L)*1.1/6)
+    camarilla_r1 = prev_close + ((prev_high - prev_low) * 1.1 / 6)
+    camarilla_s1 = prev_close - ((prev_high - prev_low) * 1.1 / 6)
     
-    # Align Camarilla levels to 6h (use previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 12h (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of weekly EMA(50), volume MA, ATR
-    start_idx = max(50, 50, 14) + 1
+    # Warmup: max of weekly EMA(50), daily shift, volume MA, ATR
+    start_idx = max(50, 1, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(atr[i])):
             # Hold current position
@@ -86,11 +86,11 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 AND weekly trend up AND volume spike
-            long_signal = (close_val > camarilla_r3_aligned[i]) and trend_1w_up and vol_spike
+            # Long: price breaks above Camarilla R1 AND weekly trend up AND volume spike
+            long_signal = (close_val > camarilla_r1_aligned[i]) and trend_1w_up and vol_spike
             
-            # Short: price breaks below Camarilla S3 AND weekly trend down AND volume spike
-            short_signal = (close_val < camarilla_s3_aligned[i]) and trend_1w_down and vol_spike
+            # Short: price breaks below Camarilla S1 AND weekly trend down AND volume spike
+            short_signal = (close_val < camarilla_s1_aligned[i]) and trend_1w_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -105,20 +105,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend flips down OR price hits ATR stoploss
+            # Exit: weekly trend flips down OR price hits ATR stoploss
             if (not trend_1w_up) or (close_val < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend flips up OR price hits ATR stoploss
+            # Exit: weekly trend flips up OR price hits ATR stoploss
             if (not trend_1w_down) or (close_val > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1wTrend_VolumeConfirmation_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_Filter_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
