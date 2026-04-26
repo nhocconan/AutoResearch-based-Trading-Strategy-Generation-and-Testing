@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R3/S3 breakout on 6h with 1d EMA34 trend filter and volume spike (>2x median). Targets R3/S3 as institutional pivot levels where breakouts often continue with momentum. Uses 1d trend filter to align with higher timeframe direction and volume spike for conviction. Designed to work in both bull/bear markets by only trading with 1d trend and avoiding low-volume conditions. Targets 12-37 trades/year via tight entry conditions.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike (>1.8x median). Targets R1/S1 as key intraday pivot levels where breakouts often continue with momentum. Uses 1d trend filter to align with higher timeframe direction and volume spike for conviction. Designed to work in both bull/bear markets by only trading with 1d trend and avoiding low-volume conditions. Targets 12-37 trades/year via tight entry conditions.
 """
 
 import numpy as np
@@ -32,13 +32,13 @@ def generate_signals(prices):
     cam_low = pd.Series(df_1d['low'].values).shift(1).values
     cam_close = pd.Series(df_1d['close'].values).shift(1).values
     
-    # Camarilla R3, S3, R4, S4 levels
-    R3 = cam_close + (cam_high - cam_low) * 1.1 / 4
-    S3 = cam_close - (cam_high - cam_low) * 1.1 / 4
-    R4 = cam_close + (cam_high - cam_low) * 1.1 / 2
-    S4 = cam_close - (cam_high - cam_low) * 1.1 / 2
+    # Camarilla R1, S1, R2, S2 levels
+    R1 = cam_close + (cam_high - cam_low) * 1.1 / 12
+    S1 = cam_close - (cam_high - cam_low) * 1.1 / 12
+    R2 = cam_close + (cam_high - cam_low) * 1.1 / 6
+    S2 = cam_close - (cam_high - cam_low) * 1.1 / 6
     
-    # Volume spike filter: volume > 2x median volume (20-period) for conviction
+    # Volume spike filter: volume > 1.8x median volume (20-period) for conviction
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     # ATR(14) for volatility-based stops
@@ -46,12 +46,12 @@ def generate_signals(prices):
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 6h timeframe
+    # Align HTF indicators to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,10 +65,10 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or
-            np.isnan(S3_aligned[i]) or
-            np.isnan(R4_aligned[i]) or
-            np.isnan(S4_aligned[i]) or
+            np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
+            np.isnan(R2_aligned[i]) or
+            np.isnan(S2_aligned[i]) or
             np.isnan(vol_median[i]) or
             np.isnan(atr[i])):
             # Hold current position
@@ -82,26 +82,26 @@ def generate_signals(prices):
         volume_val = volume[i]
         vol_median_val = vol_median[i]
         atr_val = atr[i]
-        r3_val = R3_aligned[i]
-        s3_val = S3_aligned[i]
-        r4_val = R4_aligned[i]
-        s4_val = S4_aligned[i]
+        r1_val = R1_aligned[i]
+        s1_val = S1_aligned[i]
+        r2_val = R2_aligned[i]
+        s2_val = S2_aligned[i]
         
         # Trend filter: price > EMA34 (uptrend) or < EMA34 (downtrend)
         uptrend = close_val > ema_34_1d_val
         downtrend = close_val < ema_34_1d_val
         
         # Volume spike filter: only trade in above-average volume environments
-        volume_spike = volume_val > 2.0 * vol_median_val
+        volume_spike = volume_val > 1.8 * vol_median_val
         
         if position == 0:
-            # Long: break above R3 with volume spike, and uptrend
-            long_signal = (close_val > r3_val) and \
+            # Long: break above R1 with volume spike, and uptrend
+            long_signal = (close_val > r1_val) and \
                           volume_spike and \
                           uptrend
             
-            # Short: break below S3 with volume spike, and downtrend
-            short_signal = (close_val < s3_val) and \
+            # Short: break below S1 with volume spike, and downtrend
+            short_signal = (close_val < s1_val) and \
                            volume_spike and \
                            downtrend
             
@@ -136,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
