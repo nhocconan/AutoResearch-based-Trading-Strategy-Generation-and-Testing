@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_HTF_Regime_Camarilla_Breakout_v1
-Hypothesis: 6h Camarilla H4/H5 breakout with 1d volatility regime filter and volume confirmation.
-- Uses 6h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-- Regime filter: 1d ATR ratio (current ATR7 / ATR30) > 1.2 = high volatility (favor breakouts)
-- Volume confirmation: 1d volume > 1.5x 20-period average
-- Trend filter: price must be above/below 1d EMA50 for long/short respectively
-- Designed to avoid low-volatility chop where breakouts fail, and high-fee overtrading
-- Works in bull/bear markets by combining volatility expansion breakouts with trend alignment
+12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: 12h Camarilla H4/H5 breakout with 1d trend filter and 1d volume spike confirmation.
+- Uses 12h timeframe for lower trade frequency (target: 12-37 trades/year)
+- Camarilla H4/H5 levels from prior 1d provide strong support/resistance
+- 1d EMA50 filter ensures alignment with daily trend
+- 1d volume spike (>2x 20-period average) confirms institutional participation
+- Designed for 50-150 total trades over 4 years to minimize fee drag
+- Works in bull/bear markets by trading with 1d trend and using volume spike to filter false breakouts
+- Fixed: removed redundant H3/L3 calculation inside loop, simplified exit logic
 """
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -32,39 +33,21 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 1d ATR for volatility regime (ATR7 and ATR30)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    atr7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr7 / np.where(atr30 == 0, np.nan, atr30)  # Avoid division by zero
-    
-    # Volatility regime: high volatility when ATR7/ATR30 > 1.2
-    vol_regime_high = atr_ratio > 1.2
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime_high.astype(float))
-    
-    # Calculate 1d volume confirmation (>1.5x 20-period average)
+    # Calculate 1d volume spike confirmation (>2x 20-period average)
     volume_1d = df_1d['volume'].values
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (1.5 * vol_ma_20)
+    vol_spike = volume_1d > (2.0 * vol_ma_20)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     camarilla_h4 = close_1d + (1.0/6) * (high_1d - low_1d)  # H4 = close + 1/6*(high-low)
     camarilla_h5 = close_1d + (1.0/4) * (high_1d - low_1d)  # H5 = close + 1/4*(high-low)
     camarilla_l4 = close_1d - (1.0/6) * (high_1d - low_1d)  # L4 = close - 1/6*(high-low)
     camarilla_l5 = close_1d - (1.0/4) * (high_1d - low_1d)  # L5 = close - 1/4*(high-low)
     
-    # Align Camarilla levels to 6h timeframe (use previous day's levels)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
@@ -73,13 +56,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 50 for EMA, 30 for ATR30, 20 for volume MA)
-    start_idx = max(50, 30, 20)
+    # Start after warmup (need 50 for 1d EMA, 20 for volume MA)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_regime_aligned[i]) or
             np.isnan(vol_spike_aligned[i]) or
             np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_h5_aligned[i]) or
             np.isnan(camarilla_l4_aligned[i]) or np.isnan(camarilla_l5_aligned[i])):
@@ -97,18 +79,12 @@ def generate_signals(prices):
         breakout_short = close[i] < camarilla_l5_aligned[i]
         
         if position == 0:
-            # Long: breakout above H5 AND close > 1d EMA50 AND high volatility regime AND volume spike
-            if (breakout_long and 
-                close[i] > ema50_1d_aligned[i] and 
-                vol_regime_aligned[i] > 0.5 and 
-                vol_spike_aligned[i] > 0.5):
+            # Long: breakout above H5 AND close > 1d EMA50 AND volume spike
+            if breakout_long and close[i] > ema50_1d_aligned[i] and vol_spike_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below L5 AND close < 1d EMA50 AND high volatility regime AND volume spike
-            elif (breakout_short and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  vol_regime_aligned[i] > 0.5 and 
-                  vol_spike_aligned[i] > 0.5):
+            # Short: breakout below L5 AND close < 1d EMA50 AND volume spike
+            elif breakout_short and close[i] < ema50_1d_aligned[i] and vol_spike_aligned[i] > 0.5:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -116,20 +92,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: breakout below L4 OR volatility regime shifts to low
-            if breakout_short or vol_regime_aligned[i] <= 0.5:
+            # Exit: breakout below L4 (stop) OR breakout below H4 (take profit at H4)
+            if breakout_short or close[i] < camarilla_h4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: breakout above H4 OR volatility regime shifts to low
-            if breakout_long or vol_regime_aligned[i] <= 0.5:
+            # Exit: breakout above H4 (stop) OR breakout above L4 (take profit at L4)
+            if breakout_long or close[i] > camarilla_l4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_HTF_Regime_Camarilla_Breakout_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H4_H5_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
