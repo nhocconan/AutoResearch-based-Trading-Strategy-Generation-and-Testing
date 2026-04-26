@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter
-Hypothesis: Camarilla R1/S1 breakout with 1d EMA50 trend filter and choppiness regime filter on 12h timeframe.
-Only trade breakouts aligned with 1d trend when market is trending (CHOP < 38.2). Uses discrete position sizing (0.25)
-to minimize fee drag. Target: 12-37 trades/year per symbol. Works in bull/bear via trend filter - only long in uptrend,
-short in downtrend. Chop filter prevents whipsaws in ranging markets.
+4h_Camarilla_R3S3_Breakout_1dTrend_ADXFilter
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and ADX regime filter.
+Only trade breakouts aligned with 1d trend when ADX > 25 (strong trend). Uses discrete
+position sizing (0.25) to minimize fee drag. Target: 20-40 trades/year per symbol.
+Works in bull/bear via trend filter - only long in uptrend, short in downtrend.
+ADX filter prevents whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -21,15 +22,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter and Camarilla levels
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
@@ -40,24 +41,49 @@ def generate_signals(prices):
     rang = high_1d - low_1d
     
     # Resistance levels
-    r1 = close_1d_prev + rang * 1.1 / 12
-    s1 = close_1d_prev - rang * 1.1 / 12
+    r3 = close_1d_prev + rang * 1.1 / 4
+    r4 = close_1d_prev + rang * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Support levels
+    s3 = close_1d_prev - rang * 1.1 / 4
+    s4 = close_1d_prev - rang * 1.1 / 2
     
-    # Calculate Choppiness Index on 1d timeframe (14-period)
-    # CHOP = 100 * log10(sum(ATR1) / (n * (max(high_n) - min(low_n)))) / log10(n)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1])))
-    tr1 = np.concatenate([[np.nan], tr1])  # align with index
-    atr1_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr1_sum / (14 * (max_high - min_low))) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume spike detector (20-bar volume MA on 12h)
+    # Calculate ADX on 1d timeframe (14-period)
+    # True Range
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                               np.abs(low_1d[1:] - close_1d[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_sum / tr_sum
+    minus_di = 100 * minus_dm_sum / tr_sum
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume spike detector (20-bar volume MA on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -69,8 +95,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
@@ -81,20 +107,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Trend filter: only trade in direction of 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: only trade in direction of 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Regime filter: only trade when market is trending (CHOP < 38.2)
-        trending_market = chop_aligned[i] < 38.2
+        # Regime filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike in uptrend and trending market
-            if close[i] > r1_aligned[i] and volume_spike[i] and uptrend and trending_market:
+            # Long: price breaks above R3 with volume spike in uptrend and strong trend
+            if close[i] > r3_aligned[i] and volume_spike[i] and uptrend and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike in downtrend and trending market
-            elif close[i] < s1_aligned[i] and volume_spike[i] and downtrend and trending_market:
+            # Short: price breaks below S3 with volume spike in downtrend and strong trend
+            elif close[i] < s3_aligned[i] and volume_spike[i] and downtrend and strong_trend:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -102,20 +128,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price closes below R1 OR trend changes OR market becomes choppy
-            if close[i] < r1_aligned[i] or not uptrend or not trending_market:
+            # Exit: price closes below R3 OR trend changes OR trend weakens
+            if close[i] < r3_aligned[i] or not uptrend or not strong_trend:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price closes above S1 OR trend changes OR market becomes choppy
-            if close[i] > s1_aligned[i] or not downtrend or not trending_market:
+            # Exit: price closes above S3 OR trend changes OR trend weakens
+            if close[i] > s3_aligned[i] or not downtrend or not strong_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
