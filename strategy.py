@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_TrendFilter
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-Enters long when price breaks above R1 with bullish 1d trend and volume spike.
-Enters short when price breaks below S1 with bearish 1d trend and volume spike.
-Exits when price reverses to opposite Camarilla level or trend changes.
-Position sizing fixed at 0.25 to minimize fee churn. Target: 12-37 trades/year on 12h.
-Works in bull/bear by aligning with 1d trend to avoid counter-trend trades.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Enters long when price breaks above R1 with bullish 1d EMA trend and volume spike (>1.5x 20-bar MA).
+Enters short when price breaks below S1 with bearish 1d EMA trend and volume spike.
+Exits on close below/above opposite level or when 1d EMA trend flips.
+Position size 0.25 to limit fee drag. Target: 20-50 trades/year on 4h timeframe.
+Uses 1d EMA34 for trend alignment to avoid counter-trend trades in both bull/bear markets.
 """
 
 import numpy as np
@@ -49,13 +49,13 @@ def generate_signals(prices):
     r1 = pivot + (range_1d * 1.0 / 12.0)  # R1 level
     s1 = pivot - (range_1d * 1.0 / 12.0)  # S1 level
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: volume > 2.0x 20-period MA
+    # Volume confirmation: volume > 1.5x 20-period MA (reduced from 2.0 to increase signal quality)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_TrendFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
