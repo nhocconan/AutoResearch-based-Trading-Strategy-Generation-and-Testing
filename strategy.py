@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_Cloud_v1
-Hypothesis: Ichimoku TK Cross with Cloud Filter on 6h timeframe. Uses 1d HTF trend alignment for higher timeframe context. In trending markets (price above/below cloud), follow TK cross direction. In ranging markets (price inside cloud), fade TK cross at cloud edges. Uses discrete position sizing (0.25) to minimize fee churn. Targets 50-150 trades over 4 years by requiring TK cross confirmation and cloud filter. Works in bull/bear via adaptive logic: trend following in strong trends, mean reversion in chop.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v3
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d trend alignment, volume spike confirmation, and choppiness regime filter. Enters long when price breaks above R1 in bullish 1d trend with volume expansion in low-chop environment; enters short when price breaks below S1 in bearish 1d trend with volume expansion. Uses discrete position sizing (0.25) to minimize fee drag. Designed for low trade frequency (12-37/year) to overcome fee drag in ranging/bear markets like 2025.
 """
 
 import numpy as np
@@ -18,61 +18,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend filter
+    # Load 1d data ONCE before loop for HTF trend, volume average, and chop
     df_1d = get_htf_data(prices, '1d')
     
-    # Ichimoku parameters
-    tenkan_period = 9   # Tenkan-sen (Conversion Line)
-    kijun_period = 26   # Kijun-sen (Base Line)
-    senkou_span_b_period = 52  # Senkou Span B
-    displacement = 26   # Kijun-sen displacement for cloud
+    # Calculate 12h Camarilla pivot levels (based on prior 12h bar's OHLC)
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # We need prior bar's OHLC, so we shift by 1
+    prior_high = np.roll(high, 1)
+    prior_low = np.roll(low, 1)
+    prior_close = np.roll(close, 1)
+    prior_high[0] = high[0]  # avoid NaN on first bar
+    prior_low[0] = low[0]
+    prior_close[0] = close[0]
     
-    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 for past 9 periods
-    highest_tenkan = pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max().values
-    lowest_tenkan = pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min().values
-    tenkan_sen = (highest_tenkan + lowest_tenkan) / 2
+    camarilla_range = prior_high - prior_low
+    R1 = prior_close + 1.1 * camarilla_range / 12
+    S1 = prior_close - 1.1 * camarilla_range / 12
     
-    # Kijun-sen (Base Line): (highest high + lowest low)/2 for past 26 periods
-    highest_kijun = pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max().values
-    lowest_kijun = pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min().values
-    kijun_sen = (highest_kijun + lowest_kijun) / 2
+    # Calculate ATR for stoploss (using 12-period ATR)
+    atr_period = 12
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 plotted 26 periods ahead
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Calculate 1d EMA34 for HTF trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    htf_trend = np.where(close > ema_34_1d_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
     
-    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 for past 52 periods plotted 26 periods ahead
-    highest_senkou_b = pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max().values
-    lowest_senkou_b = pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min().values
-    senkou_span_b = (highest_senkou_b + lowest_senkou_b) / 2
+    # Calculate 1d average volume for volume spike filter
+    avg_volume_1d = pd.Series(df_1d['volume'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    volume_spike = volume > (1.5 * avg_volume_1d_aligned)  # 50% above average
     
-    # Align HTF indicators to LTF (accounting for displacement)
-    # Senkou spans are already displaced, so we align without additional shift
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Calculate cloud top and bottom
-    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
-    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
-    
-    # TK Cross signals
-    tk_cross = np.where(tenkan_sen > kijun_sen, 1, -1)  # 1 = bullish cross, -1 = bearish cross
-    
-    # 1d EMA50 for HTF trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    htf_trend = np.where(close > ema_50_1d_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
+    # Calculate choppiness index (14-period) for regime filter
+    chop_period = 14
+    sum_tr = pd.Series(tr).rolling(window=chop_period, min_periods=chop_period).sum().values
+    highest_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
+    lowest_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
+    chop_denom = np.log10(sum_tr) * (chop_period / np.log10(2))
+    chop_num = np.log10((highest_high - lowest_low) + 1e-10)
+    chop = 100 * (chop_num / chop_denom)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 52 for Senkou Span B, 26 for Kijun)
-    start_idx = max(senkou_span_b_period, kijun_period, tenkan_period)
+    # Start after warmup (need 34 for EMA, 14 for chop, 12 for ATR)
+    start_idx = max(34, chop_period, atr_period) + 1  # +1 for prior bar shift
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(tk_cross[i]) or np.isnan(htf_trend[i])):
+        if (np.isnan(atr[i]) or np.isnan(chop[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or
+            np.isnan(htf_trend[i]) or np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -82,57 +84,43 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Price relative to cloud
-        price_above_cloud = close[i] > cloud_top[i]
-        price_below_cloud = close[i] < cloud_bottom[i]
-        price_in_cloud = (close[i] >= cloud_bottom[i]) & (close[i] <= cloud_top[i])
+        # Regime filter: only trade in low-chop environment (trending market)
+        # Chop < 38.2 = strong trending (ideal for breakouts)
+        if chop[i] >= 38.2:
+            # High chop = ranging market, avoid breakout trades
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
+            continue
         
-        # Trend following logic: when price is outside cloud, follow TK cross
-        if price_above_cloud and tk_cross[i] == 1:  # Bullish alignment
-            if position != 1:
-                signals[i] = 0.25
-                position = 1
-            else:
-                signals[i] = 0.25
-        elif price_below_cloud and tk_cross[i] == -1:  # Bearish alignment
-            if position != -1:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = -0.25
-        # Mean reversion logic: when price is inside cloud, fade at cloud edges
-        elif price_in_cloud:
-            if close[i] <= cloud_bottom[i] * 1.001:  # Near cloud bottom (long bias)
-                if position != 1:
-                    signals[i] = 0.25
-                    position = 1
-                else:
-                    signals[i] = 0.25
-            elif close[i] >= cloud_top[i] * 0.999:  # Near cloud top (short bias)
-                if position != -1:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = -0.25
-            else:
-                # Exit mean reversion position when price returns to cloud midpoint
-                cloud_mid = (cloud_top[i] + cloud_bottom[i]) / 2
-                if position == 1 and close[i] > cloud_mid:
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and close[i] < cloud_mid:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    # Hold current position
-                    if position == 0:
-                        signals[i] = 0.0
-                    elif position == 1:
-                        signals[i] = 0.25
-                    else:
-                        signals[i] = -0.25
+        # Breakout logic with volume confirmation and HTF trend alignment
+        long_entry = (close[i] > R1[i]) and volume_spike[i] and (htf_trend[i] == 1)
+        short_entry = (close[i] < S1[i]) and volume_spike[i] and (htf_trend[i] == -1)
+        
+        # Exit logic: reverse signal or stoploss
+        long_exit = (position == 1) and (close[i] < S1[i])  # reverse to short or flat
+        short_exit = (position == -1) and (close[i] > R1[i])  # reverse to long or flat
+        
+        # ATR-based stoploss (optional - using close-based exit for simplicity)
+        # In practice, engine will handle exit via signal change
+        
+        if long_entry and position != 1:
+            signals[i] = 0.25
+            position = 1
+        elif short_entry and position != -1:
+            signals[i] = -0.25
+            position = -1
+        elif long_exit:
+            signals[i] = -0.25  # reverse to short
+            position = -1
+        elif short_exit:
+            signals[i] = 0.25   # reverse to long
+            position = 1
         else:
-            # Transition: price at cloud edges but TK cross not aligned - hold or flatten
+            # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -142,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_Cloud_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v3"
+timeframe = "12h"
 leverage = 1.0
