@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_ATRStop
-Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and ATR-based stoploss.
-Designed for lower trade frequency (12h timeframe) to minimize fee drag while capturing medium-term trends.
-Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes with trend filter).
-Target: 50-150 total trades over 4 years (12-37/year) to stay within fee-efficient range.
+4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation.
+In bull markets: breakouts with trend and volume capture momentum.
+In bear markets: mean reversion at extremes with trend filter and volume spike avoids false breakouts.
+Volume spike ensures participation, reducing whipsaws. ATR stoploss manages risk.
+Target: 75-200 total trades over 4 years (19-50/year) to stay within fee-efficient range.
 """
 
 import numpy as np
@@ -19,6 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -40,6 +42,10 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # Calculate volume spike: volume > 1.5 * 20-period MA
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
     # Calculate Camarilla levels from previous 1d bar
     # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     prev_high = df_1d['high'].shift(1).values
@@ -56,7 +62,7 @@ def generate_signals(prices):
     r1 = pivot + (range_hl * 1.1 / 12.0)
     s1 = pivot - (range_hl * 1.1 / 12.0)
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -64,15 +70,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of 1d EMA(34), ATR(14)
-    start_idx = max(34, 14) + 1
+    # Warmup: max of 1d EMA(34), ATR(14), volume MA(20)
+    start_idx = max(34, 14, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
-            np.isnan(atr[i])):
+            np.isnan(atr[i]) or
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -85,13 +92,14 @@ def generate_signals(prices):
         close_val = close[i]
         trend_1d_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
         trend_1d_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above R1 AND 1d trend up
-            long_signal = (close_val > r1_aligned[i]) and trend_1d_up
+            # Long: price breaks above R1 AND 1d trend up AND volume spike
+            long_signal = (close_val > r1_aligned[i]) and trend_1d_up and vol_spike
             
-            # Short: price breaks below S1 AND 1d trend down
-            short_signal = (close_val < s1_aligned[i]) and trend_1d_down
+            # Short: price breaks below S1 AND 1d trend down AND volume spike
+            short_signal = (close_val < s1_aligned[i]) and trend_1d_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -120,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_ATRStop"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
