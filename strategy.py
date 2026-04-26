@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-R1/S1 levels provide frequent but reliable breakout opportunities when aligned with daily trend.
-Volume confirmation ensures breakouts have genuine participation.
-In bull markets: price breaks above R1 with 1d uptrend → long.
-In bear markets: price breaks below S1 with 1d downtrend → short.
-ATR-based stoploss limits downside during false breakouts.
-Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag.
+6h_RSI_Extremes_1dTrend_v1
+Hypothesis: Trade RSI extremes (oversold/overbought) on 6h with 1d EMA50 trend filter.
+In bull markets: buy 6h RSI < 30 when 1d EMA50 uptrend, exit at RSI > 70.
+In bear markets: sell 6h RSI > 70 when 1d EMA50 downtrend, exit at RSI < 30.
+Volume confirmation ensures momentum participation.
+Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -24,63 +22,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 51:
         return np.zeros(n)
     
-    # Calculate EMA(34) on 1d for trend filter
+    # Calculate EMA(50) on 1d for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR(14) on 4h for stoploss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate RSI(14) on 6h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Using R1/S1 for breakout entries (more frequent than R3/S3)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Where C = (H+L+Close)/3 of previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Avoid NaN from shift
-    prev_high = np.where(np.isnan(prev_high), df_1d['high'].values, prev_high)
-    prev_low = np.where(np.isnan(prev_low), df_1d['low'].values, prev_low)
-    prev_close = np.where(np.isnan(prev_close), df_1d['close'].values, prev_close)
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    r1 = pivot + (range_hl * 1.1 / 12.0)
-    s1 = pivot - (range_hl * 1.1 / 12.0)
-    
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average (~16h average on 4h)
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    # Warmup: max of 1d EMA(34), ATR(14), volume MA(20), and need 1d data
-    start_idx = max(34, 14, 20) + 1
+    # Warmup: max of 1d EMA(50), RSI(14), volume MA(20)
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -90,46 +65,43 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        close_val = close[i]
+        rsi_val = rsi[i]
         vol_conf = volume_confirm[i]
-        atr_val = atr[i]
-        trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
-        trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
+        trend_up = close[i] > ema_50_1d_aligned[i]   # 1d uptrend
+        trend_down = close[i] < ema_50_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: price breaks above R1 AND volume confirm AND 1d uptrend
-            long_signal = (close_val > r1_aligned[i]) and vol_conf and trend_up
+            # Long: RSI < 30 (oversold) AND volume confirm AND 1d uptrend
+            long_signal = (rsi_val < 30) and vol_conf and trend_up
             
-            # Short: price breaks below S1 AND volume confirm AND 1d downtrend
-            short_signal = (close_val < s1_aligned[i]) and vol_conf and trend_down
+            # Short: RSI > 70 (overbought) AND volume confirm AND 1d downtrend
+            short_signal = (rsi_val > 70) and vol_conf and trend_down
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: ATR-based stoploss OR price drops below S1 (failed breakout) OR 1d trend flips down
-            if (close_val < entry_price - 1.5 * atr_val) or (close_val < s1_aligned[i]) or (not trend_up):
+            # Exit: RSI > 70 (overbought) OR 1d trend flips down
+            if (rsi_val > 70) or (not trend_up):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: ATR-based stoploss OR price rises above S1 (failed breakdown) OR 1d trend flips up
-            if (close_val > entry_price + 1.5 * atr_val) or (close_val > r1_aligned[i]) or (not trend_down):
+            # Exit: RSI < 30 (oversold) OR 1d trend flips up
+            if (rsi_val < 30) or (not trend_down):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_RSI_Extremes_1dTrend_v1"
+timeframe = "6h"
 leverage = 1.0
