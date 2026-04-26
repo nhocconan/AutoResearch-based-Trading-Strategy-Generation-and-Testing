@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_Kumo_Filter_1dTrend
-Hypothesis: Ichimoku TK cross with Kumo filter on 6h, confirmed by 1d trend (price vs Kumo).
-Long when TK crosses above AND price above Kumo (bullish Kumo). Short when TK crosses below AND price below Kumo (bearish Kumo).
-Exit on opposite TK cross or price crossing Kumo. Uses discrete sizing (0.25) to minimize fee drag.
-Designed for 50-150 trades over 4 years (12-37/year) on BTC/ETH/SOL.
-Works in bull/bear via Kumo trend filter and TK cross for momentum timing.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm
+Hypothesis: Camarilla R3/S3 breakout on 12h with 1d EMA34 trend filter and volume spike confirmation.
+Long when price breaks above R3 with 1d bullish trend and volume > 1.5x average.
+Short when price breaks below S3 with 1d bearish trend and volume > 1.5x average.
+Uses discrete sizing (0.25) to minimize fee drag. Target: 50-150 trades over 4 years.
+Works in bull/bear via 1d EMA trend filter and volume confirmation to avoid false breakouts.
 """
 
 import numpy as np
@@ -14,70 +14,48 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Calculate Camarilla pivot levels for 12h
+    # Pivot = (high + low + close) / 3
+    # R3 = close + (high - low) * 1.1 / 4
+    # S3 = close - (high - low) * 1.1 / 4
+    pivot = (high + low + close) / 3
+    r3 = close + (high - low) * 1.1 / 4
+    s3 = close - (high - low) * 1.1 / 4
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Load 1d data for HTF trend filter (Kumo)
+    # Load 1d data for HTF trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d Senkou Span A and B for Kumo
-    period9_high_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (period9_high_1d + period9_low_1d) / 2
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    period26_high_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (period26_high_1d + period26_low_1d) / 2
-    
-    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
-    
-    period52_high_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = (period52_high_1d + period52_low_1d) / 2
-    
-    # Align 1d Ichimoku components to 6h
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    # 1d average volume for confirmation (20-period)
+    avg_vol_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    avg_vol_20_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 52-period for Senkou B)
-    start_idx = 52
+    # Start after warmup (need 34-period for EMA and 20 for volume avg)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i])):
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_vol_20_1d_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -87,41 +65,36 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Kumo filter: price above/below Kumo on 1d
-        # Bullish Kumo: price > Senkou A and price > Senkou B
-        # Bearish Kumo: price < Senkou A and price < Senkou B
-        price = close[i]
-        kumo_top = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        kumo_bottom = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        kumo_bullish = price > kumo_top
-        kumo_bearish = price < kumo_bottom
+        # Volume confirmation: current volume > 1.5x 1d average volume
+        volume_confirmed = volume[i] > 1.5 * avg_vol_20_1d_aligned[i]
         
-        # TK cross: Tenkan crossing Kijun on 6h
-        # Bullish cross: Tenkan > Kijun (and was below or equal previous bar)
-        # Bearish cross: Tenkan < Kijun (and was above or equal previous bar)
-        tk_bullish_cross = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        tk_bearish_cross = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
+        # Trend filter: price vs 1d EMA34
+        trend_bullish = close[i] > ema_34_1d_aligned[i]
+        trend_bearish = close[i] < ema_34_1d_aligned[i]
         
-        # Long logic: TK bullish cross + Kumo bullish
-        if tk_bullish_cross and kumo_bullish:
+        # Breakout conditions
+        breakout_long = close[i] > r3[i]
+        breakout_short = close[i] < s3[i]
+        
+        # Long logic: breakout above R3 + bullish trend + volume confirmation
+        if breakout_long and trend_bullish and volume_confirmed:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: TK bearish cross + Kumo bearish
-        elif tk_bearish_cross and kumo_bearish:
+        # Short logic: breakout below S3 + bearish trend + volume confirmation
+        elif breakout_short and trend_bearish and volume_confirmed:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
-        # Exit: long exits on TK bearish cross OR price below Kumo bottom
-        elif position == 1 and (tk_bearish_cross or price < kumo_bottom):
+        # Exit conditions: reverse breakout or trend change
+        elif position == 1 and (close[i] < s3[i] or close[i] < ema_34_1d_aligned[i]):
             signals[i] = 0.0
             position = 0
-        # Exit: short exits on TK bullish cross OR price above Kumo top
-        elif position == -1 and (tk_bullish_cross or price > kumo_top):
+        elif position == -1 and (close[i] > r3[i] or close[i] > ema_34_1d_aligned[i]):
             signals[i] = 0.0
             position = 0
         else:
@@ -135,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_Kumo_Filter_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
