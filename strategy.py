@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1
-Hypothesis: Trade Camarilla pivot (R1/S1) breakouts on 4h with 1d EMA34 trend filter and volume spike confirmation.
-Uses 1d EMA34 for slower trend adaptation to reduce whipsaws, and 2.0x volume spike for confirmation.
-Only trade in trending markets (ADX > 20) to avoid chop. Designed for 15-30 trades/year.
-Works in bull/bear markets by following 1d EMA34 trend and filtering ranging regimes via ADX.
+1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_Volume_v1
+Hypothesis: Trade daily Camarilla pivot (R1/S1) breakouts with weekly EMA50 trend filter and volume spike confirmation.
+Uses 1w EMA50 for slower trend adaptation to reduce whipsaws in bear markets, and 2.0x volume spike for confirmation.
+Only trade in trending markets (ADX > 25 on 1d) to avoid chop. Designed for 10-25 trades/year on 1d timeframe.
+Works in bull/bear markets by following 1w EMA50 trend and filtering ranging regimes via ADX.
 """
 
 import numpy as np
@@ -21,13 +21,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend and Camarilla calculation
+    # Get 1w data for HTF trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Get 1d data for Camarilla calculation and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter (slower adaptation for fewer whipsaws)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1w EMA(50) for trend filter (slower adaptation for fewer whipsaws)
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate Camarilla levels from previous 1d OHLC
     prev_close_1d = df_1d['close'].shift(1).values
@@ -37,16 +42,16 @@ def generate_signals(prices):
     camarilla_r1 = prev_close_1d + 1.125 * (prev_high_1d - prev_low_1d)
     camarilla_s1 = prev_close_1d - 1.125 * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align HTF indicators to 1d timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume confirmation: 2.0x median volume (20-period) for signal
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # ADX(14) for regime filter - trending when > 20
-    # Calculate ADX using 4h data
+    # ADX(14) for regime filter on 1d data - trending when > 25
+    # Calculate ADX using 1d data
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
     tr = np.zeros(n)
@@ -83,12 +88,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of 1d EMA (34), volume median (20), ADX (14*2 for smoothing)
-    start_idx = max(34, 20, 28)
+    # Warmup: max of 1w EMA (50), volume median (20), ADX (14*2 for smoothing)
+    start_idx = max(50, 20, 28)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(vol_median[i]) or
             np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
@@ -97,7 +102,7 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_34_1d_val = ema_34_1d_aligned[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
         close_val = close[i]
         volume_val = volume[i]
         vol_median_val = vol_median[i]
@@ -107,14 +112,14 @@ def generate_signals(prices):
             # Long: break above R1 with volume spike, uptrend, and trending regime
             long_signal = (close_val > camarilla_r1_aligned[i]) and \
                           (volume_val > 2.0 * vol_median_val) and \
-                          (close_val > ema_34_1d_val) and \
-                          (adx_val > 20)
+                          (close_val > ema_50_1w_val) and \
+                          (adx_val > 25)
             
             # Short: break below S1 with volume spike, downtrend, and trending regime
             short_signal = (close_val < camarilla_s1_aligned[i]) and \
                            (volume_val > 2.0 * vol_median_val) and \
-                           (close_val < ema_34_1d_val) and \
-                           (adx_val > 20)
+                           (close_val < ema_50_1w_val) and \
+                           (adx_val > 25)
             
             if long_signal:
                 signals[i] = 0.25
@@ -127,24 +132,24 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price breaks below S1 (reversal) or trend changes (close < 1d EMA34) or regime changes (ADX < 15)
+            # Exit: price breaks below S1 (reversal) or trend changes (close < 1w EMA50) or regime changes (ADX < 20)
             if (close_val < camarilla_s1_aligned[i]) or \
-               (close_val < ema_34_1d_val) or \
-               (adx_val < 15):
+               (close_val < ema_50_1w_val) or \
+               (adx_val < 20):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price breaks above R1 (reversal) or trend changes (close > 1d EMA34) or regime changes (ADX < 15)
+            # Exit: price breaks above R1 (reversal) or trend changes (close > 1w EMA50) or regime changes (ADX < 20)
             if (close_val > camarilla_r1_aligned[i]) or \
-               (close_val > ema_34_1d_val) or \
-               (adx_val < 15):
+               (close_val > ema_50_1w_val) or \
+               (adx_val < 20):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
