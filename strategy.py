@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 Enters long when price breaks above R3 with bullish 1d trend and volume spike.
 Enters short when price breaks below S3 with bearish 1d trend and volume spike.
 Exits when price reverses to opposite Camarilla level (R1/S1) or trend changes.
-Uses 6h primary timeframe to target 12-37 trades/year (50-150 total over 4 years).
+Uses 12h primary timeframe to target 12-37 trades/year (50-150 total over 4 years).
 Works in bull/bear markets by aligning with 1d trend to avoid counter-trend trades.
 """
 
@@ -51,7 +51,7 @@ def generate_signals(prices):
     r1 = pivot + (range_1d * 1.0 / 12.0)  # R1 level
     s1 = pivot - (range_1d * 1.0 / 12.0)  # S1 level
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
