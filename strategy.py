@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wEMA50_VolumeSpike
-Hypothesis: Daily Camarilla R1/S1 breakouts with weekly EMA50 trend filter and volume confirmation (>2.0x 20-bar MA). 
-Works in bull/bear markets by following weekly trend while using Camarilla structure for precise daily entries. 
-Volume spike reduces whipsaws. Target: 7-25 trades/year on 1d timeframe. Designed for BTC/ETH with SOL as secondary.
+6h_Ichimoku_Kumo_Twist_Breakout_1dTrend_VolumeSpike
+Hypothesis: Ichimoku cloud twist (Senkou Span A/B cross) from 1d timeframe as trend filter, combined with 6h price breaking above/below the cloud with volume confirmation (>2.0x 20-bar MA). Cloud twist indicates strong trend acceleration, providing edge in both bull and bear markets. Uses 6h timeframe for lower frequency (target: 12-30 trades/year) to minimize fee drag while capturing major moves. Works in ranging markets by requiring both cloud breakout and volume spike, reducing whipsaws.
 """
 
 import numpy as np
@@ -20,36 +18,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Load 1d data for Camarilla levels (previous day's OHLC)
+    # Load 1d data ONCE before loop for HTF filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:  # Need 52 for Senkou Span B (26*2)
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla levels (R1/S1 = standard breakout levels)
+    # Ichimoku components on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels: R1, S1 (standard breakout levels)
-    rng = high_1d - low_1d
-    camarilla_r1 = close_1d_vals + (rng * 1.1 / 2)   # R1 level
-    camarilla_s1 = close_1d_vals - (rng * 1.1 / 2)   # S1 level
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Align Camarilla levels to 1d timeframe (already aligned, but keep for consistency)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Volume confirmation: volume > 2.0x 20-period average (dynamic threshold)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Align Ichimoku components to 6h timeframe (no additional delay needed for Senkou spans)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Cloud twist: Senkou A crossing above/below Senkou B (trend acceleration signal)
+    # We use the previous value to detect the cross
+    senkou_a_prev = np.roll(senkou_a_aligned, 1)
+    senkou_b_prev = np.roll(senkou_b_aligned, 1)
+    senkou_a_prev[0] = np.nan
+    senkou_b_prev[0] = np.nan
+    
+    # Bullish twist: Senkou A crosses above Senkou B
+    bullish_twist = (senkou_a_aligned > senkou_b_aligned) & (senkou_a_prev <= senkou_b_prev)
+    # Bearish twist: Senkou A crosses below Senkou B
+    bearish_twist = (senkou_a_aligned < senkou_b_aligned) & (senkou_a_prev >= senkou_b_prev)
+    
+    # The cloud boundaries (for price breakout)
+    upper_cloud = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    lower_cloud = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -57,31 +76,27 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size (25% of capital)
     
-    # Warmup: max of calculations (20 for vol, 50 for 1w EMA)
-    start_idx = max(20, 50)
+    # Warmup: max of calculations (52 for Senkou B, 20 for volume)
+    start_idx = max(52, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(upper_cloud[i]) or 
+            np.isnan(lower_cloud[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
-        ema_50_val = ema_50_1w_aligned[i]
+        bullish_twist_val = bullish_twist[i]
+        bearish_twist_val = bearish_twist[i]
         vol_spike = volume_spike[i]
         
-        # Determine 1w trend: bullish if price > EMA50, bearish if price < EMA50
-        bullish_1w = close_val > ema_50_val
-        bearish_1w = close_val < ema_50_val
-        
-        # Entry conditions: breakout of Camarilla R1/S1 in trend direction with volume spike
-        long_entry = (close_val > camarilla_r1_val) and bullish_1w and vol_spike
-        short_entry = (close_val < camarilla_s1_val) and bearish_1w and vol_spike
+        # Entry conditions: price breaks cloud in direction of twist with volume spike
+        long_entry = (close_val > upper_cloud[i]) and bullish_twist_val and vol_spike
+        short_entry = (close_val < lower_cloud[i]) and bearish_twist_val and vol_spike
         
         if position == 0:
             # Flat - look for entry
@@ -94,17 +109,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on mean reversion to midpoint or trend change
-            mid_point = (camarilla_r1_val + camarilla_s1_val) / 2
-            if close_val < mid_point or not bullish_1w:
+            # Long - exit when price re-enters cloud or twist reverses
+            if close_val < lower_cloud[i] or not bullish_twist_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = base_size
         elif position == -1:
-            # Short - exit on mean reversion to midpoint or trend change
-            mid_point = (camarilla_r1_val + camarilla_s1_val) / 2
-            if close_val > mid_point or not bearish_1w:
+            # Short - exit when price re-enters cloud or twist reverses
+            if close_val > upper_cloud[i] or not bearish_twist_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
