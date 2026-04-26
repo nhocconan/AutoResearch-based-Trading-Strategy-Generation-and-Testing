@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_NoATR
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-ATR-based exits are replaced by trend-following exits to reduce whipsaw and trade frequency.
-Designed for low-to-moderate trade frequency (4h timeframe) to balance opportunity and fee drag.
-In bull markets: breakouts with trend capture momentum.
-In bear markets: trend filter prevents counter-trend entries; trend-following exits manage risk.
-Target: 75-200 total trades over 4 years (19-50/year) to stay within fee-efficient range for 4h.
-Uses proven winning formula: price channel breakout + volume confirmation + regime filter (trend).
+4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume confirmation, and ATR-based stoploss.
+Combines price channel breakouts with trend filtering and volatility-based exits to work in both bull and bear markets.
+ATR stops reduce whipsaw vs pure trend exits while maintaining low trade frequency.
+Target: 75-200 total trades over 4 years (19-50/year) for fee efficiency on 4h timeframe.
 """
 
 import numpy as np
@@ -33,6 +30,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate ATR(14) for stoploss on 4h
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate volume spike filter: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,15 +66,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of 1d EMA(34), volume MA
-    start_idx = max(34, 20) + 1
+    # Warmup: max of 1d EMA(34), volume MA, ATR
+    start_idx = max(34, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i]) or
+            np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -105,20 +110,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend flips down (no ATR stop to reduce whipsaw)
-            if not trend_1d_up:
+            # Exit: trend flips down OR price hits ATR stoploss
+            if (not trend_1d_up) or (close_val < entry_price - 1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend flips up (no ATR stop to reduce whipsaw)
-            if not trend_1d_down:
+            # Exit: trend flips up OR price hits ATR stoploss
+            if (not trend_1d_down) or (close_val > entry_price + 1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_NoATR"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_ATRStop"
 timeframe = "4h"
 leverage = 1.0
