@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume confirmation, and ATR-based stoploss.
-- Long when price breaks above Camarilla R1 level AND 1d EMA34 uptrend AND volume > 1.8 * volume_ma(20)
-- Short when price breaks below Camarilla S1 level AND 1d EMA34 downtrend AND volume > 1.8 * volume_ma(20)
-- Uses Camarilla pivot levels from 4h chart for structure-based breakouts
-- 1d EMA34 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws in bear markets
-- Volume spike (1.8x) confirms institutional participation and reduces false breakouts
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2
+Hypothesis: Tighter Camarilla R1/S1 breakout with stronger volume confirmation (2.0x) and stricter trend filter (EMA50) to reduce trade count and fee drag.
+- Long when price breaks above Camarilla R1 AND 1d EMA50 uptrend AND volume > 2.0 * volume_ma(20)
+- Short when price breaks below Camarilla S1 AND 1d EMA50 downtrend AND volume > 2.0 * volume_ma(20)
 - ATR-based stoploss: exit long if price < highest_high_since_entry - 2.5 * ATR(14)
 - ATR-based stoploss: exit short if price > lowest_low_since_entry + 2.5 * ATR(14)
-- Designed for moderate frequency (target 20-50 trades/year on 4h) to minimize fee drag
-- Novelty: Combines proven Camarilla R1/S1 breakout logic with ATR trailing stop for better risk management
+- Exit also on opposite Camarilla level touch (S3 for longs, R3 for shorts) or trend reversal
+- Designed for lower frequency (target 15-30 trades/year on 4h) to minimize fee drag and improve test generalization
 """
 
 import numpy as np
@@ -19,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need enough data for calculations
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -30,12 +27,12 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA34 for trend filter (needs completed 1d candle)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    # Trend: 1 = uptrend (close > EMA34), -1 = downtrend (close < EMA34), 0 = neutral/invalid
-    trend_1d = np.where(ema_34_1d_aligned > 0, 
-                        np.where(close > ema_34_1d_aligned, 1, -1), 
+    # Calculate 1d EMA50 for trend filter (more stable than EMA34)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Trend: 1 = uptrend (close > EMA50), -1 = downtrend (close < EMA50), 0 = neutral/invalid
+    trend_1d = np.where(ema_50_1d_aligned > 0, 
+                        np.where(close > ema_50_1d_aligned, 1, -1), 
                         0)
     
     # Calculate ATR(14) for stoploss
@@ -49,15 +46,13 @@ def generate_signals(prices):
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate Camarilla pivot levels on 4h chart (primary timeframe)
-    # Using previous bar's OHLC for Camarilla calculation
     prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # first bar uses current values
+    prev_close[0] = close[0]
     prev_high[0] = high[0]
     prev_low[0] = low[0]
     
-    # Camarilla calculations
     pivot = (prev_high + prev_low + prev_close) / 3.0
     range_hl = prev_high - prev_low
     
@@ -68,9 +63,9 @@ def generate_signals(prices):
     S1 = pivot - (range_hl * 1.1 / 12.0)
     S3 = pivot - (range_hl * 1.1 / 4.0)
     
-    # Calculate volume filter: volume > 1.8 * volume_ma(20) for confirmation
+    # Calculate volume filter: volume > 2.0 * volume_ma(20) for stronger confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * volume_ma)
+    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,8 +73,8 @@ def generate_signals(prices):
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
-    # Start after warmup (need 34 for 1d EMA, 20 for volume MA, 14 for ATR)
-    start_idx = max(34, 20, 14)
+    # Start after warmup (need 50 for 1d EMA, 20 for volume MA, 14 for ATR)
+    start_idx = max(50, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -161,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
 timeframe = "4h"
 leverage = 1.0
