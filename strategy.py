@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_HTF_Trend_Filter_With_Volume_Confirmation_v1
-Hypothesis: Trade with 4h and 1d trend alignment using EMA crossovers, confirmed by volume spikes on 1h timeframe.
-- Uses 4h EMA(21) and 1d EMA(50) for trend direction filter (requires both to agree)
-- Enters on 1h breakouts of 20-period Donchian channels when volume > 2x 20-period average
-- Exits when trend disagrees or price reaches opposite Donchian boundary
-- Designed for 1h timeframe targeting 60-150 total trades over 4 years (15-37/year)
-- Works in bull/bear markets by requiring HTF trend alignment, reducing false breakouts
-- Volume confirmation ensures momentum behind moves, reducing whipsaws
+6h_Ichimoku_Cloud_Breakout_WeeklyTrend_v1
+Hypothesis: 6h Ichimoku cloud breakout with weekly trend filter for BTC/ETH.
+- Uses 6h timeframe for moderate trade frequency (target: 50-150 total trades over 4 years)
+- Ichimoku cloud (Senkou Span A/B) from 6h data for dynamic support/resistance
+- Weekly trend filter: price above/below weekly EMA20 to avoid counter-trend trades
+- Long when price breaks above cloud with weekly uptrend, short when breaks below cloud with weekly downtrend
+- Designed for 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+- Works in bull/bear markets by trading with weekly trend and using Ichimoku for precise entries
 """
 
 import numpy as np
@@ -16,91 +16,106 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need sufficient data for indicators
+    if n < 100:  # Need enough data for Ichimoku calculations
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA21 for short-term trend
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate 1d EMA50 for long-term trend
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Ichimoku components on 6h data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (high_tenkan + low_tenkan) / 2
     
-    # Calculate 1h Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (high_kijun + low_kijun) / 2
     
-    # Calculate 1h volume spike filter
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 2.0)  # Volume at least 2x average
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    period_senkou_b = 52
+    high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((high_senkou_b + low_senkou_b) / 2)
+    
+    # Chikou Span (Lagging Span): Close plotted 26 periods behind (not used for signals)
+    
+    # The cloud is between Senkou Span A and B
+    # Upper cloud boundary = max(Senkou A, Senkou B)
+    # Lower cloud boundary = min(Senkou A, Senkou B)
+    upper_cloud = np.maximum(senkou_a, senkou_b)
+    lower_cloud = np.minimum(senkou_a, senkou_b)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 for Donchian/volume, 21 for 4h EMA, 50 for 1d EMA)
-    start_idx = max(20, 21, 50)
+    # Start after warmup (need 52 for Senkou B)
+    start_idx = 52
     
     for i in range(start_idx, n):
-        # Skip if any HTF data not ready
-        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i])):
+        # Skip if any data not ready
+        if (np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        # Trend filters: both 4h and 1d must agree
-        trend_up = close[i] > ema21_4h_aligned[i] and close[i] > ema50_1d_aligned[i]
-        trend_down = close[i] < ema21_4h_aligned[i] and close[i] < ema50_1d_aligned[i]
+        # Ichimoku cloud breakout conditions
+        price_above_cloud = close[i] > upper_cloud[i]
+        price_below_cloud = close[i] < lower_cloud[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_20[i]
-        breakout_down = close[i] < lowest_20[i]
+        # Weekly trend filter
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
         if position == 0:
-            # Long: bullish alignment + breakout + volume spike
-            if trend_up and breakout_up and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: price breaks above cloud AND weekly uptrend
+            if price_above_cloud and trend_up:
+                signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment + breakout + volume spike
-            elif trend_down and breakout_down and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: price breaks below cloud AND weekly downtrend
+            elif price_below_cloud and trend_down:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.20
-            # Exit: trend disagrees OR price reaches opposite Donchian boundary
-            if not trend_up or close[i] < lowest_20[i]:
+            signals[i] = 0.25
+            # Exit: price falls below cloud OR weekly trend turns down
+            if price_below_cloud or not trend_up:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.20
-            # Exit: trend disagrees OR price reaches opposite Donchian boundary
-            if not trend_down or close[i] > highest_20[i]:
+            signals[i] = -0.25
+            # Exit: price rises above cloud OR weekly trend turns up
+            if price_above_cloud or not trend_down:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_HTF_Trend_Filter_With_Volume_Confirmation_v1"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Breakout_WeeklyTrend_v1"
+timeframe = "6h"
 leverage = 1.0
