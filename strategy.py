@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter_1wCamarilla_Breakout_v1
-Hypothesis: On 1d timeframe, using Kaufman Adaptive Moving Average (KAMA) as a dynamic trend filter combined with weekly Camarilla R3/S3 breakouts and volume confirmation reduces whipsaws in ranging markets while capturing strong trends. KAMA adapts to market noise, making it effective in both bull and bear regimes by avoiding false breakouts during choppy periods. Volume confirmation ensures breakouts have conviction. Target: 30-100 total trades over 4 years (7-25/year).
+4h_Camarilla_R1_S1_Breakout_1dATRRegime_VolumeSpike_v1
+Hypothesis: On 4h timeframe, combining Camarilla R1/S1 breakouts with 1d ATR-based regime filter (low volatility = mean reversion, high volatility = trend) and volume confirmation reduces false breakouts in ranging markets while capturing strong trends. The ATR regime filter adapts to changing market conditions, making it effective in both bull and bear markets by avoiding breakouts during low-volatility squeezes and participating during high-volatility breakouts. Volume confirmation ensures breakouts have conviction. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,60 +18,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HTF Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for HTF ATR regime and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d KAMA for trend filter (adaptive to market noise)
-    close_1d = prices['close'].values  # Use primary timeframe close for KAMA
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    total_change = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        total_change[i] = total_change[i-1] + np.abs(close_1d[i] - close_1d[i-1])
-        if i >= 10:
-            total_change[i] -= np.abs(close_1d[i-10] - close_1d[i-11])
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        net_change = np.abs(close_1d[i] - close_1d[i-10])
-        er[i] = net_change / total_change[i] if total_change[i] != 0 else 0
-    # Smoothing constants: fastest SC = 2/(2+1) = 0.666, slowest SC = 2/(30+1) = 0.0645
-    sc = (er * (0.666 - 0.0645) + 0.0645) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # seed value
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate 1d ATR(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Camarilla levels (R3, S3) using previous 1w's OHLC
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Shift to get previous week's close
-    close_1w_shifted = np.concatenate([[np.nan], close_1w[:-1]])
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_1d = np.full_like(tr, np.nan)
+    atr_1d[13] = np.mean(tr[1:14])  # seed with first 14 values
+    for i in range(14, len(tr)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    camarilla_range = high_1w - low_1w
-    r3 = close_1w_shifted + 1.1 * camarilla_range / 4
-    s3 = close_1w_shifted - 1.1 * camarilla_range / 4
+    # ATR percentile rank over 50 periods for regime detection
+    atr_percentile = np.full_like(atr_1d, np.nan)
+    for i in range(49, len(atr_1d)):
+        window = atr_1d[i-49:i+1]
+        if not np.any(np.isnan(window)):
+            atr_percentile[i] = (np.sum(window <= atr_1d[i]) - 1) / 49 * 100
     
-    # Align Camarilla levels to 1d timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Regime: High volatility (trending) when ATR percentile > 60, Low volatility (choppy) when < 40
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    # 1d volume confirmation: volume > 1.8x 20-period average
+    # Calculate 1d Camarilla levels (R1, S1) using previous 1d's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Shift to get previous day's OHLC for Camarilla calculation
+    prev_high_1d = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
+    
+    camarilla_range = prev_high_1d - prev_low_1d
+    r1 = prev_close_1d + 1.1 * camarilla_range / 12
+    s1 = prev_close_1d - 1.1 * camarilla_range / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 4h volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need sufficient data for KAMA and volume MA)
-    start_idx = max(30, 20)
+    # Start after warmup (need sufficient data for ATR percentile and volume MA)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama[i]) or 
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
+        if (np.isnan(atr_regime_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             # Hold current position
             if position == 0:
@@ -82,36 +90,35 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1d trend filter (KAMA)
-        uptrend = close[i] > kama[i]
-        downtrend = close[i] < kama[i]
-        
         # Volume confirmation
-        volume_spike = volume[i] > 1.8 * vol_ma_20[i]
+        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Weekly Camarilla breakout conditions
-        breakout_r3 = close[i] > r3_aligned[i]
-        breakout_s3 = close[i] < s3_aligned[i]
+        # Camarilla breakout conditions
+        breakout_r1 = close[i] > r1_aligned[i]
+        breakout_s1 = close[i] < s1_aligned[i]
         
-        # Long logic: breakout above R3 in uptrend with volume
-        if uptrend and volume_spike and breakout_r3:
+        # Regime filter: Only trade in high volatility (trending) regimes
+        high_vol_regime = atr_regime_aligned[i] > 60
+        
+        # Long logic: breakout above R1 in high volatility regime with volume
+        if high_vol_regime and volume_spike and breakout_r1:
             if position != 1:
                 signals[i] = 0.25
                 position = 1
             else:
                 signals[i] = 0.25
-        # Short logic: breakout below S3 in downtrend with volume
-        elif downtrend and volume_spike and breakout_s3:
+        # Short logic: breakout below S1 in high volatility regime with volume
+        elif high_vol_regime and volume_spike and breakout_s1:
             if position != -1:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = -0.25
-        # Exit conditions: loss of trend
-        elif position == 1 and not uptrend:
+        # Exit conditions: exit when volatility drops (regime change) or opposite breakout
+        elif position == 1 and (atr_regime_aligned[i] < 40 or breakout_s1):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not downtrend:
+        elif position == -1 and (atr_regime_aligned[i] < 40 or breakout_r1):
             signals[i] = 0.0
             position = 0
         else:
@@ -125,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_Filter_1wCamarilla_Breakout_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dATRRegime_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
