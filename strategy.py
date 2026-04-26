@@ -1,65 +1,58 @@
 #!/usr/bin/env python3
 """
-1d_FundingRateMeanReversion_Zscore_30d_1wTrend
-Hypothesis: Funding rate mean reversion works on BTC/ETH in both bull and bear markets.
-- Long when 30d funding rate z-score < -2.0 (extreme negative = overly bearish sentiment)
-- Short when 30d funding rate z-score > +2.0 (extreme positive = overly bullish sentiment)
-- Only trade in alignment with 1w EMA34 trend to avoid fighting major trend
-- Uses discrete position sizing (0.25) to minimize fee churn
-- Low frequency: target 15-25 trades/year based on extreme funding readings
+6h_ElderRay_ZeroCross_1dTrend_v2
+Hypothesis: 6h Elder Ray (Bull/Bear Power) zero-cross with 1d EMA trend filter.
+- Long when 6h Bull Power crosses above zero AND price > 1d EMA34 (uptrend)
+- Short when 6h Bear Power crosses below zero AND price < 1d EMA34 (downtrend)
+- Uses 13-period EMA for Bull/Bear Power calculation (standard)
+- Trend filter avoids counter-trend trades in strong markets
+- Designed for low frequency (target 12-30 trades/year) with edge in both bull/bear regimes
 """
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need sufficient data for 30d calculations
+    if n < 50:  # Need enough data for calculations
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     
-    # Load funding rate data (assuming it's available in prices DataFrame)
-    # If not available, we'll simulate based on price action as proxy
-    # In real implementation, this would load from data/processed/funding/*.parquet
-    # For now, we'll use a proxy: funding rate approximation based on price momentum
+    # Load 1d data ONCE before loop for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d returns as proxy for funding rate pressure
-    returns_1d = np.diff(np.log(close), prepend=np.log(close[0]))
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 30d moving average and std of returns for z-score
-    ma_returns_30d = pd.Series(returns_1d).rolling(window=30, min_periods=30).mean().values
-    std_returns_30d = pd.Series(returns_1d).rolling(window=30, min_periods=30).std().values
+    # Calculate Elder Ray on 6h timeframe
+    # Bull Power = High - EMA(close)
+    # Bear Power = Low - EMA(close)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Avoid division by zero
-    std_returns_30d = np.where(std_returns_30d == 0, 1e-10, std_returns_30d)
+    # Calculate zero-cross signals
+    bull_cross_above = (bull_power[1:] > 0) & (bull_power[:-1] <= 0)
+    bear_cross_below = (bear_power[1:] < 0) & (bear_power[:-1] >= 0)
     
-    # Calculate z-score of 30d returns (proxy for funding rate z-score)
-    zscore_30d = (returns_1d - ma_returns_30d) / std_returns_30d
-    
-    # Load 1w data ONCE before loop for trend filter
-    try:
-        from mtf_data import get_htf_data, align_htf_to_ltf
-        df_1w = get_htf_data(prices, '1w')
-        # Calculate 1w EMA34 for trend filter
-        ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-        ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-        use_1w_trend = True
-    except:
-        # Fallback: use 1d EMA34 if 1w data not available
-        ema_34_1d = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
-        ema_34_1w_aligned = ema_34_1d  # Use 1d as fallback
-        use_1w_trend = False
+    # Pad to original length (shift due to diff)
+    bull_cross_above = np.concatenate([[False], bull_cross_above])
+    bear_cross_below = np.concatenate([[False], bear_cross_below])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 30 for z-score, 34 for EMA)
-    start_idx = max(30, 34)
+    # Start after warmup (need 34 for 1d EMA, 13 for 6h EMA)
+    start_idx = max(34, 13)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(zscore_30d[i]) or np.isnan(ema_34_1w_aligned[i])):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -69,23 +62,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Determine 1w trend direction
-        if use_1w_trend and i >= 1:
-            trend_up = close[i] > ema_34_1w_aligned[i]
-            trend_down = close[i] < ema_34_1w_aligned[i]
-        else:
-            # Simple trend filter using price vs EMA
-            trend_up = close[i] > ema_34_1w_aligned[i]
-            trend_down = close[i] < ema_34_1w_aligned[i]
-        
-        # Funding rate mean reversion signals with trend filter
+        # Elder Ray zero-cross with 1d EMA trend filter
         if position == 0:
-            # Long: Extreme negative funding (z < -2.0) AND uptrend or ranging
-            if zscore_30d[i] < -2.0 and trend_up:
+            # Long: Bull Power crosses above zero AND price > 1d EMA34 (uptrend)
+            if bull_cross_above[i] and close[i] > ema_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Extreme positive funding (z > +2.0) AND downtrend or ranging
-            elif zscore_30d[i] > 2.0 and trend_down:
+            # Short: Bear Power crosses below zero AND price < 1d EMA34 (downtrend)
+            elif bear_cross_below[i] and close[i] < ema_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -93,20 +77,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Funding normalizes (z > -0.5) or trend breaks
-            if zscore_30d[i] > -0.5 or close[i] < ema_34_1w_aligned[i]:
+            # Exit: Bull Power falls below zero
+            if bull_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Funding normalizes (z < 0.5) or trend breaks
-            if zscore_30d[i] < 0.5 or close[i] > ema_34_1w_aligned[i]:
+            # Exit: Bear Power rises above zero
+            if bear_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_FundingRateMeanReversion_Zscore_30d_1wTrend"
-timeframe = "1d"
+name = "6h_ElderRay_ZeroCross_1dTrend_v2"
+timeframe = "6h"
 leverage = 1.0
