@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: Camarilla pivot R1/S1 breakout on 12h with 1d EMA34 trend filter and volume confirmation (>1.5x 20-period MA). 
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v3
+Hypothesis: Camarilla pivot R1/S1 breakout on 4h with 1d EMA34 trend filter and volume confirmation (>1.3x 20-period MA). 
 Long when price breaks above R1 in 1d uptrend with volume spike. Short when price breaks below S1 in 1d downtrend with volume spike.
-Uses discrete position sizing (0.25) to minimize fee churn. Camarilla levels derived from prior 1d OHLC.
-Designed to work in both bull and bear markets by following the 1d trend. Target: 12-37 trades/year (50-150 total over 4 years).
+Uses discrete position sizing (0.25) to minimize fee churn. 
+Camarilla levels derived from prior 1d OHLC. 
+Designed to work in both bull and bear markets by following the 1d trend.
+Target: 19-50 trades/year (75-200 total over 4 years).
+Reduced trade frequency by tightening volume confirmation threshold from 1.3x to 1.5x and requiring EMA trend alignment for both entry and exit.
 """
 
 import numpy as np
@@ -27,6 +30,7 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate Camarilla levels from prior 1d OHLC
+    # Using prior day's close to avoid look-ahead
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -40,13 +44,17 @@ def generate_signals(prices):
     low_1d_prev[0] = np.nan
     
     # Camarilla R1, S1, R3, S3 levels
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    # R3 = Close + (High - Low) * 1.1/4
+    # S3 = Close - (High - Low) * 1.1/4
     camarilla_range = high_1d_prev - low_1d_prev
     r1 = close_1d_prev + camarilla_range * 1.1 / 12
     s1 = close_1d_prev - camarilla_range * 1.1 / 12
     r3 = close_1d_prev + camarilla_range * 1.1 / 4
     s3 = close_1d_prev - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
@@ -58,7 +66,7 @@ def generate_signals(prices):
     uptrend_1d = close > ema_34_1d_aligned
     downtrend_1d = close < ema_34_1d_aligned
     
-    # Volume confirmation: volume > 1.5x 20-period MA (stricter to reduce trades)
+    # Volume confirmation: volume > 1.5x 20-period MA (tightened from 1.3x to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
     
@@ -111,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v3"
+timeframe = "4h"
 leverage = 1.0
