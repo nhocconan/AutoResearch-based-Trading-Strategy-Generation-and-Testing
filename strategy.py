@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_RSI2_Extreme_With_1dTrendFilter_v1
-Hypothesis: RSI(2) below 10 or above 90 on 6h captures extreme short-term reversals. Filtered by 1d EMA50 trend to trade only in direction of higher timeframe momentum. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend). Uses discrete sizing (0.25) to minimize fee churn. Targets 50-150 trades over 4 years.
+12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1w EMA50 trend filter and volume spike (>2x average volume). Uses discrete position sizing (0.25) to minimize fee churn. Exits when price retests the broken Camarilla level (R1 for longs, S1 for shorts). Works in both bull and bear markets by following the 1w trend direction, confirmed by volume to avoid false breakouts. Targeting 50-150 total trades over 4 years on 12h timeframe.
 """
 
 import numpy as np
@@ -10,44 +10,65 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need warmup for RSI, EMA
+    if n < 50:  # Need warmup for EMA, volume
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1d data for HTF trend filter
+    # Load 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Load 1d data for Camarilla levels (using daily to calculate pivot points)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # RSI(2) on 6h close
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values  # neutral when undefined
+    # Camarilla R1 and S1 levels (inner levels for tighter stops)
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe (1 bar delay for completed 1d bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Calculate average volume for confirmation (20-period SMA)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 50 for EMA, 2 for RSI)
-    start_idx = max(50, 2)
+    # Start after warmup (need 50 for 1w EMA, 20 for volume)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        rsi_val = rsi_values[i]
-        ema_val = ema_50_1d_aligned[i]
+        # Get current values
         close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        ema_val = ema_50_1w_aligned[i]
+        r1_val = camarilla_r1_aligned[i]
+        s1_val = camarilla_s1_aligned[i]
         
         # Skip if any data not ready
-        if np.isnan(ema_val):
+        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r1_val) or 
+            np.isnan(s1_val)):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -57,14 +78,17 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long: RSI(2) < 10 (extreme oversold) and price above 1d EMA50 (uptrend filter)
-        long_condition = (rsi_val < 10) and (close_val > ema_val)
-        # Short: RSI(2) > 90 (extreme overbought) and price below 1d EMA50 (downtrend filter)
-        short_condition = (rsi_val > 90) and (close_val < ema_val)
+        # Volume confirmation: current volume > 2x average volume (strong breakout)
+        volume_confirmed = vol > 2.0 * avg_vol
         
-        # Exit: RSI returns to neutral zone (40-60) or opposite extreme
-        long_exit = (position == 1 and (rsi_val > 40))
-        short_exit = (position == -1 and (rsi_val < 60))
+        # Long logic: price breaks above Camarilla R1 with 1w uptrend and volume confirmation
+        long_condition = (close_val > r1_val) and (close_val > ema_val) and volume_confirmed
+        # Short logic: price breaks below Camarilla S1 with 1w downtrend and volume confirmation
+        short_condition = (close_val < s1_val) and (close_val < ema_val) and volume_confirmed
+        
+        # Exit logic: price retests or breaks the broken Camarilla level
+        long_exit = (position == 1 and close_val <= r1_val)
+        short_exit = (position == -1 and close_val >= s1_val)
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -89,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI2_Extreme_With_1dTrendFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
