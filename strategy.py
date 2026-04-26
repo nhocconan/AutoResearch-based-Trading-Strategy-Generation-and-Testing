@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: Camarilla R1/S1 breakout on 12h timeframe with 1d EMA34 trend filter and volume spike (>2x median) to capture strong momentum moves. Works in bull/bear markets by only trading with the 1d trend and avoiding low-volume, choppy conditions. Targets 12-37 trades/year via tight entry conditions requiring confluence of breakout, trend, and volume. Uses 12h primary timeframe as requested in experiment #90656.
+4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: Donchian(20) breakout on 4h timeframe with 1d EMA34 trend filter and volume spike (>2x median) to capture strong momentum moves. Works in bull/bear markets by only trading with the 1d trend and avoiding low-volume, choppy conditions. Targets 20-50 trades/year via tight entry conditions requiring confluence of breakout, trend, and volume.
 """
 
 import numpy as np
@@ -27,23 +27,12 @@ def generate_signals(prices):
     # 1d EMA(34) for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Get 1d data for Camarilla calculation (from previous daily OHLC)
-    # Note: We use the same 1d data for both Camarilla levels and EMA trend
-    if len(df_1d) < 50:  # Need extra for shift(1) in Camarilla calculation
-        return np.zeros(n)
+    # Calculate Donchian(20) channels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from previous 1d OHLC
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
-    
-    camarilla_r1 = prev_close_1d + (1.0/6) * (prev_high_1d - prev_low_1d)
-    camarilla_s1 = prev_close_1d - (1.0/6) * (prev_high_1d - prev_low_1d)
-    
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume spike filter: volume > 2x median volume (20-period) for conviction
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
@@ -59,15 +48,15 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup: max of EMA(34) 1d, volume median (20), ATR (14)
-    start_idx = max(34, 20, 14)
+    # Warmup: max of Donchian(20), EMA(34) 1d, volume median (20), ATR (14)
+    start_idx = max(20, 34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or
             np.isnan(vol_median[i]) or
-            np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(atr[i])):
             # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
@@ -89,13 +78,13 @@ def generate_signals(prices):
         volume_spike = volume_val > 2.0 * vol_median_val
         
         if position == 0:
-            # Long: break above R1 with volume spike, and uptrend
-            long_signal = (close_val > camarilla_r1_aligned[i]) and \
+            # Long: break above Donchian high with volume spike, and uptrend
+            long_signal = (close_val > highest_20[i]) and \
                           volume_spike and \
                           uptrend
             
-            # Short: break below S1 with volume spike, and downtrend
-            short_signal = (close_val < camarilla_s1_aligned[i]) and \
+            # Short: break below Donchian low with volume spike, and downtrend
+            short_signal = (close_val < lowest_20[i]) and \
                            volume_spike and \
                            downtrend
             
@@ -130,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
