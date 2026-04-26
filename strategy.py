@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_ChopFilter_v1
-Hypothesis: 12-hour Camarilla R1/S1 breakout with daily EMA34 trend filter and choppiness regime filter.
-Designed for low trade frequency (target 12-37/year) to minimize fee drag while capturing medium-term swings.
-The daily EMA34 provides strong trend filtering that works across bull/bear regimes, and breakouts at 
-Camarilla R1/S1 levels offer precise entries. Choppiness filter avoids whipsaws in ranging markets.
-Focuses on BTC and ETH as primary targets for robustness.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: 4-hour Camarilla R1/S1 breakout with daily EMA34 trend filter and volume spike confirmation.
+Designed for low trade frequency (target 20-50/year) to minimize fee drag while capturing medium-term swings.
+The daily EMA34 provides strong trend filtering that works across bull/bear regimes, and breakouts at
+Camarilla R1/S1 levels offer precise entries. Volume spike confirmation reduces false breakouts.
+Focuses on BTC and ETH as primary targets for robustness, with SOL as secondary.
 """
 
 import numpy as np
@@ -20,6 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get daily data for HTF filters
     df_1d = get_htf_data(prices, '1d')
@@ -31,12 +32,8 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for stoploss on 12h
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate average volume on 4h for volume confirmation (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Calculate Camarilla levels from previous daily bar
     # Camarilla: R1 = C + ((H-L)*1.1/12), S1 = C - ((H-L)*1.1/12)
@@ -48,38 +45,23 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
     camarilla_s1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
     
-    # Align Camarilla levels to 12h (use previous day's levels)
+    # Align Camarilla levels to 4h (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Calculate Choppiness Index on 12h for regime filter
-    # Chop = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
-    # We'll use a simplified version: Chop > 61.8 = ranging, Chop < 38.2 = trending
-    atr_period = 14
-    chop_period = 14
-    tr_sum = pd.Series(tr).rolling(window=chop_period, min_periods=chop_period).sum().values
-    highest_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
-    lowest_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
-    # Avoid division by zero
-    range_hl = highest_high - lowest_low
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = 100 * np.log10(tr_sum / range_hl) / np.log10(chop_period)
-    chop = np.where(np.isnan(chop), 50.0, chop)  # default to middle if not enough data
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of daily EMA(34), ATR, Chop
-    start_idx = max(34, 14, 14) + 1
+    # Warmup: max of daily EMA(34), volume MA
+    start_idx = max(34, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(chop[i])):
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -90,18 +72,18 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_spike = vol_ratio > 2.0  # Volume at least 2x average
+        
         trend_1d_up = close_val > ema_34_1d_aligned[i]   # Daily uptrend
         trend_1d_down = close_val < ema_34_1d_aligned[i]  # Daily downtrend
         
-        # Regime filter: only trade in trending markets (Chop < 38.2)
-        is_trending = chop[i] < 38.2
-        
         if position == 0:
-            # Long: price breaks above Camarilla R1 AND daily trend up AND trending regime
-            long_signal = (close_val > camarilla_r1_aligned[i]) and trend_1d_up and is_trending
+            # Long: price breaks above Camarilla R1 AND daily trend up AND volume spike
+            long_signal = (close_val > camarilla_r1_aligned[i]) and trend_1d_up and volume_spike
             
-            # Short: price breaks below Camarilla S1 AND daily trend down AND trending regime
-            short_signal = (close_val < camarilla_s1_aligned[i]) and trend_1d_down and is_trending
+            # Short: price breaks below Camarilla S1 AND daily trend down AND volume spike
+            short_signal = (close_val < camarilla_s1_aligned[i]) and trend_1d_down and volume_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -116,20 +98,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend flips down OR price hits ATR stoploss OR regime changes to ranging
-            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]) or (not is_trending):
+            # Exit: trend flips down
+            if not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend flips up OR price hits ATR stoploss OR regime changes to ranging
-            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]) or (not is_trending):
+            # Exit: trend flips up
+            if not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
