@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_1dTrend
-Hypothesis: Donchian(20) breakouts on 4h with volume spike (>2x 20-bar average) and 1d EMA50 trend filter capture strong momentum moves. Uses discrete sizing (0.25) to target 20-50 trades/year. Works in bull/bear by only taking breakouts aligned with 1d trend. ATR-based stoploss (2.0) controls drawdown. Avoids overtrading by requiring confluence of breakout, volume, and trend.
+4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_VolumeSpike_ATRStop_v3
+Hypothesis: Camarilla R3/S3 breakouts on 4h with 12h EMA50 trend filter and volume confirmation (>2.0x 20-bar average) capture strong trending moves. Uses discrete sizing (0.25) and ATR-based stoploss (2.0x ATR) to limit drawdown. Only takes breakouts aligned with 12h trend to work in bull/bear markets. Reduced trade frequency via tighter volume confirmation and trend alignment.
 """
 
 import numpy as np
@@ -18,14 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # ATR(14) for stoploss calculation
     tr1 = pd.Series(high[1:] - low[1:]).values
@@ -34,61 +34,70 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 2.5 * 20-period average (tighter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 2.0)
-    
-    # Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    volume_confirm = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     entry_price = 0.0
     
-    # Warmup: max of Donchian (20), EMA50 (50), ATR (14), volume MA (20)
-    start_idx = max(20, 50, 14, 20)
+    # Warmup: max of EMA50 (50), ATR (14), volume MA (20)
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        trend_val = ema50_1d_aligned[i]
+        trend_val = ema50_12h_aligned[i]
         atr_val = atr[i]
         vol_conf = volume_confirm[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
         
         # Skip if any data not ready
-        if (np.isnan(trend_val) or np.isnan(atr_val) or np.isnan(upper_channel) or np.isnan(lower_channel)):
+        if (np.isnan(trend_val) or np.isnan(atr_val)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Donchian breakout conditions
-        long_breakout = close_val > upper_channel
-        short_breakout = close_val < lower_channel
+        # Calculate Camarilla levels for today (using previous bar's OHLC)
+        if i >= 1:
+            # Use previous bar's OHLC for Camarilla calculation
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            range_val = prev_high - prev_low
+            
+            # Camarilla R3 and S3 levels
+            r3 = prev_close + range_val * 1.1 / 4
+            s3 = prev_close - range_val * 1.1 / 4
+        else:
+            r3 = close_val
+            s3 = close_val
         
-        # Trend filter: price > 1d EMA50 = uptrend, price < 1d EMA50 = downtrend
+        # Trend filter: price > 12h EMA50 = uptrend, price < 12h EMA50 = downtrend
         is_uptrend = close_val > trend_val
         is_downtrend = close_val < trend_val
         
-        # Entry conditions: Donchian breakout in direction of 1d trend + volume
+        # Camarilla breakout conditions
+        long_breakout = close_val > r3
+        short_breakout = close_val < s3
+        
+        # Entry conditions: Camarilla breakout in direction of 12h trend + volume
         long_entry = long_breakout and is_uptrend and vol_conf
         short_entry = short_breakout and is_downtrend and vol_conf
         
-        # Exit conditions: ATR-based stoploss or opposite Donchian touch
+        # Exit conditions: ATR-based stoploss or opposite Camarilla touch
         long_exit = False
         short_exit = False
         if position == 1:
             # Long stoploss: entry price - 2.0 * ATR
             stop_price = entry_price - 2.0 * atr_val
-            long_exit = close_val < stop_price or close_val < lower_channel  # Stop or Donchian breakdown
+            long_exit = close_val < stop_price or close_val < s3  # Stop or Camarilla S3 breakdown
         elif position == -1:
             # Short stoploss: entry price + 2.0 * ATR
             stop_price = entry_price + 2.0 * atr_val
-            short_exit = close_val > stop_price or close_val > upper_channel  # Stop or Donchian breakout
+            short_exit = close_val > stop_price or close_val > r3  # Stop or Camarilla R3 breakout
         
         if long_entry and position != 1:
             signals[i] = base_size
@@ -110,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_1dTrend"
+name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_VolumeSpike_ATRStop_v3"
 timeframe = "4h"
 leverage = 1.0
