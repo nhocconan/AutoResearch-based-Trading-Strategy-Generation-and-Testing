@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Long when price breaks above Camarilla R1 AND 1d EMA34 uptrend AND volume > 1.5 * volume_ma(20)
-- Short when price breaks below Camarilla S1 AND 1d EMA34 downtrend AND volume > 1.5 * volume_ma(20)
-- Uses Camarilla pivot levels from completed 1d bar for structure-based breakouts
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Long when price breaks above Camarilla R1 AND 1d EMA34 uptrend AND volume > 1.8 * volume_ma(20)
+- Short when price breaks below Camarilla S1 AND 1d EMA34 downtrend AND volume > 1.8 * volume_ma(20)
+- Exit on opposite Camarilla level (S1 for long, R1 for short) or trend reversal
+- Uses Camarilla pivot levels from prior 1d bar (completed bar only) for structure-based entries
 - 1d EMA34 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws
 - Volume spike confirms institutional participation and reduces false breakouts
-- Designed for low frequency (target 12-37 trades/year) to minimize fee drag on 12h timeframe
-- Exit on opposite Camarilla level touch or trend reversal
-- Novelty: Combines Camarilla breakouts with 1d trend and volume confirmation for BTC/ETH edge in both bull/bear markets
+- Designed for moderate frequency (target 19-50 trades/year) to minimize fee drag
+- Novelty: Combines Camarilla pivots with HTF trend and volume confirmation for BTC/ETH edge in both bull/bear markets
 """
 
 import numpy as np
@@ -26,27 +26,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels (structure)
+    # Load 4h data ONCE before loop for Camarilla calculation (structure)
+    df_4h = get_htf_data(prices, '4h')
+    
+    # Load 1d data ONCE before loop for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels from prior 1d bar (completed bar only)
-    # Typical price for pivot calculation
-    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    # Camarilla levels: R1 = PP + (H-L)*1.1/12, S1 = PP - (H-L)*1.1/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_r1 = pivot + (high_1d - low_1d) * 1.1 / 12.0
-    camarilla_s1 = pivot - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # Align Camarilla levels to 1d timeframe (no additional delay needed for structure)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Load 1d data ONCE before loop for trend filter (same timeframe as structure)
-    # Using EMA34 for trend filter
+    # Calculate 1d EMA34 for trend filter (needs completed 1d candle)
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     # Trend: 1 = uptrend (close > EMA34), -1 = downtrend (close < EMA34), 0 = neutral/invalid
@@ -54,9 +40,25 @@ def generate_signals(prices):
                         np.where(close > ema_34_1d_aligned, 1, -1), 
                         0)
     
-    # Calculate volume filter: volume > 1.5 * volume_ma(20) for confirmation
+    # Calculate volume filter: volume > 1.8 * volume_ma(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    volume_spike = volume > (1.8 * volume_ma)
+    
+    # Calculate Camarilla levels from prior 1d bar (completed bar only)
+    # Camarilla uses prior day's OHLC
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Camarilla R1 and S1 levels
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    camarilla_r1 = close_1d + (1.1 * (high_1d - low_1d) / 12)
+    camarilla_s1 = close_1d - (1.1 * (high_1d - low_1d) / 12)
+    
+    # Align Camarilla levels to 4h timeframe (no additional delay needed for structure)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -106,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
