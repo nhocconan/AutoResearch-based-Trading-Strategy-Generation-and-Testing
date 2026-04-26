@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above 20-period high with bullish 1d EMA trend and volume spike.
-Short when price breaks below 20-period low with bearish 1d EMA trend and volume spike.
-Works in bull/bear by following daily trend. Volume confirmation adds institutional participation signal.
-Discrete position sizing (0.25) minimizes fee churn. Targets 20-50 trades/year on 4h.
+1d_WeeklyDonchian20_Breakout_WeeklyTrend_VolumeConfirmation
+Hypothesis: 1d Donchian(20) breakout with weekly trend filter and volume confirmation.
+Long when price breaks above 20-day high in weekly bullish trend with volume spike.
+Short when price breaks below 20-day low in weekly bearish trend with volume spike.
+Weekly trend filter (price above/below weekly EMA34) avoids counter-trend trades.
+Volume spike confirms institutional interest. Works in bull/bear by following weekly trend.
+Discrete position sizing (0.25) minimizes fee churn. Targets 7-25 trades/year on 1d.
 """
 
 import numpy as np
@@ -22,34 +23,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter and Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_bullish = close_1w > ema_34_1w
+    weekly_bearish = close_1w < ema_34_1w
     
-    # Align EMA34 to primary timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align weekly trend to daily timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate weekly Donchian(20) on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Donchian(20) on 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
     
-    # Align Donchian levels to primary timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Volume confirmation: volume > 2.0x 20-period MA
+    # Volume confirmation: volume > 2.0x 20-period MA on daily data
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -62,7 +61,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -73,14 +73,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high with bullish 1d EMA trend and volume spike
+            # Long: price breaks above weekly Donchian high with weekly bullish trend and volume spike
             if (close[i] > donchian_high_aligned[i] and 
-                close[i] > ema_34_aligned[i] and volume_spike[i]):
+                weekly_bullish_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with bearish 1d EMA trend and volume spike
+            # Short: price breaks below weekly Donchian low with weekly bearish trend and volume spike
             elif (close[i] < donchian_low_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and volume_spike[i]):
+                  weekly_bearish_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
@@ -88,20 +88,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price closes below Donchian low OR price breaks below 1d EMA34
-            if (close[i] < donchian_low_aligned[i] or close[i] < ema_34_aligned[i]):
+            # Exit: price closes below weekly Donchian low OR weekly trend turns bearish
+            if (close[i] < donchian_low_aligned[i] or not weekly_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price closes above Donchian high OR price breaks above 1d EMA34
-            if (close[i] > donchian_high_aligned[i] or close[i] > ema_34_aligned[i]):
+            # Exit: price closes above weekly Donchian high OR weekly trend turns bullish
+            if (close[i] > donchian_high_aligned[i] or not weekly_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_Breakout_WeeklyTrend_VolumeConfirmation"
+timeframe = "1d"
 leverage = 1.0
