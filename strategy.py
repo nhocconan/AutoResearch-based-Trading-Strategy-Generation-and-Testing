@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn
-Hypothesis: Camarilla R1/S1 breakout with dynamic volume spike filter (2.0x median volume) and 1d EMA34 trend.
-Long when price breaks above R1 with volume > 2.0x median volume and close > 1d EMA34.
-Short when price breaks below S1 with volume > 2.0x median volume and close < 1d EMA34.
-Uses discrete sizing (0.25) to minimize fee drag. Target: 75-150 trades over 4 years.
-Works in bull/bear via 1d trend filter and volume confirmation to avoid false breakouts.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+Uses discrete sizing (0.25) to minimize fee drag. Works in bull/bear via 1d trend filter and volume confirmation.
 """
 
 import numpy as np
@@ -22,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for 4h (based on previous bar's range)
+    # Calculate Camarilla levels for 12h (based on previous bar's range)
     prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
@@ -34,7 +32,7 @@ def generate_signals(prices):
     r1 = prev_close + range_hl * 1.1 / 12
     s1 = prev_close - range_hl * 1.1 / 12
     
-    # Volume confirmation: volume > 2.0x 20-period median (more robust than mean)
+    # Volume confirmation: volume > 2.0x 20-period median
     vol_series = pd.Series(volume)
     vol_median = vol_series.rolling(window=20, min_periods=20).median().values
     volume_confirm = volume > (vol_median * 2.0)
@@ -101,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
