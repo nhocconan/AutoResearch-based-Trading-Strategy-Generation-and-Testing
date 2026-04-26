@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ChopRegime_v1
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (1.8x), and choppiness regime (<38.2) for strong trending markets only.
-Uses 12h timeframe to target 50-150 total trades over 4 years (12-37/year). The 12h timeframe reduces noise and false breakouts vs lower timeframes.
-In bull markets: 1d uptrend + Camarilla R3 breakout + volume spike + chop regime = long.
-In bear markets: 1d downtrend + Camarilla S3 breakout + volume spike + chop regime = short.
-Chop regime filter ensures we only trade in strong trends, avoiding whipsaws in ranging markets.
-Discrete position sizing (0.25) minimizes fee churn.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ChopRegime_v6
+Hypothesis: Tighten entry conditions by requiring volume > 2.2x 20-bar MA (instead of 1.8x) and chop < 35.0 (instead of <38.2) to reduce trade frequency and avoid fee drag. Keep 1d EMA34 trend filter and Camarilla R3/S3 breakout logic. Target 50-120 trades over 4 years (~12-30/year) to stay within winning range. Uses discrete position sizing (0.25) to minimize churn. Works in bull/bear via 1d trend alignment and strong trend regime filter.
 """
 
 import numpy as np
@@ -45,18 +40,18 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume filter: volume > 1.8 * volume_ma(20) for balanced confirmation
+    # Volume filter: volume > 2.2 * volume_ma(20) for tighter confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * volume_ma)
+    volume_spike = volume > (2.2 * volume_ma)
     
-    # Choppiness index (14-period): < 38.2 = strong trending regime (tighter than 61.8)
+    # Choppiness index (14-period): < 35.0 = strong trending regime (tighter than 38.2)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     hh14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
     ll14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
     chop = 100 * np.log10(atr14 * 14 / (hh14 - ll14)) / np.log10(14)
-    chop_filter = chop < 38.2  # Only strong trending markets
+    chop_filter = chop < 35.0  # Only strong trending markets
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,13 +73,13 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Camarilla R3/S3 breakout conditions with balanced filters
+        # Camarilla R3/S3 breakout conditions with tightened filters
         if position == 0:
-            # Long: Price breaks above Camarilla R3 AND 1d uptrend AND volume spike (1.8x) AND strong trend (chop < 38.2)
+            # Long: Price breaks above Camarilla R3 AND 1d uptrend AND volume spike (2.2x) AND strong trend (chop < 35.0)
             if close[i] > camarilla_r3_aligned[i] and trend_1d[i] == 1 and volume_spike[i] and chop_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S3 AND 1d downtrend AND volume spike (1.8x) AND strong trend (chop < 38.2)
+            # Short: Price breaks below Camarilla S3 AND 1d downtrend AND volume spike (2.2x) AND strong trend (chop < 35.0)
             elif close[i] < camarilla_s3_aligned[i] and trend_1d[i] == -1 and volume_spike[i] and chop_filter[i]:
                 signals[i] = -0.25
                 position = -1
@@ -107,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ChopRegime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ChopRegime_v6"
+timeframe = "4h"
 leverage = 1.0
