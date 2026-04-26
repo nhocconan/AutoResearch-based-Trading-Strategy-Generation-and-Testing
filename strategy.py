@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v2
-Hypothesis: On 4h timeframe, price breaking Camarilla R3/S3 levels with 1d EMA34 trend alignment and volume confirmation provides robust breakout signals. The 1d EMA34 offers a balanced trend filter that works in both bull and bear markets by capturing the primary trend while reducing noise. Volume confirmation (2.0x average) ensures breakouts have conviction. ATR-based stoploss (2.0x) and discrete sizing (0.0, ±0.25) control risk and minimize fee churn. Targets ~20-30 trades/year (~80-120 over 4 years) to stay within optimal trade frequency for 4h timeframe.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3
+Hypothesis: Price breaking Camarilla R1/S1 levels with 1d EMA34 trend alignment and volume spike (2.0x) provides high-probability breakout signals. Uses discrete sizing (0.0, ±0.25) to minimize fee churn. ATR-based stoploss (2.0x) controls risk. Targets ~20-30 trades/year for optimal 4h frequency. Designed to work in both bull and bear markets via trend filter and volume confirmation.
 """
 
 import numpy as np
@@ -44,8 +44,8 @@ def generate_signals(prices):
     prev_low = np.concatenate([[np.nan], low[:-1]])
     prev_close = np.concatenate([[np.nan], close[:-1]])
     
-    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_r1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
+    camarilla_s1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,8 +59,8 @@ def generate_signals(prices):
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ratio[i]) or
-            np.isnan(camarilla_r3[i]) or
-            np.isnan(camarilla_s3[i])):
+            np.isnan(camarilla_r1[i]) or
+            np.isnan(camarilla_s1[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -71,16 +71,16 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        vol_confirmed = vol_ratio[i] > 2.0  # volume at least 2.0x average (stricter)
+        vol_confirmed = vol_ratio[i] > 2.0  # volume at least 2.0x average
         trend_1d_up = close_val > ema_34_1d_aligned[i]
         trend_1d_down = close_val < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 AND 1d trend up AND volume confirmation
-            long_signal = (close_val > camarilla_r3[i]) and trend_1d_up and vol_confirmed
+            # Long: price breaks above Camarilla R1 AND 1d trend up AND volume confirmation
+            long_signal = (close_val > camarilla_r1[i]) and trend_1d_up and vol_confirmed
             
-            # Short: price breaks below Camarilla S3 AND 1d trend down AND volume confirmation
-            short_signal = (close_val < camarilla_s3[i]) and trend_1d_down and vol_confirmed
+            # Short: price breaks below Camarilla S1 AND 1d trend down AND volume confirmation
+            short_signal = (close_val < camarilla_s1[i]) and trend_1d_down and vol_confirmed
             
             if long_signal:
                 signals[i] = 0.25
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
