@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_Regime
-Hypothesis: Trade 4h Camarilla R3/S3 breakouts in direction of 1d EMA34 trend with volume spike and chop regime filter.
-Uses Camarilla pivot levels from daily timeframe for stronger structure (R3/S3 = deeper retracement levels),
-1d EMA34 for higher timeframe trend alignment, volume spike on 4h for breakout conviction, and choppiness index to avoid whipsaws.
-Designed to work in both bull and bear markets via trend filter + volume confirmation + regime filter.
-Target: 20-30 trades/year per symbol to avoid fee drag (proven winning pattern from top performers).
+6h_Ichimoku_TK_Cross_CloudFilter_1dTrend
+Hypothesis: Trade Ichimoku TK cross (Tenkan/Kijun) on 6h with 1d trend filter (price vs Kumo) and volume confirmation.
+Ichimoku provides dynamic support/resistance via Kumo (cloud) and momentum via TK cross.
+In bull markets: price above cloud + TK cross up = long. In bear markets: price below cloud + TK cross down = short.
+Volume confirmation reduces false signals. Designed for 6h timeframe to target 12-37 trades/year.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,92 +21,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for volume MA and price action
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for EMA34 trend and Camarilla pivots
+    # Get 1d data for Kumo (cloud) trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Ichimoku components on 6h data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    max_high_9 = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_9 = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_9 + min_low_9) / 2
     
-    # Calculate Camarilla pivot levels from prior 1d OHLC
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    max_high_26 = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_26 = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_26 + min_low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    max_high_52 = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_52 = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = (max_high_52 + min_low_52) / 2
+    
+    # Align 1d Kumo components to 6h timeframe
+    # For 1d trend filter: price vs Kumo (cloud)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: R1, S1, R2, S2, R3, S3, R4, S4
-    range_1d = high_1d - low_1d
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3
-    camarilla_r1 = camarilla_pivot + (range_1d * 1.0 / 12)
-    camarilla_s1 = camarilla_pivot - (range_1d * 1.0 / 12)
-    camarilla_r2 = camarilla_pivot + (range_1d * 2.0 / 12)
-    camarilla_s2 = camarilla_pivot - (range_1d * 2.0 / 12)
-    camarilla_r3 = camarilla_pivot + (range_1d * 3.0 / 12)
-    camarilla_s3 = camarilla_pivot - (range_1d * 3.0 / 12)
-    camarilla_r4 = camarilla_pivot + (range_1d * 4.0 / 12)
-    camarilla_s4 = camarilla_pivot - (range_1d * 4.0 / 12)
+    # 1d Ichimoku for trend filter (using 1d data)
+    max_high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    min_low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_1d = (max_high_9_1d + min_low_9_1d) / 2
     
-    # Align Camarilla levels to 4h timeframe (prior 1d's levels available at 1d close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    max_high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    min_low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_1d = (max_high_26_1d + min_low_26_1d) / 2
     
-    # Volume confirmation: volume > 2.0x 20-period average on 4h
+    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
+    
+    max_high_52_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    min_low_52_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b_1d = (max_high_52_1d + min_low_52_1d) / 2
+    
+    # Kumo (cloud) boundaries: Senkou Span A and B
+    # Future cloud is plotted 26 periods ahead, but for trend filter we use current cloud
+    # Align 1d Senkou spans to 6x (since 1d = 4x 6h)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    
+    # Kumo top and bottom
+    kumo_top = np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    kumo_bottom = np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 2.0
-    
-    # Choppiness Index regime filter (using 4h data)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of ATR over 14 periods
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    
-    # Max(high) - Min(low) over 14 periods
-    max_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    
-    # Choppiness Index
-    chop = np.where(
-        (sum_atr_14 > 0) & (range_14 > 0),
-        100 * np.log10(sum_atr_14 / range_14) / np.log10(14),
-        50
-    )
+    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA34 (34), volume MA (20), ATR (14+14), chop (14+14)
-    start_idx = max(34, 20, 28)
+    # Warmup: need TK cross (26), Senkou B (52), volume MA (20)
+    start_idx = max(26, 52, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(volume_ma[i]) or
-            np.isnan(chop[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or
+            np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -117,21 +104,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Trend filter: price relative to 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # TK cross signals
+        tk_cross_up = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
+        tk_cross_down = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
         
-        # Regime filter: avoid strong ranging markets (chop > 50)
-        not_ranging = chop[i] < 50
+        # Price vs Kumo (cloud) for trend filter
+        price_above_kumo = close[i] > kumo_top[i]
+        price_below_kumo = close[i] < kumo_bottom[i]
+        price_in_kumo = (close[i] >= kumo_bottom[i]) & (close[i] <= kumo_top[i])
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 + price above 1d EMA34 + volume spike + not ranging
-            long_breakout = close[i] > camarilla_r3_aligned[i]
-            long_signal = long_breakout and price_above_ema and volume_spike[i] and not_ranging
-            
-            # Short: price breaks below Camarilla S3 + price below 1d EMA34 + volume spike + not ranging
-            short_breakout = close[i] < camarilla_s3_aligned[i]
-            short_signal = short_breakout and price_below_ema and volume_spike[i] and not_ranging
+            # Long: price above cloud + TK cross up + volume spike
+            long_signal = price_above_kumo and tk_cross_up and volume_spike[i]
+            # Short: price below cloud + TK cross down + volume spike
+            short_signal = price_below_kumo and tk_cross_down and volume_spike[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -144,20 +130,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price touches Camarilla S3 OR trend turns bearish (price below EMA) OR strong ranging market
-            if (close[i] < camarilla_s3_aligned[i] or not price_above_ema or chop[i] > 60):
+            # Exit: TK cross down OR price falls below cloud
+            if tk_cross_down or close[i] < kumo_top[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price touches Camarilla R3 OR trend turns bullish (price above EMA) OR strong ranging market
-            if (close[i] > camarilla_r3_aligned[i] or not price_below_ema or chop[i] > 60):
+            # Exit: TK cross up OR price rises above cloud
+            if tk_cross_up or close[i] > kumo_bottom[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_Regime"
-timeframe = "4h"
+name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend"
+timeframe = "6h"
 leverage = 1.0
