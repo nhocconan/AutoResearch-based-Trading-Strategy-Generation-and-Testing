@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Regime_Filter_v1
-Hypothesis: On daily timeframe, Kaufman Adaptive Moving Average (KAMA) captures trend with low lag, combined with choppiness regime filter to avoid whipsaws in ranging markets. Uses volume confirmation for breakout strength. Designed for 1d to minimize fee drag while capturing major trends in both bull and bear markets via adaptive trend filter and regime detection. Target 10-25 trades/year.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike (>2x average) captures institutional breakouts with low false signals. Designed for 12h timeframe to minimize fee drag while allowing trend following in both bull and bear markets via 1d EMA filter. Target 12-37 trades/year (50-150 total over 4 years) to stay within fee limits. Uses discrete sizing (0.25) and close-based exits when price retests broken level.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,103 +18,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for regime filter (optional, can use 1d chop)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # KAMA(10, 2, 30) - adaptive trend indicator
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    change = np.concatenate([np.full(10, np.nan), change])
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    volatility = np.abs(np.diff(close, n=1))
-    volatility = np.concatenate([np.array([np.nan]), volatility])
-    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
-    
-    # Avoid division by zero
-    er = np.divide(change, volatility_sum, out=np.full_like(change, np.nan), where=volatility_sum!=0)
-    
-    # Smoothing constants
-    fastest = 2.0 / (2 + 1)   # EMA(2)
-    slowest = 2.0 / (30 + 1)  # EMA(30)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Choppiness Index (CHOP) for regime detection - uses 14 periods
-    # True Range
+    # ATR(14) for volatility (used in volume spike threshold)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Choppiness Index
-    chop = np.full_like(close, np.nan)
-    for i in range(13, n):
-        if tr_sum[i] > 0 and hh[i] > ll[i]:
-            log_val = np.log10(tr_sum[i] / (hh[i] - ll[i]))
-            chop[i] = 100 * log_val / np.log10(14)
-        else:
-            chop[i] = np.nan
+    # Align to 12h (wait for completed 1d bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume average for confirmation (20-period SMA)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Average volume for confirmation (2-period SMA = 12h * 2 = 1 day)
+    avg_volume = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     base_size = 0.25
     
-    # Warmup: max of KAMA seed, CHOP, volume
-    start_idx = max(50, 20)  # ensure sufficient data
+    # Warmup: max of EMA(34), volume(2)
+    start_idx = max(34, 2)
     
     for i in range(start_idx, n):
         close_val = close[i]
-        kama_val = kama[i]
-        chop_val = chop[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
+        ema_val = ema_34_1d_aligned[i]
+        r1_val = camarilla_r1_aligned[i]
+        s1_val = camarilla_s1_aligned[i]
         
         # Skip if any data not ready
-        if (np.isnan(kama_val) or np.isnan(chop_val) or np.isnan(avg_vol)):
+        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r1_val) or 
+            np.isnan(s1_val)):
+            # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Regime filter: CHOP < 50 = trending (favor trend following), CHOP >= 50 = ranging (avoid)
-        trending_regime = chop_val < 50
+        # Volume confirmation: current volume > 2x average volume
+        volume_confirmed = vol > 2.0 * avg_vol
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirmed = vol > 1.5 * avg_vol
+        # Long: price CLOSES above R1 with 1d uptrend and volume
+        long_condition = (close_val > r1_val) and (close_val > ema_val) and volume_confirmed
+        # Short: price CLOSES below S1 with 1d downtrend and volume
+        short_condition = (close_val < s1_val) and (close_val < ema_val) and volume_confirmed
         
-        # Long: price > KAMA in trending regime with volume
-        long_condition = (close_val > kama_val) and trending_regime and volume_confirmed
-        # Short: price < KAMA in trending regime with volume
-        short_condition = (close_val < kama_val) and trending_regime and volume_confirmed
-        
-        # Exit: opposite signal or regime change to ranging
-        long_exit = (position == 1 and (close_val <= kama_val or not trending_regime))
-        short_exit = (position == -1 and (close_val >= kama_val or not trending_regime))
+        # Exit: price retests broken level
+        long_exit = (position == 1 and close_val <= r1_val)
+        short_exit = (position == -1 and close_val >= s1_val)
         
         if long_condition and position != 1:
             signals[i] = base_size
             position = 1
+            entry_price = close_val
         elif short_condition and position != -1:
             signals[i] = -base_size
             position = -1
+            entry_price = close_val
         elif long_exit:
             signals[i] = 0.0
             position = 0
@@ -127,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_Regime_Filter_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
