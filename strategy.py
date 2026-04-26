@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-Only trade breakouts in direction of 1d trend to avoid counter-trend whipsaws.
-In uptrend (price > 1d EMA34): long breakouts above R1.
-In downtrend (price < 1d EMA34): short breakdowns below S1.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Only trade breakouts in direction of 1d EMA34 trend to avoid counter-trend whipsaws.
+In uptrend (price > 1d EMA34): long breakouts above R1, short breakdowns below S1 only for mean reversion.
+In downtrend (price < 1d EMA34): short breakdowns below S1, long breakouts above R1 only for mean reversion.
 Uses volume confirmation to avoid false breakouts and discrete position sizing (0.25) to minimize fee churn.
-Target: 75-200 total trades over 4 years (19-50/year) by requiring confluence of breakout, trend, and volume.
-Designed for BTC/ETH - uses 1d trend filter to work in both bull and bear markets.
+Target: 50-150 total trades over 4 years (12-37/year) by requiring confluence of breakout, trend, and volume.
+Designed for BTC/ETH - uses 1d trend filter to avoid SOL-only bias and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -24,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend and Camarilla levels
+    # Load 1d data ONCE before loop for HTF trend
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA34 for HTF trend filter
@@ -32,7 +32,8 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     htf_trend = np.where(close > ema_34_1d_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
     
-    # Calculate Camarilla pivot levels from 1d data
+    # Load 1d data ONCE before loop for Camarilla levels (same timeframe as HTF)
+    # Note: We use the same 1d data for both trend and Camarilla levels
     typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     R1_1d = typical_price_1d + (1.1/12) * (df_1d['high'] - df_1d['low'])  # R1 level
     S1_1d = typical_price_1d - (1.1/12) * (df_1d['high'] - df_1d['low'])  # S1 level
@@ -75,6 +76,13 @@ def generate_signals(prices):
                     position = 1
                 else:
                     signals[i] = 0.25
+            # Mean reversion short: breakdown below S1 in uptrend (fade the move)
+            elif close[i] < S1_1d_aligned[i] and volume_spike:
+                if position != -1:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = -0.25
             else:
                 # Hold current position
                 if position == 0:
@@ -91,6 +99,13 @@ def generate_signals(prices):
                     position = -1
                 else:
                     signals[i] = -0.25
+            # Mean reversion long: breakout above R1 in downtrend (fade the move)
+            elif close[i] > R1_1d_aligned[i] and volume_spike:
+                if position != 1:
+                    signals[i] = 0.25
+                    position = 1
+                else:
+                    signals[i] = 0.25
             else:
                 # Hold current position
                 if position == 0:
@@ -110,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
