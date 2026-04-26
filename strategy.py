@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_NoRegime
-Hypothesis: On 4h timeframe, Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) capture high-probability institutional breakouts. The EMA34 filter ensures breakouts occur in the direction of the daily trend, while volume confirmation filters false breakouts. Removing the ADX regime filter reduces overtrading seen in prior variants. Discrete sizing (0.25) minimizes fee churn. Works in bull/bear via trend filter adaptation.
+12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike
+Hypothesis: On 12h timeframe, Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) capture institutional breakouts. The 1d EMA34 filter ensures breakouts occur in the direction of the daily trend, while volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Works in bull/bear via trend filter adaptation.
 """
 
 import numpy as np
@@ -29,27 +29,23 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 4h data for Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
+    # Get 1d data for Camarilla levels (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate Camarilla levels from previous 4h bar (R3, S3)
-    prev_close = np.concatenate([[np.nan], close_4h[:-1]])
-    prev_high = np.concatenate([[np.nan], high_4h[:-1]])
-    prev_low = np.concatenate([[np.nan], low_4h[:-1]])
+    # Calculate Camarilla levels from previous 1d bar (R3, S3)
+    prev_close = np.concatenate([[np.nan], close_1d_arr[:-1]])
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
     
     camarilla_range = prev_high - prev_low
     r3 = prev_close + 1.1 * camarilla_range * 1.1 / 4
     s3 = prev_close - 1.1 * camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume average (20-period) for volume spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -126,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_NoRegime"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
