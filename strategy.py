@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Combine Camarilla pivot breakouts (R1/S1) with 1d EMA34 trend filter and volume confirmation. 
-Camarilla levels provide precise intraday support/resistance, EMA34 filters for higher timeframe trend alignment, 
-and volume spike confirms institutional participation. Designed for 4h timeframe to target 20-50 trades/year, 
-minimizing fee drag while capturing meaningful breakouts in both bull and bear markets.
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
+Hypothesis: Use 1d timeframe with Camarilla R1/S1 breakout confirmed by 1w EMA34 trend and volume spike. Targets 7-25 trades/year to minimize fee drag. Works in bull/bear markets by using 1w EMA34 for trend direction and volume confirmation to filter false breakouts. Includes ATR-based stoploss to manage risk. Focus on BTC/ETH as primary targets.
 """
 
 import numpy as np
@@ -21,30 +18,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    # Using 1d data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate Camarilla pivot levels (based on previous day)
+    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # We need previous day's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    # Camarilla R1 and S1 levels
-    camarilla_r1 = pivot + (1.1/12.0) * (prev_high - prev_low)
-    camarilla_s1 = pivot - (1.1/12.0) * (prev_high - prev_low)
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,30 +54,30 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need sufficient data for all indicators
-    start_idx = max(34, 20, 14)  # EMA34, volume avg, ATR
+    # Warmup: need 1 for Camarilla (uses prev bar), 34 for 1w EMA, 20 for volume avg, 14 for ATR
+    start_idx = max(1, 34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         atr_val = atr[i]
-        size = 0.25  # 25% position size to balance risk and return
+        size = 0.25  # 25% position size
         
         if position == 0:
             # Flat - look for breakout with trend and volume confirmation
-            # Long: break above Camarilla R1 + 1d EMA34 uptrend + volume spike
-            long_entry = (close_val > camarilla_r1_aligned[i]) and \
-                       (ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]) and \
+            # Long: break above Camarilla R1 + 1w EMA34 uptrend + volume spike
+            long_entry = (close_val > camarilla_r1[i]) and \
+                       (ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]) and \
                        volume_spike[i]
-            # Short: break below Camarilla S1 + 1d EMA34 downtrend + volume spike
-            short_entry = (close_val < camarilla_s1_aligned[i]) and \
-                        (ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]) and \
-                       volume_spike[i]
+            # Short: break below Camarilla S1 + 1w EMA34 downtrend + volume spike
+            short_entry = (close_val < camarilla_s1[i]) and \
+                        (ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1]) and \
+                        volume_spike[i]
             
             if long_entry:
                 signals[i] = size
@@ -98,8 +91,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long - exit on Camarilla S1 break or ATR stoploss
-            exit_condition = (close_val < camarilla_s1_aligned[i]) or \
-                           (close_val < entry_price - 2.0 * atr_val)
+            exit_condition = (close_val < camarilla_s1[i]) or \
+                           (close_val < entry_price - 2.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -108,8 +101,8 @@ def generate_signals(prices):
                 signals[i] = size
         elif position == -1:
             # Short - exit on Camarilla R1 break or ATR stoploss
-            exit_condition = (close_val > camarilla_r1_aligned[i]) or \
-                           (close_val > entry_price + 2.0 * atr_val)
+            exit_condition = (close_val > camarilla_r1[i]) or \
+                           (close_val > entry_price + 2.5 * atr_val)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -119,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
