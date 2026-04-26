@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_ATRStop_v1
-Hypothesis: Donchian(20) breakout with volume confirmation (2.0x 20-bar average) and ATR-based stoploss captures strong trending moves while avoiding whipsaw. Uses discrete sizing (0.25) and strict volume filter to target ~25-40 trades/year. Works in bull/bear by only taking breakouts in direction of 4h trend (price > EMA50 = long, price < EMA50 = short).
+4h_Donchian20_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Donchian(20) breakout with 1d trend filter (price > 1d EMA50 = long, price < 1d EMA50 = short) and volume confirmation (>2.0x 20-bar average) captures strong trending moves with fewer whipsaws. Uses discrete sizing (0.25) and ATR-based stoploss (2.0x ATR) to target ~20-35 trades/year. Works in bull/bear by only taking breakouts aligned with 1d trend.
 """
 
 import numpy as np
@@ -18,14 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # ATR(14) for stoploss calculation
     tr1 = pd.Series(high[1:] - low[1:]).values
@@ -54,7 +54,7 @@ def generate_signals(prices):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        trend_val = ema50_4h_aligned[i]
+        trend_val = ema50_1d_aligned[i]
         atr_val = atr[i]
         vol_conf = volume_confirm[i]
         
@@ -64,7 +64,7 @@ def generate_signals(prices):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Trend filter: price > EMA50 = uptrend, price < EMA50 = downtrend
+        # Trend filter: price > 1d EMA50 = uptrend, price < 1d EMA50 = downtrend
         is_uptrend = close_val > trend_val
         is_downtrend = close_val < trend_val
         
@@ -72,7 +72,7 @@ def generate_signals(prices):
         long_breakout = close_val > highest_high[i-1]  # Use previous bar's channel
         short_breakout = close_val < lowest_low[i-1]
         
-        # Entry conditions: Donchian breakout in direction of trend + volume
+        # Entry conditions: Donchian breakout in direction of 1d trend + volume
         long_entry = long_breakout and is_uptrend and vol_conf
         short_entry = short_breakout and is_downtrend and vol_conf
         
@@ -108,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ATRStop_v1"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
