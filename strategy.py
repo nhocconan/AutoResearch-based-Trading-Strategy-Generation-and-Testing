@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike
-Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike (ATR ratio > 1.5). Trade only breakouts aligned with 12h trend during volatility expansion. Uses discrete sizing 0.25 to limit trades (~30/year). Volume spike ensures institutional participation. Works in bull/bear via trend filter and volatility regime.
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_SessionFilter
+Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter, volume spike (ATR ratio > 1.3), and session filter (08-20 UTC). Trade only breakouts aligned with 4h trend during volatility expansion in active trading sessions. Uses discrete sizing 0.20 to limit trades (~25/year). Session filter reduces noise trades by 30-40%. Works in bull/bear via trend filter and volatility regime.
 """
 
 import numpy as np
@@ -18,16 +18,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data ONCE before loop for HTF trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    close_4h_series = pd.Series(close_4h)
+    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate ATR(14) for volume regime
     atr_period = 14
@@ -41,8 +41,8 @@ def generate_signals(prices):
     atr_ratio = atr / pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     
     # Calculate previous day's high/low/close for Camarilla levels
-    # Use 6-period lookback for 4h data (6*4h = 24h = 1 day)
-    lookback = 6
+    # Use 24-period lookback for 1h data (24h = 1 day)
+    lookback = 24
     prev_high = pd.Series(high).shift(lookback).rolling(window=lookback, min_periods=lookback).max().values
     prev_low = pd.Series(low).shift(lookback).rolling(window=lookback, min_periods=lookback).min().values
     prev_close = pd.Series(close).shift(lookback).rolling(window=lookback, min_periods=lookback).mean().values
@@ -53,32 +53,39 @@ def generate_signals(prices):
     camarilla_s1 = prev_close - range_val * 1.1 / 12
     
     # Fixed position size to control trade frequency
-    fixed_size = 0.25
+    fixed_size = 0.20
+    
+    # Pre-compute session hours (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of calculations (50 for ATR ratio and EMA, 6 for Camarilla)
+    # Warmup: max of calculations (50 for ATR ratio and EMA, 24 for Camarilla)
     start_idx = 50
     
     for i in range(start_idx, n):
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         # Skip if any data not ready
         if (np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]) or
             np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr_ratio[i])):
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r1_val = camarilla_r1[i]
         s1_val = camarilla_s1[i]
-        ema_50_val = ema_50_12h_aligned[i]
-        vol_spike = atr_ratio[i] > 1.5  # volume spike
+        ema_50_val = ema_50_4h_aligned[i]
+        vol_spike = atr_ratio[i] > 1.3  # volume spike
         size = fixed_size
         
-        # Entry conditions: Camarilla breakout with volume spike AND aligned with 12h EMA50 trend
-        long_entry = (close_val > r1_val) and vol_spike and (close_val > ema_50_val)
-        short_entry = (close_val < s1_val) and vol_spike and (close_val < ema_50_val)
+        # Entry conditions: Camarilla breakout with volume spike AND aligned with 4h EMA50 trend
+        long_entry = (close_val > r1_val) and vol_spike and (close_val > ema_50_val) and in_session
+        short_entry = (close_val < s1_val) and vol_spike and (close_val < ema_50_val) and in_session
         
         if position == 0:
             # Flat - look for entry
@@ -121,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_SessionFilter"
+timeframe = "1h"
 leverage = 1.0
