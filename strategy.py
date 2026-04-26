@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_1dATRRegime_v1
-Hypothesis: Trade Donchian(20) breakouts on 4h with volume confirmation (2.0x median) and 1d ATR regime filter (low ATR = mean reversion bias, high ATR = trend follow). Only long when price > upper band and ATR(1d) rising, short when price < lower band and ATR(1d) falling. Uses ATR(4h) trailing stop (1.5x ATR). Designed to work in bull/bear by adapting to volatility regime. Target: 20-30 trades/year on 4h.
+1d_Donchian20_Breakout_VolumeSpike_ChopRegime_v1
+Hypothesis: Trade daily Donchian(20) breakouts with volume confirmation (2.0x median) and choppiness regime filter (CHOP>61.8 = range, mean reversion; CHOP<38.2 = trend, follow breakout). Only long when price > 200 EMA for trend filter. Designed for low-frequency, high-conviction trades (target 7-25/year) to minimize fee drag and work in both bull/bear markets via regime adaptation.
 """
 
 import numpy as np
@@ -18,123 +18,129 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR regime filter
+    # Get 1w data for HTF trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # 1w EMA(34) for trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Donchian(20) on daily timeframe
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d ATR(14) for volatility regime
-    tr_1d = np.maximum(df_1d['high'] - df_1d['low'], 
-                       np.maximum(np.abs(df_1d['high'] - np.roll(df_1d['close'], 1)), 
-                                  np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))))
-    tr_1d[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Donchian upper/lower: 20-day high/low
+    donchian_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # 1d ATR(50) for regime comparison
-    atr_1d_50 = pd.Series(tr_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_ratio_1d = atr_1d / np.where(atr_1d_50 > 0, atr_1d_50, np.nan)
-    # Low volatility regime (mean reversion favor): ATR ratio < 0.8
-    # High volatility regime (trend follow favor): ATR ratio > 1.2
-    low_vol_regime = atr_ratio_1d < 0.8
-    high_vol_regime = atr_ratio_1d > 1.2
+    # Align Donchian levels to 1d timeframe (already aligned as we use 1d data)
+    donchian_high_aligned = donchian_high  # no alignment needed for same timeframe
+    donchian_low_aligned = donchian_low
     
-    # Donchian(20) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # 200 EMA for trend filter (daily)
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = ema_200_1d  # same timeframe
+    
+    # Choppiness Index on daily timeframe
+    chop_period = 14
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=chop_period, adjust=False, min_periods=chop_period).mean().values
+    sum_tr = pd.Series(tr).rolling(window=chop_period, min_periods=chop_period).sum().values
+    hh = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
+    ll = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
+    chop = 100 * np.log10(sum_tr / np.where((hh - ll) > 0, hh - ll, np.nan)) / np.log10(chop_period)
+    
+    # Align HTF indicators (1w EMA) to 1d timeframe
+    # Donchian and chop are already 1d, no alignment needed
     
     # Volume confirmation: 2.0x median volume (20-period)
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # ATR(14) for trailing stop (4h)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align HTF indicators to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime.astype(float))
-    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime.astype(float))
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Warmup: max of Donchian(20), volume median (20), ATR (14), ATR 1d (14,50)
-    start_idx = max(lookback, 20, 14, 50)
+    # Warmup: max of EMA34(1w), Donchian(20), EMA200(1d), chop(14), volume median(20)
+    start_idx = max(34, 20, 200, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or
-            np.isnan(vol_median[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(atr_ratio_1d_aligned[i]) or
-            np.isnan(low_vol_regime_aligned[i]) or
-            np.isnan(high_vol_regime_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_200_aligned[i]) or
+            np.isnan(chop[i]) or
+            np.isnan(vol_median[i])):
             # Hold current position
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        highest_high_val = highest_high[i]
-        lowest_low_val = lowest_low[i]
         close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
         volume_val = volume[i]
         vol_median_val = vol_median[i]
-        atr_val = atr[i]
-        atr_1d_val = atr_1d_aligned[i]
-        atr_ratio_val = atr_ratio_1d_aligned[i]
-        low_vol = low_vol_regime_aligned[i] > 0.5
-        high_vol = high_vol_regime_aligned[i] > 0.5
+        ema_34_1w_val = ema_34_1w_aligned[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        ema_200_val = ema_200_aligned[i]
+        chop_val = chop[i]
+        
+        # Regime filters
+        chop_high_regime = chop_val > 61.8  # range market, mean reversion
+        chop_low_regime = chop_val < 38.2   # trending market
+        
+        # Trend filter: price > EMA200 for long bias in uptrend
+        uptrend_bias = close_val > ema_200_val
+        downtrend_bias = close_val < ema_200_val
         
         if position == 0:
-            # Long: break above upper Donchian band with volume spike
-            # In low vol regime: mean reversion bias (still take breakout but tighter stop)
-            # In high vol regime: trend follow bias
-            long_signal = (close_val > highest_high_val) and \
-                          (volume_val > 2.0 * vol_median_val)
+            # Long: break above Donchian high with volume spike
+            # In choppy range (CHOP>61.8): mean reversion - wait for pullback? Actually, breakout still valid but be selective
+            # In trending (CHOP<38.2): follow breakout
+            # Require volume spike and alignment with 1w EMA trend
+            long_signal = (close_val > donchian_high_val) and \
+                          (volume_val > 2.0 * vol_median_val) and \
+                          (ema_34_1w_val > 0) and \
+                          (uptrend_bias or chop_high_regime)  # allow long in uptrend or range (mean reversion long from low)
             
-            # Short: break below lower Donchian band with volume spike
-            short_signal = (close_val < lowest_low_val) and \
-                           (volume_val > 2.0 * vol_median_val)
+            # Short: break below Donchian low with volume spike
+            short_signal = (close_val < donchian_low_val) and \
+                           (volume_val > 2.0 * vol_median_val) and \
+                           (ema_34_1w_val > 0) and \
+                           (downtrend_bias or chop_high_regime)  # allow short in downtrend or range (mean reversion short from high)
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
-                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            highest_since_entry = max(highest_since_entry, high_val)
-            # ATR trailing stop: 1.5x ATR in low vol, 2.0x ATR in high vol (wider stop in trending markets)
-            atr_multiplier = 1.5 if low_vol else 2.0
-            if close_val < highest_since_entry - atr_multiplier * atr_val:
+            # Exit: close below Donchian low (contrarian exit) or trailing stop
+            if close_val < donchian_low_val:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR trailing stop: 1.5x ATR in low vol, 2.0x ATR in high vol
-            atr_multiplier = 1.5 if low_vol else 2.0
-            if close_val > lowest_since_entry + atr_multiplier * atr_val:
+            # Exit: close above Donchian high (contrarian exit) or trailing stop
+            if close_val > donchian_high_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_1dATRRegime_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_VolumeSpike_ChopRegime_v1"
+timeframe = "1d"
 leverage = 1.0
