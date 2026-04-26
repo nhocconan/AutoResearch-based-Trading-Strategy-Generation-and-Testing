@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wEMA34_VolumeSpike_v1
-Hypothesis: Trade daily Camarilla R1/S1 breakouts with weekly EMA34 trend filter and volume spike confirmation.
-Uses ATR trailing stop (2.5x) for risk control. Designed for low frequency (target 15-25 trades/year) to minimize fee drag
-and capture multi-week trends in both bull and bear markets via confluence: daily pivot break + weekly trend + volume spike.
+6h_ElderRay_Alligator_1dTrend_v1
+Hypothesis: Combine Elder Ray (Bull/Bear Power) with Williams Alligator on 6h timeframe, filtered by 1d EMA50 trend. 
+Elder Ray measures bull/bear power relative to EMA13; Alligator (JAW/TEETH/LIPS) confirms trend alignment. 
+Only take longs when Bull Power > 0, Bear Power < 0, and price above Alligator teeth (red line) in uptrend (1d EMA50 up).
+Only take shorts when Bear Power < 0, Bull Power < 0, and price below Alligator teeth in downtrend.
+Uses volume confirmation (1.5x median) to avoid false signals. Designed for low-frequency, high-conviction trades 
+that work in both bull (trend following) and bear (counter-trend reversals via Elder Ray extremes) markets.
+Target: 12-30 trades/year (50-120 over 4 years) with discrete sizing 0.25 to minimize fee drag.
 """
 
 import numpy as np
@@ -12,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,58 +24,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # 1w EMA(34) for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align 1w EMA and 1d Camarilla levels to 1d timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # 6h EMA(13) for Elder Ray foundation
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume confirmation: 2.0x median volume (balanced for 1d)
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA13
+    bear_power = low - ema_13   # Bear Power = Low - EMA13
     
-    # ATR for stop (15-period on 1d)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_15 = pd.Series(tr).rolling(window=15, min_periods=15).mean().values
+    # Williams Alligator on 6h: SMAs with specific periods
+    # JAW (Blue): 13-period SMMA shifted 8 bars ahead
+    # TEETH (Red): 8-period SMMA shifted 5 bars ahead  
+    # LIPS (Green): 5-period SMMA shifted 3 bars ahead
+    # Using regular SMA with shift for simplicity (SMMA approximation)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Volume confirmation: 1.5x median volume
+    vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    long_stop = 0.0
-    short_stop = 0.0
     bars_since_entry = 0
     
-    # Warmup: max of 1w EMA (34), 1d volume median (20), 1d ATR (15)
-    start_idx = max(34, 20, 15)
+    # Warmup: max of 1d EMA50 (50), EMA13 (13), Alligator JAW (13+8=21), volume median (30)
+    start_idx = max(50, 13, 21, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_median[i]) or 
-            np.isnan(atr_15[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(jaw[i]) or 
+            np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or 
+            np.isnan(vol_median[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -81,63 +79,90 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        ema_34_1w_val = ema_34_1w_aligned[i]
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
+        ema_13_val = ema_13[i]
+        bull_power_val = bull_power[i]
+        bear_power_val = bear_power[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
         volume_val = volume[i]
         vol_median_val = vol_median[i]
-        atr_15_val = atr_15[i]
+        
+        # Determine Alligator alignment: price > teeth = bullish alignment
+        price_above_teeth = close_val > teeth_val
+        price_below_teeth = close_val < teeth_val
+        
+        # Determine 1d trend: rising EMA50 = uptrend, falling = downtrend
+        if i > start_idx:
+            ema_50_1d_prev = ema_50_1d_aligned[i-1]
+            uptrend_1d = ema_50_1d_val > ema_50_1d_prev
+            downtrend_1d = ema_50_1d_val < ema_50_1d_prev
+        else:
+            uptrend_1d = False
+            downtrend_1d = False
         
         if position == 0:
-            # Long: break above R1, weekly uptrend (close > EMA34), volume spike
-            long_signal = (high_val > camarilla_r1_val) and \
-                          (close_val > ema_34_1w_val) and \
-                          (volume_val > 2.0 * vol_median_val)
-            # Short: break below S1, weekly downtrend (close < EMA34), volume spike
-            short_signal = (low_val < camarilla_s1_val) and \
-                           (close_val < ema_34_1w_val) and \
-                           (volume_val > 2.0 * vol_median_val)
+            # Long conditions:
+            # 1. Bull Power > 0 (bulls in control)
+            # 2. Bear Power < 0 (bears weak)
+            # 3. Price above Alligator teeth (bullish alignment)
+            # 4. 1d uptrend (higher timeframe bias)
+            # 5. Volume confirmation
+            long_signal = (bull_power_val > 0) and \
+                          (bear_power_val < 0) and \
+                          price_above_teeth and \
+                          uptrend_1d and \
+                          (volume_val > 1.5 * vol_median_val)
+            
+            # Short conditions:
+            # 1. Bear Power < 0 (bears in control)
+            # 2. Bull Power < 0 (bulls weak) 
+            # 3. Price below Alligator teeth (bearish alignment)
+            # 4. 1d downtrend (higher timeframe bias)
+            # 5. Volume confirmation
+            short_signal = (bear_power_val < 0) and \
+                           (bull_power_val < 0) and \
+                           price_below_teeth and \
+                           downtrend_1d and \
+                           (volume_val > 1.5 * vol_median_val)
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-                long_stop = entry_price - 2.5 * atr_15_val
                 bars_since_entry = 0
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
-                short_stop = entry_price + 2.5 * atr_15_val
                 bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Hold long with ATR trailing stop
+            # Hold long with minimum holding period to reduce churn
             bars_since_entry += 1
             signals[i] = 0.25
-            # Update trailing stop: move stop up as price makes new highs
-            long_stop = max(long_stop, high_val - 2.5 * atr_15_val)
-            # Exit: trailing stop hit
-            if low_val < long_stop:
+            # Exit conditions:
+            # 1. Minimum holding period (3 bars) AND
+            # 2. Either: Bear Power turns negative (bulls losing) OR price breaks below teeth
+            if bars_since_entry >= 3 and ((bear_power_val >= 0) or (close_val < teeth_val)):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Hold short with ATR trailing stop
+            # Hold short with minimum holding period
             bars_since_entry += 1
             signals[i] = -0.25
-            # Update trailing stop: move stop down as price makes new lows
-            short_stop = min(short_stop, low_val + 2.5 * atr_15_val)
-            # Exit: trailing stop hit
-            if high_val > short_stop:
+            # Exit conditions:
+            # 1. Minimum holding period (3 bars) AND
+            # 2. Either: Bull Power turns positive (bears losing) OR price breaks above teeth
+            if bars_since_entry >= 3 and ((bull_power_val <= 0) or (close_val > teeth_val)):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA34_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_Alligator_1dTrend_v1"
+timeframe = "6h"
 leverage = 1.0
