@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime_v1
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike + chop regime filter.
-- Uses 4h timeframe targeting 75-200 total trades over 4 years (19-50/year)
-- Long when price breaks above R1 with volume spike, 1d uptrend, and low chop (trending market)
-- Short when price breaks below S1 with volume spike, 1d downtrend, and low chop
+12h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_v2
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and chop regime filter.
+- Uses 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
+- Long when price breaks above R1 with 1d uptrend and low chop (trending market)
+- Short when price breaks below S1 with 1d downtrend and low chop
 - Camarilla levels derived from previous 1d OHLC for structure-aware entries
 - Chop filter avoids ranging markets where breakouts fail
-- Volume spike confirms institutional participation
-- Designed for moderate trade frequency with proven edge on BTC/ETH from historical data
+- Designed for low trade frequency with proven edge on BTC/ETH from historical data
 """
 
 import numpy as np
@@ -23,7 +22,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
     # Load 1d data ONCE before loop for Camarilla levels, trend, and chop
     df_1d = get_htf_data(prices, '1d')
@@ -37,17 +35,13 @@ def generate_signals(prices):
     R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Calculate 1d EMA34 for trend filter
     ema34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Calculate volume spike (20-period volume average on 4h)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 2.0)  # Volume at least 2x average
     
     # Calculate Choppiness Index on 1d to filter ranging markets
     high_1d = df_1d['high'].values
@@ -73,8 +67,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for EMA, 20 for volume MA)
-    start_idx = max(34, 20)
+    # Start after warmup (need 34 for EMA)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -90,7 +84,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Camarilla breakout conditions with volume confirmation and regime filter
+        # Camarilla breakout conditions with trend filter and regime filter
         price_above_R1 = close[i] > R1_aligned[i]
         price_below_S1 = close[i] < S1_aligned[i]
         
@@ -102,12 +96,12 @@ def generate_signals(prices):
         trending_market = chop_aligned[i] < 38.2
         
         if position == 0:
-            # Long: price breaks above R1 AND volume spike AND 1d uptrend AND trending market
-            if price_above_R1 and volume_spike[i] and trend_up and trending_market:
+            # Long: price breaks above R1 AND 1d uptrend AND trending market
+            if price_above_R1 and trend_up and trending_market:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND volume spike AND 1d downtrend AND trending market
-            elif price_below_S1 and volume_spike[i] and trend_down and trending_market:
+            # Short: price breaks below S1 AND 1d downtrend AND trending market
+            elif price_below_S1 and trend_down and trending_market:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -129,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_v2"
+timeframe = "12h"
 leverage = 1.0
