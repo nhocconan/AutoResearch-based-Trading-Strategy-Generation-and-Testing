@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_Breakout_VolumeSpike_ChopFilter
-Hypothesis: 12h Donchian channel breakout with volume spike and chop regime filter.
-Long when price breaks above 20-bar high with volume spike in trending market (CHOP < 38.2).
-Short when price breaks below 20-bar low with volume spike in trending market.
-Uses ATR-based stoploss via signal=0 when price closes outside channel.
-Designed for 12h timeframe to target 12-37 trades/year, works in bull/bear via trend filter.
+4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike
+Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
+Long when price breaks above R1 in 12h uptrend with volume spike.
+Short when price breaks below S1 in 12h downtrend with volume spike.
+Uses Camarilla pivot levels from daily OHLC for robust support/resistance.
+Discrete position sizing (0.25) to minimize fee churn. Targets 20-50 trades/year on 4h.
+Works in bull/bear by following 12h trend. Camarilla levels act as magnetic pivot points.
 """
 
 import numpy as np
@@ -22,64 +23,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for chop filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate Chopiness Index on 1d
+    # Calculate Camarilla levels on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    # True range for volatility
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.25 * (high - low)
+    # R2 = close + 1.166 * (high - low)
+    # R1 = close + 1.083 * (high - low)
+    # PP = (high + low + close) / 3
+    # S1 = close - 1.083 * (high - low)
+    # S2 = close - 1.166 * (high - low)
+    # S3 = close - 1.25 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    range_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + 1.083 * range_1d
+    camarilla_s1 = close_1d - 1.083 * range_1d
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
     
-    # Max/min high/low over 14 periods
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Chopiness Index: 100 * log10(sum(TR14) / (max_high_14 - min_low_14)) / log10(14)
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    denominator = max_high_14 - min_low_14
-    chop = np.where(denominator > 0, 100 * np.log10(sum_tr_14 / denominator) / np.log10(14), 100)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    uptrend_12h = close_12h > ema_50_12h
+    downtrend_12h = close_12h < ema_50_12h
     
-    # Align chop to 12h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align all HTF data to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
     
-    # Donchian Channel (20-period) on 12h
-    period = 20
-    donchian_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    donchian_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    # ATR(10) for stoploss
-    atr_period = 10
-    tr_12h = np.maximum(np.abs(high[1:] - low[:-1]), np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
-    tr_12h = np.concatenate([[np.nan], tr_12h])
-    atr_10 = pd.Series(tr_12h).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # Volume confirmation: volume > 2.0x 20-period MA
+    # Volume confirmation: volume > 1.5x 20-period MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(period, 20, 14)
+    # Start after warmup (need 50 for EMA, 20 for volume MA)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(atr_10[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(uptrend_12h_aligned[i]) or np.isnan(downtrend_12h_aligned[i]) or
+            np.isnan(volume_spike[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -90,14 +97,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume spike in trending market (CHOP < 38.2)
-            if (close[i] > donchian_high[i] and 
-                volume_spike[i] and chop_aligned[i] < 38.2):
+            # Long: price breaks above R1 with 12h uptrend and volume spike
+            if (close[i] > camarilla_r1_aligned[i] and 
+                uptrend_12h_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume spike in trending market
-            elif (close[i] < donchian_low[i] and 
-                  volume_spike[i] and chop_aligned[i] < 38.2):
+            # Short: price breaks below S1 with 12h downtrend and volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  downtrend_12h_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
@@ -105,20 +112,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price closes below Donchian low OR chop becomes too high (choppy market)
-            if (close[i] < donchian_low[i] or chop_aligned[i] > 61.8):
+            # Exit: price closes below S1 OR 12h trend changes to downtrend
+            if (close[i] < camarilla_s1_aligned[i] or not uptrend_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price closes above Donchian high OR chop becomes too high
-            if (close[i] > donchian_high[i] or chop_aligned[i] > 61.8):
+            # Exit: price closes above R1 OR 12h trend changes to uptrend
+            if (close[i] > camarilla_r1_aligned[i] or not downtrend_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Donchian20_Breakout_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
