@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_v2
-Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d trend filter and choppiness regime filter.
-Only trade breakouts in direction of 1d EMA34 trend when market is not too choppy (CHOP < 61.8).
-Avoids whipsaws in ranging markets while capturing trends in both bull and bear markets.
-Volume confirmation reduces false breakouts. Discrete position sizing (0.25) minimizes fee churn.
-Target: 50-150 total trades over 4 years (12-37/year) by requiring confluence of breakout, trend, volume, and chop filter.
-Designed for BTC/ETH - avoids SOL-only bias by requiring HTF trend alignment and regime filter.
+4h_Donchian20_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+Only trade breakouts in direction of 1d trend to avoid counter-trend whipsaw.
+Volume spike confirms institutional interest. Designed for BTC/ETH with discrete sizing (0.25)
+to limit fee drag. Target: 75-200 total trades over 4 years (19-50/year).
+Uses ATR-based trailing stop (signal=0 when price < highest_high - 2.5*ATR for longs,
+or price > lowest_low + 2.5*ATR for shorts) to manage risk without look-ahead.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend and Camarilla levels
+    # Load 1d data ONCE before loop for HTF trend
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA34 for HTF trend filter
@@ -31,44 +31,32 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     htf_trend = np.where(close > ema_34_1d_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
     
-    # Calculate Camarilla pivot levels from 1d data
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    R1_1d = typical_price_1d + (1.1/12) * (df_1d['high'] - df_1d['low'])  # R1 level
-    S1_1d = typical_price_1d - (1.1/12) * (df_1d['high'] - df_1d['low'])  # S1 level
+    # Calculate ATR(20) for volatility and trailing stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Align Camarilla levels to 1d timeframe (no additional delay needed)
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d.values)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d.values)
+    # Calculate Donchian(20) channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20-period average true range for choppiness index (14-period)
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.concatenate([[close[0]], close[:-1]]))).values
-    tr3 = pd.Series(np.abs(low - np.concatenate([[close[0]], close[:-1]]))).values
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate choppiness index: CHOP = 100 * log10(sum(ATR14) / (n * (max(high)-min(low)))) / log10(n)
-    # Simplified: CHOP < 61.8 = trending, CHOP > 61.8 = ranging
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr_14 / (max_high_14 - min_low_14)) / np.log10(14)
-    chop_filter = chop < 61.8  # Only trade when market is trending (not choppy)
-    
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Track highest high since entry for trailing stop (longs)
+    # Track lowest low since entry for trailing stop (shorts)
+    highest_since_entry = np.full(n, np.nan)
+    lowest_since_entry = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for 1d EMA, 14 for ATR/CHOP, 20 for volume MA)
-    start_idx = max(34, 14, 20)
+    # Start after warmup (need 34 for 1d EMA, 20 for Donchian/ATR)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or
-            np.isnan(chop[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -78,25 +66,50 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition
-        volume_spike = volume[i] > 1.3 * vol_ma_20[i]
+        # Update trailing stop levels
+        if position == 1:  # Long position
+            highest_since_entry[i] = max(highest_since_entry[i-1] if i > start_idx else high[i], high[i])
+        elif position == -1:  # Short position
+            lowest_since_entry[i] = min(lowest_since_entry[i-1] if i > start_idx else low[i], low[i])
+        else:
+            # Reset tracking when flat
+            highest_since_entry[i] = high[i]
+            lowest_since_entry[i] = low[i]
         
-        # Breakout conditions with trend filter and chop filter
+        # Volume confirmation: volume > 1.5x 20-period average
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        if np.isnan(vol_ma_20[i]):
+            vol_ma_20_val = volume[i]  # fallback
+        else:
+            vol_ma_20_val = vol_ma_20[i]
+        volume_spike = volume[i] > 1.5 * vol_ma_20_val
+        
+        # Breakout conditions
+        bullish_breakout = close[i] > highest_high[i]
+        bearish_breakout = close[i] < lowest_low[i]
+        
+        # Trailing stop conditions
+        long_stop = False
+        short_stop = False
+        if position == 1 and not np.isnan(highest_since_entry[i]):
+            long_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+        elif position == -1 and not np.isnan(lowest_since_entry[i]):
+            short_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+        
+        # Exit on stop
+        if long_stop or short_stop:
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Entry logic
         if htf_trend[i] == 1:  # Uptrend on 1d
-            # Long breakout above R1 with volume spike and chop filter (trade with trend)
-            if close[i] > R1_1d_aligned[i] and volume_spike and chop_filter[i]:
+            if bullish_breakout and volume_spike:
                 if position != 1:
                     signals[i] = 0.25
                     position = 1
                 else:
                     signals[i] = 0.25
-            # Mean reversion short: breakdown below S1 in uptrend (fade the move) only in low chop
-            elif close[i] < S1_1d_aligned[i] and volume_spike and chop_filter[i]:
-                if position != -1:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = -0.25
             else:
                 # Hold current position
                 if position == 0:
@@ -106,20 +119,12 @@ def generate_signals(prices):
                 else:
                     signals[i] = -0.25
         elif htf_trend[i] == -1:  # Downtrend on 1d
-            # Short breakdown below S1 with volume spike and chop filter (trade with trend)
-            if close[i] < S1_1d_aligned[i] and volume_spike and chop_filter[i]:
+            if bearish_breakout and volume_spike:
                 if position != -1:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = -0.25
-            # Mean reversion long: breakout above R1 in downtrend (fade the move) only in low chop
-            elif close[i] > R1_1d_aligned[i] and volume_spike and chop_filter[i]:
-                if position != 1:
-                    signals[i] = 0.25
-                    position = 1
-                else:
-                    signals[i] = 0.25
             else:
                 # Hold current position
                 if position == 0:
@@ -129,7 +134,7 @@ def generate_signals(prices):
                 else:
                     signals[i] = -0.25
         else:
-            # Should not happen with our trend calculation
+            # Should not happen
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -139,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_v2"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
