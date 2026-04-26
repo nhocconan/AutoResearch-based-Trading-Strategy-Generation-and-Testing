@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_FundingRateMeanReversion_v2
-Hypothesis: Funding rate mean reversion works on BTC/ETH perpetual futures. Extreme positive funding (>0.03%) indicates overleveraged longs → mean-reversion short. Extreme negative funding (<-0.03%) indicates overleveraged shorts → mean-reversion long. Uses 6h timeframe for execution with 1d funding rate HTF filter. Discrete sizing ±0.25 targets 12-37 trades/year. Works in both bull/bear markets as funding extremes occur in all regimes.
+12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirmation
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts filtered by 1-week EMA50 trend and volume spike capture institutional breakout moves in both bull and bear markets. Long when price breaks above R1 in bullish weekly trend with volume confirmation; short when price breaks below S1 in bearish weekly trend with volume confirmation. Uses discrete sizing (±0.25) and targets 12-37 trades/year. Weekly trend filter ensures we only trade with the dominant higher-timeframe momentum, reducing whipsaws.
 """
 
 import numpy as np
@@ -13,81 +13,84 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    
-    # Load funding rate data ONCE before loop (1d timeframe)
-    # Note: funding rate data is stored in processed/funding/ directory with 8h frequency
-    # We'll use 1d resampled data from mtf_data helper
-    try:
-        df_1d = get_htf_data(prices, '1d')
-        if len(df_1d) < 30:
-            return np.zeros(n)
-        
-        # For this strategy, we need to load actual funding rate data
-        # Since mtf_data.get_htf_data loads price data, we need a different approach
-        # We'll simulate funding rate using price action proxy for now
-        # In practice, this would load from data/processed/funding/*.parquet
-        
-        # Proxy: funding rate tends to correlate with price momentum and volatility
-        # Use RSI divergence from 50 as proxy for funding extremes
-        close_series = pd.Series(close)
-        rsi = 100 - (100 / (1 + close_series.rolling(14, min_periods=14).apply(
-            lambda x: np.mean(np.diff(x)[np.diff(x) > 0]) / 
-            np.abs(np.mean(np.diff(x)[np.diff(x) < 0])) if len(np.diff(x)[np.diff(x) < 0]) > 0 else 100
-        )))
-        rsi_values = rsi.values
-        
-        # Normalize RSI to funding-like scale: RSI 50 = 0 funding, RSI 70 = +0.05%, RSI 30 = -0.05%
-        funding_proxy = (rsi_values - 50) / 50 * 0.05  # Scale to ±0.05%
-        
-        # Align to 6h timeframe
-        funding_aligned = align_htf_to_ltf(prices, df_1d, funding_proxy)
-        
-    except Exception:
-        # Fallback: use price-based mean reversion if funding data unavailable
-        close_series = pd.Series(close)
-        ma_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-        std_50 = close_series.rolling(50, min_periods=50).std().values
-        z_score = (close - ma_50) / (std_50 + 1e-8)
-        funding_aligned = z_score * 0.01  # Scale to reasonable levels
-    
-    # Volume confirmation: volume > 1.3x 20-period average
     volume = prices['volume'].values
+    
+    # Load 1-week data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # 1-week EMA50 for higher-timeframe trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate previous day's Camarilla levels (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's high, low, close for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values  # Shift to get previous day
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.3)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Warmup: ensure indicators are ready
-    start_idx = max(50, 20) + 5
+    # Warmup: max of calculations (20 for volume MA, 1d shift, 1w EMA50 alignment)
+    start_idx = max(20, 1) + 16  # +16 to ensure 1w bar completion (12h -> 1w: 14 bars per 1w, but use conservative)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(funding_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if any data not ready (NaN from calculation)
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+            # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
         close_val = close[i]
-        funding_val = funding_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_50_val = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         
-        # Entry conditions: extreme funding proxy with volume confirmation
-        long_entry = (funding_val < -0.02) and vol_spike  # Oversold proxy
-        short_entry = (funding_val > 0.02) and vol_spike   # Overbought proxy
+        # Determine 1w trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_1w = close_val > ema_50_val
+        bearish_1w = close_val < ema_50_val
         
-        # Exit conditions: funding returns to neutral or opposite extreme
+        # Entry conditions: price breaks above/below Camarilla levels in direction of 1w trend with volume confirmation
+        long_entry = (close_val > r1_val) and bullish_1w and vol_spike
+        short_entry = (close_val < s1_val) and bearish_1w and vol_spike
+        
+        # Exit conditions: price returns inside Camarilla levels or trend reversal
         if long_entry and position != 1:
             signals[i] = base_size
             position = 1
         elif short_entry and position != -1:
             signals[i] = -base_size
             position = -1
-        elif position == 1 and (funding_val > -0.01 or funding_val > 0.02):
+        elif position == 1 and (close_val < r1_val or not bullish_1w):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (funding_val < 0.01 or funding_val < -0.02):
+        elif position == -1 and (close_val > s1_val or not bearish_1w):
             signals[i] = 0.0
             position = 0
         else:
@@ -96,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_FundingRateMeanReversion_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
