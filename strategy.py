@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: On 6h timeframe, Ichimoku cloud breakouts (price above/below cloud) with 1d EMA50 trend filter and volume confirmation (>1.5x 24-bar avg) capture institutional breakouts in both bull and bear markets. Uses Ichimoku cloud as dynamic support/resistance and 1d trend filter to avoid counter-trend trades. Targets 12-25 trades/year to minimize fee drag while maintaining edge via trend filter and volume confirmation.
+12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirmation
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1-week EMA34 trend filter and volume confirmation (>1.5x 48-bar avg) capture institutional breakouts in both bull and bear markets. Uses higher timeframe weekly trend to reduce noise and avoid lower timeframe whipsaws. Targets 12-37 trades/year to minimize fee drag while maintaining edge via trend filter and volume confirmation.
 """
 
 import numpy as np
@@ -18,62 +18,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend and Ichimoku
+    # Get 1d data for Camarilla pivot calculation (daily OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
+        return np.zeros(n)
+    
+    # Calculate EMA34 on 1w for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components on 1d
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + (range_1d * 1.1 / 12.0)
+    s1_1d = close_1d - (range_1d * 1.1 / 12.0)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Align Camarilla levels to 12h timeframe (1-bar delay for completed daily bar)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe with proper delay
-    # Ichimoku uses past data only, so standard 1-bar completed candle delay is sufficient
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Calculate EMA50 on 1d for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume average (24-period = 4 days on 6h) for volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume average (48-period = 24h on 12h) for volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start index: need warmup for calculations
-    start_idx = max(60, 52, 26, 24)  # 1d lookback, Ichimoku periods, volume MA
+    start_idx = max(48, 34, 2)  # volume MA, weekly EMA, 1d data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen_aligned[i]) or 
-            np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or 
-            np.isnan(senkou_span_b_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             # Hold current position or flat
             if position == 0:
@@ -85,29 +75,23 @@ def generate_signals(prices):
             continue
         
         # Get aligned values
-        tenkan_val = tenkan_sen_aligned[i]
-        kijun_val = kijun_sen_aligned[i]
-        senkou_a_val = senkou_span_a_aligned[i]
-        senkou_b_val = senkou_span_b_aligned[i]
-        ema_50_val = ema_50_aligned[i]
+        ema_34_1w_val = ema_34_1w_aligned[i]
+        r1_1d_val = r1_1d_aligned[i]
+        s1_1d_val = s1_1d_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_val = volume[i]
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
         
-        # Calculate cloud boundaries (Senkou Span A and B)
-        upper_cloud = max(senkou_a_val, senkou_b_val)
-        lower_cloud = min(senkou_a_val, senkou_b_val)
-        
-        # Volume confirmation: current volume > 1.5x 24-period average
+        # Volume confirmation: current volume > 1.5x 48-period average
         volume_confirmed = vol_val > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: price breaks above cloud with uptrend (close > EMA50) and volume confirmation
-            long_signal = (close_val > upper_cloud) and (close_val > ema_50_val) and volume_confirmed
-            # Short: price breaks below cloud with downtrend (close < EMA50) and volume confirmation
-            short_signal = (close_val < lower_cloud) and (close_val < ema_50_val) and volume_confirmed
+            # Long: price breaks above R1 with uptrend (close > EMA34) and volume confirmation
+            long_signal = (high_val > r1_1d_val) and (close_val > ema_34_1w_val) and volume_confirmed
+            # Short: price breaks below S1 with downtrend (close < EMA34) and volume confirmation
+            short_signal = (low_val < s1_1d_val) and (close_val < ema_34_1w_val) and volume_confirmed
             
             if long_signal:
                 signals[i] = 0.25
@@ -123,13 +107,13 @@ def generate_signals(prices):
             # Long: hold position
             signals[i] = 0.25
             # Exit conditions:
-            # 1. Price closes below cloud (exit long)
-            if close_val < lower_cloud:
+            # 1. Opposite breakout: price breaks below S1 (exit long)
+            if low_val < s1_1d_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # 2. Trend reversal: close crosses below EMA50
-            elif close_val < ema_50_val:
+            # 2. Trend reversal: close crosses below EMA34
+            elif close_val < ema_34_1w_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -137,19 +121,19 @@ def generate_signals(prices):
             # Short: hold position
             signals[i] = -0.25
             # Exit conditions:
-            # 1. Price closes above cloud (exit short)
-            if close_val > upper_cloud:
+            # 1. Opposite breakout: price breaks above R1 (exit short)
+            if high_val > r1_1d_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # 2. Trend reversal: close crosses above EMA50
-            elif close_val > ema_50_val:
+            # 2. Trend reversal: close crosses above EMA34
+            elif close_val > ema_34_1w_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
