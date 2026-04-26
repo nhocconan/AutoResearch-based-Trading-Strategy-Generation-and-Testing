@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ADX_Alligator_Filter_1dTrend_Volume
-Hypothesis: On 6h timeframe, enter long when ADX > 25 (trending), price > Alligator Jaw (EMA13) AND 1d trend is up (close > EMA34) AND volume > 1.5x 20-period average volume. Enter short when ADX > 25, price < Alligator Jaw (EMA13) AND 1d trend is down (close < EMA34) AND volume > 1.5x 20-period average volume. Exit when ADX < 20 (range) or price crosses Alligator Teeth (EMA8). Uses discrete sizing (0.0, ±0.25) to limit fee drag. Target: 12-37 trades/year.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_DynamicSize
+Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level AND 1d trend is up (close > EMA34) AND volume > 1.5x 20-period average volume. Enter short when price breaks below Camarilla S1 level AND 1d trend is down (close < EMA34) AND volume > 1.5x 20-period average volume. Exit on trend reversal or price retracing to Camarilla midpoint. Uses dynamic position sizing based on volume strength (0.15-0.30) to maximize edge while controlling fee drag. Target: 12-37 trades/year. Works in both bull and bear markets by following the 1d trend while using Camarilla levels for precise entries and volume spike for confirmation.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -28,109 +28,99 @@ def generate_signals(prices):
     ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Alligator (6h timeframe): Jaw=EMA13, Teeth=EMA8, Lips=EMA5
-    close_s = pd.Series(close)
-    jaw = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values  # Jaw (EMA13)
-    teeth = close_s.ewm(span=8, adjust=False, min_periods=8).mean().values   # Teeth (EMA8)
-    lips = close_s.ewm(span=5, adjust=False, min_periods=5).mean().values    # Lips (EMA5)
+    # Calculate 1d Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_raw = df_1d['close'].values
     
-    # Calculate ADX (6h timeframe)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d_raw, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        else:
-            plus_dm[i] = 0
-            
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
-        else:
-            minus_dm[i] = 0
-            
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    camarilla_range = prev_high_1d - prev_low_1d
+    r1 = prev_close_1d + 1.1 * camarilla_range / 12
+    s1 = prev_close_1d - 1.1 * camarilla_range / 12
+    mid = (r1 + s1) / 2  # Camarilla midpoint for exit
     
-    # Wilder's smoothing
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, n):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align Camarilla levels and EMA34 to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    mid_aligned = align_htf_to_ltf(prices, df_1d, mid)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    tr14 = wilders_smoothing(tr, 14)
-    plus_dm14 = wilders_smoothing(plus_dm, 14)
-    minus_dm14 = wilders_smoothing(minus_dm, 14)
-    
-    plus_di14 = 100 * plus_dm14 / tr14
-    minus_di14 = 100 * minus_dm14 / tr14
-    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: dynamic threshold based on volume strength
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * volume_ma
+    volume_ratio = np.where(volume_ma > 0, volume / volume_ma, 1.0)
+    volume_spike = volume_ratio > 1.5  # Require 1.5x average volume
+    
+    # Dynamic position sizing based on volume strength (0.15-0.30)
+    # Cap volume ratio at 3.0 for sizing calculation
+    volume_ratio_capped = np.minimum(volume_ratio, 3.0)
+    # Map volume ratio 1.0-3.0 to position size 0.15-0.30
+    position_size = 0.15 + 0.15 * (volume_ratio_capped - 1.0) / 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need ADX, Alligator, volume MA, and 1d EMA warmup
-    start_idx = max(14+13, 20, 34)  # ADX needs ~27, Alligator Jaw needs 13, volume MA needs 20, 1d EMA needs 34
+    # Warmup: need EMA warmup and volume MA warmup
+    start_idx = max(34, 20)  # EMA34 needs 34, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = position_size[i]
             else:
-                signals[i] = -0.25
+                signals[i] = -position_size[i]
             continue
         
-        # Entry conditions
-        adx_trending = adx[i] > 25
-        adx_ranging = adx[i] < 20
+        # Breakout conditions
+        breakout_up = close[i] > r1_aligned[i]
+        breakout_down = close[i] < s1_aligned[i]
+        
+        # 1d trend filter
+        trend_uptrend = close[i] > ema_34_1d_aligned[i]
+        trend_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: ADX trending, price > Jaw, 1d uptrend, volume spike
-            long_signal = adx_trending and (close[i] > jaw[i]) and (close[i] > ema_34_1d_aligned[i]) and volume_spike[i]
+            # Long: breakout above R1 + volume spike + 1d uptrend
+            long_signal = breakout_up and volume_spike[i] and trend_uptrend
             
-            # Short: ADX trending, price < Jaw, 1d downtrend, volume spike
-            short_signal = adx_trending and (close[i] < jaw[i]) and (close[i] < ema_34_1d_aligned[i]) and volume_spike[i]
+            # Short: breakout below S1 + volume spike + 1d downtrend
+            short_signal = breakout_down and volume_spike[i] and trend_downtrend
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = position_size[i]
                 position = 1
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -position_size[i]
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
-            # Exit: ADX ranging OR price < Teeth (EMA8)
-            if adx_ranging or close[i] < teeth[i]:
+            signals[i] = position_size[i]
+            # Exit: trend change to downtrend OR price retracing to Camarilla midpoint
+            if not trend_uptrend or close[i] < mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
-            # Exit: ADX ranging OR price > Teeth (EMA8)
-            if adx_ranging or close[i] > teeth[i]:
+            signals[i] = -position_size[i]
+            # Exit: trend change to uptrend OR price retracing to Camarilla midpoint
+            if not trend_downtrend or close[i] > mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ADX_Alligator_Filter_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_DynamicSize"
+timeframe = "12h"
 leverage = 1.0
