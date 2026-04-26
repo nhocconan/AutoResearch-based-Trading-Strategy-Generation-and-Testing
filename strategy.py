@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_WilliamsFractal_Breakout_1dTrend_VolumeSpike
-Hypothesis: Williams fractal breakouts on 6h with 1d EMA50 trend filter and volume confirmation. 
-Fractals require 2-bar confirmation (aligned with extra delay) to avoid look-ahead. 
-Targets 50-150 total trades over 4 years by requiring confluence of trend, volume, and fractal breakout. 
-Works in bull/bear markets via 1d trend filter (EMA50). 
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts on 12h with 1d EMA34 trend filter and volume confirmation. 
+Targets 50-150 total trades over 4 years by requiring confluence of trend, volume, and Camarilla breakout. 
+Works in bull/bear markets via 1d trend filter (EMA34). Uses proper MTF alignment to avoid look-ahead.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,14 +22,14 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop for HTF trend filter and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1d ATR(14) for stoploss
     high_1d = df_1d['high'].values
@@ -46,56 +45,55 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate Williams fractals on 1d (requires 2 extra bars for confirmation)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Align with 2-bar delay for fractal confirmation (needs 2 future 1d bars)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    # Calculate Camarilla levels from 1d OHLC
+    # Camarilla: R4 = close + 1.5*(high-low)*1.1/2, R3 = close + 1.25*(high-low)*1.1/2
+    #          S3 = close - 1.25*(high-low)*1.1/2, S4 = close - 1.5*(high-low)*1.1/2
+    # But we only need R3 and S3 for breakout
+    range_1d = high_1d - low_1d
+    camarilla_r3_1d = close_1d + 1.25 * range_1d * 1.1 / 2
+    camarilla_s3_1d = close_1d - 1.25 * range_1d * 1.1 / 2
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
     # Volume spike: volume > 1.5x 20-period median volume
     volume_series = pd.Series(volume)
     vol_median_20 = volume_series.rolling(window=20, min_periods=20).median().values
     volume_spike = volume > (1.5 * vol_median_20)
     
-    # Reduced fixed position size to control trade frequency and drawdown
+    # Position size: 0.25 (25% of capital) to control trade frequency and drawdown
     fixed_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need 50 for 1d EMA, 14 for ATR, 20 for volume median
-    start_idx = max(50, 14, 20)
+    # Warmup: need 34 for 1d EMA, 14 for ATR, 20 for volume median
+    start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(camarilla_r3_1d_aligned[i]) or
+            np.isnan(camarilla_s3_1d_aligned[i]) or
             np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_50_val = ema_50_1d_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
         atr_val = atr_14_1d_aligned[i]
         vol_spike = volume_spike[i]
+        r3_level = camarilla_r3_1d_aligned[i]
+        s3_level = camarilla_s3_1d_aligned[i]
         size = fixed_size
         
         if position == 0:
             # Flat - look for entry
-            # Bullish fractal breakout: high > bullish_fractal and volume spike, in uptrend (close > EMA50_1d)
-            long_entry = (high[i] > bullish_fractal_aligned[i]) and vol_spike and (close_val > ema_50_val)
-            # Bearish fractal breakout: low < bearish_fractal and volume spike, in downtrend (close < EMA50_1d)
-            short_entry = (low[i] < bearish_fractal_aligned[i]) and vol_spike and (close_val < ema_50_val)
+            # Long breakout: high > R3 and volume spike, in uptrend (close > EMA34_1d)
+            long_entry = (high[i] > r3_level) and vol_spike and (close_val > ema_34_val)
+            # Short breakout: low < S3 and volume spike, in downtrend (close < EMA34_1d)
+            short_entry = (low[i] < s3_level) and vol_spike and (close_val < ema_34_val)
             
             if long_entry:
                 signals[i] = size
@@ -108,18 +106,18 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on trend reversal, ATR stoploss, or at bearish fractal (take profit)
+            # Long - exit on trend reversal, ATR stoploss, or at S3 (take profit)
             stop_price = entry_price - 2.0 * atr_val
-            if close_val < ema_50_val or close_val < stop_price or low[i] < bearish_fractal_aligned[i]:
+            if close_val < ema_34_val or close_val < stop_price or low[i] < s3_level:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on trend reversal, ATR stoploss, or at bullish fractal (take profit)
+            # Short - exit on trend reversal, ATR stoploss, or at R3 (take profit)
             stop_price = entry_price + 2.0 * atr_val
-            if close_val > ema_50_val or close_val > stop_price or high[i] > bullish_fractal_aligned[i]:
+            if close_val > ema_34_val or close_val > stop_price or high[i] > r3_level:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -128,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsFractal_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
