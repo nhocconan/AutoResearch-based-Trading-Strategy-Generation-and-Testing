@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: Camarilla R3/S3 breakouts on 6h with 1d EMA34 trend filter and volume confirmation. 
-R3/S3 levels represent stronger support/resistance than R1/S1, reducing false breakouts. 
-The 1d EMA34 provides medium-term trend alignment that works in both bull and bear markets. 
-Volume confirmation ensures breakouts occur with participation. Targeting 60-120 total trades 
-over 4 years (15-30/year) to balance signal quality and fee drag.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_v1
+Hypothesis: Camarilla R3/S3 breakouts on 12h with 1d EMA34 trend filter and volume confirmation.
+Targets 50-150 total trades over 4 years (12-37/year) to avoid fee drag. Uses discrete position sizing
+(0.0, ±0.25) to minimize transaction costs. Designed to work in both bull and bear markets by
+aligning with the 1d trend while using strong R3/S3 levels to reduce false breakouts.
 """
 
 import numpy as np
@@ -30,7 +29,7 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate ATR(14) on 6h for volume normalization
+    # Calculate ATR(14) on 12h for volatility normalization
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -53,7 +52,7 @@ def generate_signals(prices):
     r3 = prev_close + (camarilla_range * 1.1 / 4)
     s3 = prev_close - (camarilla_range * 1.1 / 4)
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -118,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
