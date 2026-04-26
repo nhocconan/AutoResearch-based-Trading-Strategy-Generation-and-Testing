@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 Works in bull/bear markets by combining Camarilla pivot structure (R3/S3 = strong breakout levels) 
 with 1d trend filter to avoid counter-trend trades. Designed for 50-150 total trades over 4 years 
 (12-37/year) with discrete position sizing (0.0, ±0.25).
@@ -33,7 +33,7 @@ def generate_signals(prices):
     camarilla_R3 = df_1d['close'].values + camarilla_range * 3
     camarilla_S3 = df_1d['close'].values - camarilla_range * 3
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
     camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
     
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
