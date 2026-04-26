@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v4
-Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level AND 1d trend is up (close > EMA34) AND volume > 2.0x 20-period average. Enter short when price breaks below S1 level AND 1d trend is down (close < EMA34) AND volume spike. Uses tighter Camarilla levels (R1/S1) for more precise entries, 1d EMA34 for slower trend filter (more reliable than 12h), and volume confirmation to reduce false breakouts. Designed for moderate trade frequency (20-40/year) with strong risk control via trend alignment and volatility filters. Targets BTC/ETH with SOL as secondary confirmation.
+6h_WilliamsVIXFix_Breakout_1dTrend
+Hypothesis: On 6h timeframe, enter long when price breaks above Donchian(20) high AND Williams VIX Fix > 0.8 (extreme fear) AND 1d trend is up (close > EMA50). Enter short when price breaks below Donchian(20) low AND Williams VIX Fix < 0.2 (extreme greed) AND 1d trend is down (close < EMA50). Uses Williams VIX Fix to detect exhaustion during extreme volatility spikes, which often precedes reversals. The Donchian breakout provides entry timing, while 1d EMA50 filters for higher-timeframe trend alignment. Designed for low trade frequency (15-30/year) with strong edge in both bull and bear markets by buying panic and selling euphoria.
 """
 
 import numpy as np
@@ -18,55 +18,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d_series = pd.Series(df_1d['close'].values)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Daily Camarilla Pivot Levels (R1, S1)
-    # Based on previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Williams VIX Fix: measures market fear/greed using price range relative to recent high
+    # VIX Fix = (Highest High in period - Low) / (Highest High in period - Lowest Low in period) * 100
+    # We invert it so high values = fear, low values = greed
+    lookback = 22  # ~1 month for 6h (22*6h = 5.5 days)
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    vix_fix = (highest_high - low) / np.maximum(highest_high - lowest_low, 1e-10)
+    # Invert: high VIX Fix = fear (good for long), low VIX Fix = greed (good for short)
     
-    # Camarilla levels: R1 = close + ((high-low)*1.1/12), S1 = close - ((high-low)*1.1/12)
-    camarilla_r1 = close_1d + ((high_1d - low_1d) * 1.1 / 12)
-    camarilla_s1 = close_1d - ((high_1d - low_1d) * 1.1 / 12)
-    
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume confirmation: volume > 2.0x 20-period average
-    volume_series = pd.Series(volume)
-    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 2.0
-    
-    # ATR for volatility filter (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Donchian channels for breakout
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA warmup (34), volume MA warmup (20), ATR warmup (14)
-    start_idx = max(34, 20, 14)
+    # Warmup: need Donchian (20), VIX Fix (22), EMA50 (50)
+    start_idx = max(donchian_period, lookback, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vix_fix[i]) or np.isnan(ema_50_1d_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -76,25 +61,24 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # ATR filter: only trade when volatility is normal (not extreme)
-        atr_mean = np.mean(atr[max(0, i-50):i]) if i > 0 else atr[i]
-        atr_ratio = atr[i] / np.maximum(atr_mean, 1e-10)
-        volatility_normal = (atr_ratio > 0.3) & (atr_ratio < 3.0)
-        
-        # Breakout conditions relative to Camarilla levels
-        breakout_above_r1 = close[i] > camarilla_r1_aligned[i]
-        breakout_below_s1 = close[i] < camarilla_s1_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > donchian_high[i]
+        breakout_down = close[i] < donchian_low[i]
         
         # 1d trend filter
-        trend_uptrend = close[i] > ema_34_1d_aligned[i]
-        trend_downtrend = close[i] < ema_34_1d_aligned[i]
+        trend_uptrend = close[i] > ema_50_1d_aligned[i]
+        trend_downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Williams VIX Fix conditions: extreme fear/greed
+        extreme_fear = vix_fix[i] > 0.8   # High fear = potential long
+        extreme_greed = vix_fix[i] < 0.2  # High greed = potential short
         
         if position == 0:
-            # Long: price above R1 + 1d uptrend + volume spike + normal volatility
-            long_signal = breakout_above_r1 and trend_uptrend and volume_spike[i] and volatility_normal
+            # Long: breakout up + extreme fear + 1d uptrend
+            long_signal = breakout_up and extreme_fear and trend_uptrend
             
-            # Short: price below S1 + 1d downtrend + volume spike + normal volatility
-            short_signal = breakout_below_s1 and trend_downtrend and volume_spike[i] and volatility_normal
+            # Short: breakout down + extreme greed + 1d downtrend
+            short_signal = breakout_down and extreme_greed and trend_downtrend
             
             if long_signal:
                 signals[i] = 0.25
@@ -107,20 +91,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price breaks below S1 OR trend change to downtrend OR volatility extreme
-            if close[i] < camarilla_s1_aligned[i] or not trend_uptrend or not volatility_normal:
+            # Exit: price breaks below Donchian low OR trend change OR fear subsides
+            if close[i] < donchian_low[i] or not trend_uptrend or vix_fix[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price breaks above R1 OR trend change to uptrend OR volatility extreme
-            if close[i] > camarilla_r1_aligned[i] or not trend_downtrend or not volatility_normal:
+            # Exit: price breaks above Donchian high OR trend change OR greed subsides
+            if close[i] > donchian_high[i] or not trend_downtrend or vix_fix[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v4"
-timeframe = "4h"
+name = "6h_WilliamsVIXFix_Breakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
