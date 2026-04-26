@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v3
-Hypothesis: On 4h timeframe, trade breakouts above/below daily Camarilla R1/S1 only when aligned with 1d EMA34 trend and confirmed by volume spike (>2.0x 20-bar average). Camarilla levels from daily timeframe provide institutional support/resistance. 1d EMA34 ensures trend alignment. Volume spike filters weak breakouts. Designed for 4h to capture swing moves in both bull and bear markets with tight entries (target: 20-50 trades/year). Uses discrete sizing (0.30) to limit fee drag.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v4
+Hypothesis: On 4h timeframe, trade breakouts above/below daily Camarilla R1/S1 only when aligned with 1d EMA34 trend and confirmed by volume spike (>2.0x 20-bar average). Uses tighter volume threshold (3.0x) and adds ATR-based trailing stop to reduce trade frequency and improve edge. Target: 15-30 trades/year. Works in bull/bear via trend filter and volatility-adjusted exits.
 """
 
 import numpy as np
@@ -57,13 +57,15 @@ def generate_signals(prices):
     tr[0] = high[0] - low[0]  # first bar
     atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Volume spike: current volume > 3.0 * 20-period average (tighter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (3.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     # Warmup: max of pivot calc (1), EMA34 (34), ATR (14), volume MA (20)
     start_idx = max(1, 34, 14, 20) + 1
@@ -79,9 +81,9 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
             continue
         
         r1_val = r1_aligned[i]
@@ -99,32 +101,36 @@ def generate_signals(prices):
             short_signal = (close_val < s1_val) and (close_val < ema_34_val) and vol_spike
             
             if long_signal:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_val
+                highest_since_entry = close_val
             elif short_signal:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_val
+                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.30
-            # Exit: price breaks below S1 OR ATR stoploss (2.0*ATR below entry)
-            if (close_val < s1_val) or (close_val < entry_price - 2.0 * atr_val):
+            signals[i] = 0.25
+            highest_since_entry = max(highest_since_entry, close_val)
+            # Exit: price breaks below S1 OR ATR trailing stop (2.5*ATR below highest)
+            if (close_val < s1_val) or (close_val < highest_since_entry - 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.30
-            # Exit: price breaks above R1 OR ATR stoploss (2.0*ATR above entry)
-            if (close_val > r1_val) or (close_val > entry_price + 2.0 * atr_val):
+            signals[i] = -0.25
+            lowest_since_entry = min(lowest_since_entry, close_val)
+            # Exit: price breaks above R1 OR ATR trailing stop (2.5*ATR above lowest)
+            if (close_val > r1_val) or (close_val > lowest_since_entry + 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v3"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v4"
 timeframe = "4h"
 leverage = 1.0
