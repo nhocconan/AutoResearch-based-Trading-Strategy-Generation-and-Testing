@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike capture institutional participation with controlled frequency. Target: 50-150 total trades over 4 years (12-37/year).
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v2
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation capture institutional participation with minimal overtrading. R1/S1 levels are the most significant Camarilla support/resistance, breaks indicate strong momentum. 1d EMA34 ensures alignment with primary trend, volume spike confirms participation. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -51,7 +51,7 @@ def generate_signals(prices):
     camarilla_r4 = prev_close + range_1d * 1.1 / 2
     camarilla_s4 = prev_close - range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
@@ -61,15 +61,15 @@ def generate_signals(prices):
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Volume spike detection on 12h (volume > 1.5x 20-period EMA)
-    volume_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (volume_ema * 1.5)
+    # Volume spike detection on 4h (volume > 1.8x 30-period EMA to reduce false signals)
+    volume_ema = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
+    volume_spike = volume > (volume_ema * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need sufficient data for all indicators)
-    start_idx = max(34, 20)
+    start_idx = max(50, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
