@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike (>1.5x average volume). Uses discrete position sizing (0.25) to minimize fee churn. ATR-based stoploss (2.0x ATR) manages risk. Designed for 12h timeframe to target 50-150 trades over 4 years, balancing opportunity with fee efficiency. Works in both bull and bear markets by following the 1d trend direction, confirmed by volume to avoid false breakouts.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ATRStop_v2
+Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter and volume spike (>2x average volume). Uses discrete position sizing (0.25) to minimize fee churn. ATR-based stoploss (2.5x ATR) manages risk. Works in both bull and bear markets by following the 1d trend direction, confirmed by volume to avoid false breakouts.
 """
 
 import numpy as np
@@ -32,13 +32,13 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R1 and S1 levels (tighter breakout levels for fewer trades)
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (1 bar delay for completed 1d bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to 4h timeframe (1 bar delay for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate average volume for confirmation (20-period SMA)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,13 +68,13 @@ def generate_signals(prices):
         vol = volume[i]
         avg_vol = avg_volume[i]
         ema_val = ema_34_1d_aligned[i]
-        r1_val = camarilla_r1_aligned[i]
-        s1_val = camarilla_s1_aligned[i]
+        r3_val = camarilla_r3_aligned[i]
+        s3_val = camarilla_s3_aligned[i]
         atr_val = atr[i]
         
         # Skip if any data not ready
-        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(atr_val)):
+        if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r3_val) or 
+            np.isnan(s3_val) or np.isnan(atr_val)):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -84,17 +84,17 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume (moderate breakout)
-        volume_confirmed = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 2x average volume (strong breakout)
+        volume_confirmed = vol > 2.0 * avg_vol
         
-        # Long logic: price breaks above Camarilla R1 with 1d uptrend and volume confirmation
-        long_condition = (close_val > r1_val) and (close_val > ema_val) and volume_confirmed
-        # Short logic: price breaks below Camarilla S1 with 1d downtrend and volume confirmation
-        short_condition = (close_val < s1_val) and (close_val < ema_val) and volume_confirmed
+        # Long logic: price breaks above Camarilla R3 with 1d uptrend and volume confirmation
+        long_condition = (close_val > r3_val) and (close_val > ema_val) and volume_confirmed
+        # Short logic: price breaks below Camarilla S3 with 1d downtrend and volume confirmation
+        short_condition = (close_val < s3_val) and (close_val < ema_val) and volume_confirmed
         
-        # Stoploss logic: ATR-based (2.0x ATR from entry)
-        stoploss_long = position == 1 and close_val < entry_price - 2.0 * atr_val
-        stoploss_short = position == -1 and close_val > entry_price + 2.0 * atr_val
+        # Stoploss logic: ATR-based (2.5x ATR from entry)
+        stoploss_long = position == 1 and close_val < entry_price - 2.5 * atr_val
+        stoploss_short = position == -1 and close_val > entry_price + 2.5 * atr_val
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
