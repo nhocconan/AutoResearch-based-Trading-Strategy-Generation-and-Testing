@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1
-Hypothesis: 6-hour Camarilla R1/S1 breakout with daily EMA34 trend filter and volume spike confirmation.
-Designed for low trade frequency (target 12-30/year) to minimize fee drag while capturing medium-term swings.
+12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v2
+Hypothesis: 12-hour Camarilla R1/S1 breakout with daily EMA34 trend filter and volume spike confirmation.
+Designed for low trade frequency (target 12-37/year) to minimize fee drag while capturing medium-term swings.
 The daily EMA34 provides trend filter that works across regimes, and breakouts at Camarilla R1/S1 with
 volume confirmation offer high-probability entries. Focuses on BTC and ETH for robustness.
 """
@@ -31,7 +31,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for stoploss on 6h
+    # Calculate ATR(14) for stoploss on 12h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -71,9 +71,9 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
             continue
         
         close_val = close[i]
@@ -89,25 +89,25 @@ def generate_signals(prices):
             short_signal = (close_val < camarilla_s1_aligned[i]) and trend_1d_down and vol_spike
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = close_val
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
+            signals[i] = 0.30
             # Exit: trend flips down OR price hits ATR stoploss
             if (not trend_1d_up) or (close_val < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
+            signals[i] = -0.30
             # Exit: trend flips up OR price hits ATR stoploss
             if (not trend_1d_down) or (close_val > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
