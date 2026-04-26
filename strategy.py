@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeChop_v1
-Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume confirmation, and choppiness regime filter produce fewer but higher-quality trades. The chop filter avoids whipsaws in ranging markets, improving performance in both bull and bear regimes. Target: 75-200 total trades over 4 years (19-50/year).
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeChop_v2
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume confirmation (>2.5x 20-period average), and choppiness regime filter (CHOP<40) produce high-quality trades with low frequency. The strict volume and chop filters reduce whipsaws and overtrading, improving performance in both bull and bear markets while keeping total trades within target range (50-150 over 4 years).
 """
 
 import numpy as np
@@ -26,25 +26,23 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla levels (R1, S1)
+    # Calculate 1d Camarilla levels (R1, S1) using previous 1d's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_shifted = np.concatenate([[np.nan], close_1d[:-1]])  # previous 1d close
     
-    # Camarilla calculation uses previous 1d's OHLC
     camarilla_range = high_1d - low_1d
     r1 = close_1d_shifted + 1.1 * camarilla_range / 12
     s1 = close_1d_shifted - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 4h volume confirmation: volume > 2.0x 20-period average (stricter)
+    # 12h volume confirmation: volume > 2.5x 20-period average (stricter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 4h choppiness index: CHOP > 61.8 = ranging (avoid breakouts), CHOP < 38.2 = trending (favor breakouts)
-    # CHOP = 100 * log10(sum(ATR14) / (max(high,n) - min(low,n))) / log10(n)
+    # 12h choppiness index: CHOP < 40 = strong trend (favor breakouts), CHOP > 61.8 = ranging (avoid)
     tr1 = np.maximum(high - low, np.absolute(high - np.concatenate([[np.nan], close[:-1]])))
     tr2 = np.maximum(tr1, np.absolute(low - np.concatenate([[np.nan], close[:-1]])))
     atr14 = pd.Series(tr2).rolling(window=14, min_periods=14).mean().values
@@ -80,11 +78,11 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (stricter)
-        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation (stricter: 2.5x average)
+        volume_spike = volume[i] > 2.5 * vol_ma_20[i]
         
-        # Choppiness regime: only take breakouts when CHOP < 50 (less choppy/more trending)
-        regime_ok = chop[i] < 50.0
+        # Choppiness regime: only take breakouts when CHOP < 40 (strong trend)
+        regime_ok = chop[i] < 40.0
         
         # Camarilla breakout conditions
         breakout_r1 = close[i] > r1_aligned[i]
@@ -104,7 +102,7 @@ def generate_signals(prices):
                 position = -1
             else:
                 signals[i] = -0.25
-        # Exit conditions: loss of trend OR regime becomes too choppy
+        # Exit conditions: loss of trend OR regime becomes too choppy (CHOP >= 61.8)
         elif position == 1 and (not uptrend or chop[i] >= 61.8):
             signals[i] = 0.0
             position = 0
@@ -122,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeChop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeChop_v2"
+timeframe = "12h"
 leverage = 1.0
