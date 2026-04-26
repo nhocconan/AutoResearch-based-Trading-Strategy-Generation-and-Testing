@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1wTrend_VolumeConfirmation
-Hypothesis: 6-hour Ichimoku TK cross with 1-week cloud filter and volume confirmation.
-In bull: price above cloud + TK cross up + volume spike → long.
-In bear: price below cloud + TK cross down + volume spike → short.
-Weekly trend (price vs weekly EMA20) filters direction to avoid counter-trend whipsaws.
-Ichimoku works well on 6h timeframe for capturing medium-term trends with clear entry/exit.
-Target: 12-30 trades/year to stay within fee limits.
+12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1
+Hypothesis: 12-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter and volume spike confirmation.
+Uses 12h primary with 1d HTF for trend alignment. Targets 12-37 trades/year to minimize fee drag.
+Works in bull via breakouts above R1 with 1d uptrend, in bear via breakdowns below S1 with 1d downtrend.
+Volume spike (>2x 20-bar MA) confirms conviction. Discrete sizing (0.0, ±0.25) reduces churn.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,54 +21,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate EMA(34) on 1d for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Chikou Span (Lagging Span): close plotted 26 periods behind
-    # Not used for signals due to look-ahead concerns
+    # Calculate ATR(14) for stoploss on 12h
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate volume ratio (current / 20-period average) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.maximum(vol_ma, 1e-10)  # avoid division by zero
     
+    # Calculate Camarilla levels from previous 1d bar
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    camarilla_r1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
+    camarilla_s1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
+    
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of Ichimoku periods (52), weekly EMA(20), volume MA(20)
-    start_idx = max(52, 20, 20) + 1
+    # Warmup: max of 1d EMA(34), ATR(14), volume MA(20)
+    start_idx = max(34, 14, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(vol_ratio[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -82,27 +78,15 @@ def generate_signals(prices):
         
         close_val = close[i]
         vol_spike = vol_ratio[i] > 2.0  # volume at least 2x average
-        
-        # Ichimoku signals
-        tk_cross_up = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        tk_cross_down = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
-        
-        # Cloud trend: price above/both Senkou lines
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
-        price_above_cloud = close_val > cloud_top
-        price_below_cloud = close_val < cloud_bottom
-        
-        # Weekly trend filter
-        weekly_uptrend = close_val > ema_20_1w_aligned[i]
-        weekly_downtrend = close_val < ema_20_1w_aligned[i]
+        trend_1d_up = close_val > ema_34_1d_aligned[i]
+        trend_1d_down = close_val < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: TK cross up + price above cloud + weekly uptrend + volume spike
-            long_signal = tk_cross_up and price_above_cloud and weekly_uptrend and vol_spike
+            # Long: price breaks above Camarilla R1 AND 1d trend up AND volume spike
+            long_signal = (close_val > camarilla_r1_aligned[i]) and trend_1d_up and vol_spike
             
-            # Short: TK cross down + price below cloud + weekly downtrend + volume spike
-            short_signal = tk_cross_down and price_below_cloud and weekly_downtrend and vol_spike
+            # Short: price breaks below Camarilla S1 AND 1d trend down AND volume spike
+            short_signal = (close_val < camarilla_s1_aligned[i]) and trend_1d_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -117,20 +101,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: TK cross down OR price falls below cloud OR weekly trend turns down
-            if tk_cross_down or (close_val < cloud_top) or (not weekly_uptrend):
+            # Exit: trend flips down OR price hits ATR stoploss
+            if (not trend_1d_up) or (close_val < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: TK cross up OR price rises above cloud OR weekly trend turns up
-            if tk_cross_up or (close_val > cloud_bottom) or (not weekly_downtrend):
+            # Exit: trend flips up OR price hits ATR stoploss
+            if (not trend_1d_down) or (close_val > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1wTrend_VolumeConfirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
