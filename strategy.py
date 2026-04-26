@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakouts on 4h with 1d EMA34 trend filter and volume spike (>2x average volume). 
-In bull markets: price breaks above R3 with 1d uptrend and high volume → long. 
-In bear markets: price breaks below S3 with 1d downtrend and high volume → short. 
-Uses discrete position sizing (0.25) to minimize fee churn. Target: 100-200 trades over 4 years (25-50/year) on 4h timeframe.
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Filtered
+Hypothesis: Camarilla R3/S3 breakouts on 12h with 1d EMA34 trend filter and volume spike (>2.5x average volume).
+In bull markets: price breaks above R3 with 1d uptrend and high volume → long.
+In bear markets: price breaks below S3 with 1d downtrend and high volume → short.
+Added stricter volume confirmation (2.5x) and trend filter (price must close beyond EMA34 by 0.5%) to reduce trades and improve quality.
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 trades over 4 years (12-37/year) on 12h timeframe.
 Requires BTC/ETH edge via 1d trend and volume filters; avoids SOL-only bias by requiring trend alignment.
 """
 
@@ -43,8 +44,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Calculate Camarilla levels using previous day's OHLC
-        # For 4h timeframe, previous day = previous 6 bars
-        prev_1d_idx = i - 6
+        # For 12h timeframe, previous day = previous 2 bars
+        prev_1d_idx = i - 2
         if prev_1d_idx < 0:
             # Hold current position
             if position == 0:
@@ -91,17 +92,21 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume
-        volume_confirmed = vol > 2.0 * avg_vol
+        # Volume confirmation: current volume > 2.5x average volume (stricter)
+        volume_confirmed = vol > 2.5 * avg_vol
+        
+        # Trend confirmation: price must close beyond EMA34 by 0.5% to avoid whipsaws
+        trend_long = close_val > ema_val * 1.005
+        trend_short = close_val < ema_val * 0.995
         
         # Long logic: price breaks above R3 with 1d uptrend and volume confirmation
-        long_condition = (close_val > R3) and (close_val > ema_val) and volume_confirmed
+        long_condition = (close_val > R3) and trend_long and volume_confirmed
         # Short logic: price breaks below S3 with 1d downtrend and volume confirmation
-        short_condition = (close_val < S3) and (close_val < ema_val) and volume_confirmed
+        short_condition = (close_val < S3) and trend_short and volume_confirmed
         
         # Exit logic: trend reversal or opposite breakout
-        exit_long = (close_val < ema_val) or (close_val < S3)
-        exit_short = (close_val > ema_val) or (close_val > R3)
+        exit_long = (close_val < ema_val * 0.995) or (close_val < S3)
+        exit_short = (close_val > ema_val * 1.005) or (close_val > R3)
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -126,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Filtered"
+timeframe = "12h"
 leverage = 1.0
