@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1
-Hypothesis: On 12h timeframe, use Camarilla R1/S1 from 1d pivot points for breakout entries with 1d trend filter (close > 1d EMA34) and volume confirmation (>2.0x 20-period average). Add choppiness regime filter (CHOP > 61.8 = range, only mean-revert at extremes) to avoid whipsaws in bear markets. Target: 12-37 trades/year. Uses R1/S1 levels (proven edge) with volume/trend confirmation to reduce false breakouts while maintaining edge in both bull and bear regimes.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Regime_v2
+Hypothesis: Use Camarilla R1/S1 from daily pivot points for breakout entries with 1d EMA34 trend filter and volume confirmation (>1.8x 20-period average). Add choppiness regime filter (CHOP > 61.8 = range, only mean-revert at extremes) to avoid whipsaws in bear markets. Reduced volume threshold and tightened breakout confirmation to lower trade frequency vs v1. Target: 19-50 trades/year. Focus on BTC/ETH edge via proven Camarilla structure with regime adaptation.
 """
 
 import numpy as np
@@ -47,15 +47,15 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels and EMA to 12h timeframe
+    # Align Camarilla levels and EMA to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average (reduced from 2.0x)
     volume_series = pd.Series(volume)
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 2.0
+    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 1.8
     
     # Choppiness regime filter: CHOP(14) > 61.8 = range (mean revert), CHOP < 38.2 = trending
     def choppiness_index(high, low, close, window=14):
@@ -107,7 +107,7 @@ def generate_signals(prices):
         trend_1d_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 + 1d uptrend + volume spike + NOT in strong range (avoid false breakouts)
+            # Long: price breaks above R1 + 1d uptrend + volume spike + NOT in strong range
             # Require confirmation: price outside bands for 2 consecutive bars
             long_breakout = (close[i] > camarilla_r1_aligned[i]) and (close[i-1] > camarilla_r1_aligned[i-1])
             long_signal = long_breakout and trend_1d_uptrend and volume_spike[i] and not chop_range[i]
@@ -127,7 +127,7 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price touches S1 OR 1d trend turns down OR chop becomes strong range (revert to mean)
+            # Exit: price touches S1 OR 1d trend turns down OR chop becomes strong range
             if (close[i] < camarilla_s1_aligned[i] or not trend_1d_uptrend or chop_range[i]):
                 signals[i] = 0.0
                 position = 0
@@ -141,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Regime_v2"
+timeframe = "4h"
 leverage = 1.0
