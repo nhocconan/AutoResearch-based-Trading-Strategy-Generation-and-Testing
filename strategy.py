@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_RegimeFilter
-Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike, and choppiness regime filter on 12h timeframe.
-Only trade in direction of 1d trend with volume > 1.5x 20-period median volume and chop < 61.8 (trending market).
-Uses discrete sizing 0.25 to target 12-37 trades/year. Works in bull/bear via 1d trend filter and avoids choppy markets via regime filter.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume spike confirmation on 4h timeframe.
+Only trade in direction of 1d trend (EMA50) with volume > 1.8x 24-period median volume. Uses discrete sizing 0.25 to target 20-50 trades/year.
+Works in bull/bear via 1d trend filter and volume confirmation reduces false breakouts.
 """
 
 import numpy as np
@@ -22,63 +22,39 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Camarilla levels from prior 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla R3, S3, R4, S4 for each 1d bar
+    # Calculate Camarilla R1, S1, R2, S2 for each 1d bar
+    # R2 = close + 1.25*(high-low), R1 = close + 1.083*(high-low)
+    # S1 = close - 1.083*(high-low), S2 = close - 1.25*(high-low)
     rng = high_1d - low_1d
-    r3 = close_1d + 1.125 * rng
-    s3 = close_1d - 1.125 * rng
-    r4 = close_1d + 1.5 * rng
-    s4 = close_1d - 1.5 * rng
+    r2 = close_1d + 1.25 * rng
+    r1 = close_1d + 1.083333 * rng
+    s1 = close_1d - 1.083333 * rng
+    s2 = close_1d - 1.25 * rng
     
-    # Align to 12h timeframe (wait for 1d bar to close)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 4h timeframe (wait for 1d bar to close)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volume spike: volume > 1.5x 20-period median volume
+    # Volume spike: volume > 1.8x 24-period median volume
     volume_series = pd.Series(volume)
-    vol_median_20 = volume_series.rolling(window=20, min_periods=20).median().values
-    volume_spike = volume > (1.5 * vol_median_20)
-    
-    # Choppiness regime filter (using 12h data)
-    # CHOP = 100 * log10(sum(ATR over period) / log10(highest high - lowest low over period))
-    # Simplified: CHOP < 61.8 = trending, > 61.8 = ranging
-    atr_period = 14
-    chop_period = 14
-    
-    # Calculate TR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Calculate ATR
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # Calculate highest high and lowest low over chop_period
-    highest_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
-    lowest_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
-    
-    # Calculate Choppiness Index
-    sum_atr = pd.Series(atr).rolling(window=chop_period, min_periods=chop_period).sum().values
-    highest_lowest_diff = highest_high - lowest_low
-    chop = 100 * np.log10(sum_atr / np.log10(highest_lowest_diff)) / np.log10(chop_period)
-    chop = np.where((highest_lowest_diff > 0) & (sum_atr > 0), chop, 50)  # default to 50 if invalid
-    chop_filter = chop < 61.8  # trending market
+    vol_median_24 = volume_series.rolling(window=24, min_periods=24).median().values
+    volume_spike = volume > (1.8 * vol_median_24)
     
     # Fixed position size to control trade frequency
     fixed_size = 0.25
@@ -87,33 +63,31 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need 34 for 1d EMA, 20 for volume median, 34 for chop (14+20)
-    start_idx = max(34, 20, 34)
+    # Warmup: need 50 for 1d EMA, 24 for volume median
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(r3_12h[i]) or
-            np.isnan(s3_12h[i]) or
-            np.isnan(r4_12h[i]) or
-            np.isnan(s4_12h[i]) or
-            np.isnan(vol_median_20[i]) or
-            np.isnan(chop[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(r1_4h[i]) or
+            np.isnan(s1_4h[i]) or
+            np.isnan(r2_4h[i]) or
+            np.isnan(s2_4h[i]) or
+            np.isnan(vol_median_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_34_val = ema_34_1d_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
         vol_spike = volume_spike[i]
-        chop_ok = chop_filter[i]
         size = fixed_size
         
         if position == 0:
             # Flat - look for entry
-            # Long: price > R3 and volume spike, in uptrend (close > EMA34), trending market
-            long_entry = (close_val > r3_12h[i]) and vol_spike and (close_val > ema_34_val) and chop_ok
-            # Short: price < S3 and volume spike, in downtrend (close < EMA34), trending market
-            short_entry = (close_val < s3_12h[i]) and vol_spike and (close_val < ema_34_val) and chop_ok
+            # Long: price > R1 and volume spike, in uptrend (close > EMA50)
+            long_entry = (close_val > r1_4h[i]) and vol_spike and (close_val > ema_50_val)
+            # Short: price < S1 and volume spike, in downtrend (close < EMA50)
+            short_entry = (close_val < s1_4h[i]) and vol_spike and (close_val < ema_50_val)
             
             if long_entry:
                 signals[i] = size
@@ -126,16 +100,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit on trend reversal or at R4 (take profit)
-            if close_val < ema_34_val or close_val > r4_12h[i] or not chop_ok:
+            # Long - exit on trend reversal or at R2 (take profit)
+            if close_val < ema_50_val or close_val > r2_4h[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit on trend reversal or at S4 (take profit)
-            if close_val > ema_34_val or close_val < s4_12h[i] or not chop_ok:
+            # Short - exit on trend reversal or at S2 (take profit)
+            if close_val > ema_50_val or close_val < s2_4h[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -144,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_RegimeFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
