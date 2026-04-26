@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1d EMA34 trend filter and volume spike (>2x average volume). Uses discrete position sizing (0.25) to minimize fee churn. Exits when price retests the broken Camarilla level. Works in both bull and bear markets by following the 1d trend direction, confirmed by volume to avoid false breakouts. Target: 50-150 total trades over 4 years.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v3
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (>2x average) reduces false breakouts. Uses ATR-based stoploss (2.5) and discrete sizing (0.25) to limit fee churn. Only trades when price closes beyond Camarilla level (avoids intrabar noise). Designed for BTC/ETH: trend filter works in bull/bear, volume confirms institutional participation, ATR stop adapts to volatility. Target 20-40 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need warmup for EMA, volume
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for HTF trend filter and Camarilla levels
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -27,68 +27,79 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
+    # ATR(14) for dynamic stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R3 and S3 levels
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (1 bar delay for completed 1d bar)
+    # Align to 4h (wait for completed 1d bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate average volume for confirmation (20-period SMA)
+    # Average volume for confirmation (20-period SMA)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     base_size = 0.25
+    atr_multiplier = 2.5
     
-    # Start after warmup (need 34 for EMA, 20 for volume)
-    start_idx = max(34, 20)
+    # Warmup: max of EMA(34), volume(20), ATR(14)
+    start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
-        # Get current values
         close_val = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
         ema_val = ema_34_1d_aligned[i]
         r3_val = camarilla_r3_aligned[i]
         s3_val = camarilla_s3_aligned[i]
+        atr_val = atr[i]
         
         # Skip if any data not ready
         if (np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(r3_val) or 
-            np.isnan(s3_val)):
+            np.isnan(s3_val) or np.isnan(atr_val)):
             # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
+            signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
-        # Volume confirmation: current volume > 2x average volume (strong breakout)
+        # Volume confirmation: current volume > 2x average volume
         volume_confirmed = vol > 2.0 * avg_vol
         
-        # Long logic: price breaks above Camarilla R3 with 1d uptrend and volume confirmation
+        # Long: price CLOSES above R3 with 1d uptrend and volume
         long_condition = (close_val > r3_val) and (close_val > ema_val) and volume_confirmed
-        # Short logic: price breaks below Camarilla S3 with 1d downtrend and volume confirmation
+        # Short: price CLOSES below S3 with 1d downtrend and volume
         short_condition = (close_val < s3_val) and (close_val < ema_val) and volume_confirmed
         
-        # Exit logic: price retests the broken Camarilla level (failed breakout)
-        long_exit = position == 1 and close_val <= r3_val
-        short_exit = position == -1 and close_val >= s3_val
+        # Stoploss: ATR-based
+        long_stop = (position == 1 and close_val < entry_price - atr_multiplier * atr_val)
+        short_stop = (position == -1 and close_val > entry_price + atr_multiplier * atr_val)
+        
+        # Exit: price retests broken level OR stoploss hit
+        long_exit = (position == 1 and (close_val <= r3_val or long_stop))
+        short_exit = (position == -1 and (close_val >= s3_val or short_stop))
         
         if long_condition and position != 1:
             signals[i] = base_size
             position = 1
+            entry_price = close_val
         elif short_condition and position != -1:
             signals[i] = -base_size
             position = -1
+            entry_price = close_val
         elif long_exit:
             signals[i] = 0.0
             position = 0
@@ -96,16 +107,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             position = 0
         else:
-            # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
+            # Hold position
+            signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v3"
+timeframe = "4h"
 leverage = 1.0
