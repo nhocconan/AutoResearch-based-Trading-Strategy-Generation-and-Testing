@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: Trade Donchian(20) breakouts on 12h with 1d EMA50 trend filter and volume confirmation (1.8x average) for fewer trades. Uses ATR trailing stop (2.2). Designed for low trade frequency (~12-37/year) by requiring confluence: breakout + HTF trend + volume spike. Works in bull markets (breakouts with trend) and bear markets (short breakdowns against trend). Focus on BTC/ETH as primary targets.
+4h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v3
+Hypothesis: Trade Donchian(20) breakouts with 1d EMA50 trend filter and volume confirmation (1.8x average) for fewer trades. Uses ATR trailing stop (2.2). Designed for low trade frequency (~20-40/year) by requiring confluence: breakout + HTF trend + volume spike. Works in bull markets (breakouts with trend) and bear markets (short breakdowns against trend). Focus on BTC/ETH as primary targets.
 """
 
 import numpy as np
@@ -26,18 +26,18 @@ def generate_signals(prices):
     # 1d EMA(50) for trend filter (slower = fewer whipsaws)
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Donchian(20) on 12h: highest high/lowest low of past 20 bars (including current?)
+    # Donchian(20) on 4h: highest high/lowest low of past 20 bars (including current?)
     # We use past 20 completed bars, so lookback 20, exclude current bar
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: 1.8x average volume (tighter for fewer trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for stop (14-period on 12h)
+    # ATR for stop (14-period on 4h)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -50,7 +50,7 @@ def generate_signals(prices):
     long_stop = 0.0
     short_stop = 0.0
     
-    # Warmup: max of 1d EMA (50), Donchian lookback (20), volume MA (20), 12h ATR (14)
+    # Warmup: max of 1d EMA (50), Donchian lookback (20), volume MA (20), 4h ATR (14)
     start_idx = max(50, 20, 20, 14)
     
     for i in range(start_idx, n):
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v3"
+timeframe = "4h"
 leverage = 1.0
