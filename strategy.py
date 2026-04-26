@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_ChopFilter_v1
-Hypothesis: Donchian(20) breakout on 4h with volume confirmation (>2x average) and choppiness regime filter (CHOP > 61.8 = range) to avoid false breakouts in sideways markets. Only long when price > upper band, only short when price < lower band. Uses discrete position sizing (0.25) and ATR-based stoploss (2.0x). Designed for low trade frequency (<30/year) to minimize fee drag. Works in both bull (breakouts) and bear (breakdowns) markets.
+1d_Donchian20_Breakout_1wTrend_Filter_VolumeSpike_v1
+Hypothesis: Donchian(20) breakout on 1d with 1-week EMA50 trend filter and volume confirmation (2x average) to reduce false breakouts. Uses 1w trend for better bull/bear discrimination - only long in strong uptrend, only short in strong downtrend. Designed for very low trade frequency (<25/year) to minimize fee drag in challenging 2025+ markets. Discrete position sizing (0.25) balances return vs risk. ATR-based stoploss (2.0x) manages risk. Focus on BTC/ETH as primary targets.
 """
 
 import numpy as np
@@ -18,7 +18,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for stoploss
+    # Get 1w data for strong trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate EMA(50) on 1w for strong trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate ATR(14) for stoploss on 1d
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -29,36 +39,26 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate Choppiness Index (14-period)
-    # CHOP = 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high - min_low
-    # Avoid division by zero
-    chop_ratio = np.where(range_14 > 0, sum_atr_14 / range_14, 1.0)
-    chop = 100 * np.log10(chop_ratio) / np.log10(14)
-    chop_filter = chop > 61.8  # Only trade in ranging markets (CHOP > 61.8)
+    # Calculate Donchian channels from previous 20 days
+    # Highest high of previous 20 days (excluding current)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    # Lowest low of previous 20 days (excluding current)
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of Donchian(20), volume MA, ATR, CHOP
-    start_idx = max(20, 20, 14, 14) + 1
+    # Warmup: max of 1w EMA(50), volume MA, ATR, Donchian
+    start_idx = max(50, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
+        if (np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(high_20[i]) or
+            np.isnan(low_20[i]) or
             np.isnan(vol_ma[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(chop[i])):
+            np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -69,15 +69,16 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
+        trend_1w_up = close_val > ema_50_1w_aligned[i]   # 1w strong uptrend
+        trend_1w_down = close_val < ema_50_1w_aligned[i]  # 1w strong downtrend
         vol_spike = volume_spike[i]
-        chop_ok = chop_filter[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band AND volume spike AND chop filter
-            long_signal = (close_val > highest_high[i]) and vol_spike and chop_ok
+            # Long: price breaks above upper Donchian AND 1w trend up AND volume spike
+            long_signal = (close_val > high_20[i]) and trend_1w_up and vol_spike
             
-            # Short: price breaks below lower Donchian band AND volume spike AND chop filter
-            short_signal = (close_val < lowest_low[i]) and vol_spike and chop_ok
+            # Short: price breaks below lower Donchian AND 1w trend down AND volume spike
+            short_signal = (close_val < low_20[i]) and trend_1w_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
@@ -92,20 +93,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price hits ATR stoploss OR re-enters Donchian channel (mean reversion in range)
-            if (close_val < entry_price - 2.0 * atr[i]) or (close_val < highest_high[i]):
+            # Exit: trend flips down OR price hits ATR stoploss
+            if (not trend_1w_up) or (close_val < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price hits ATR stoploss OR re-enters Donchian channel
-            if (close_val > entry_price + 2.0 * atr[i]) or (close_val > lowest_low[i]):
+            # Exit: trend flips up OR price hits ATR stoploss
+            if (not trend_1w_down) or (close_val > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wTrend_Filter_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
