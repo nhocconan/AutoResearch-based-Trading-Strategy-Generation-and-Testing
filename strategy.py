@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_RegimeFilter_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts with 1d EMA34 trend and volume confirmation, filtered by choppiness regime (CHOP > 61.8 = range, CHOP < 38.2 = trend). Uses ATR trailing stop (2.0x) and requires price >1.0% from EMA34 to avoid chop. Position size 0.25. Designed for stable performance in both bull and bear markets via confluence: pivot break + HTF trend + volume spike + regime filter.
+12h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h timeframe with 1d EMA34 trend filter, volume confirmation, and choppiness regime filter (CHOP < 38.2 = trending). Designed for low-frequency, high-confluence trades to minimize fee drag and perform in both bull and bear markets via trend alignment and regime avoidance of chop. Target: 12-37 trades/year.
 """
 
 import numpy as np
@@ -33,33 +33,29 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align 1d EMA and 1d Camarilla levels to 4h timeframe
+    # Align 1d EMA and 1d Camarilla levels to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume confirmation: 2.0x median volume (balanced for frequency)
+    # Volume confirmation: 2.0x median volume
     vol_median = pd.Series(volume).rolling(window=50, min_periods=50).median().values
     
-    # ATR for stop (14-period on 4h)
+    # ATR for stop (14-period on 12h)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Choppiness Index (14-period on 4h) for regime filter
-    # CHOP = 100 * log10(sum(ATR(14)) / (max(high, lookback) - min(low, lookback))) / log10(lookback)
+    # Choppiness Index (14-period on 12h) for regime filter
     atr_14_chop = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     sum_atr_14 = pd.Series(atr_14_chop).rolling(window=14, min_periods=14).sum().values
     max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
     min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop_denominator = np.maximum(max_high_14 - min_low_14, 1e-10)  # avoid division by zero
+    chop_denominator = np.maximum(max_high_14 - min_low_14, 1e-10)
     chop_raw = 100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14)
-    chop = np.where(chop_denominator > 0, chop_raw, 50.0)  # default to 50 when no range
-    
-    # Price distance from EMA34 to avoid chop (>1.0%)
-    ema_distance = np.abs((close - ema_34_1d_aligned) / ema_34_1d_aligned * 100)
+    chop = np.where(chop_denominator > 0, chop_raw, 50.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,7 +64,7 @@ def generate_signals(prices):
     short_stop = 0.0
     bars_since_entry = 0
     
-    # Warmup: max of 1d EMA (34), volume median (50), 4h ATR (14), chop (14), distance calc
+    # Warmup: max of 1d EMA (34), volume median (50), 12h ATR (14), chop (14)
     start_idx = max(34, 50, 14)
     
     for i in range(start_idx, n):
@@ -78,8 +74,7 @@ def generate_signals(prices):
             np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_median[i]) or 
             np.isnan(atr_14[i]) or
-            np.isnan(chop[i]) or
-            np.isnan(ema_distance[i])):
+            np.isnan(chop[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -99,24 +94,20 @@ def generate_signals(prices):
         vol_median_val = vol_median[i]
         atr_14_val = atr_14[i]
         chop_val = chop[i]
-        ema_distance_val = ema_distance[i]
         
-        # Regime filter: only trade in trending markets (CHOP < 38.2) or strong range (CHOP > 61.8)
-        # For breakout strategy, we prefer trending markets
-        regime_filter = chop_val < 38.2  # trending regime
+        # Regime filter: only trade in trending markets (CHOP < 38.2)
+        regime_filter = chop_val < 38.2
         
         if position == 0:
-            # Long: break above R1, uptrend (close > EMA34), volume spike, price >1.0% from EMA, trending regime
+            # Long: break above R1, uptrend (close > EMA34), volume spike, trending regime
             long_signal = (high_val > camarilla_r1_val) and \
                           (close_val > ema_34_1d_val) and \
                           (volume_val > 2.0 * vol_median_val) and \
-                          (ema_distance_val > 1.0) and \
                           regime_filter
-            # Short: break below S1, downtrend (close < EMA34), volume spike, price >1.0% from EMA, trending regime
+            # Short: break below S1, downtrend (close < EMA34), volume spike, trending regime
             short_signal = (low_val < camarilla_s1_val) and \
                            (close_val < ema_34_1d_val) and \
                            (volume_val > 2.0 * vol_median_val) and \
-                           (ema_distance_val > 1.0) and \
                            regime_filter
             
             if long_signal:
@@ -156,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_RegimeFilter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
