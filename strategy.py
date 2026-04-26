@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeChop_v1
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter, volume spike (>1.5x median), and choppiness regime filter (CHOP > 50 for range, < 50 for trend). Only trade breakouts in the direction of the 1d trend. Uses discrete position sizing (0.25) to minimize fee churn and ATR trailing stop (2.0x) for risk management. Designed for BTC/ETH with strict entry conditions (~20-35 trades/year) to avoid overtrading. Works in bull/bear by only trading with 1d trend direction and adding chop filter to avoid false breakouts in sideways markets.
+6h_WeeklyPivot_Donchian20_Breakout_1dTrend_VolumeConfirmation_v1
+Hypothesis: On 6h timeframe, trade Donchian(20) breakouts only when aligned with weekly pivot bias (above/below weekly pivot) and 1d EMA50 trend, with volume confirmation (>1.5x median). Weekly pivot provides institutional reference, Donchian captures breakouts, and 1d EMA50 ensures we trade with the daily trend. Volume confirmation filters low-conviction breakouts. Designed for BTC/ETH to work in bull/bear by requiring 1d trend alignment. Target: 12-30 trades/year (50-120 over 4 years) to avoid fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,161 +18,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend (EMA34) and chop filter
+    # Get 1d data for HTF trend (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1d Choppiness Index (CHOP) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range for 1d
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    
-    # ATR(14) for 1d
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Sum of TR over last 14 periods
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over last 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: CHOP = 100 * log10(sumTR14 / (HH14 - LL14)) / log10(14)
-    range_14 = hh_14 - ll_14
-    # Avoid division by zero
-    range_14 = np.where(range_14 == 0, 1e-10, range_14)
-    chop_1d = 100 * np.log10(sum_tr_14 / range_14) / np.log10(14)
-    # Handle invalid values (when sum_tr_14 <= 0 or range_14 <= 0)
-    chop_1d = np.where((sum_tr_14 <= 0) | (range_14 <= 0), 50.0, chop_1d)
-    
-    # Calculate Camarilla levels from previous 4h bar (HLC of prior 4h)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for pivot calculation (weekly HLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    cam_high = pd.Series(df_4h['high'].values).shift(1).values
-    cam_low = pd.Series(df_4h['low'].values).shift(1).values
-    cam_close = pd.Series(df_4h['close'].values).shift(1).values
+    # Weekly pivot: (weekly_high + weekly_low + weekly_close) / 3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Camarilla R1, S1 levels (core breakout levels)
-    R1 = cam_close + (cam_high - cam_low) * 1.1 / 12
-    S1 = cam_close - (cam_high - cam_low) * 1.1 / 12
+    # Get 6h data for Donchian calculation (need 20 periods)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
     
-    # Volume spike filter: volume > 1.5x median volume (30-period) for high conviction
+    # Donchian(20) from previous 6h bar (to avoid look-ahead)
+    donch_high = pd.Series(df_6h['high'].values).shift(1).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_6h['low'].values).shift(1).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: volume > 1.5x median volume (30-period)
     vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median().values
     
-    # ATR(14) for volatility-based stops (4h)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align HTF indicators to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_4h, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_4h, S1)
+    # Align HTF indicators to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    donch_high_aligned = align_htf_to_ltf(prices, df_6h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_6h, donch_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Warmup: max of EMA(34) 1d, CHOP, Camarilla (need 2 bars for shift), volume median (30), ATR (14)
-    start_idx = max(34, 30, 2, 30, 14) + 1
+    # Warmup: max of EMA(50) 1d (50), weekly pivot (2), Donchian (20+1), volume median (30)
+    start_idx = max(50, 2, 21, 30) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(chop_1d_aligned[i]) or
-            np.isnan(R1_aligned[i]) or
-            np.isnan(S1_aligned[i]) or
-            np.isnan(vol_median[i]) or
-            np.isnan(atr[i])):
-            # Hold current position
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(donch_high_aligned[i]) or
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(vol_median[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_34_1d_val = ema_34_1d_aligned[i]
-        chop_val = chop_1d_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
+        weekly_pivot_val = weekly_pivot_aligned[i]
+        donch_high_val = donch_high_aligned[i]
+        donch_low_val = donch_low_aligned[i]
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
         volume_val = volume[i]
         vol_median_val = vol_median[i]
-        atr_val = atr[i]
-        r1_val = R1_aligned[i]
-        s1_val = S1_aligned[i]
         
-        # Trend filter: price > EMA34 (uptrend) or < EMA34 (downtrend)
-        uptrend = close_val > ema_34_1d_val
-        downtrend = close_val < ema_34_1d_val
+        # Trend filter: price > EMA50 (uptrend) or < EMA50 (downtrend)
+        uptrend = close_val > ema_50_1d_val
+        downtrend = close_val < ema_50_1d_val
         
-        # Volume spike filter: only trade in high-volume environments
-        volume_spike = volume_val > 1.5 * vol_median_val
+        # Weekly pivot bias: above pivot = bullish bias, below pivot = bearish bias
+        bullish_bias = close_val > weekly_pivot_val
+        bearish_bias = close_val < weekly_pivot_val
         
-        # Choppiness regime filter: 
-        # CHOP > 50 = ranging market (mean reversion favorable)
-        # CHOP < 50 = trending market (trend following favorable)
-        # We'll use CHOP < 50 to confirm we're in a trending environment for breakouts
-        trending_regime = chop_val < 50.0
+        # Volume confirmation: only trade in above-average volume environments
+        volume_confirm = volume_val > 1.5 * vol_median_val
         
         if position == 0:
-            # Long: break above R1 with volume spike, uptrend, and trending regime
-            long_signal = (close_val > r1_val) and \
-                          volume_spike and \
+            # Long: break above Donchian high with bullish bias from weekly pivot, uptrend, and volume confirmation
+            long_signal = (high_val > donch_high_val) and \
+                          bullish_bias and \
                           uptrend and \
-                          trending_regime
+                          volume_confirm
             
-            # Short: break below S1 with volume spike, downtrend, and trending regime
-            short_signal = (close_val < s1_val) and \
-                           volume_spike and \
+            # Short: break below Donchian low with bearish bias from weekly pivot, downtrend, and volume confirmation
+            short_signal = (low_val < donch_low_val) and \
+                           bearish_bias and \
                            downtrend and \
-                           trending_regime
+                           volume_confirm
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                highest_since_entry = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Hold long
+            # Hold long until break below Donchian low (reversal signal)
             signals[i] = 0.25
-            highest_since_entry = max(highest_since_entry, high_val)
-            # ATR trailing stop
-            if close_val < highest_since_entry - 2.0 * atr_val:
+            if low_val < donch_low_val:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Hold short
+            # Hold short until break above Donchian high (reversal signal)
             signals[i] = -0.25
-            lowest_since_entry = min(lowest_since_entry, low_val)
-            # ATR trailing stop
-            if close_val > lowest_since_entry + 2.0 * atr_val:
+            if high_val > donch_high_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeChop_v1"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Donchian20_Breakout_1dTrend_VolumeConfirmation_v1"
+timeframe = "6h"
 leverage = 1.0
