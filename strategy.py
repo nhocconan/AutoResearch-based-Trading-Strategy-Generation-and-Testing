@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v1
-Hypothesis: Use 4h timeframe with Camarilla R1/S1 breakout from prior day, confirmed by 1d EMA34 trend, volume spike, and choppiness regime filter. Targets 15-40 trades/year to minimize fee drag and improve test generalization. Works in both bull and bear markets by using regime filter (chop > 61.8 = ranging) to avoid false breakouts in strong trends.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1
+Hypothesis: Use 12h timeframe with Camarilla R1/S1 breakout from prior day, confirmed by 1d EMA34 trend, volume spike, and choppiness regime filter. Targets 12-30 trades/year to minimize fee drag and improve test generalization. Works in both bull and bear markets by using regime filter (chop > 61.8 = ranging) to avoid false breakouts in strong trends.
 """
 
 import numpy as np
@@ -33,7 +33,7 @@ def generate_signals(prices):
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     camarilla_pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 4h timeframe (wait for completed 1d bar)
+    # Align to 12h timeframe (wait for completed 1d bar)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
