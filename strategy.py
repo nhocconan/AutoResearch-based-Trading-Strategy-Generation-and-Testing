@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1dTrend_RegimeFilter_v1
-Hypothesis: Elder Ray (Bull Power/Bear Power) combined with 1d EMA50 trend and Bollinger Bandwidth regime filter to capture momentum continuations in both trending and ranging markets. Bull Power > 0 indicates buying strength, Bear Power < 0 indicates selling strength. Regime filter avoids whipsaws in high volatility. Target: 60-120 total trades over 4 years (15-30/year).
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_v1
+Hypothesis: Camarilla R3/S3 breakouts on 12h with 1d EMA34 trend filter and volume confirmation capture swing continuations in both bull and bear markets. The 12h timeframe reduces trade frequency to minimize fee drag while still capturing significant moves. Volume spike confirms breakout validity, and 1d EMA34 ensures alignment with the daily trend. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -18,43 +18,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend filter
+    # Load 1d data ONCE before loop for HTF trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate Bollinger Bandwidth on 1d for regime filter (low BW = low volatility)
-    bb_period = 20
-    bb_std = 2.0
-    sma_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma_1d + (bb_std * std_1d)
-    lower_bb = sma_1d - (bb_std * std_1d)
-    bb_width = (upper_bb - lower_bb) / sma_1d  # Normalized bandwidth
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    # Calculate Camarilla pivot levels on 1d data (using previous day's OHLC)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    # We need previous day's data, so shift by 1
+    if len(df_1d) < 2:
+        # Not enough data for previous day calculation
+        return np.zeros(n)
     
-    # Calculate 6h EMA13 for Elder Ray (EMA of close)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate Camarilla levels
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + (camarilla_range * 1.1 / 4)
+    s3 = prev_close - (camarilla_range * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume spike detection on 12h (volume > 2.0x 20-period EMA)
+    volume_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (volume_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need sufficient data for all indicators)
-    start_idx = max(50, bb_period, 13)
+    start_idx = max(100, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(bb_width_aligned[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -64,34 +70,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Regime filter: avoid extremely low volatility (BB width too tight) and high volatility
-        # Low BB width indicates squeeze/low vol, high BB width indicates expansion/high vol
-        # We want moderate volatility regime: BB width between 0.01 and 0.05 (adjust based on asset)
-        vol_regime = (bb_width_aligned[i] > 0.01) & (bb_width_aligned[i] < 0.05)
+        # 1d trend filter (EMA34)
+        uptrend = close[i] > ema_34_aligned[i]
+        downtrend = close[i] < ema_34_aligned[i]
         
-        # 1d trend filter (EMA50)
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
-        
-        # Long logic: Bull Power > 0 (buying strength) + uptrend + moderate volatility
-        if bull_power[i] > 0 and uptrend and vol_regime:
+        # Long logic: price breaks above R3 with volume spike + in uptrend
+        if close[i] > r3_aligned[i] and volume_spike[i] and uptrend:
             if position != 1:
                 signals[i] = 0.25
                 position = 1
             else:
                 signals[i] = 0.25
-        # Short logic: Bear Power < 0 (selling strength) + downtrend + moderate volatility
-        elif bear_power[i] < 0 and downtrend and vol_regime:
+        # Short logic: price breaks below S3 with volume spike + in downtrend
+        elif close[i] < s3_aligned[i] and volume_spike[i] and downtrend:
             if position != -1:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = -0.25
-        # Exit conditions: power reverses or trend weakens or volatility regime changes
-        elif position == 1 and (bull_power[i] <= 0 or not uptrend or not vol_regime):
+        # Exit conditions: price returns to opposite level or trend weakens
+        elif position == 1 and (close[i] < s3_aligned[i] or not uptrend):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (bear_power[i] >= 0 or not downtrend or not vol_regime):
+        elif position == -1 and (close[i] > r3_aligned[i] or not downtrend):
             signals[i] = 0.0
             position = 0
         else:
@@ -105,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1dTrend_RegimeFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
