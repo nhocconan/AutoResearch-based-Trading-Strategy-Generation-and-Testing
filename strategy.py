@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_HTF_Trend_With_Volume_Regime_Filter
-Hypothesis: On 1h timeframe, capture medium-term trends by requiring alignment between 1h price action, 4h EMA50 trend, and 1d EMA200 trend, with volume regime filter (low volume = choppy, high volume = trending). Enter long when 1h close > 4h EMA50 > 1d EMA200 AND volume > 1.5x 20-period average. Enter short when 1h close < 4h EMA50 < 1d EMA200 AND volume > 1.5x 20-period average. Uses discrete position size 0.20 to limit fee churn. Designed for 15-30 trades/year on 1h by requiring strong HTF alignment and volume confirmation, reducing overtrading while capturing sustained moves in both bull and bear markets.
+6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: On 6h timeframe, use Camarilla R3/S3 levels from 1d for breakout entries, filtered by 1w trend direction (close > EMA50) and volume spike (>2.0x 20-period average). Enter long when price breaks above R3 with 1w uptrend and volume spike. Enter short when price breaks below S3 with 1w downtrend and volume spike. Uses discrete position size 0.25 to balance capture and drawdown. Designed for 12-30 trades/year on 6h by requiring weekly alignment and volume confirmation, reducing overtrading while capturing structured moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,88 +13,97 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for Camarilla levels and 1w for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 50 or len(df_1d) < 200:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 5 or len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for intermediate trend
-    close_4h_series = pd.Series(df_4h['close'].values)
-    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # Using previous 1d bar's OHLC
+    prev_1d_close = df_1d['close'].shift(1).values
+    prev_1d_high = df_1d['high'].shift(1).values
+    prev_1d_low = df_1d['low'].shift(1).values
     
-    # Calculate 1d EMA200 for long-term trend
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema_200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    camarilla_range = prev_1d_high - prev_1d_low
+    r3 = prev_1d_close + 1.1 * camarilla_range / 2
+    s3 = prev_1d_close - 1.1 * camarilla_range / 2
     
-    # Volume regime: >1.5x 20-period average indicates trending conditions
+    # Align Camarilla levels to 6h timeframe (no additional delay needed as they're based on completed 1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate 1w EMA50 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
     volume_series = pd.Series(volume)
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_trending = volume / np.maximum(volume_ma, 1e-10) > 1.5
+    volume_spike = volume / np.maximum(volume_ma, 1e-10) > 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA warmup and volume MA warmup
-    start_idx = max(50, 200, 20)
+    # Warmup: need 1w EMA warmup, volume MA warmup
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        # Determine HTF trend alignment
-        # Long regime: price above both EMAs AND EMAs in correct order (4h > 1d)
-        long_regime = (close[i] > ema_50_4h_aligned[i]) and \
-                      (ema_50_4h_aligned[i] > ema_200_1d_aligned[i])
-        
-        # Short regime: price below both EMAs AND EMAs in correct order (4h < 1d)
-        short_regime = (close[i] < ema_50_4h_aligned[i]) and \
-                       (ema_50_4h_aligned[i] < ema_200_1d_aligned[i])
+        # 1w trend alignment
+        trend_1w_uptrend = close[i] > ema_50_1w_aligned[i]
+        trend_1w_downtrend = close[i] < ema_50_1w_aligned[i]
         
         if position == 0:
-            # Enter long: long regime + volume trending
-            if long_regime and volume_trending[i]:
-                signals[i] = 0.20
+            # Long: price breaks above R3 + 1w uptrend + volume spike
+            long_signal = (close[i] > r3_aligned[i]) and trend_1w_uptrend and volume_spike[i]
+            
+            # Short: price breaks below S3 + 1w downtrend + volume spike
+            short_signal = (close[i] < s3_aligned[i]) and trend_1w_downtrend and volume_spike[i]
+            
+            if long_signal:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: short regime + volume trending
-            elif short_regime and volume_trending[i]:
-                signals[i] = -0.20
+            elif short_signal:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.20
-            # Exit: regime breaks OR volume drops (choppy conditions)
-            if not (long_regime and volume_trending[i]):
+            signals[i] = 0.25
+            # Exit: price breaks below S3 OR 1w trend turns down
+            if (close[i] < s3_aligned[i] or not trend_1w_uptrend):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.20
-            # Exit: regime breaks OR volume drops (choppy conditions)
-            if not (short_regime and volume_trending[i]):
+            signals[i] = -0.25
+            # Exit: price breaks above R3 OR 1w trend turns up
+            if (close[i] > r3_aligned[i] or not trend_1w_downtrend):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_HTF_Trend_With_Volume_Regime_Filter"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
