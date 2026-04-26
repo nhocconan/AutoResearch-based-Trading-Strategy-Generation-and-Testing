@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ChopFilter
-Hypothesis: Camarilla R3/S3 breakout on 4h with 1d trend filter, volume spike (>2x average), and choppiness regime filter.
-Only trade in low-chop environments (CHOP < 50) to avoid whipsaws in ranging markets.
-In bull markets: price breaks above R3 with 1d uptrend, high volume, and low chop → long.
-In bear markets: price breaks below S3 with 1d downtrend, high volume, and low chop → short.
-Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-150 trades over 4 years (19-38/year) on 4h timeframe.
-Requires BTC/ETH edge via 1d trend and volume filters; avoids SOL-only bias by requiring trend alignment.
-Chop filter reduces false breakouts in sideways markets, improving win rate and Sharpe.
+1h_RSI_MeanReversion_4hTrendFilter
+Hypothesis: On 1h timeframe, use RSI(14) for mean reversion entries (RSI<30 long, RSI>70 short) 
+but only when aligned with 4h trend (price > 4h EMA50 for longs, price < 4h EMA50 for shorts).
+Add session filter (08-20 UTC) to avoid low-volume hours. Uses discrete sizing (0.20) to minimize fee drag.
+Target: 60-120 trades over 4 years (15-30/year) on 1h. Uses 4h EMA for trend filter to avoid SOL-only bias.
 """
 
 import numpy as np
@@ -16,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need warmup for EMA and chop
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,37 +21,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for HTF trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Precompute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data for HTF trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate average volume for confirmation (20-period SMA)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate choppiness index on 4h data (14-period)
-    # CHOP = 100 * log10(sum(ATR(1)) / (n * log(n))) / log10(n)
-    # where ATR(1) = max(high-low, abs(high-close_prev), abs(low-close_prev))
-    tr1 = np.maximum(high - low, np.maximum(np.abs(high - np.concatenate([[close[0]], close[:-1]])), 
-                                            np.abs(low - np.concatenate([[close[0]], close[:-1]]))))
-    atr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(atr_sum / (14 * np.log10(14))) / np.log10(14)
+    # RSI(14) on 1h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    base_size = 0.25
+    base_size = 0.20
     
-    # Start after warmup (need 20 for Camarilla calculation, 34 for EMA, 14 for chop)
-    start_idx = max(20, 34, 14)
+    # Start after warmup (need 14 for RSI, 50 for EMA)
+    start_idx = max(14, 50)
     
     for i in range(start_idx, n):
-        # Need previous day's OHLC for Camarilla levels
-        if i < 1:
-            # Hold current position
+        # Skip if outside session
+        if not in_session[i]:
+            # Hold current position outside session
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -63,35 +63,12 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
             
-        # Previous period's high, low, close (for Camarilla calculation)
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        prev_close = close[i-1]
-        
-        # Calculate Camarilla levels
-        range_val = prev_high - prev_low
-        if range_val <= 0:
-            # Hold current position if invalid range
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = base_size
-            else:
-                signals[i] = -base_size
-            continue
-            
-        # Camarilla R3 and S3 levels (stronger levels)
-        r3 = prev_close + range_val * 1.1 / 4
-        s3 = prev_close - range_val * 1.1 / 4
-        
+        rsi_val = rsi[i]
         close_val = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        ema_val = ema_34_1d_aligned[i]
-        chop_val = chop[i]
+        ema_val = ema_50_4h_aligned[i]
         
         # Skip if any data not ready
-        if np.isnan(r3) or np.isnan(s3) or np.isnan(ema_val) or np.isnan(avg_vol) or np.isnan(chop_val):
+        if np.isnan(rsi_val) or np.isnan(ema_val):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -101,19 +78,14 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume (stricter for fewer trades)
-        volume_confirmed = vol > 2.0 * avg_vol
-        # Choppiness filter: only trade when chop < 50 (low chop = trending market)
-        chop_filter = chop_val < 50
+        # Long condition: RSI < 30 (oversold) + price above 4h EMA50 (uptrend)
+        long_condition = (rsi_val < 30) and (close_val > ema_val)
+        # Short condition: RSI > 70 (overbought) + price below 4h EMA50 (downtrend)
+        short_condition = (rsi_val > 70) and (close_val < ema_val)
         
-        # Long logic: price breaks above R3 with 1d uptrend, volume confirmation, and low chop
-        long_condition = (close_val > r3) and (close_val > ema_val) and volume_confirmed and chop_filter
-        # Short logic: price breaks below S3 with 1d downtrend, volume confirmation, and low chop
-        short_condition = (close_val < s3) and (close_val < ema_val) and volume_confirmed and chop_filter
-        
-        # Exit logic: trend reversal, opposite Camarilla level break, or high chop
-        exit_long = (close_val < ema_val) or (close_val < s3) or (chop_val >= 50)
-        exit_short = (close_val > ema_val) or (close_val > r3) or (chop_val >= 50)
+        # Exit conditions: RSI reverts to mean (40-60) or opposite extreme
+        exit_long = rsi_val > 50
+        exit_short = rsi_val < 50
         
         if long_condition and position != 1:
             signals[i] = base_size
@@ -138,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hTrendFilter"
+timeframe = "1h"
 leverage = 1.0
