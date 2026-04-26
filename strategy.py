@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WilliamsFractal_Alligator_1wTrend_v1
-Hypothesis: Daily Williams Fractal signals filtered by weekly Alligator trend (Jaw/Teeth/Lips alignment) and volume confirmation. Enters on bullish/bearish fractal breaks when Alligator is aligned (trending) and volume > 1.5x average. Uses ATR-based stoploss. Designed for low frequency (15-30 trades/year) to minimize fee drag in ranging/bear markets. Works in bull via trend-following breaks and in bear via fade at extremes with Alligator misalignment filtering. Focus on BTC/ETH as primary targets.
+6h_Ichimoku_Kumo_Twist_1dTrend_VolumeBreakout_v1
+Hypothesis: Ichimoku Kumo twist (Senkou Span A/B cross) on 6h with 1d trend filter (price >/=< EMA50) and volume confirmation (2.0x average). Kumo twist signals potential trend reversal with momentum. In bull markets, long when price above Kumo and bullish twist; in bear markets, short when price below Kumo and bearish twist. Uses discrete position sizing (0.25) to limit drawdown and fee drag. Targets 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,71 +18,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Alligator trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 6h data for Ichimoku calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 52:  # need at least 52 for Ichimoku
         return np.zeros(n)
     
-    # Calculate Alligator (Williams) on weekly: Jaw(13,8), Teeth(8,5), Lips(5,3)
-    close_1w = df_1w['close'].values
-    jaw = pd.Series(close_1w).ewm(span=13, adjust=False).mean().shift(8).values
-    teeth = pd.Series(close_1w).ewm(span=8, adjust=False).mean().shift(5).values
-    lips = pd.Series(close_1w).ewm(span=5, adjust=False).mean().shift(3).values
+    # Calculate Ichimoku components on 6h
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Align Alligator to daily (with extra delay for smoothed indicators)
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw, additional_delay_bars=0)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth, additional_delay_bars=0)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips, additional_delay_bars=0)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2.0
     
-    # Get daily data for Williams Fractals and ATR
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2.0)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2.0)
+    
+    # Align Ichimoku components to 6h (no additional delay needed as they are based on completed candles)
+    tenkan_aligned = align_htf_to_ltf(prices, df_6h, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_6h, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_b)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate ATR(14) for stoploss
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA(50) on 1d for trend filter
     close_1d = df_1d['close'].values
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate volume spike filter: volume > 1.5 * 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # Calculate Williams Fractals on daily (requires 2 extra bars for confirmation)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Align fractals with 2-bar extra delay for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    # Calculate volume spike filter: volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    # Warmup: max of Alligator setup, ATR, volume MA
-    start_idx = max(50, 14, 50) + 2
+    # Warmup: max of Ichimoku (52), 1d EMA (50), volume MA (20)
+    start_idx = max(52, 50, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw_aligned[i]) or
-            np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -93,45 +87,68 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        # Alligator trend: Jaw > Teeth > Lips = uptrend, reverse = downtrend
-        alligator_up = (jaw_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > lips_aligned[i])
-        alligator_down = (jaw_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < lips_aligned[i])
+        # Kumo twist detection: Senkou A crosses Senkou B
+        # Bullish twist: Senkou A crosses above Senkou B (previous A <= previous B and current A > current B)
+        # Bearish twist: Senkou A crosses below Senkou B (previous A >= previous B and current A < current B)
+        if i >= 1:
+            prev_senkou_a = senkou_a_aligned[i-1]
+            prev_senkou_b = senkou_b_aligned[i-1]
+            curr_senkou_a = senkou_a_aligned[i]
+            curr_senkou_b = senkou_b_aligned[i]
+            
+            bullish_twist = (prev_senkou_a <= prev_senkou_b) and (curr_senkou_a > curr_senkou_b)
+            bearish_twist = (prev_senkou_a >= prev_senkou_b) and (curr_senkou_a < curr_senkou_b)
+        else:
+            bullish_twist = False
+            bearish_twist = False
+        
+        # Trend filter from 1d EMA50
+        trend_1d_up = close_val > ema_50_1d_aligned[i]
+        trend_1d_down = close_val < ema_50_1d_aligned[i]
+        
+        # Kumo (cloud) boundaries
+        upper_kumo = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
+        lower_kumo = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
+        
+        # Price relative to Kumo
+        price_above_kumo = close_val > upper_kumo
+        price_below_kumo = close_val < lower_kumo
+        price_in_kumo = (close_val >= lower_kumo) and (close_val <= upper_kumo)
+        
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: bullish fractal break AND Alligator uptrend AND volume spike
-            long_signal = bullish_fractal_aligned[i] and alligator_up and vol_spike
+            # Long: bullish Kumo twist AND price above Kumo AND 1d uptrend AND volume spike
+            long_signal = bullish_twist and price_above_kumo and trend_1d_up and vol_spike
             
-            # Short: bearish fractal break AND Alligator downtrend AND volume spike
-            short_signal = bearish_fractal_aligned[i] and alligator_down and vol_spike
+            # Short: bearish Kumo twist AND price below Kumo AND 1d downtrend AND volume spike
+            short_signal = bearish_twist and price_below_kumo and trend_1d_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: Alligator flips down OR price hits ATR stoploss
-            if (not alligator_up) or (close_val < entry_price - 2.5 * atr_1d_aligned[i]):
+            # Exit: price re-enters Kumo OR bearish Kumo twist
+            if price_in_kumo or bearish_twist:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: Alligator flips up OR price hits ATR stoploss
-            if (not alligator_down) or (close_val > entry_price + 2.5 * atr_1d_aligned[i]):
+            # Exit: price re-enters Kumo OR bullish Kumo twist
+            if price_in_kumo or bullish_twist:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WilliamsFractal_Alligator_1wTrend_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_1dTrend_VolumeBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
