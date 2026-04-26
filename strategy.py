@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v3
-Hypothesis: 4-hour Camarilla R3/S3 level breakout with daily EMA34 trend filter and volume confirmation (1.8x average). Uses discrete position sizing (0.30) and ATR-based stoploss (2.0x) for risk management. Adds a choppiness regime filter (CHOP > 61.8 = range, avoid breakouts in chop) to reduce false signals and fee drag. Designed for moderate trade frequency (target 20-50/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The daily EMA34 provides strong trend filtering that works across regimes, and volume confirmation ensures breakouts have participation. Focuses on BTC and ETH as primary targets.
+Hypothesis: 4-hour Camarilla R3/S3 level breakout with daily EMA34 trend filter and volume confirmation (1.8x average). Uses discrete position sizing (0.30) and ATR-based stoploss (2.0x) for risk management. Designed for moderate trade frequency (target 20-50/year) to minimize fee drag while capturing medium-term swings in both bull and bear markets. The daily EMA34 provides strong trend filtering that works across regimes, and volume confirmation ensures breakouts have participation. Focuses on BTC and ETH as primary targets.
 """
 
 import numpy as np
@@ -54,40 +54,12 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate Choppiness Index on 4h for regime filter
-    def calculate_chop(high, low, close, window=14):
-        """Calculate Choppiness Index: higher = more choppy/ranging"""
-        atr_sum = np.zeros(len(close))
-        for i in range(len(close)):
-            if i == 0:
-                atr_sum[i] = 0
-            else:
-                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-                atr_sum[i] = atr_sum[i-1] + tr
-        
-        max_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        min_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        
-        chop = np.zeros(len(close))
-        for i in range(len(close)):
-            if i < window - 1 or atr_sum[i] == 0:
-                chop[i] = 50  # neutral
-            else:
-                log_sum = np.log10(atr_sum[i] / window)
-                log_range = np.log10((max_high[i] - min_low[i]) / window)
-                chop[i] = 100 * log_sum / log_range if log_range != 0 else 50
-        return chop
-    
-    chop = calculate_chop(high, low, close, window=14)
-    chop_threshold = 61.8  # Above this = choppy/ranging market (avoid breakouts)
-    no_chop = chop < chop_threshold  # Only trade when NOT choppy
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of daily EMA(34), volume MA, ATR, chop calculation
-    start_idx = max(34, 20, 14, 14) + 1
+    # Warmup: max of daily EMA(34), volume MA, ATR
+    start_idx = max(34, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -95,8 +67,7 @@ def generate_signals(prices):
             np.isnan(camarilla_r3_aligned[i]) or
             np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(vol_ma[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(chop[i])):
+            np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -110,14 +81,13 @@ def generate_signals(prices):
         trend_1d_up = close_val > ema_34_1d_aligned[i]   # Daily uptrend
         trend_1d_down = close_val < ema_34_1d_aligned[i]  # Daily downtrend
         vol_spike = volume_spike[i]
-        not_choppy = no_chop[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 AND daily trend up AND volume spike AND not choppy
-            long_signal = (close_val > camarilla_r3_aligned[i]) and trend_1d_up and vol_spike and not_choppy
+            # Long: price breaks above Camarilla R3 AND daily trend up AND volume spike
+            long_signal = (close_val > camarilla_r3_aligned[i]) and trend_1d_up and vol_spike
             
-            # Short: price breaks below Camarilla S3 AND daily trend down AND volume spike AND not choppy
-            short_signal = (close_val < camarilla_s3_aligned[i]) and trend_1d_down and vol_spike and not_choppy
+            # Short: price breaks below Camarilla S3 AND daily trend down AND volume spike
+            short_signal = (close_val < camarilla_s3_aligned[i]) and trend_1d_down and vol_spike
             
             if long_signal:
                 signals[i] = 0.30
@@ -132,15 +102,15 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.30
-            # Exit: trend flips down OR price hits ATR stoploss OR chop increases significantly
-            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]) or (chop[i] > chop_threshold + 10):
+            # Exit: trend flips down OR price hits ATR stoploss
+            if (not trend_1d_up) or (close_val < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.30
-            # Exit: trend flips up OR price hits ATR stoploss OR chop increases significantly
-            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]) or (chop[i] > chop_threshold + 10):
+            # Exit: trend flips up OR price hits ATR stoploss
+            if (not trend_1d_down) or (close_val > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
     
