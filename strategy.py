@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_With_Trend_And_Regime_Filter
-Hypothesis: On daily timeframe, KAMA (adaptive trend) identifies market direction, combined with 1-week EMA trend filter and choppiness regime to avoid false signals in ranging markets. Uses volume confirmation to ensure breakout validity. Designed for low trade frequency (target: 30-100 trades over 4 years) to minimize fee drag, works in both bull and bear via adaptive trend and regime filters.
+6h_Donchian20_Breakout_12hTrend_VolumeSpike
+Hypothesis: Donchian(20) breakouts on 6h with 12h EMA50 trend filter and volume confirmation. 
+Targets 50-150 total trades over 4 years by requiring confluence of 12h trend, volume spike, and price breaking Donchian channels. 
+Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear via 12h trend filter. 
+Primary timeframe: 6h, HTF: 12h for trend and Donchian calculation.
 """
 
 import numpy as np
@@ -13,127 +16,102 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load 12h data ONCE before loop for HTF trend filter and Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    close_12h_series = pd.Series(close_12h)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate KAMA on daily prices (ER=10, fast=2, slow=30)
-    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.subtract(close[10:], close[:-10]))  # |close_t - close_t-10|
-    volatility = np.sum(np.abs(np.subtract(close[1:], close[:-1])), axis=0) if False else None  # placeholder for correct calc
-    # Proper volatility calculation: sum of absolute daily changes over 10 periods
-    volatility = pd.Series(close).diff().abs().rolling(window=10, min_periods=10).sum().values
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Pad ER array to match close length (first 10 values undefined)
-    er_padded = np.full_like(close, 0.0)
-    er_padded[10:] = er
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Smoothing constants: sc = [ER*(2/(fast+1)-2/(slow+1)) + 2/(slow+1)]^2
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = er_padded * (fast_sc - slow_sc) + slow_sc
-    sc = sc * sc  # square
+    # Upper channel: highest high over last 20 12h periods
+    high_series = pd.Series(high_12h)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    # Lower channel: lowest low over last 20 12h periods
+    low_series = pd.Series(low_12h)
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]  # seed
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Align Donchian channels to 6h (no extra delay needed as they're based on completed 12h candles)
+    upper_channel_aligned = align_htf_to_ltf(prices, df_12h, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_12h, lower_channel)
     
-    # Volume confirmation: volume > 1.5x 20-day median volume
+    # Volume spike: volume > 2.0x 20-period median volume (stricter to reduce trades)
     volume_series = pd.Series(volume)
     vol_median_20 = volume_series.rolling(window=20, min_periods=20).median().values
-    volume_spike = volume > (1.5 * vol_median_20)
+    volume_spike = volume > (2.0 * vol_median_20)
     
-    # Choppiness regime filter: CHOP > 61.8 = ranging (avoid), CHOP < 38.2 = trending (favor)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    hh_ll = highest_high - lowest_low
-    # Avoid division by zero and log of non-positive
-    chop = np.full_like(close, 50.0)
-    mask = (hh_ll > 1e-8) & ~np.isnan(hh_ll) & ~np.isnan(atr) & (atr > 0)
-    chop[mask] = 100 * np.log10(atr[mask] / (np.log10(hh_ll[mask]) * 14))
-    # Regime: chop between 38.2 and 61.8 = undefined (neutral), <38.2 = trending, >61.8 = ranging
-    chop_regime = (chop >= 38.2) & (chop <= 61.8)  # only trade in neutral to mildly trending/choppy to avoid strong ranging
-    
-    # Fixed position size for low trade frequency
+    # Fixed position size to control trade frequency and drawdown
     fixed_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Warmup: need 34 for weekly EMA, 30 for KAMA slow, 20 for volume median, 14 for chop/ATR
-    start_idx = max(34, 30, 20, 14)
+    # Warmup: need 50 for 12h EMA, 20 for Donchian, 20 for volume median
+    start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(kama[i]) or
-            np.isnan(vol_median_20[i]) or
-            np.isnan(chop[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(upper_channel_aligned[i]) or
+            np.isnan(lower_channel_aligned[i]) or
+            np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        kama_val = kama[i]
-        ema_34_w_val = ema_34_1w_aligned[i]
+        ema_50_val = ema_50_12h_aligned[i]
         vol_spike = volume_spike[i]
-        in_chop_regime = chop_regime[i]
         size = fixed_size
         
         if position == 0:
             # Flat - look for entry
-            # Long: price > KAMA AND price > weekly EMA34 AND volume spike AND in chop regime (not strong ranging)
-            long_entry = (close_val > kama_val) and (close_val > ema_34_w_val) and vol_spike and in_chop_regime
-            # Short: price < KAMA AND price < weekly EMA34 AND volume spike AND in chop regime
-            short_entry = (close_val < kama_val) and (close_val < ema_34_w_val) and vol_spike and in_chop_regime
+            # Long: price breaks above upper Donchian channel with volume spike and uptrend (close > EMA50_12h)
+            long_entry = (close_val > upper_channel_aligned[i]) and vol_spike and (close_val > ema_50_val)
+            # Short: price breaks below lower Donchian channel with volume spike and downtrend (close < EMA50_12h)
+            short_entry = (close_val < lower_channel_aligned[i]) and vol_spike and (close_val < ema_50_val)
             
             if long_entry:
                 signals[i] = size
                 position = 1
+                entry_price = close_val
             elif short_entry:
                 signals[i] = -size
                 position = -1
+                entry_price = close_val
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long - exit when price crosses below KAMA OR weekly EMA34 (trend change)
-            if (close_val < kama_val) or (close_val < ema_34_w_val):
+            # Long - exit on trend reversal or price re-enters Donchian channel
+            if close_val < ema_50_val or close_val < lower_channel_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price crosses above KAMA OR weekly EMA34
-            if (close_val > kama_val) or (close_val > ema_34_w_val):
+            # Short - exit on trend reversal or price re-enters Donchian channel
+            if close_val > ema_50_val or close_val > upper_channel_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "1d_KAMA_With_Trend_And_Regime_Filter"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
