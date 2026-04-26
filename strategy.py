@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeRegime_v3
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume confirmation, and choppiness regime filter (CHOP < 38.2 for trending) produce high-quality trades. The regime filter ensures breakouts occur only in trending markets, reducing whipsaws in ranging conditions. Target: 60-100 total trades over 4 years (15-25/year).
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation produce high-quality trades with low frequency. The 1d EMA34 provides a robust trend filter that works in both bull and bear markets by avoiding counter-trend breakouts. Volume confirmation ensures breakouts have conviction. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -35,36 +35,25 @@ def generate_signals(prices):
     r1 = close_1d_shifted + 1.1 * camarilla_range / 12
     s1 = close_1d_shifted - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 12h volume confirmation: volume > 1.8x 20-period average
+    # 4h volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # 12h choppiness index: CHOP < 38.2 = trending (favor breakouts), CHOP > 61.8 = ranging (avoid)
-    tr1 = np.maximum(high - low, np.absolute(high - np.concatenate([[np.nan], close[:-1]])))
-    tr2 = np.maximum(tr1, np.absolute(low - np.concatenate([[np.nan], close[:-1]])))
-    atr14 = pd.Series(tr2).rolling(window=14, min_periods=14).mean().values
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(pd.Series(atr14).rolling(window=14, min_periods=14).sum().values / (max_high_14 - min_low_14)) / np.log10(14)
-    chop = np.where((max_high_14 - min_low_14) == 0, 50, chop)  # avoid div by zero
-    chop = np.nan_to_num(chop, nan=50.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for EMA, 20 for volume MA, 14*2 for chop)
-    start_idx = max(34, 20, 28)
+    # Start after warmup (need 34 for EMA, 20 for volume MA)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(chop[i])):
+            np.isnan(vol_ma_20[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -79,34 +68,31 @@ def generate_signals(prices):
         downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation
-        volume_spike = volume[i] > 1.8 * vol_ma_20[i]
-        
-        # Choppiness regime: only take breakouts when CHOP < 38.2 (strongly trending)
-        regime_ok = chop[i] < 38.2
+        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         # Camarilla breakout conditions
         breakout_r1 = close[i] > r1_aligned[i]
         breakout_s1 = close[i] < s1_aligned[i]
         
-        # Long logic: breakout above R1 in uptrend with volume and good regime
-        if uptrend and volume_spike and breakout_r1 and regime_ok:
+        # Long logic: breakout above R1 in uptrend with volume
+        if uptrend and volume_spike and breakout_r1:
             if position != 1:
                 signals[i] = 0.25
                 position = 1
             else:
                 signals[i] = 0.25
-        # Short logic: breakout below S1 in downtrend with volume and good regime
-        elif downtrend and volume_spike and breakout_s1 and regime_ok:
+        # Short logic: breakout below S1 in downtrend with volume
+        elif downtrend and volume_spike and breakout_s1:
             if position != -1:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = -0.25
-        # Exit conditions: loss of trend OR regime becomes choppy (CHOP >= 38.2)
-        elif position == 1 and (not uptrend or chop[i] >= 38.2):
+        # Exit conditions: loss of trend
+        elif position == 1 and not uptrend:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (not downtrend or chop[i] >= 38.2):
+        elif position == -1 and not downtrend:
             signals[i] = 0.0
             position = 0
         else:
@@ -120,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeRegime_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
