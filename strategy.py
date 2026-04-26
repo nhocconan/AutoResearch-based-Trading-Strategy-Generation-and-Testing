@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1wTrend_1dRegime_v1
-Hypothesis: On 12h timeframe, trade Camarilla R1/S1 breakouts with 1w EMA50 trend filter and 1d chop regime (mean reversion when choppy, trend following when trending). Volume confirmation reduces false breakouts. Designed for low trade frequency (12-37/year) to minimize fee drag while capturing swings in both bull and bear markets via multi-timeframe confluence.
+4h_KAMA_Direction_RSI_ChopFilter_v1
+Hypothesis: On 4h timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction, RSI(14) for momentum confirmation, and Choppiness Index(14) for regime filtering. Enter long when KAMA slopes up, RSI>50, and CHOP<38.2 (trending regime); short when KAMA slopes down, RSI<50, and CHOP<38.2. Avoid ranging markets (CHOP>61.8). ATR-based stoploss limits drawdown. Designed to work in both bull and bear markets via adaptive trend filter and regime avoidance.
 """
 
 import numpy as np
@@ -18,67 +18,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # 1w EMA(50) for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Get 1d data for Camarilla pivot levels (using previous day's OHLC)
+    # Get 1d data for HTF indicators (more stable than 4h for longer-term filters)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # Calculate KAMA(10,2,30) on 1d close
+    close_1d = df_1d['close'].values
+    er = np.abs(np.diff(close_1d, 10)) / (
+        np.sum(np.abs(np.diff(close_1d, 1)), axis=0)[:len(close_1d)-10] + 1e-10
+    )
+    # Pad ER array to match close_1d length
+    er_full = np.concatenate([np.full(10, np.nan), er])
+    sc = (er_full * 0.28 + 0.06) ** 2
+    sc = np.where(np.isnan(sc), 0.0, sc)
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # seed
+    for i in range(10, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Get 1d data for chop regime filter (Choppiness Index)
-    # CHOP(14) = 100 * log10(sum(ATR(14)) / log10(range(14))) / log10(14)
-    # Simplified: use ATR ratio for regime detection
-    tr1 = pd.Series(df_1d['high']).rolling(window=2).max() - pd.Series(df_1d['low']).rolling(window=2).min()
-    tr2 = abs(pd.Series(df_1d['high']).rolling(window=2).max() - pd.Series(df_1d['close']).shift(1))
-    tr3 = abs(pd.Series(df_1d['low']).rolling(window=2).min() - pd.Series(df_1d['close']).shift(1))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr_1d.rolling(window=14, min_periods=14).mean().values
-    high_14 = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    low_14 = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    chop_raw = 100 * np.log10(atr_14.sum() / (high_14 - low_14)) / np.log10(14) if (high_14 - low_14) > 0 else 50
-    # For simplicity, use ATR normalization as proxy: chop > 0.6 = choppy, < 0.4 = trending
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    chop_ratio = atr_14 / atr_ma_50
-    chop_ratio = np.where(np.isnan(chop_ratio), 0.5, chop_ratio)
+    # Calculate RSI(14) on 1d close
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_full = np.concatenate([np.full(14, np.nan), rsi])
     
-    # Volume spike: current 12h volume > 2.0 * 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate Choppiness Index(14) on 1d OHLC
+    atr_1d = []
+    for i in range(1, len(df_1d)):
+        tr = max(
+            df_1d['high'].values[i] - df_1d['low'].values[i],
+            abs(df_1d['high'].values[i] - df_1d['close'].values[i-1]),
+            abs(df_1d['low'].values[i] - df_1d['close'].values[i-1])
+        )
+        atr_1d.append(tr)
+    atr_1d = np.concatenate([[np.nan], atr_1d])
+    atr_sum = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    high_low_range = pd.Series(df_1d['high'].values - df_1d['low'].values).rolling(window=14, min_periods=14).max().values - \
+                     pd.Series(df_1d['high'].values - df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / high_low_range) / np.log10(14)
+    chop_full = np.concatenate([np.full(13, np.nan), chop])  # 13 NaNs for 14-period indicator
     
-    # Align HTF indicators to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1, additional_delay_bars=1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1, additional_delay_bars=1)
-    chop_ratio_aligned = align_htf_to_ltf(prices, df_1d, chop_ratio, additional_delay_bars=1)
+    # Align HTF indicators to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_full)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_full)
+    
+    # ATR(14) for 4h stoploss
+    tr1 = pd.Series(high).rolling(window=2).max() - pd.Series(low).rolling(window=2).min()
+    tr2 = abs(pd.Series(high).rolling(window=2).max() - pd.Series(close).shift(1))
+    tr3 = abs(pd.Series(low).rolling(window=2).min() - pd.Series(close).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    atr_at_entry = 0.0
     
-    # Warmup: max of EMA(50) 1w (50), Camarilla (need 2nd 1d bar), volume MA (20), chop ratio (50)
-    start_idx = max(50, 2, 20, 50) + 1
+    # Warmup: need KAMA(10,2,30), RSI(14), CHOP(14), ATR(14)
+    start_idx = max(30, 14, 14, 14) + 5  # extra buffer for alignment
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(chop_ratio_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(chop_aligned[i]) or
+            np.isnan(atr[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -88,72 +98,61 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        ema_50_1w_val = ema_50_1w_aligned[i]
+        kama_val = kama_aligned[i]
+        kama_prev = kama_aligned[i-1] if i > 0 else kama_val
+        rsi_val = rsi_aligned[i]
+        chop_val = chop_aligned[i]
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        vol_spike = volume_spike[i]
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
-        chop_val = chop_ratio_aligned[i]
+        atr_val = atr[i]
         
-        # Regime filter: chop > 0.6 = choppy (mean revert), chop < 0.4 = trending (trend follow)
-        is_choppy = chop_val > 0.6
-        is_trending = chop_val < 0.4
+        # KAMA slope: rising if current > previous
+        kama_rising = kama_val > kama_prev
+        kama_falling = kama_val < kama_prev
+        
+        # Regime filter: trending market (CHOP < 38.2), avoid ranging (CHOP > 61.8)
+        trending_regime = chop_val < 38.2
+        ranging_regime = chop_val > 61.8
         
         if position == 0:
-            # Long conditions
-            long_breakout = high_val > camarilla_r1_val
-            long_trend = close_val > ema_50_1w_val  # uptrend filter
-            long_mean_revert = low_val < camarilla_s1_val and close_val > camarilla_s1_val  # bounce from S1
+            # Long: KAMA rising, RSI > 50, trending regime
+            long_signal = kama_rising and (rsi_val > 50) and trending_regime
             
-            # Short conditions
-            short_breakout = low_val < camarilla_s1_val
-            short_trend = close_val < ema_50_1w_val  # downtrend filter
-            short_mean_revert = high_val > camarilla_r1_val and close_val < camarilla_r1_val  # rejection from R1
-            
-            # In choppy regime: mean reversion at S1/R1
-            # In trending regime: breakout in direction of trend
-            if is_choppy:
-                long_signal = long_mean_revert and vol_spike
-                short_signal = short_mean_revert and vol_spike
-            else:  # trending or neutral
-                long_signal = long_breakout and long_trend and vol_spike
-                short_signal = short_breakout and short_trend and vol_spike
+            # Short: KAMA falling, RSI < 50, trending regime
+            short_signal = kama_falling and (rsi_val < 50) and trending_regime
             
             if long_signal:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
+                atr_at_entry = atr_val
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
+                atr_at_entry = atr_val
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: trend reversal or mean reversion signal
-            if is_choppy and close_val > camarilla_r1_val:  # reached R1 in choppy market
-                signals[i] = 0.0
-                position = 0
-            elif not is_choppy and close_val < ema_50_1w_val:  # trend reversal
+            # Exit: ATR-based stoploss or regime change to ranging or KAMA turns down
+            if (close_val < entry_price - 2.5 * atr_at_entry or 
+                ranging_regime or 
+                not kama_rising):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: trend reversal or mean reversion signal
-            if is_choppy and close_val < camarilla_s1_val:  # reached S1 in choppy market
-                signals[i] = 0.0
-                position = 0
-            elif not is_choppy and close_val > ema_50_1w_val:  # trend reversal
+            # Exit: ATR-based stoploss or regime change to ranging or KAMA turns up
+            if (close_val > entry_price + 2.5 * atr_at_entry or 
+                ranging_regime or 
+                not kama_falling):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_1dRegime_v1"
-timeframe = "12h"
+name = "4h_KAMA_Direction_RSI_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
