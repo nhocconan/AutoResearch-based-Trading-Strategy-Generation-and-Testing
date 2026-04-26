@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_ChopFilter_v1
-Hypothesis: 4h Donchian channel breakout with volume confirmation and choppiness regime filter.
-- Uses 4h timeframe for optimal trade frequency (target: 75-200 total trades over 4 years)
-- Donchian(20) breakout captures trend continuation after consolidation
-- Volume confirmation (1.5x average volume) ensures institutional participation
-- Choppiness index filter: only trade when CHOP > 50 (avoid strong trends where breakouts fail)
-- Works in bull/bear markets by trading breakouts in both directions with volume/regime confirmation
-- Designed for 19-50 trades/year to minimize fee drag
+1d_Camarilla_Pivot_VolumeSpike_ChopFilter_v1
+Hypothesis: 1d Camarilla pivot breakout with volume spike and choppiness regime filter.
+- Uses 1d timeframe for low trade frequency (target: 30-100 total trades over 4 years)
+- Weekly trend filter ensures alignment with higher timeframe direction
+- Camarilla R3/S3 levels act as strong support/resistance for breakouts
+- Volume spike confirms institutional participation
+- Choppiness filter avoids whipsaws in ranging markets
+- Designed for 7-25 trades/year (30-100 total over 4 years) to minimize fee drag
+- Works in bull/bear markets by combining pivot structure with volume/regime filters
 """
 
 import numpy as np
@@ -24,58 +25,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for choppiness filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d choppiness index (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # Align with 1d indices
+    # Previous day's OHLC for Camarilla calculation (using 1d data directly)
+    prev_high = pd.Series(high).shift(1).values
+    prev_low = pd.Series(low).shift(1).values
+    prev_close = pd.Series(close).shift(1).values
     
-    # ATR(14)
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Camarilla levels: R3, S3 (strongest levels)
+    # R3 = Close + 1.1*(High-Low)/2
+    # S3 = Close - 1.1*(High-Low)/2
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + 1.1 * camarilla_range / 2
+    s3 = prev_close - 1.1 * camarilla_range / 2
     
-    # Highest high and lowest low over 14 periods
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Volume confirmation: volume > 1.5 * 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Choppiness Index: 100 * log10(sum(TR(14)) / (HH(14) - LL(14))) / log10(14)
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop_denominator = hh_1d - ll_1d
-    chop_denominator = np.where(chop_denominator == 0, np.nan, chop_denominator)
-    chop_ratio = sum_tr_14 / chop_denominator
-    chop_ratio = np.where((chop_ratio <= 0) | np.isnan(chop_ratio), np.nan, chop_ratio)
-    chop_1d = 100 * np.log10(chop_ratio) / np.log10(14)
-    
-    # Align choppiness to 4h timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Donchian(20) breakout levels
-    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: 1.5x average volume
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Choppiness Index (14-period) to avoid ranging markets
+    # CHOP = 100 * log10(sum(ATR) / (max(high)-min(low))) / log10(N)
+    tr1 = pd.Series(high).rolling(window=14, min_periods=14).max().values - pd.Series(low).rolling(window=14, min_periods=14).min().values
+    tr2 = abs(pd.Series(high).shift(1) - pd.Series(low).shift(1))
+    tr3 = abs(pd.Series(high).shift(1) - pd.Series(close).shift(1))
+    tr4 = abs(pd.Series(low).shift(1) - pd.Series(close).shift(1))
+    true_range = pd.concat([tr2, tr3, tr4], axis=1).max(axis=1).values
+    atr_sum = pd.Series(true_range).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low + 1e-10)) / np.log10(14)
+    chop_filter = chop < 61.8  # Trending market (below 61.8 = trending, above = ranging)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 for Donchian)
-    start_idx = 20
+    # Start after warmup (need 20 for volume MA, 14 for chop)
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(period20_high[i]) or np.isnan(period20_low[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema200_1w_aligned[i]) or 
+            np.isnan(r3[i]) or np.isnan(s3[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -85,16 +82,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Only trade when market is choppy (avoid strong trends)
-        choppy_market = chop_1d_aligned[i] > 50
+        # Entry conditions
+        bullish_breakout = close[i] > r3[i] and volume_spike[i] and chop_filter[i] and weekly_uptrend
+        bearish_breakout = close[i] < s3[i] and volume_spike[i] and chop_filter[i] and weekly_downtrend
+        
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema200_1w_aligned[i]
+        weekly_downtrend = close[i] < ema200_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high AND volume spike AND choppy market
-            if close[i] > period20_high[i] and volume_spike[i] and choppy_market:
+            # Long: price breaks above R3 with volume spike in trending market AND weekly uptrend
+            if bullish_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND volume spike AND choppy market
-            elif close[i] < period20_low[i] and volume_spike[i] and choppy_market:
+            # Short: price breaks below S3 with volume spike in trending market AND weekly downtrend
+            elif bearish_breakout:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -102,20 +104,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price falls below Donchian low OR volume drops significantly
-            if close[i] < period20_low[i] or volume[i] < (volume_ma[i] * 0.5):
+            # Exit: price falls below S3 (reversal) OR loss of momentum
+            if close[i] < s3[i] or not chop_filter[i]:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price rises above Donchian high OR volume drops significantly
-            if close[i] > period20_high[i] or volume[i] < (volume_ma[i] * 0.5):
+            # Exit: price rises above R3 (reversal) OR loss of momentum
+            if close[i] > r3[i] or not chop_filter[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_VolumeSpike_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
