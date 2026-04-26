@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike
-Hypothesis: On daily timeframe, enter long when price breaks above Camarilla R1 level AND 1w trend is up (close > EMA50) AND volume > 2.0x 20-period average volume. Enter short when price breaks below Camarilla S1 level AND 1w trend is down (close < EMA50) AND volume > 2.0x 20-period average volume. Exit on trend reversal or price retracing to Camarilla midpoint. Uses discrete sizing (0.0, ±0.25) to limit fee drag. Target: 7-25 trades/year.
+12h_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike
+Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level (bullish breakout from tight range) AND 1w trend is up (close > EMA50) AND volume > 2.0x 20-period average volume. Enter short when price breaks below Camarilla S1 level AND 1w trend is down (close < EMA50) AND volume > 2.0x 20-period average volume. Exit on trend reversal or price retracing to Camarilla midpoint. Uses discrete sizing (0.0, ±0.25) to limit fee drag. Target: 12-37 trades/year.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
+    # Get 1w data for trend filter and Camarilla levels
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
@@ -28,31 +28,27 @@ def generate_signals(prices):
     ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1d Camarilla levels from previous 1d bar
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate 1w Camarilla levels from previous 1w bar
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w_raw = df_1w['close'].values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_raw = df_1d['close'].values
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w = np.roll(close_1w_raw, 1)
+    prev_high_1w[0] = np.nan
+    prev_low_1w[0] = np.nan
+    prev_close_1w[0] = np.nan
     
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d_raw, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
-    
-    camarilla_range = prev_high_1d - prev_low_1d
-    r1 = prev_close_1d + 1.1 * camarilla_range / 12
-    s1 = prev_close_1d - 1.1 * camarilla_range / 12
+    camarilla_range = prev_high_1w - prev_low_1w
+    r1 = prev_close_1w + 1.1 * camarilla_range / 12  # R1 level
+    s1 = prev_close_1w - 1.1 * camarilla_range / 12  # S1 level
     mid = (r1 + s1) / 2  # Camarilla midpoint for exit
     
-    # Align Camarilla levels and EMA50 to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    mid_aligned = align_htf_to_ltf(prices, df_1d, mid)
+    # Align Camarilla levels and EMA50 to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    mid_aligned = align_htf_to_ltf(prices, df_1w, mid)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: fixed threshold of 2.0x average volume
@@ -118,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
