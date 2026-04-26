@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1
-Hypothesis: On 12h timeframe, price breaking Camarilla R1/S1 levels from the previous 12h bar with 1d EMA34 trend alignment and volume confirmation provides robust breakout signals. Uses ATR-based stoploss (2.0x) and discrete sizing (0.0, ±0.25) to control risk. Targets 50-150 trades over 4 years (12-37/year) to stay within optimal trade frequency for 12h timeframe. Works in bull markets via trend-following breaks and in bear markets via mean-reversion at extreme Camarilla levels (R1/S1 act as support/resistance in ranging markets).
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1
+Hypothesis: On 4h timeframe, price breaking Camarilla R1/S1 levels with 1d EMA34 trend alignment and volume confirmation provides robust breakout signals. Uses ATR-based stoploss (2.0x) and discrete sizing (0.0, ±0.25) to control risk and minimize fee churn. Targets 75-200 trades over 4 years (19-50/year) to stay within optimal trade frequency for 4h timeframe. Designed to work in both bull (trend following) and bear (mean reversion via regime filter) markets by requiring alignment with higher timeframe trend.
 """
 
 import numpy as np
@@ -28,7 +28,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for stoploss on 12h
+    # Calculate ATR(14) for stoploss on 4h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -39,7 +39,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.maximum(vol_ma, 1e-10)  # avoid division by zero
     
-    # Calculate Camarilla levels from previous 12h bar
+    # Calculate Camarilla levels from previous 4h bar
     prev_high = np.concatenate([[np.nan], high[:-1]])
     prev_low = np.concatenate([[np.nan], low[:-1]])
     prev_close = np.concatenate([[np.nan], close[:-1]])
@@ -71,7 +71,7 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        vol_confirmed = vol_ratio[i] > 1.5  # volume at least 1.5x average (slightly looser for 12h)
+        vol_confirmed = vol_ratio[i] > 2.0  # volume at least 2.0x average
         trend_1d_up = close_val > ema_34_1d_aligned[i]
         trend_1d_down = close_val < ema_34_1d_aligned[i]
         
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
