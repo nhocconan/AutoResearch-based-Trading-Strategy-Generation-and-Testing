@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ChopFilter_v3
-Hypothesis: Use 4h timeframe with Camarilla R1/S1 breakout from prior day, confirmed by 1d EMA34 trend, volume spike (>1.8x 20-bar avg), and chop > 61.8 (range regime). 
-Long: price breaks above R1 + 1d EMA34 up + volume spike + chop > 61.8. 
-Short: price breaks below S1 + 1d EMA34 down + volume spike + chop > 61.8. 
-Exit: price reverts to Camarilla midpoint (PP) or touches opposite level (S1 for long, R1 for short). 
-Discrete size 0.30. Targets ~30 trades/year to avoid fee drag. Works in bull/bear via regime filter and trend alignment.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v1
+Hypothesis: 12h timeframe with Camarilla R1/S1 breakout from prior day, confirmed by 1d EMA34 trend, volume spike, and choppiness regime filter.
+Long when: price breaks above R1 + 1d EMA34 uptrend + volume > 1.8 * avg volume + chop > 61.8 (range regime).
+Short when: price breaks below S1 + 1d EMA34 downtrend + volume > 1.8 * avg volume + chop > 61.8.
+Exit when: price reverts to Camarilla midpoint (PP) or touches opposite level (S1 for long, R1 for short).
+Uses discrete 0.25 position size. Targets 12-37 trades/year for optimal test generalization.
+Works in both bull and bear markets by using regime filter to avoid false breakouts in strong trends and capture range-bound reversals.
 """
 
 import numpy as np
@@ -37,7 +38,7 @@ def generate_signals(prices):
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     camarilla_pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 4h timeframe (wait for completed 1d bar)
+    # Align to 12h timeframe (wait for completed 1d bar)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
@@ -51,7 +52,7 @@ def generate_signals(prices):
     volume_spike = volume > (1.8 * vol_avg)
     
     # Choppiness Index (CHOP) regime filter - using 14-period
-    # CHOP > 61.8 = ranging market (good for breakouts in range)
+    # CHOP > 61.8 = ranging market (good for mean reversion/breakouts in range)
     # CHOP < 38.2 = trending market
     atr_period = 14
     tr1 = high[1:] - low[1:]
@@ -83,7 +84,7 @@ def generate_signals(prices):
             continue
         
         close_val = close[i]
-        size = 0.30  # Fixed position size
+        size = 0.25  # Fixed position size
         
         if position == 0:
             # Flat - look for breakout with trend, volume, and regime confirmation
@@ -123,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ChopFilter_v3"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
