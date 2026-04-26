@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend filter (EMA34) and volume spike confirmation.
-Enters long when price breaks above R1 with bullish daily trend and volume spike.
-Enters short when price breaks below S1 with bearish daily trend and volume spike.
-Exits when price reverts to opposite Camarilla level (S1 for longs, R1 for shorts).
+4h_Donchian20_Breakout_VolumeChopFilter
+Hypothesis: 4h Donchian(20) breakout with volume spike and choppiness regime filter.
+Enters long on upper band breakout when volume > 2x EMA20 volume and chop > 61.8 (range).
+Enters short on lower band breakout when volume > 2x EMA20 volume and chop > 61.8 (range).
+Exits on opposite band touch.
 Designed for 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 Uses discrete position sizing (0.25) to minimize churn. Works in both bull and bear markets.
 """
@@ -23,50 +23,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (R1, S1) on 1d timeframe
-    # Use prior completed 1d bar to avoid look-ahead
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Prior 1d bar's OHLC for Camarilla calculation (shifted by 1)
-    prior_high = np.roll(df_1d['high'].values, 1)
-    prior_low = np.roll(df_1d['low'].values, 1)
-    prior_close = np.roll(df_1d['close'].values, 1)
-    prior_open = np.roll(df_1d['open'].values, 1)
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    prior_close[0] = np.nan
-    prior_open[0] = np.nan
-    
-    # Calculate pivot point and Camarilla levels (R1, S1)
-    pivot = (prior_high + prior_low + prior_close) / 3.0
-    range_hl = prior_high - prior_low
-    r1 = pivot + range_hl * 1.1 / 2
-    s1 = pivot - range_hl * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Load 1d data for trend filter (EMA34)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Donchian channels (20-period) on 4h timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 2.0 * 20-period EMA volume
     avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * avg_volume)
     
+    # Choppiness Index (14-period) - uses true range and ATR
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.concatenate([[close[0]], close[:-1]])))
+    tr3 = pd.Series(np.abs(low - np.concatenate([[close[0]], close[:-1]])))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    sum_tr = tr.rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_tr / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop = np.nan_to_num(chop, nan=50.0)  # replace NaN with neutral value
+    
+    # Regime filter: chop > 61.8 indicates ranging market (good for mean reversion/breakout fade)
+    chop_range = chop > 61.8
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 1d shift + 34-period EMA)
-    start_idx = 1 + 34
+    # Start after warmup (need 20-period Donchian and 14-period chop)
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(chop_range[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -76,25 +66,25 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long logic: break above R1 + bullish 1d trend + volume spike
-        if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+        # Long logic: break above upper Donchian + volume spike + choppy regime
+        if close[i] > highest_high[i] and volume_spike[i] and chop_range[i]:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: break below S1 + bearish 1d trend + volume spike
-        elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+        # Short logic: break below lower Donchian + volume spike + choppy regime
+        elif close[i] < lowest_low[i] and volume_spike[i] and chop_range[i]:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
-        # Exit: price reverts to opposite Camarilla level
-        elif position == 1 and close[i] < s1_aligned[i]:
+        # Exit: price touches opposite Donchian band
+        elif position == 1 and close[i] < lowest_low[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > r1_aligned[i]:
+        elif position == -1 and close[i] > highest_high[i]:
             signals[i] = 0.0
             position = 0
         else:
@@ -108,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
+name = "4h_Donchian20_Breakout_VolumeChopFilter"
 timeframe = "4h"
 leverage = 1.0
