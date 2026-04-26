@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: 4h Camarilla pivot breakout with 1d trend filter (not 12h) and volume spike.
-- Uses 1d HTF for stronger trend filter (fewer whipsaws than 12h)
-- Camarilla R1/S1 from previous 1d bar (more significant levels)
-- Volume confirmation (2x 20-period average) to avoid false breakouts
-- Discrete position sizing (0.25) to minimize fee churn
-- Target: 20-50 trades/year (80-200 over 4 years) to stay under fee drag threshold
-- Works in bull/bear markets by trading with 1d trend and using Camarilla for precise entries
-- BTC/ETH focus: 1d trend filter reduces SOL-only bias
+Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation.
+- Uses 4h timeframe for moderate trade frequency (target: 75-200 total trades over 4 years)
+- Camarilla R1/S1 levels calculated from previous 1d bar (more stable than 12h)
+- Long when price breaks above R1 with volume spike and 1d uptrend
+- Short when price breaks below S1 with volume spike and 1d downtrend
+- Designed for 19-50 trades/year (75-200 total over 4 years) to minimize fee drag
+- Uses 1d trend for better BTC/ETH alignment (proven edge from top performers)
 """
 
 import numpy as np
@@ -28,7 +27,7 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA34 for trend filter (more responsive than EMA50)
+    # Calculate 1d EMA34 for trend filter (proven in top performers)
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
