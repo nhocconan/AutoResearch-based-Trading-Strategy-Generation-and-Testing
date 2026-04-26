@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_KAMA_TrendFilter_v1
-Hypothesis: On 4h timeframe, Donchian(20) breakouts with volume confirmation and KAMA(10,2,30) trend filter capture strong trends while avoiding false breakouts in choppy markets. KAMA adapts to market noise, making it effective in both bull and bear regimes. Volume ensures breakouts have conviction. Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing (0.25) to minimize fee drag.
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
+Hypothesis: On daily timeframe, Camarilla R1/S1 breakouts with 1-week trend filter (EMA50) and volume confirmation captures strong trends while avoiding whipsaws in choppy markets. The 1-week EMA50 provides a robust trend filter that works in both bull and bear regimes, while volume confirmation ensures breakouts have conviction. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -18,47 +18,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend filter (KAMA)
+    # Load 1w data ONCE before loop for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate 1d Camarilla levels (R1, S1) using previous 1d's OHLC
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d KAMA for trend filter (adaptive to market noise)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0) if False else None  # placeholder for correct calc
-    # Proper ER calculation: |net change| / sum(|individual changes|) over period
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        net_change = np.abs(close_1d[i] - close_1d[i-10])
-        total_change = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
-        er[i] = net_change / total_change if total_change != 0 else 0
-    # Smoothing constants: fastest SC = 2/(2+1) = 0.666, slowest SC = 2/(30+1) = 0.0645
-    sc = (er * (0.666 - 0.0645) + 0.0645) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # seed value
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # 4h Donchian(20) channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
+    prev_high_1d = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
     
-    # 4h volume confirmation: volume > 2.0x 20-period average (strict to reduce trades)
+    camarilla_range = prev_high_1d - prev_low_1d
+    r1 = prev_close_1d + 1.1 * camarilla_range / 12
+    s1 = prev_close_1d - 1.1 * camarilla_range / 12
+    
+    # Align Camarilla levels to 1d timeframe (no alignment needed as both are 1d)
+    r1_aligned = r1  # Already on 1d timeframe
+    s1_aligned = s1  # Already on 1d timeframe
+    
+    # 1d volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need sufficient data for Donchian and volume MA)
-    start_idx = 20
+    # Start after warmup (need sufficient data for EMA and volume MA)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or
+        if (np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             # Hold current position
             if position == 0:
@@ -69,26 +69,26 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1d trend filter (KAMA)
-        uptrend = close[i] > kama_aligned[i]
-        downtrend = close[i] < kama_aligned[i]
+        # 1w trend filter (EMA50)
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
-        # Volume confirmation (strict)
+        # Volume confirmation
         volume_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_20[i]
-        breakout_down = close[i] < lowest_20[i]
+        # Camarilla breakout conditions
+        breakout_r1 = close[i] > r1_aligned[i]
+        breakout_s1 = close[i] < s1_aligned[i]
         
-        # Long logic: breakout above upper Donchian in uptrend with volume
-        if uptrend and volume_spike and breakout_up:
+        # Long logic: breakout above R1 in uptrend with volume
+        if uptrend and volume_spike and breakout_r1:
             if position != 1:
                 signals[i] = 0.25
                 position = 1
             else:
                 signals[i] = 0.25
-        # Short logic: breakout below lower Donchian in downtrend with volume
-        elif downtrend and volume_spike and breakout_down:
+        # Short logic: breakout below S1 in downtrend with volume
+        elif downtrend and volume_spike and breakout_s1:
             if position != -1:
                 signals[i] = -0.25
                 position = -1
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_KAMA_TrendFilter_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
