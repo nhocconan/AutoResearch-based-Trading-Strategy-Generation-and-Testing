@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike (ATR ratio > 1.2). 
-Trade only breakouts aligned with 1d trend during volatility expansion. Uses discrete sizing 0.25 to 
-limit trades (~20/year). Volume spike ensures institutional participation. Works in bull/bear via 
-trend filter and volatility regime. Target: 50-150 total trades over 4 years.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_HT
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike (ATR ratio > 1.3). Trade only breakouts aligned with 1d trend during volatility expansion. Uses discrete sizing 0.25 to limit trades (~25/year). Volume spike ensures institutional participation. Works in bull/bear via trend filter and volatility regime.
 """
 
 import numpy as np
@@ -44,8 +41,8 @@ def generate_signals(prices):
     atr_ratio = atr / pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     
     # Calculate previous day's high/low/close for Camarilla levels
-    # Use 2-period lookback for 12h data (2*12h = 1 day)
-    lookback = 2
+    # Use 6-period lookback for 4h data (6*4h = 24h = 1 day)
+    lookback = 6
     prev_high = pd.Series(high).shift(lookback).rolling(window=lookback, min_periods=lookback).max().values
     prev_low = pd.Series(low).shift(lookback).rolling(window=lookback, min_periods=lookback).min().values
     prev_close = pd.Series(close).shift(lookback).rolling(window=lookback, min_periods=lookback).mean().values
@@ -61,7 +58,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of calculations (34 for EMA, 50 for ATR ratio, 2 for Camarilla)
+    # Warmup: max of calculations (50 for ATR ratio, 34 for EMA, 6 for Camarilla)
     start_idx = 50
     
     for i in range(start_idx, n):
@@ -76,7 +73,7 @@ def generate_signals(prices):
         r1_val = camarilla_r1[i]
         s1_val = camarilla_s1[i]
         ema_34_val = ema_34_1d_aligned[i]
-        vol_spike = atr_ratio[i] > 1.2  # volume spike
+        vol_spike = atr_ratio[i] > 1.3  # volume spike
         size = fixed_size
         
         # Entry conditions: Camarilla breakout with volume spike AND aligned with 1d EMA34 trend
@@ -124,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_HT"
+timeframe = "4h"
 leverage = 1.0
