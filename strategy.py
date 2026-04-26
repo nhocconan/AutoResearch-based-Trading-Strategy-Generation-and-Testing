@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation (>1.5x 20-bar average) capture strong trending moves. Discrete sizing (0.25) targets 20-50 trades/year. Works in bull/bear by taking breakouts in direction of higher-timeframe trend. Volume confirmation ensures momentum validity. ATR-based trailing stop (2.5x) manages risk. Designed for 4h timeframe to minimize fee drag while capturing multi-day trends.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ChopRegime_v3
+Hypothesis: 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar average), and choppiness regime filter (CHOP > 61.8 = range) capture strong trending moves while avoiding whipsaws in strong trends. Discrete sizing (0.25) targets 20-50 trades/year. Works in bull/bear by taking breakouts in direction of higher-timeframe trend only during ranging regimes (CHOP > 61.8) to avoid trend-following failures. Volume confirmation ensures momentum validity. ATR-based trailing stop (2.5x) manages risk. Designed for 4h timeframe to minimize fee drag while capturing multi-day trends.
 """
 
 import numpy as np
@@ -38,6 +38,16 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (vol_ma * 1.5)
     
+    # Choppiness Index (CHOP) regime filter: CHOP > 61.8 = ranging (good for mean reversion/breakouts)
+    # CHOP = 100 * LOG10(SUM(ATR(14),14) / (MAXHIGH(14) - MINLOW(14))) / LOG10(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop_raw = 100 * np.log10(atr_14 / (max_high_14 - min_low_14 + 1e-10)) / np.log10(14)
+    chop_raw = np.where((max_high_14 - min_low_14) == 0, 100, chop_raw)  # avoid div by zero
+    chop_raw = np.nan_to_num(chop_raw, nan=100.0)
+    chop_filter = chop_raw > 61.8  # ranging regime
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
@@ -45,8 +55,8 @@ def generate_signals(prices):
     highest_since_long = 0.0
     lowest_since_short = 0.0
     
-    # Warmup: max of EMA34 (34), ATR (14), volume MA (20)
-    start_idx = max(34, 14, 20)
+    # Warmup: max of EMA34 (34), ATR (14), volume MA (20), CHOP (14)
+    start_idx = max(34, 14, 20, 14)
     
     for i in range(start_idx, n):
         close_val = close[i]
@@ -55,9 +65,10 @@ def generate_signals(prices):
         trend_val = ema34_1d_aligned[i]
         atr_val = atr[i]
         vol_conf = volume_confirm[i]
+        chop_ok = chop_filter[i]
         
         # Skip if any data not ready
-        if (np.isnan(trend_val) or np.isnan(atr_val)):
+        if (np.isnan(trend_val) or np.isnan(atr_val) or np.isnan(chop_ok)):
             # Hold current position
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
@@ -84,9 +95,9 @@ def generate_signals(prices):
         long_breakout = close_val > r1
         short_breakout = close_val < s1
         
-        # Entry conditions: Camarilla breakout in direction of 1d trend + volume confirmation
-        long_entry = long_breakout and is_uptrend and vol_conf
-        short_entry = short_breakout and is_downtrend and vol_conf
+        # Entry conditions: Camarilla breakout in direction of 1d trend + volume confirmation + chop filter (ranging)
+        long_entry = long_breakout and is_uptrend and vol_conf and chop_ok
+        short_entry = short_breakout and is_downtrend and vol_conf and chop_ok
         
         # Update highest/lowest for trailing stop (ATR-based)
         if position == 1:
@@ -133,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ChopRegime_v3"
 timeframe = "4h"
 leverage = 1.0
