@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_FundingExtreme_v1
-Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1-day trend filter and extreme funding rate filter.
-Only trade breakouts in direction of 1-day EMA34 trend when funding rate is extremely biased (contrarian signal).
-Funding rate > +0.10% → short bias, < -0.10% → long bias. Avoids crowded trades and reduces fee drift.
-Designed for 12-37 trades/year (50-150 over 4 years) by requiring confluence of breakout, trend, and funding extreme.
-Works in bull/bear via 1-day trend filter: only takes long breakouts in uptrend, short in downtrend.
-Uses discrete position sizing (0.25) to minimize fee churn.
+4h_Donchian20_Breakout_12hEMA50_Trend_VolumeSpike_v1
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+Only trade breakouts in direction of 12h EMA50 trend when volume > 1.8x 20-bar average.
+Exit on opposite Donchian(10) break or volume dry-up. Designed for 20-50 trades/year on 4h.
+Uses discrete sizing (0.25) to minimize fee churn. Works in bull/bear via 12h trend filter.
 """
 
 import numpy as np
@@ -23,51 +21,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for HTF trend
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA34 for HTF trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    htf_trend = np.where(close > ema_34_1d_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
+    # Calculate 12h EMA50 for HTF trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    htf_trend = np.where(close > ema_50_12h_aligned, 1, -1)  # 1 = uptrend, -1 = downtrend
     
-    # Calculate Camarilla pivot levels from 1d data
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    R1_1d = typical_price_1d + (1.1/12) * (df_1d['high'] - df_1d['low'])  # R1 level
-    S1_1d = typical_price_1d - (1.1/12) * (df_1d['high'] - df_1d['low'])  # S1 level
+    # Calculate Donchian channels on 4h (primary timeframe)
+    # Upper channel: 20-period high
+    # Lower channel: 20-period low
+    # Exit channel: 10-period opposite
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high_20 = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_high_10 = high_series.rolling(window=10, min_periods=10).max().values
+    donchian_low_10 = low_series.rolling(window=10, min_periods=10).min().values
     
-    # Align Camarilla levels to 12h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d.values)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d.values)
-    
-    # Load funding rate data (8h) and align to 12h
-    try:
-        df_8h = get_htf_data(prices, '8h')
-        # Funding rate is typically in the data as 'funding_rate' column
-        if 'funding_rate' in df_8h.columns:
-            funding_rate = df_8h['funding_rate'].values
-        else:
-            # Fallback: use zero if funding rate not available (should not happen on Binance)
-            funding_rate = np.zeros(len(df_8h))
-        funding_rate_aligned = align_htf_to_ltf(prices, df_8h, funding_rate)
-    except:
-        # If funding rate data not available, disable filter (neutral)
-        funding_rate_aligned = np.zeros(n)
-    
-    # Volume confirmation: volume > 2.0x 20-period average (much tighter)
+    # Volume confirmation: volume > 1.8x 20-period average (tight)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for 1d EMA, 20 for volume MA)
-    start_idx = max(34, 20)
+    # Start after warmup (need 50 for 12h EMA, 20 for Donchian/volume)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or
-            np.isnan(funding_rate_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(donchian_high_20[i]) or 
+            np.isnan(donchian_low_20[i]) or np.isnan(donchian_high_10[i]) or 
+            np.isnan(donchian_low_10[i]) or np.isnan(vol_ma_20[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -77,25 +63,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (much tighter: 2.0x average)
-        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume spike condition (tight: 1.8x average)
+        volume_spike = volume[i] > 1.8 * vol_ma_20[i]
         
-        # Extreme funding rate condition (contrarian signal)
-        funding_long_extreme = funding_rate_aligned[i] < -0.0010  # < -0.10%
-        funding_short_extreme = funding_rate_aligned[i] > 0.0010   # > +0.10%
-        funding_normal = abs(funding_rate_aligned[i]) <= 0.0010
-        
-        # Breakout conditions with trend filter and extreme funding filter
-        if htf_trend[i] == 1:  # Uptrend on 1d
-            # Long breakout above R1 with volume spike, extreme funding long bias or normal
-            if close[i] > R1_1d_aligned[i] and volume_spike and (funding_long_extreme or funding_normal):
+        # Breakout conditions with trend filter
+        if htf_trend[i] == 1:  # Uptrend on 12h
+            # Long breakout above 20-period Donchian high with volume spike
+            if close[i] > donchian_high_20[i] and volume_spike:
                 if position != 1:
                     signals[i] = 0.25
                     position = 1
                 else:
                     signals[i] = 0.25
-            # Exit long if price falls below S1 (reversal signal) or extreme short funding
-            elif position == 1 and (close[i] < S1_1d_aligned[i] or funding_short_extreme):
+            # Exit long if price falls below 10-period Donchian low (reversal) or volume dry-up
+            elif position == 1 and (close[i] < donchian_low_10[i] or volume[i] < 0.5 * vol_ma_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,16 +87,16 @@ def generate_signals(prices):
                     signals[i] = 0.25
                 else:
                     signals[i] = -0.25
-        elif htf_trend[i] == -1:  # Downtrend on 1d
-            # Short breakdown below S1 with volume spike, extreme funding short bias or normal
-            if close[i] < S1_1d_aligned[i] and volume_spike and (funding_short_extreme or funding_normal):
+        elif htf_trend[i] == -1:  # Downtrend on 12h
+            # Short breakdown below 20-period Donchian low with volume spike
+            if close[i] < donchian_low_20[i] and volume_spike:
                 if position != -1:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = -0.25
-            # Exit short if price rises above R1 (reversal signal) or extreme long funding
-            elif position == -1 and (close[i] > R1_1d_aligned[i] or funding_long_extreme):
+            # Exit short if price rises above 10-period Donchian high (reversal) or volume dry-up
+            elif position == -1 and (close[i] > donchian_high_10[i] or volume[i] < 0.5 * vol_ma_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_FundingExtreme_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
