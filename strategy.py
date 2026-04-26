@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d trend filter and volume confirmation.
-Only trade breakouts in direction of 1d EMA34 trend to avoid counter-trend whipsaws.
-In uptrend (price > 1d EMA34): long breakouts above R1, short breakdowns below S1 only for mean reversion.
-In downtrend (price < 1d EMA34): short breakdowns below S1, long breakouts above R1 only for mean reversion.
-Uses volume confirmation (volume > 1.3x 20-period average) to avoid false breakouts and discrete position sizing (0.25) to minimize fee churn.
+Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Only trade breakouts in direction of 1d trend to avoid counter-trend whipsaws.
+In uptrend (price > 1d EMA34): long breakouts above R1.
+In downtrend (price < 1d EMA34): short breakdowns below S1.
+Uses volume confirmation to avoid false breakouts and discrete position sizing (0.25) to minimize fee churn.
 Target: 75-200 total trades over 4 years (19-50/year) by requiring confluence of breakout, trend, and volume.
-Designed for BTC/ETH - uses 1d trend filter to avoid SOL-only bias and work in both bull and bear markets.
+Designed for BTC/ETH - uses 1d trend filter to work in both bull and bear markets.
 """
 
 import numpy as np
@@ -75,13 +75,6 @@ def generate_signals(prices):
                     position = 1
                 else:
                     signals[i] = 0.25
-            # Mean reversion short: breakdown below S1 in uptrend (fade the move)
-            elif close[i] < S1_1d_aligned[i] and volume_spike:
-                if position != -1:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = -0.25
             else:
                 # Hold current position
                 if position == 0:
@@ -98,13 +91,6 @@ def generate_signals(prices):
                     position = -1
                 else:
                     signals[i] = -0.25
-            # Mean reversion long: breakout above R1 in downtrend (fade the move)
-            elif close[i] > R1_1d_aligned[i] and volume_spike:
-                if position != 1:
-                    signals[i] = 0.25
-                    position = 1
-                else:
-                    signals[i] = 0.25
             else:
                 # Hold current position
                 if position == 0:
