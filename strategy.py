@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v3
-Hypothesis: Trade Camarilla pivot (R1/S1) breakouts on 4h with 1d EMA34 trend filter and volume spike confirmation.
-Uses 1d EMA34 for slower trend adaptation to reduce whipsaws, and 2.0x volume spike for confirmation.
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike_v1
+Hypothesis: Trade Camarilla pivot (R1/S1) breakouts on 4h with 12h EMA50 trend filter and volume spike confirmation.
+Uses 12h EMA50 for trend adaptation to reduce whipsaws, and 2.0x volume spike for confirmation.
 Only trade in trending markets (ADX > 20) to avoid chop. ATR-based stoploss (2.0) and profit target (3.0*ATR).
-Designed for 15-30 trades/year. Works in bull/bear markets by following 1d EMA34 trend and filtering ranging regimes via ADX.
+Designed for 15-30 trades/year. Works in bull/bear markets by following 12h EMA50 trend and filtering ranging regimes via ADX.
 """
 
 import numpy as np
@@ -21,26 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for HTF trend and Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter (slower adaptation for fewer whipsaws)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla levels from previous 1d OHLC
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
+    # Calculate Camarilla levels from previous 12h OHLC
+    prev_close_12h = df_12h['close'].shift(1).values
+    prev_high_12h = df_12h['high'].shift(1).values
+    prev_low_12h = df_12h['low'].shift(1).values
     
-    camarilla_r1 = prev_close_1d + 1.125 * (prev_high_1d - prev_low_1d)
-    camarilla_s1 = prev_close_1d - 1.125 * (prev_high_1d - prev_low_1d)
+    camarilla_r1 = prev_close_12h + 1.125 * (prev_high_12h - prev_low_12h)
+    camarilla_s1 = prev_close_12h - 1.125 * (prev_high_12h - prev_low_12h)
     
     # Align HTF indicators to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
     
     # Volume confirmation: 2.0x median volume (20-period) for signal
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
@@ -83,12 +83,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: max of 1d EMA (34), volume median (20), ADX (14*2 for smoothing), ATR (14)
-    start_idx = max(34, 20, 28, 14)
+    # Warmup: max of 12h EMA (50), volume median (20), ADX (14*2 for smoothing), ATR (14)
+    start_idx = max(50, 20, 28, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(vol_median[i]) or
             np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
@@ -98,7 +98,7 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_34_1d_val = ema_34_1d_aligned[i]
+        ema_50_12h_val = ema_50_12h_aligned[i]
         close_val = close[i]
         volume_val = volume[i]
         vol_median_val = vol_median[i]
@@ -109,13 +109,13 @@ def generate_signals(prices):
             # Long: break above R1 with volume spike, uptrend, and trending regime
             long_signal = (close_val > camarilla_r1_aligned[i]) and \
                           (volume_val > 2.0 * vol_median_val) and \
-                          (close_val > ema_34_1d_val) and \
+                          (close_val > ema_50_12h_val) and \
                           (adx_val > 20)
             
             # Short: break below S1 with volume spike, downtrend, and trending regime
             short_signal = (close_val < camarilla_s1_aligned[i]) and \
                            (volume_val > 2.0 * vol_median_val) and \
-                           (close_val < ema_34_1d_val) and \
+                           (close_val < ema_50_12h_val) and \
                            (adx_val > 20)
             
             if long_signal:
@@ -133,12 +133,12 @@ def generate_signals(prices):
             signals[i] = 0.25
             # Exit conditions
             # 1. Price breaks below S1 (reversal)
-            # 2. Trend changes (close < 1d EMA34)
+            # 2. Trend changes (close < 12h EMA50)
             # 3. Regime changes (ADX < 15)
             # 4. ATR-based stop loss (2.0 * ATR below entry)
             # 5. Profit target (3.0 * ATR above entry)
             if (close_val < camarilla_s1_aligned[i]) or \
-               (close_val < ema_34_1d_val) or \
+               (close_val < ema_50_12h_val) or \
                (adx_val < 15) or \
                (close_val < entry_price - 2.0 * atr_val) or \
                (close_val > entry_price + 3.0 * atr_val):
@@ -149,12 +149,12 @@ def generate_signals(prices):
             signals[i] = -0.25
             # Exit conditions
             # 1. Price breaks above R1 (reversal)
-            # 2. Trend changes (close > 1d EMA34)
+            # 2. Trend changes (close > 12h EMA50)
             # 3. Regime changes (ADX < 15)
             # 4. ATR-based stop loss (2.0 * ATR above entry)
             # 5. Profit target (3.0 * ATR below entry)
             if (close_val > camarilla_r1_aligned[i]) or \
-               (close_val > ema_34_1d_val) or \
+               (close_val > ema_50_12h_val) or \
                (adx_val < 15) or \
                (close_val > entry_price + 2.0 * atr_val) or \
                (close_val < entry_price - 3.0 * atr_val):
@@ -163,6 +163,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_ATRStop_v3"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
