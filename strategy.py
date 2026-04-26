@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3S3_Breakout_1wTrend_v1
-Hypothesis: Trade 1d Camarilla R3/S3 breakouts with 1w EMA34 trend filter and volume confirmation.
-R3/S3 levels act as stronger support/resistance than R1/S1, reducing false breakouts.
-In bull markets: price breaks above R3 with 1w uptrend → long continuation.
-In bear markets: price breaks below S3 with 1w downtrend → short continuation.
-Volume confirmation ensures breakouts have participation.
-Targets 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+6h_ADX_DMI_TrendStrength_v1
+Hypothesis: Trade 6h bars when ADX > 25 indicates strong trend, using +DI/-DI crossover for direction.
+In bull markets: ADX > 25 and +DI crosses above -DI → long trend continuation.
+In bear markets: ADX > 25 and -DI crosses above +DI → short trend continuation.
+1d EMA50 filter ensures alignment with higher timeframe trend to reduce counter-trend trades.
+Volume confirmation requires current volume > 1.5 * 20-period average to ensure participation.
+Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,59 +23,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
-        return np.zeros(n)
-    
-    # Calculate EMA(34) on 1w for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 51:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Using R3/S3 for breakout entries (stronger levels than R1/S1)
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # Where C = (H+L+Close)/3 of previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate EMA(50) on 1d for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Avoid NaN from shift
-    prev_high = np.where(np.isnan(prev_high), df_1d['high'].values, prev_high)
-    prev_low = np.where(np.isnan(prev_low), df_1d['low'].values, prev_low)
-    prev_close = np.where(np.isnan(prev_close), df_1d['close'].values, prev_close)
+    # Calculate ADX and DMI on 6h data
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    r3 = pivot + (range_hl * 1.1 / 4.0)
-    s3 = pivot - (range_hl * 1.1 / 4.0)
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Align Camarilla levels to 1d
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    period = 14
+    alpha = 1.0 / period
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Initial TR and DM sums
+    tr_sum = np.zeros_like(tr)
+    plus_dm_sum = np.zeros_like(plus_dm)
+    minus_dm_sum = np.zeros_like(minus_dm)
+    
+    # First value: simple average of first 'period' values
+    tr_sum[period] = np.nansum(tr[1:period+1])
+    plus_dm_sum[period] = np.nansum(plus_dm[1:period+1])
+    minus_dm_sum[period] = np.nansum(minus_dm[1:period+1])
+    
+    # Wilder's smoothing: subsequent values
+    for i in range(period + 1, len(tr)):
+        tr_sum[i] = tr_sum[i-1] - (tr_sum[i-1] / period) + tr[i]
+        plus_dm_sum[i] = plus_dm_sum[i-1] - (plus_dm_sum[i-1] / period) + plus_dm[i]
+        minus_dm_sum[i] = minus_dm_sum[i-1] - (minus_dm_sum[i-1] / period) + minus_dm[i]
+    
+    # Avoid division by zero
+    plus_di = 100 * plus_dm_sum / np.where(tr_sum == 0, np.nan, tr_sum)
+    minus_di = 100 * minus_dm_sum / np.where(tr_sum == 0, np.nan, tr_sum)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, np.nan, (plus_di + minus_di))
+    
+    # ADX: Wilder's smoothing of DX
+    adx = np.zeros_like(dx)
+    adx[2*period] = np.nanmean(dx[period+1:2*period+1])  # First ADX after 2*period
+    
+    for i in range(2*period + 1, len(dx)):
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    # Align 1d EMA50 to 6h
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max of 1w EMA(34), volume MA(20), and need 1d data
-    start_idx = max(34, 20) + 1
+    # Warmup: need ADX, DMI, EMA, and volume MA
+    start_idx = max(2*period + 1, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i])):
+        if (np.isnan(adx[i]) or
+            np.isnan(plus_di[i]) or
+            np.isnan(minus_di[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -87,15 +113,18 @@ def generate_signals(prices):
         
         close_val = close[i]
         vol_conf = volume_confirm[i]
-        trend_up = close_val > ema_34_1w_aligned[i]   # 1w uptrend
-        trend_down = close_val < ema_34_1w_aligned[i]  # 1w downtrend
+        adx_strong = adx[i] > 25
+        di_cross_up = plus_di[i] > minus_di[i]
+        di_cross_down = minus_di[i] > plus_di[i]
+        trend_up = close_val > ema_50_1d_aligned[i]   # 1d uptrend
+        trend_down = close_val < ema_50_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: price breaks above R3 AND volume confirm AND 1w uptrend
-            long_signal = (close_val > r3_aligned[i]) and vol_conf and trend_up
+            # Long: ADX > 25, +DI crosses above -DI, volume confirm, 1d uptrend
+            long_signal = adx_strong and di_cross_up and vol_conf and trend_up
             
-            # Short: price breaks below S3 AND volume confirm AND 1w downtrend
-            short_signal = (close_val < s3_aligned[i]) and vol_conf and trend_down
+            # Short: ADX > 25, -DI crosses above +DI, volume confirm, 1d downtrend
+            short_signal = adx_strong and di_cross_down and vol_conf and trend_down
             
             if long_signal:
                 signals[i] = 0.25
@@ -108,20 +137,20 @@ def generate_signals(prices):
         elif position == 1:
             # Hold long
             signals[i] = 0.25
-            # Exit: price drops below S3 (failed breakout) OR 1w trend flips down
-            if (close_val < s3_aligned[i]) or (not trend_up):
+            # Exit: ADX weakens (< 20) OR -DI crosses above +DI (trend reversal) OR 1d trend flips down
+            if (adx[i] < 20) or (minus_di[i] > plus_di[i]) or (not trend_up):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
             signals[i] = -0.25
-            # Exit: price rises above R3 (failed breakdown) OR 1w trend flips up
-            if (close_val > r3_aligned[i]) or (not trend_down):
+            # Exit: ADX weakens (< 20) OR +DI crosses above -DI (trend reversal) OR 1d trend flips up
+            if (adx[i] < 20) or (plus_di[i] > minus_di[i]) or (not trend_down):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R3S3_Breakout_1wTrend_v1"
-timeframe = "1d"
+name = "6h_ADX_DMI_TrendStrength_v1"
+timeframe = "6h"
 leverage = 1.0
