@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1wEMA50_Trend_ChopFilter_v2
-Hypothesis: Camarilla R3/S3 breakouts on 4h with 1w EMA50 trend filter and chop regime filter. Uses weekly trend to capture major market direction, reducing whipsaws in both bull and bear markets. Chop filter avoids ranging markets. Targeting 80-150 total trades over 4 years (20-37/year).
+12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_ChopFilter_v1
+Hypothesis: Camarilla R3/S3 breakouts on 12h with 1w EMA50 trend filter, volume spike confirmation, and chop regime filter. 
+Camarilla pivot levels provide high-probability support/resistance derived from prior week's range. 
+Breakouts above R3 or below S3 with volume expansion and trend alignment capture sustained moves. 
+Chop filter avoids whipsaws in ranging markets. Targeting 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -26,19 +29,18 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Calculate Camarilla levels from prior 1d bar (HLC of previous day)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Calculate Camarilla levels from prior 1w bar (HLC of previous week)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w_vals = df_1w['close'].values
     
-    # Calculate Camarilla R3 and S3 for each 1d bar
-    camarilla_r3 = close_1d_vals + ((high_1d - low_1d) * 1.1 / 4)
-    camarilla_s3 = close_1d_vals - ((high_1d - low_1d) * 1.1 / 4)
+    # Calculate Camarilla R3 and S3 for each 1w bar
+    camarilla_r3 = close_1w_vals + ((high_1w - low_1w) * 1.1 / 4)
+    camarilla_s3 = close_1w_vals - ((high_1w - low_1w) * 1.1 / 4)
     
-    # Align Camarilla levels to 4h timeframe (1d -> 4h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 12h timeframe (1w -> 12h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
     # Volume spike detection: volume > 2.0 * 20-period average volume
     avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -65,8 +67,8 @@ def generate_signals(prices):
     mask = (range_14 > 0) & (sum_atr_14 > 0)
     chop[mask] = 100 * np.log10(sum_atr_14[mask] / range_14[mask]) / np.log10(14)
     
-    # Chop filter: only trade when market is trending (CHOP < 40)
-    chop_filter = chop < 40
+    # Chop filter: only trade when market is trending (CHOP < 45)
+    chop_filter = chop < 45
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -131,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1wEMA50_Trend_ChopFilter_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
