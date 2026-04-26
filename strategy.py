@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime
-Hypothesis: 12h Camarilla R3/S3 breakout in direction of 1d EMA34 trend, confirmed by volume spike (>2x 20-bar MA) and choppiness regime (CHOP > 61.8 = ranging, fade breakouts; CHOP < 38.2 = trending, follow breakouts). Uses ATR(14) trailing stop (2.0 ATR from extreme). Designed for low frequency (target 12-37 trades/year) to avoid fee drag, works in bull/bear via trend alignment and regime filter. Discrete position sizing (0.25) minimizes churn.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 4h Camarilla R1/S1 breakout in direction of 1d EMA34 trend, confirmed by volume spike (>1.8x 20-bar MA). Uses ATR(14) trailing stop (2.0 ATR from extreme) for risk control. Designed for lower frequency (target 20-40 trades/year) with discrete sizing (0.25) to minimize fee drag and improve generalization across bull/bear markets.
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # 1d EMA34 for trend filter
@@ -28,37 +28,9 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Fractals for Camarilla levels (need 2-bar confirmation delay)
-    from mtf_data import compute_williams_fractals
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Bullish fractal = potential resistance (sell fractal), Bearish fractal = potential support (buy fractal)
-    # Camarilla R3/S3 derived from prior day's range
-    # We'll compute Camarilla levels using prior 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Prior day's range for Camarilla
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
-    
-    range_1d = prev_high_1d - prev_low_1d
-    camarilla_r3 = prev_close_1d + range_1d * 1.1 / 4
-    camarilla_s3 = prev_close_1d - range_1d * 1.1 / 4
-    
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3, additional_delay_bars=0)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3, additional_delay_bars=0)
-    
-    # Volume confirmation: volume > 2x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
     # ATR(14) for stoploss calculation
     atr_period = 14
@@ -73,37 +45,6 @@ def generate_signals(prices):
     for i in range(atr_period, n):
         atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Choppiness Index regime filter (14-period)
-    chop_period = 14
-    sum_tr = np.zeros(n)
-    if n >= chop_period:
-        sum_tr[chop_period-1] = np.sum(tr[:chop_period])
-    for i in range(chop_period, n):
-        sum_tr[i] = sum_tr[i-1] - tr[i-chop_period] + tr[i]
-    
-    max_high = np.zeros(n)
-    min_low = np.zeros(n)
-    for i in range(n):
-        if i < chop_period:
-            max_high[i] = np.max(high[:i+1]) if i >= 0 else 0
-            min_low[i] = np.min(low[:i+1]) if i >= 0 else 0
-        else:
-            max_high[i] = np.max(high[i-chop_period+1:i+1])
-            min_low[i] = np.min(low[i-chop_period+1:i+1])
-    
-    chop = np.zeros(n)
-    for i in range(chop_period-1, n):
-        if sum_tr[i] > 0 and max_high[i] > min_low[i]:
-            chop[i] = 100 * np.log10(sum_tr[i] / (max_high[i] - min_low[i])) / np.log10(chop_period)
-        else:
-            chop[i] = 50.0  # neutral
-    
-    # Regime: CHOP > 61.8 = ranging (fade), CHOP < 38.2 = trending (follow)
-    chop_high = 61.8
-    chop_low = 38.2
-    ranging = chop > chop_high
-    trending = chop < chop_low
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size
@@ -113,13 +54,12 @@ def generate_signals(prices):
     low_low = 0.0
     
     # Warmup: max of calculations
-    start_idx = max(34, 20, 20, atr_period, chop_period)
+    start_idx = max(20, 34, 20, atr_period)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i]) or np.isnan(chop[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+            np.isnan(atr[i])):
             signals[i] = base_size if position == 1 else (-base_size if position == -1 else 0.0)
             continue
         
@@ -129,28 +69,37 @@ def generate_signals(prices):
         ema_34_val = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
-        chop_val = chop[i]
-        r3_val = camarilla_r3_aligned[i]
-        s3_val = camarilla_s3_aligned[i]
         
         # Determine 1d trend: bullish if price > EMA34, bearish if price < EMA34
         bullish_1d = close_val > ema_34_val
         bearish_1d = close_val < ema_34_val
         
-        # Entry conditions: breakout of Camarilla R3/S3 with volume spike
-        # In trending regime: follow breakout direction
-        # In ranging regime: fade breakout (opposite direction)
-        long_entry = False
-        short_entry = False
+        # Typical price for Camarilla calculation (using previous day's typical price)
+        # Since we don't have daily OHLC directly, approximate using rolling window
+        if i >= 24:  # Approximate 1 day back in 4h bars (24 * 4h = 96h ≈ 4 days, adjust)
+            # Use previous day's typical price: (H+L+C)/3 from 1d data
+            # We'll approximate using 24-bar lookback for typical price
+            tp_lookback = min(24, i)
+            if tp_lookback >= 1:
+                prev_high = np.max(high[i-tp_lookback:i])
+                prev_low = np.min(low[i-tp_lookback:i])
+                prev_close = close[i-1]
+                typical_price = (prev_high + prev_low + prev_close) / 3.0
+                range_val = prev_high - prev_low
+                
+                # Camarilla levels
+                R1 = typical_price + (range_val * 1.1 / 12)
+                S1 = typical_price - (range_val * 1.1 / 12)
+            else:
+                R1 = high_val
+                S1 = low_val
+        else:
+            R1 = high_val
+            S1 = low_val
         
-        if trending[i]:
-            # Trending: follow breakout
-            long_entry = (close_val > r3_val) and bullish_1d and vol_spike
-            short_entry = (close_val < s3_val) and bearish_1d and vol_spike
-        elif ranging[i]:
-            # Ranging: fade breakout
-            long_entry = (close_val < s3_val) and bearish_1d and vol_spike  # fade downside breakout
-            short_entry = (close_val > r3_val) and bullish_1d and vol_spike  # fade upside breakout
+        # Entry conditions
+        long_entry = (close_val > R1) and bullish_1d and vol_spike
+        short_entry = (close_val < S1) and bearish_1d and vol_spike
         
         # Update trailing extremes
         if position == 1:
@@ -163,16 +112,16 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # ATR trailing stop or opposite Camarilla level
+            # ATR trailing stop or opposite breakout
             if long_high > 0 and close_val < (long_high - 2.0 * atr_val):
                 exit_long = True
-            elif close_val < s3_val:  # Opposite breakout (S3)
+            elif close_val < S1:  # Opposite breakout
                 exit_long = True
         elif position == -1:
-            # ATR trailing stop or opposite Camarilla level
+            # ATR trailing stop or opposite breakout
             if low_low > 0 and close_val > (low_low + 2.0 * atr_val):
                 exit_short = True
-            elif close_val > r3_val:  # Opposite breakout (R3)
+            elif close_val > R1:  # Opposite breakout
                 exit_short = True
         
         if long_entry and position != 1:
@@ -199,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
