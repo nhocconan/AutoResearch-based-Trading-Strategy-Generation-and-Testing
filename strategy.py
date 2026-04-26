@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-period MA).
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-period MA).
 Long when price breaks above R1 in 1d uptrend with volume spike. Short when price breaks below S1 in 1d downtrend with volume spike.
-Camarilla R1/S1 = C ± (H-L)*1.1/12 represent the inner core levels, requiring less extreme moves but still significant.
-Volume confirmation threshold lowered to 1.5x to increase trade frequency to target 12-37/year on 12h timeframe.
-Uses discrete position sizing (0.25) to minimize fee churn. Designed for fewer, higher-quality trades.
+Camarilla R1/S1 represent inner pivot levels (R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12) providing frequent but meaningful breakouts.
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
 Works in both bull and bear markets by following the 1d trend. Daily trend filters out counter-trend noise.
 """
 
@@ -38,7 +37,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe (they change only when new 1d candle forms)
+    # Align Camarilla levels to 4h timeframe (they change only when new 1d candle forms)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -48,15 +47,15 @@ def generate_signals(prices):
     uptrend_1d = close > ema_34_1d_aligned
     downtrend_1d = close < ema_34_1d_aligned
     
-    # Volume confirmation: volume > 1.5x 20-period MA (adjusted for 12h frequency)
+    # Volume confirmation: volume > 1.5x 20-period MA (balanced threshold)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 34 for EMA and 20 for volume MA)
-    start_idx = 34
+    # Start after warmup (need 20 for volume MA, 34 for EMA)
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -101,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
