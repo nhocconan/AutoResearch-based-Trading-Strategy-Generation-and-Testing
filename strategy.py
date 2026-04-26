@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
 - Long when price breaks above Camarilla R3 level AND 1d EMA50 uptrend AND volume > 2.0 * volume_ma(20)
 - Short when price breaks below Camarilla S3 level AND 1d EMA50 downtrend AND volume > 2.0 * volume_ma(20)
-- Uses Camarilla pivot levels from 6h chart for structure-based breakouts
+- Uses Camarilla pivot levels from 12h chart for structure-based breakouts
 - 1d EMA50 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws in bear markets
 - Volume spike (2.0x) confirms institutional participation and reduces false breakouts
 - Exit on opposite Camarilla level (S3 for longs, R3 for shorts) or trend reversal
-- Designed for lower frequency (target 12-37 trades/year on 6h) to minimize fee drag
-- Novelty: Applying proven Camarilla R3/S3 breakout logic to 6h timeframe with 1d trend filter
+- Designed for lower frequency (target 12-37 trades/year on 12h) to minimize fee drag
+- Novelty: Applying proven Camarilla R3/S3 breakout logic to 12h timeframe with 1d trend filter
 """
 
 import numpy as np
@@ -37,7 +37,7 @@ def generate_signals(prices):
                         np.where(close > ema_50_1d_aligned, 1, -1), 
                         0)
     
-    # Calculate Camarilla pivot levels on 6h chart (primary timeframe)
+    # Calculate Camarilla pivot levels on 12h chart (primary timeframe)
     # Using previous bar's OHLC for Camarilla calculation
     prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
