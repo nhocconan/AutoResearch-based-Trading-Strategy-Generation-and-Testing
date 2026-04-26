@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_WeeklyTrend_VolumeFilter
-Hypothesis: 6h Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation (>1.5x median). Enters long when price breaks above 20-bar high with volume confirmation and bullish weekly trend; short when price breaks below 20-bar low with volume confirmation and bearish weekly trend. Exits on opposite breakout. Uses discrete position sizing (0.25) to minimize churn. Target: 50-150 trades over 4 years. Works in both bull and bear markets by following weekly trend filter and using volume to confirm genuine breakouts.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeChopRegime
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter, volume confirmation (>1.5x median), and choppiness regime filter (CHOP > 50) to avoid whipsaws. Enters long when price breaks above R1 with volume confirmation, bullish 1d trend, and choppy market (mean reversion favorable). Enters short when price breaks below S1 with volume confirmation, bearish 1d trend, and choppy market. Exits on opposite breakout. Uses discrete position sizing (0.25) to minimize churn. Target: 50-150 trades over 4 years. Works in both bull and bear markets by following 1d trend filter and avoiding strong trends via chop filter.
 """
 
 import numpy as np
@@ -18,37 +18,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian levels for 6h (based on previous 20 bars)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate Camarilla levels for 12h (based on previous 12h bar)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
+    
+    # Previous bar's values for level calculation (to avoid look-ahead)
+    h_12h_prev = np.roll(h_12h, 1)
+    l_12h_prev = np.roll(l_12h, 1)
+    c_12h_prev = np.roll(c_12h, 1)
+    h_12h_prev[0] = np.nan
+    l_12h_prev[0] = np.nan
+    c_12h_prev[0] = np.nan
+    
+    # Calculate Camarilla R1 and S1 levels
+    rng_12h = h_12h_prev - l_12h_prev
+    r1_12h = c_12h_prev + (rng_12h * 1.1 / 12)
+    s1_12h = c_12h_prev - (rng_12h * 1.1 / 12)
+    
+    # Align to 12h primary timeframe
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
     # Volume confirmation: volume > 1.5x 50-period median
     volume_series = pd.Series(volume)
     vol_median = volume_series.rolling(window=50, min_periods=50).median().values
     volume_confirm = volume > (1.5 * vol_median)
     
-    # Load weekly data for HTF trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Load 1d data for HTF trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Choppiness regime filter (14-period) - use 4h data for higher frequency chop reading
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        chop_aligned = np.full(n, 50.0)  # neutral default
+    else:
+        high_4h = df_4h['high'].values
+        low_4h = df_4h['low'].values
+        close_4h = df_4h['close'].values
+        atr_14 = []
+        tr = np.maximum(high_4h[1:] - low_4h[1:], np.maximum(np.abs(high_4h[1:] - close_4h[:-1]), np.abs(low_4h[1:] - close_4h[:-1])))
+        tr = np.concatenate([[np.nan], tr])
+        atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+        highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+        lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+        chop = 100 * np.log10(atr_14 * 14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
+        chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25
     
-    # Start after warmup (need 20-period Donchian, 50-period volume median, 50-period weekly EMA)
+    # Start after warmup (need 50-period volume median, 50-period EMA, 14-period chop)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_median[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(vol_median[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -58,25 +92,28 @@ def generate_signals(prices):
                 signals[i] = -base_size
             continue
         
-        # Long logic: price breaks above Donchian high + volume confirmation + bullish weekly trend
-        if close[i] > donchian_high[i] and volume_confirm[i] and close[i] > ema_50_1w_aligned[i]:
+        # Only trade in choppy markets (CHOP > 50 indicates ranging/mean reverting conditions)
+        in_choppy_regime = chop_aligned[i] > 50
+        
+        # Long logic: price breaks above R1 + volume confirmation + bullish 1d trend + choppy regime
+        if close[i] > r1_12h_aligned[i] and volume_confirm[i] and close[i] > ema_50_1d_aligned[i] and in_choppy_regime:
             if position != 1:
                 signals[i] = base_size
                 position = 1
             else:
                 signals[i] = base_size
-        # Short logic: price breaks below Donchian low + volume confirmation + bearish weekly trend
-        elif close[i] < donchian_low[i] and volume_confirm[i] and close[i] < ema_50_1w_aligned[i]:
+        # Short logic: price breaks below S1 + volume confirmation + bearish 1d trend + choppy regime
+        elif close[i] < s1_12h_aligned[i] and volume_confirm[i] and close[i] < ema_50_1d_aligned[i] and in_choppy_regime:
             if position != -1:
                 signals[i] = -base_size
                 position = -1
             else:
                 signals[i] = -base_size
         # Exit: opposite breakout (price returns to the other level)
-        elif position == 1 and close[i] < donchian_low[i]:
+        elif position == 1 and close[i] < s1_12h_aligned[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > donchian_high[i]:
+        elif position == -1 and close[i] > r1_12h_aligned[i]:
             signals[i] = 0.0
             position = 0
         else:
@@ -90,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_WeeklyTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeChopRegime"
+timeframe = "12h"
 leverage = 1.0
