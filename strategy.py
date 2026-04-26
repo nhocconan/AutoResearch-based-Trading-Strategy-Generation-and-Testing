@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level AND 1d trend is up (close > EMA34) AND volume > 2.0x 20-period average. Enter short when price breaks below S1 level AND 1d trend is down (close < EMA34) AND volume spike. Uses tight Camarilla levels (R1/S1) for earlier entry with 1d EMA34 trend filter and volume confirmation. Designed for lower trade frequency (12-37/year) with strong edge in both bull and bear markets via trend alignment and volatility-based entry.
+4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
+Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level AND 1d trend is up (close > EMA34) AND volume > 2.0x 20-period average. Enter short when price breaks below S1 level AND 1d trend is down (close < EMA34) AND volume spike. Uses tight Camarilla levels (R1/S1) for frequent but meaningful breakouts with 1d EMA34 trend filter and volume confirmation. Designed for moderate trade frequency (20-50/year) with edge in both bull and bear markets via trend alignment and volatility-based entry.
 """
 
 import numpy as np
@@ -38,7 +38,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + ((high_1d - low_1d) * 1.1 / 12)
     camarilla_s1 = close_1d - ((high_1d - low_1d) * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe (use previous 1d bar's levels)
+    # Align Camarilla levels to 4h timeframe (use previous 1d bar's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
