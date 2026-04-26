@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1w EMA50 trend filter and volume spike (>2.0x 20-bar avg) capture institutional breakouts with lower frequency to minimize fee drag. Works in both bull (breakouts with trend) and bear (mean reversion at S1/R1 with volume confirmation). Targets 12-37 trades/year to stay within proven winning range.
+1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike
+Hypothesis: On 1d timeframe, Camarilla R1/S1 breakouts with 1w EMA50 trend filter and volume spike (>2.0x 20-bar avg) capture institutional breakouts. Uses close-based exit on opposite Camarilla level break. Targets 15-30 trades/year to minimize fee drag while maintaining edge via trend filter and volatility confirmation. Works in both bull (breakouts with trend) and bear (fades at S1/R1 with trend) markets.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend (more stable for 12h strategy)
+    # Get 1w data for HTF trend (more stable than lower timeframes)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -29,27 +29,23 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for Camarilla levels (more stable than lower timeframes)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Get 1w data for Camarilla levels (more stable than lower timeframes)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels from previous 1d bar (R1, S1)
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    # Calculate Camarilla levels from previous 1w bar (R1, S1)
+    prev_close = np.concatenate([[np.nan], close_1w[:-1]])
+    prev_high = np.concatenate([[np.nan], high_1w[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1w[:-1]])
     
     camarilla_range = prev_high - prev_low
     r1 = prev_close + 1.1 * camarilla_range * 1.0 / 4  # R1 level
     s1 = prev_close - 1.1 * camarilla_range * 1.0 / 4  # S1 level
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 1d timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
     # Volume average (20-period) for volume spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -108,34 +104,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions:
-            # 1. Opposite breakout: price breaks below S1 (exit long)
+            # Exit condition: price breaks below S1 (exit long)
             if close_val < s1_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # 2. Trend reversal: close crosses below EMA50 (exit long)
-            elif close_val < ema_50_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions:
-            # 1. Opposite breakout: price breaks above R1 (exit short)
+            # Exit condition: price breaks above R1 (exit short)
             if close_val > r1_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # 2. Trend reversal: close crosses above EMA50 (exit short)
-            elif close_val > ema_50_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
