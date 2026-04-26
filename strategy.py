@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn
-Hypothesis: 12h Camarilla R3/S3 breakout with dynamic volume filter (2.0x) and 1d EMA34 trend filter. 
-Tightens volume confirmation from 1.8x to 2.0x to reduce trades to optimal range (50-150/4yr) while maintaining edge. 
-Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear via 1d trend alignment.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation (2.0x) to target 75-200 trades over 4 years (19-50/year). 
+Uses discrete position sizing (0.30) to minimize fee churn. Works in bull/bear via 1d trend alignment.
+Breakouts are filtered by volume spike and trend direction to avoid false signals.
 """
 
 import numpy as np
@@ -42,7 +42,7 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume filter: volume > 2.0 * volume_ma(20) for tighter confirmation (reduces trades)
+    # Volume filter: volume > 2.0 * volume_ma(20) for tight confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * volume_ma)
     
@@ -61,33 +61,33 @@ def generate_signals(prices):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
             continue
         
         # Camarilla R3/S3 breakout conditions with volume and trend confirmation
         if position == 0:
             # Long: Price breaks above Camarilla R3 AND 1d uptrend AND volume spike (2.0x)
             if close[i] > camarilla_r3_aligned[i] and trend_1d[i] == 1 and volume_spike[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Price breaks below Camarilla S3 AND 1d downtrend AND volume spike (2.0x)
             elif close[i] < camarilla_s3_aligned[i] and trend_1d[i] == -1 and volume_spike[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Hold long
-            signals[i] = 0.25
+            signals[i] = 0.30
             # Exit: Price falls below Camarilla S3 OR 1d trend turns down
             if close[i] < camarilla_s3_aligned[i] or trend_1d[i] == -1:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Hold short
-            signals[i] = -0.25
+            signals[i] = -0.30
             # Exit: Price rises above Camarilla R3 OR 1d trend turns up
             if close[i] > camarilla_r3_aligned[i] or trend_1d[i] == 1:
                 signals[i] = 0.0
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
