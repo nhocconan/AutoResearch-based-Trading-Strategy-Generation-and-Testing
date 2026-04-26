@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirm_v1
-Hypothesis: Camarilla R3/S3 breakout on 1d timeframe with 1w EMA50 trend filter and volume spike captures institutional swing continuations in both bull and bear markets. Camarilla levels act as magnet zones; breaks indicate momentum acceleration. Volume spike confirms validity. 1w EMA50 ensures alignment with weekly trend. Target: 30-100 total trades over 4 years (7-25/year).
+6h_KeltnerDonchian_HybridBreakout_1dTrend_v1
+Hypothesis: Combines Keltner Channel (volatility-based) and Donchian Channel (price-based) breakouts on 6h with 1d EMA50 trend filter. Long when price breaks above upper Keltner AND Donchian with volume confirmation in uptrend. Short when breaks below lower Keltner AND Donchian with volume confirmation in downtrend. Uses discrete positions (0.0, ±0.25) to minimize fee churn. Works in bull/bear by following 1d trend while capturing momentum bursts validated by volume.
 """
 
 import numpy as np
@@ -18,43 +18,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HTF trend filter (EMA)
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    
-    # Calculate Camarilla levels on 1d data
+    # Load 1d data ONCE before loop for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Keltner Channel (20, 2.0) on 6h
+    atr_period = 20
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema20 + (2.0 * atr)
+    kc_lower = ema20 - (2.0 * atr)
     
-    # Align Camarilla levels to lower timeframe (no extra delay needed as they are based on completed 1d bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Donchian Channel (20) on 6h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike detection on 1d (volume > 2.0x 20-period EMA)
+    # Volume confirmation: volume > 1.5x 20-period EMA
     volume_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (volume_ema * 2.0)
+    volume_confirm = volume > (volume_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need sufficient data for all indicators)
-    start_idx = max(100, 50, 20)
+    start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i])):
+            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             # Hold current position
             if position == 0:
                 signals[i] = 0.0
@@ -64,29 +65,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # 1w trend filter (EMA50)
+        # 1d trend filter
         uptrend = close[i] > ema_50_aligned[i]
         downtrend = close[i] < ema_50_aligned[i]
         
-        # Long logic: price breaks above Camarilla R3 with volume spike + in uptrend
-        if close[i] > r3_aligned[i] and volume_spike[i] and uptrend:
-            if position != 1:
-                signals[i] = 0.25
-                position = 1
-            else:
-                signals[i] = 0.25
-        # Short logic: price breaks below Camarilla S3 with volume spike + in downtrend
-        elif close[i] < s3_aligned[i] and volume_spike[i] and downtrend:
-            if position != -1:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = -0.25
-        # Exit conditions: price returns to opposite Camarilla level or trend weakens
-        elif position == 1 and (close[i] < s3_aligned[i] or not uptrend):
+        # Long conditions: price breaks above BOTH KC upper AND Donchian upper with volume confirmation in uptrend
+        long_breakout = (close[i] > kc_upper[i]) and (close[i] > highest_high[i]) and volume_confirm[i] and uptrend
+        # Short conditions: price breaks below BOTH KC lower AND Donchian lower with volume confirmation in downtrend
+        short_breakout = (close[i] < kc_lower[i]) and (close[i] < lowest_low[i]) and volume_confirm[i] and downtrend
+        
+        # Exit conditions: price returns to middle of KC or trend weakens
+        long_exit = (close[i] < ema20[i]) or (not uptrend)
+        short_exit = (close[i] > ema20[i]) or (not downtrend)
+        
+        if long_breakout and position != 1:
+            signals[i] = 0.25
+            position = 1
+        elif short_breakout and position != -1:
+            signals[i] = -0.25
+            position = -1
+        elif position == 1 and long_exit:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] > r3_aligned[i] or not downtrend):
+        elif position == -1 and short_exit:
             signals[i] = 0.0
             position = 0
         else:
@@ -100,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_KeltnerDonchian_HybridBreakout_1dTrend_v1"
+timeframe = "6h"
 leverage = 1.0
