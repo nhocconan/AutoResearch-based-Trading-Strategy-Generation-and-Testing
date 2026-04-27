@@ -1,3 +1,9 @@
+# 1h volatility expansion strategy with 4h/1d filters
+# Hypothesis: Volatility expansion combined with RSI mean reversion and trend alignment
+# captures reversals in both bull and bear markets. Using 4h/1d for direction, 1h for timing.
+# Volatility filter reduces whipsaw, RSI(4) provides timely entries, weekly EMA filters trend.
+# Target: 15-37 trades/year to avoid fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,7 +19,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volatility regime
+    # Get daily data for ATR and volatility regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
@@ -114,13 +120,13 @@ def generate_signals(prices):
             if (rsi_4[i] < 30 and 
                 vol_expansion and 
                 ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: RSI > 70 (overbought) + volatility expansion + weekly downtrend
             elif (rsi_4[i] > 70 and 
                   vol_expansion and 
                   ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
@@ -131,7 +137,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Short exit: RSI < 30 or weekly trend turns up
             if (rsi_4[i] < 30 or 
@@ -139,10 +145,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
-timeframe = "4h"
+name = "1h_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
+timeframe = "1h"
 leverage = 1.0
