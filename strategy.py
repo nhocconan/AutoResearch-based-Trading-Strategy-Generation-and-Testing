@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,38 +13,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w data for HTF context
+    # Get 1d data for daily pivot calculation and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week OHLC)
-    high_1w = get_htf_data(prices, '1w')['high'].values
-    low_1w = get_htf_data(prices, '1w')['low'].values
-    close_1w = get_htf_data(prices, '1w')['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    high_1w_prev = np.roll(high_1w, 1)
-    low_1w_prev = np.roll(low_1w, 1)
-    close_1w_prev = np.roll(close_1w, 1)
-    high_1w_prev[0] = np.nan
-    low_1w_prev[0] = np.nan
-    close_1w_prev[0] = np.nan
+    # Calculate daily pivot points (using prior day OHLC)
+    high_prev = np.roll(high_1d, 1)
+    low_prev = np.roll(low_1d, 1)
+    close_prev = np.roll(close_1d, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
     
-    weekly_pivot = (high_1w_prev + low_1w_prev + close_1w_prev) / 3.0
-    weekly_r1 = 2 * weekly_pivot - low_1w_prev
-    weekly_s1 = 2 * weekly_pivot - high_1w_prev
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    r1 = 2 * pivot - low_prev
+    s1 = 2 * pivot - high_prev
     
-    # Align weekly pivots to 6h
-    weekly_pivot_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '1w'), weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '1w'), weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '1w'), weekly_s1)
+    # Align daily pivots to 4h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 60-period moving average on 6h for trend filter
-    ma_60 = np.full(n, np.nan)
-    for i in range(59, n):
-        ma_60[i] = np.mean(close[i-59:i+1])
+    # Daily trend: price above/below daily EMA(34)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 1.5 x 20-period average
+    # Volume filter: volume > 1.5 x 20-period average (4h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -53,13 +52,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need weekly pivot (1), MA60 (60), volume MA (20)
-    start_idx = max(60, 20)
+    # Warmup: need pivots (1), daily EMA (34), volume MA (20)
+    start_idx = max(1, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
-            np.isnan(ma_60[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -70,35 +69,31 @@ def generate_signals(prices):
         # Volume filter
         vol_filter = vol_now > 1.5 * vol_avg
         
-        # Weekly trend filter
-        bullish_weekly = price > weekly_pivot_aligned[i]
-        bearish_weekly = price < weekly_pivot_aligned[i]
-        
-        # Price relative to 60-period MA
-        above_ma = price > ma_60[i]
-        below_ma = price < ma_60[i]
+        # Daily trend filter
+        bullish_daily = price > ema_34_1d_aligned[i]
+        bearish_daily = price < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price crosses above weekly S1 with volume and above weekly pivot and above MA60
-            if price > weekly_s1_aligned[i] and vol_filter and bullish_weekly and above_ma:
+            # Long: price crosses above S1 with volume and bullish daily trend
+            if price > s1_aligned[i] and vol_filter and bullish_daily:
                 signals[i] = size
                 position = 1
-            # Short: price crosses below weekly R1 with volume and below weekly pivot and below MA60
-            elif price < weekly_r1_aligned[i] and vol_filter and bearish_weekly and below_ma:
+            # Short: price crosses below R1 with volume and bearish daily trend
+            elif price < r1_aligned[i] and vol_filter and bearish_daily:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below weekly pivot or below MA60
-            if price < weekly_pivot_aligned[i] or price < ma_60[i]:
+            # Exit long: price crosses below pivot or daily trend turns bearish
+            if price < pivot_aligned[i] or not bullish_daily:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above weekly pivot or above MA60
-            if price > weekly_pivot_aligned[i] or price > ma_60[i]:
+            # Exit short: price crosses above pivot or daily trend turns bullish
+            if price > pivot_aligned[i] or not bearish_daily:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_S1R1_MA60_Volume"
-timeframe = "6h"
+name = "4h_Pivot_S1R1_DailyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
