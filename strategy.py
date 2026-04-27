@@ -13,132 +13,136 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and volume context
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get daily data for ATR and volatility regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA(34) for trend
-    ema_34_4h = np.full(len(df_4h), np.nan)
-    alpha_4h = 2 / (34 + 1)
-    for i in range(len(close_4h)):
+    # Calculate daily ATR(14) for volatility regime
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr_14_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(tr_1d)):
+        atr_14_1d[i] = np.mean(tr_1d[i-14:i])
+    
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Calculate ATR ratio: current ATR(7) / ATR(14) - volatility expansion signal
+    tr1_7 = high_1d[1:] - low_1d[1:]
+    tr2_7 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_7 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_7d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1_7, np.maximum(tr2_7, tr3_7))])
+    
+    atr_7_1d = np.full(len(df_1d), np.nan)
+    for i in range(7, len(tr_7d)):
+        atr_7_1d[i] = np.mean(tr_7d[i-7:i])
+    
+    atr_7_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_7_1d)
+    
+    # ATR ratio: ATR(7)/ATR(14) > 1.3 indicates volatility expansion
+    atr_ratio = np.full(n, np.nan)
+    valid_mask = (~np.isnan(atr_7_1d_aligned)) & (~np.isnan(atr_14_1d_aligned)) & (atr_14_1d_aligned > 0)
+    atr_ratio[valid_mask] = atr_7_1d_aligned[valid_mask] / atr_14_1d_aligned[valid_mask]
+    
+    # Get weekly data for trend filter: EMA(34) on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_1w_34 = np.full(len(df_1w), np.nan)
+    alpha_w = 2 / (34 + 1)
+    for i in range(len(close_1w)):
         if i < 33:
-            ema_34_4h[i] = np.mean(close_4h[:i+1]) if i > 0 else close_4h[i]
+            ema_1w_34[i] = np.mean(close_1w[:i+1]) if i > 0 else close_1w[i]
         else:
-            if np.isnan(ema_34_4h[i-1]):
-                ema_34_4h[i] = np.mean(close_4h[i-33:i+1])
+            if np.isnan(ema_1w_34[i-1]):
+                ema_1w_34[i] = np.mean(close_1w[i-33:i+1])
             else:
-                ema_34_4h[i] = close_4h[i] * alpha_4h + ema_34_4h[i-1] * (1 - alpha_4h)
+                ema_1w_34[i] = close_1w[i] * alpha_w + ema_1w_34[i-1] * (1 - alpha_w)
     
-    # Calculate 4h volume SMA(20) for volume filter
-    vol_sma_20_4h = np.full(len(df_4h), np.nan)
-    for i in range(len(volume_4h)):
-        if i < 19:
-            vol_sma_20_4h[i] = np.mean(volume_4h[:i+1]) if i > 0 else volume_4h[i]
-        else:
-            vol_sma_20_4h[i] = np.mean(volume_4h[i-19:i+1])
+    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
-    # Align 4h indicators to 1h
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    vol_sma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_sma_20_4h)
-    
-    # Calculate 1h RSI(14) for entry timing
+    # Calculate 4-period RSI for mean reentry signals
     delta = np.diff(close, prepend=close[0])
     gain = np.maximum(delta, 0)
     loss = np.maximum(-delta, 0)
     
     avg_gain = np.full(n, np.nan)
     avg_loss = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
+    for i in range(4, n):
+        if i == 4:
+            avg_gain[i] = np.mean(gain[1:5])
+            avg_loss[i] = np.mean(loss[1:5])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            avg_gain[i] = (avg_gain[i-1] * 3 + gain[i]) / 4
+            avg_loss[i] = (avg_loss[i-1] * 3 + loss[i]) / 4
     
     rs = np.full(n, np.nan)
     valid_rsi = (~np.isnan(avg_gain)) & (~np.isnan(avg_loss)) & (avg_loss > 0)
     rs[valid_rsi] = avg_gain[valid_rsi] / avg_loss[valid_rsi]
-    rsi_14 = np.full(n, np.nan)
-    rsi_14[valid_rsi] = 100 - (100 / (1 + rs[valid_rsi]))
-    
-    # Calculate 1h volume ratio for entry confirmation
-    vol_sma_20_1h = np.full(n, np.nan)
-    for i in range(n):
-        if i < 19:
-            vol_sma_20_1h[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-        else:
-            vol_sma_20_1h[i] = np.mean(volume[i-19:i+1])
-    
-    volume_ratio = np.full(n, np.nan)
-    valid_vol = (~np.isnan(vol_sma_20_1h)) & (vol_sma_20_1h > 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_sma_20_1h[valid_vol]
+    rsi_4 = np.full(n, np.nan)
+    rsi_4[valid_rsi] = 100 - (100 / (1 + rs[valid_rsi]))
     
     signals = np.zeros(n)
     position = 0
     
     # Warmup
-    start_idx = max(34, 14, 20)
+    start_idx = max(14, 34, 4)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(vol_sma_20_4h_aligned[i]) or
-            np.isnan(rsi_14[i]) or
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_ratio[i]) or 
+            np.isnan(ema_1w_34_aligned[i]) or
+            np.isnan(rsi_4[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
+        price = close[i]
         
-        if not in_session:
-            signals[i] = 0.0
-            continue
-        
-        # Volume filter: current volume > 1.5 * 4h average volume
-        vol_filter = volume_ratio[i] > 1.5
+        # Volatility regime filter: ATR ratio > 1.3 = expansion (favor trend)
+        vol_expansion = atr_ratio[i] > 1.3
         
         if position == 0:
-            # Long: price above 4h EMA34 (uptrend) + RSI < 40 (pullback) + volume spike
-            if (close[i] > ema_34_4h_aligned[i] and 
-                rsi_14[i] < 40 and 
-                vol_filter):
-                signals[i] = 0.20
+            # Long: RSI < 30 (oversold) + volatility expansion + weekly uptrend
+            if (rsi_4[i] < 30 and 
+                vol_expansion and 
+                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 4h EMA34 (downtrend) + RSI > 60 (bounce) + volume spike
-            elif (close[i] < ema_34_4h_aligned[i] and 
-                  rsi_14[i] > 60 and 
-                  vol_filter):
-                signals[i] = -0.20
+            # Short: RSI > 70 (overbought) + volatility expansion + weekly downtrend
+            elif (rsi_4[i] > 70 and 
+                  vol_expansion and 
+                  ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI > 60 or price crosses below 4h EMA34
-            if (rsi_14[i] > 60 or 
-                close[i] < ema_34_4h_aligned[i]):
+            # Long exit: RSI > 70 or weekly trend turns down
+            if (rsi_4[i] > 70 or 
+                ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 40 or price crosses above 4h EMA34
-            if (rsi_14[i] < 40 or 
-                close[i] > ema_34_4h_aligned[i]):
+            # Short exit: RSI < 30 or weekly trend turns up
+            if (rsi_4[i] < 30 or 
+                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA34_RSI_VolumeFilter_Session_v1"
-timeframe = "1h"
+name = "1d_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
+timeframe = "1d"
 leverage = 1.0
