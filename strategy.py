@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Aroon_Trend_1wADX_Filter
-Hypothesis: Aroon identifies trend strength and direction (new highs/lows over 25 periods); combined with weekly ADX filter (>25) to ensure trending market, avoiding whipsaws in ranging markets. Works in bull markets via Aroon-up strength and in bear markets via Aroon-down strength. Targets ~15-25 trades/year on 6h to minimize fee drag.
+4h_Stochastic_Pullback_1dTrend_Volume
+Hypothesis: Stochastic oscillator identifies oversold/overbought conditions for pullback entries in trending markets. Combined with 1d EMA50 trend filter and volume confirmation to capture high-probability swing trades. Works in bull markets via long pullbacks and in bear markets via short rallies. Targets ~25-35 trades/year on 4h to minimize fee drag.
 """
 
 import numpy as np
@@ -10,122 +10,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for ADX filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly ADX (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # True Range
-    tr1 = np.abs(high_1w - np.roll(low_1w, 1))
-    tr2 = np.abs(low_1w - np.roll(high_1w, 1))
-    tr3 = np.abs(high_1w - np.roll(high_1w, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = high_1w[0] - low_1w[0]
+    # Stochastic Oscillator (14,3,3) on 4h data
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    denominator = np.where(denominator == 0, 1e-10, denominator)
     
-    # Smooth over 14 periods
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    k_percent = 100 * ((close - lowest_low) / denominator)
     
-    # DI+ and DI-
-    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
-    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
+    # Smooth %K to get %D (3-period SMA of %K)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1w = adx  # already weekly
-    
-    # Align weekly ADX to 6h
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Aroon (25-period) on 6h data
-    # Aroon Up: ((25 - periods since 25-period high) / 25) * 100
-    # Aroon Down: ((25 - periods since 25-period low) / 25) * 100
-    aroon_period = 25
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
-    
-    for i in range(aroon_period - 1, n):
-        window_high = high[i - aroon_period + 1:i + 1]
-        window_low = low[i - aroon_period + 1:i + 1]
-        periods_since_high = aroon_period - 1 - np.argmax(window_high)
-        periods_since_low = aroon_period - 1 - np.argmin(window_low)
-        aroon_up[i] = ((aroon_period - periods_since_high) / aroon_period) * 100
-        aroon_down[i] = ((aroon_period - periods_since_low) / aroon_period) * 100
+    # Volume confirmation: volume > 1.8 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Aroon and weekly ADX
-    start_idx = max(30, aroon_period)
+    # Warmup: need enough data for Stochastic, EMA, and volume MA
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(aroon_up[i]) or np.isnan(aroon_down[i]) or 
-            np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(d_percent[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        aroon_up_val = aroon_up[i]
-        aroon_down_val = aroon_down[i]
-        adx_val = adx_1w_aligned[i]
+        k = k_percent[i]
+        d = d_percent[i]
+        ema_trend = ema50_1d_aligned[i]
+        vol_spike_val = vol_spike[i]
         
-        # Only trade when weekly ADX > 25 (trending market)
-        if adx_val > 25:
-            if position == 0:
-                # Long: Aroon Up > Aroon Down (bullish strength)
-                if aroon_up_val > aroon_down_val:
-                    signals[i] = size
-                    position = 1
-                # Short: Aroon Down > Aroon Up (bearish strength)
-                elif aroon_down_val > aroon_up_val:
-                    signals[i] = -size
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                # Exit long: Aroon Down > Aroon Up (trend weakness)
-                if aroon_down_val > aroon_up_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = size
-            elif position == -1:
-                # Exit short: Aroon Up > Aroon Down (trend weakness)
-                if aroon_up_val > aroon_down_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -size
-        else:
-            # Range market: stay flat
-            signals[i] = 0.0
-            position = 0
+        if position == 0:
+            # Long: Oversold bounce (K crosses above D from below 20) with uptrend and volume spike
+            if k > d and k < 20 and d < 20 and vol_spike_val and close[i] > ema_trend:
+                signals[i] = size
+                position = 1
+            # Short: Overbought pullback (K crosses below D from above 80) with downtrend and volume spike
+            elif k < d and k > 80 and d > 80 and vol_spike_val and close[i] < ema_trend:
+                signals[i] = -size
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Exit long: overbought condition or trend turns down
+            if k > 80 or k < d or close[i] < ema_trend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = size
+        elif position == -1:
+            # Exit short: oversold condition or trend turns up
+            if k < 20 or k > d or close[i] > ema_trend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -size
     
     return signals
 
-name = "6h_Aroon_Trend_1wADX_Filter"
-timeframe = "6h"
+name = "4h_Stochastic_Pullback_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
