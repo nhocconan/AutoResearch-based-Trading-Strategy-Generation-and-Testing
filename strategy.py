@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,9 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR (volatility filter)
+    # Get 1d data for ATR and RSI (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -34,31 +34,44 @@ def generate_signals(prices):
         else:
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Get 4h data for Donchian channel breakout
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate 14-period RSI using Wilder's smoothing
+    delta = np.diff(close_1d)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(len(gain), np.nan)
+    avg_loss = np.full(len(loss), np.nan)
+    for i in range(14, len(gain)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Get 1w data for trend filter (weekly EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
+    # Calculate weekly EMA200
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 200:
+        ema_1w[199] = np.mean(close_1w[:200])
+        for i in range(200, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * (2 / 201) + ema_1w[i-1] * (199 / 201))
     
-    # Calculate 4h Donchian channel (20-period)
-    donch_high = np.full(len(high_4h), np.nan)
-    donch_low = np.full(len(low_4h), np.nan)
-    for i in range(len(high_4h)):
-        if i >= 19:  # 20-period window
-            donch_high[i] = np.max(high_4h[i-19:i+1])
-            donch_low[i] = np.min(low_4h[i-19:i+1])
-    
-    # Align indicators to 4h timeframe
+    # Align indicators to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 24-period average (24*12h = 12 days)
     vol_ma = np.full(n, np.nan)
-    vol_period = 20
+    vol_period = 24
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -66,13 +79,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ATR, Donchian, and volume MA
-    start_idx = max(14, 20, vol_period) + 5
+    # Warmup: need ATR, RSI, EMA, and volume MA
+    start_idx = max(14, 200, vol_period) + 30  # extra buffer for calculations
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -81,30 +94,32 @@ def generate_signals(prices):
         atr = atr_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume spike
-            if (price > donch_high_aligned[i] and 
-                vol_ratio > 1.5):
+            # Long: RSI < 30 (oversold) + volume spike + price > weekly EMA200
+            if (rsi_1d_aligned[i] < 30 and 
+                vol_ratio > 1.5 and 
+                price > ema_1w_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian low + volume spike
-            elif (price < donch_low_aligned[i] and 
-                  vol_ratio > 1.5):
+            # Short: RSI > 70 (overbought) + volume spike + price < weekly EMA200
+            elif (rsi_1d_aligned[i] > 70 and 
+                  vol_ratio > 1.5 and 
+                  price < ema_1w_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price closes below Donchian low OR ATR-based stop
-            if (price < donch_low_aligned[i] or 
-                price < high[i-1] - 2.0 * atr):
+            # Long exit: RSI > 50 (mean reversion) OR ATR-based stop
+            if (rsi_1d_aligned[i] > 50 or 
+                price < close[i-1] - 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price closes above Donchian high OR ATR-based stop
-            if (price > donch_high_aligned[i] or 
-                price > low[i-1] + 2.0 * atr):
+            # Short exit: RSI < 50 (mean reversion) OR ATR-based stop
+            if (rsi_1d_aligned[i] < 50 or 
+                price > close[i-1] + 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ATRStop"
-timeframe = "4h"
+name = "12h_RSI_MeanReversion_VolumeSpike_WeeklyEMA200"
+timeframe = "12h"
 leverage = 1.0
