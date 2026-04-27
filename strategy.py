@@ -13,39 +13,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for higher timeframe context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate 1d EMA 34 for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate 1d ATR for volatility filter
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # 12h Donchian channels (20-period for structure) - using 12h data from mtf_data
+    # Get 12h data for higher timeframe context
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 30:
         return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
-    highest_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
-    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
+    volume_12h = df_12h['volume'].values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Calculate 12h EMA 50 for trend direction
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate 12h ATR for volatility filter
+    tr_12h = np.maximum(high_12h[1:] - low_12h[1:], np.abs(high_12h[1:] - close_12h[:-1]), np.abs(low_12h[1:] - close_12h[:-1]))
+    tr_12h = np.concatenate([[np.nan], tr_12h])
+    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    
+    # Calculate 12h volume average for volume spike detection
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    
+    # 4h Donchian channels (20-period for structure)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    highest_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
+    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
+    
+    # Volume filter: volume > 2x 20-period average (spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,32 +60,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(highest_high_12h_aligned[i]) or 
-            np.isnan(lowest_low_12h_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(vol_ma_12h_aligned[i]) or 
+            np.isnan(highest_high_4h_aligned[i]) or 
+            np.isnan(lowest_low_4h_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA50
+        price_above_ema = close[i] > ema_50_12h_aligned[i]
+        price_below_ema = close[i] < ema_50_12h_aligned[i]
         
         # Volatility filter: only trade when ATR is above average (avoid choppy markets)
-        vol_filter = atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[max(0, i-50):i+1])
+        vol_filter = atr_12h_aligned[i] > np.nanmedian(atr_12h_aligned[max(0, i-50):i+1])
         
-        # Long conditions: price breaks above 12h Donchian high + above 1d EMA + volume + volatility
-        long_breakout = (close[i] > highest_high_12h_aligned[i-1] and 
+        # Volume spike filter
+        vol_spike = volume_spike[i]
+        
+        # Long conditions: price breaks above 4h Donchian high + above 12h EMA + volume spike + volatility
+        long_breakout = (close[i] > highest_high_4h_aligned[i-1] and 
                         price_above_ema and 
-                        volume_filter[i] and 
+                        vol_spike and 
                         vol_filter)
         
-        # Short conditions: price breaks below 12h Donchian low + below 1d EMA + volume + volatility
-        short_breakout = (close[i] < lowest_low_12h_aligned[i-1] and 
+        # Short conditions: price breaks below 4h Donchian low + below 12h EMA + volume spike + volatility
+        short_breakout = (close[i] < lowest_low_4h_aligned[i-1] and 
                          price_below_ema and 
-                         volume_filter[i] and 
+                         vol_spike and 
                          vol_filter)
         
         if long_breakout:
@@ -89,11 +97,11 @@ def generate_signals(prices):
         elif short_breakout:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite 12h Donchian breakout
-        elif position == 1 and close[i] < lowest_low_12h_aligned[i-1]:
+        # Exit conditions: opposite 4h Donchian breakout
+        elif position == 1 and close[i] < lowest_low_4h_aligned[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > highest_high_12h_aligned[i-1]:
+        elif position == -1 and close[i] > highest_high_4h_aligned[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -107,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
