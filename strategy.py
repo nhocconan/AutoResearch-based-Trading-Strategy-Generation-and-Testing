@@ -1,3 +1,4 @@
+#14:51
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -30,37 +31,23 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high_1d[i-19:i+1])
         donchian_low[i] = np.min(low_1d[i-19:i+1])
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        alpha = 2 / (34 + 1)
-        ema_34_1d[0] = close_1d[0]
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        alpha = 2 / (50 + 1)
+        ema_50_1d[0] = close_1d[0]
         for i in range(1, len(close_1d)):
-            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
+            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Calculate daily ATR(14) for volatility filter
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    high_close[0] = high_low[0]
-    low_close[0] = high_low[0]
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_14 = np.full(len(tr), np.nan)
-    if len(tr) >= 14:
-        atr_14[13] = np.mean(tr[:14])
-        for i in range(14, len(tr)):
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-    
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12-period volume average for spike detection
+    # Calculate 4-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 12
+    vol_period = 4
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -73,7 +60,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -83,30 +70,27 @@ def generate_signals(prices):
         # Volume spike filter: at least 1.5x average volume
         vol_filter = vol_ratio > 1.5
         
-        # Volatility filter: ATR > 0.5 * price (avoid low volatility chop)
-        vol_filter = vol_filter and (atr_14_aligned[i] > 0.005 * price)
-        
         if position == 0:
-            # Long: Price breaks above Donchian high with volume and above daily EMA34
-            if price > donchian_high_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
+            # Long: Price breaks above Donchian high with volume and above daily EMA50
+            if price > donchian_high_aligned[i] and vol_filter and price > ema_50_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume and below daily EMA34
-            elif price < donchian_low_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
+            # Short: Price breaks below Donchian low with volume and below daily EMA50
+            elif price < donchian_low_aligned[i] and vol_filter and price < ema_50_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below Donchian low or below daily EMA34
-            if price < donchian_low_aligned[i] or price < ema_34_1d_aligned[i]:
+            # Long exit: Price closes below Donchian low or below daily EMA50
+            if price < donchian_low_aligned[i] or price < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above Donchian high or above daily EMA34
-            if price > donchian_high_aligned[i] or price > ema_34_1d_aligned[i]:
+            # Short exit: Price closes above Donchian high or above daily EMA50
+            if price > donchian_high_aligned[i] or price > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_20_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
