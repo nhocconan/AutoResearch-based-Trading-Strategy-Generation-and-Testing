@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray with 12h trend filter and volume confirmation
-# Elder Ray measures bull/bear power using EMA(13) and price extremes.
-# Bull Power = High - EMA13, Bear Power = Low - EMA13
-# In trending markets, buy when Bull Power turns positive with divergence,
-# sell when Bear Power turns negative with divergence.
-# Trend filter from 12h EMA(34) ensures we trade with higher timeframe trend.
-# Volume filter confirms conviction. Works in bull/bear via 12h trend filter.
+# Hypothesis: 4h TRIX + volume spike + choppiness regime filter
+# TRIX (1-period ROC of EMA) filters noise and identifies momentum.
+# In trending markets, TRIX crosses above/below zero signal momentum shifts.
+# Volume spike confirms breakout conviction. Choppiness regime filter avoids ranging markets.
+# Works in bull/bear via momentum + volume confirmation.
+# Target: 75-200 total trades over 4 years (~19-50/year) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,27 +20,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for choppiness regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Elder Ray: EMA13 of close, Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # TRIX: 1-period ROC of triple EMA (15-period)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3.pct_change(1))
+    trix = trix.values
     
-    # Align Elder Ray to 6h timeframe (same timeframe, just ensure proper alignment)
-    bull_power_aligned = align_htf_to_ltf(prices, prices, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, prices, bear_power)
+    # Choppiness Index (14-period)
+    def true_range(high, low, close_prev):
+        return np.maximum(high - low, np.maximum(np.abs(high - close_prev), np.abs(low - close_prev)))
     
-    # 12h EMA trend filter (34-period)
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    tr1 = true_range(high_1d, low_1d, np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: volume > 1.5 x 20-period average (~5 days of 6h bars)
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    chop = 100 * np.log10(atr1 * 14 / (hh - ll)) / np.log10(14)
+    
+    # Align indicators to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, prices, trix)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume filter: volume > 2.0 x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -50,13 +61,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need EMA13 (13), EMA34 (34), volume MA (20)
-    start_idx = max(13, 34, 20)
+    # Warmup: need TRIX (15*3=45), chop (14), volume MA (20)
+    start_idx = max(45, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -65,50 +76,37 @@ def generate_signals(prices):
         vol_avg = vol_ma_20[i]
         
         # Volume filter: significant volume spike
-        vol_filter = vol_now > 1.5 * vol_avg
+        vol_filter = vol_now > 2.0 * vol_avg
         
-        # Trend filter from 12h EMA
-        bullish_trend = price > ema_34_aligned[i]
-        bearish_trend = price < ema_34_aligned[i]
+        # Momentum from TRIX
+        trix_now = trix_aligned[i]
+        trix_prev = trix_aligned[i-1]
         
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
-        
-        # Divergence conditions: power changing sign with trend
-        bull_divergence = bull_power_val > 0 and bear_power_val < 0  # Bullish divergence
-        bear_divergence = bear_power_val < 0 and bull_power_val > 0  # Bearish divergence (same condition)
-        # Actually we need: bull power turning positive, bear power turning negative
-        # For simplicity, use zero-cross with hysteresis
-        if i > start_idx:
-            bull_power_prev = bull_power_aligned[i-1]
-            bear_power_prev = bear_power_aligned[i-1]
-            bull_cross_up = bull_power_prev <= 0 and bull_power_val > 0
-            bear_cross_down = bear_power_prev >= 0 and bear_power_val < 0
-        else:
-            bull_cross_up = False
-            bear_cross_down = False
+        # Choppiness regime: chop > 61.8 = ranging (avoid), chop < 38.2 = trending
+        chop_now = chop_aligned[i]
+        trending_regime = chop_now < 38.2
         
         if position == 0:
-            # Long: bull power crossing up + volume + bullish 12h trend
-            if bull_cross_up and vol_filter and bullish_trend:
+            # Long: TRIX crosses above zero + volume + trending regime
+            if trix_prev <= 0 and trix_now > 0 and vol_filter and trending_regime:
                 signals[i] = size
                 position = 1
-            # Short: bear power crossing down + volume + bearish 12h trend
-            elif bear_cross_down and vol_filter and bearish_trend:
+            # Short: TRIX crosses below zero + volume + trending regime
+            elif trix_prev >= 0 and trix_now < 0 and vol_filter and trending_regime:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bull power turns negative or trend turns bearish
-            if bull_power_val <= 0 or not bullish_trend:
+            # Exit long: TRIX crosses below zero
+            if trix_now < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: bear power turns positive or trend turns bullish
-            if bear_power_val >= 0 or not bearish_trend:
+            # Exit short: TRIX crosses above zero
+            if trix_now > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_TRIX_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
