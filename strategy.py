@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Aroon_Retracement_1dTrend
-Hypothesis: Aroon measures trend strength and retracement depth. In trending markets (Aroon Up/Down > 70), 
-pullbacks to Aroon oscillator zero line offer high-probability re-entry. Combined with 1d EMA50 trend filter,
-this captures continuation moves in both bull (buy Aroon Up retracements) and bear (sell Aroon Down retracements).
-Target: 15-25 trades/year per side. Uses Aroon(25) for smooth signals.
+4h_Volume_Weighted_RSI_12hTrend
+Hypothesis: Combine volume-weighted RSI(14) with 12h EMA50 trend filter to capture 
+momentum extremes in the direction of higher timeframe trend. Volume weighting 
+reduces false signals during low-volume periods. Designed for 15-25 trades/year 
+per symbol with clear entry/exit rules to minimize fee churn.
 """
 
 import numpy as np
@@ -13,84 +13,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Aroon(25) - measures time since high/low
-    period = 25
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    for i in range(period - 1, n):
-        # Find highest high and lowest low in lookback period
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        
-        # Calculate periods since high/low
-        periods_since_high = period - 1 - np.where(high[i - period + 1:i + 1] == highest_high)[0][-1]
-        periods_since_low = period - 1 - np.where(low[i - period + 1:i + 1] == lowest_low)[0][-1]
-        
-        aroon_up[i] = ((period - 1 - periods_since_high) / (period - 1)) * 100
-        aroon_down[i] = ((period - 1 - periods_since_low) / (period - 1)) * 100
+    # Volume-weighted RSI calculation
+    # Calculate price changes
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Aroon oscillator: Aroon Up - Aroon Down (positive = uptrend bias, negative = downtrend bias)
-    aroon_osc = aroon_up - aroon_down
+    # Weight gains and losses by volume
+    vol_weight = volume / (np.mean(volume) + 1e-10)  # Normalize volume
+    weighted_gain = gain * vol_weight
+    weighted_loss = loss * vol_weight
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate smoothed averages with proper min_periods
+    avg_gain = pd.Series(weighted_gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(weighted_loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate RSI
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Aroon calculation
-    start_idx = period - 1
+    # Warmup: need enough data for RSI calculation
+    start_idx = 14
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(aroon_up[i]) or np.isnan(aroon_down[i]) or 
-            np.isnan(aroon_osc[i]) or np.isnan(ema_50_1d_aligned[i])):
+        # Skip if trend data not ready
+        if np.isnan(ema_50_12h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        aroon_up_val = aroon_up[i]
-        aroon_down_val = aroon_down[i]
-        aroon_osc_val = aroon_osc[i]
-        ema_50_val = ema_50_1d_aligned[i]
+        rsi_val = rsi[i]
+        ema_50_val = ema_50_12h_aligned[i]
         
         if position == 0:
-            # Long: Aroon Up > 70 (strong uptrend) AND Aroon oscillator crosses above zero (retracement end)
-            # AND price above 1d EMA50 (bullish regime)
-            if aroon_up_val > 70 and aroon_osc_val > 0 and aroon_osc[i-1] <= 0 and close[i] > ema_50_val:
+            # Long: RSI < 30 (oversold) and price above 12h EMA50 (uptrend)
+            if rsi_val < 30 and close[i] > ema_50_val:
                 signals[i] = size
                 position = 1
-            # Short: Aroon Down > 70 (strong downtrend) AND Aroon oscillator crosses below zero (retracement end)
-            # AND price below 1d EMA50 (bearish regime)
-            elif aroon_down_val > 70 and aroon_osc_val < 0 and aroon_osc[i-1] >= 0 and close[i] < ema_50_val:
+            # Short: RSI > 70 (overbought) and price below 12h EMA50 (downtrend)
+            elif rsi_val > 70 and close[i] < ema_50_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: Aroon Down > 70 (downtrend taking over) OR Aroon oscillator < -20 (strong bearish bias)
-            if aroon_down_val > 70 or aroon_osc_val < -20:
+            # Exit long: RSI > 50 (momentum fading) or trend change
+            if rsi_val > 50 or close[i] < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Aroon Up > 70 (uptrend taking over) OR Aroon oscillator > 20 (strong bullish bias)
-            if aroon_up_val > 70 or aroon_osc_val > 20:
+            # Exit short: RSI < 50 (momentum fading) or trend change
+            if rsi_val < 50 or close[i] > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Aroon_Retracement_1dTrend"
-timeframe = "6h"
+name = "4h_Volume_Weighted_RSI_12hTrend"
+timeframe = "4h"
 leverage = 1.0
