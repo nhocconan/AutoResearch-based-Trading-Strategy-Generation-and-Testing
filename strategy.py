@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm
-Hypothesis: Camarilla R1/S1 levels from 1d chart act as intraday support/resistance. 
-Breakout above R1 with volume confirmation and 1w uptrend (price > EMA50) goes long.
-Breakdown below S1 with volume confirmation and 1w downtrend (price < EMA50) goes short.
-Exits on opposite Camarilla level touch or trend reversal. Uses discrete sizing (0.25) 
-to limit fee churn. Designed for 1d timeframe targeting 30-100 total trades over 4 years 
-(7-25/year). Works in bull markets via upside breakouts and bear markets via 
-downside breakdowns, with volume filter preventing false breakouts in low-liquidity periods.
+6h_Donchian20_Breakout_12hTrend_VolumeSpike
+Hypothesis: 6h Donchian(20) breakouts in the direction of the 12h trend with volume confirmation capture sustained moves. 
+In bull markets, upside breakouts with 12h uptrend go long. In bear markets, downside breakouts with 12h downtrend go short. 
+Volume filter (>2.0x 20-bar average) prevents false breakouts in low volatility periods. 
+Exits on opposite Donchian band touch or trend reversal. Discrete sizing (0.25) limits fee churn.
+Target: 50-150 total trades over 4 years (12-37/year). Works across BTC/ETH/SOL.
 """
 
 import numpy as np
@@ -24,27 +22,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and 1w data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    # Get 6h data for Donchian channels and 12h data for trend filter
+    df_6h = get_htf_data(prices, '6h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d Camarilla levels: R1, S1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 6h Donchian(20): upper/lower bands
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    rang = high_1d - low_1d
-    R1 = close_1d + rang * 1.1 / 2
-    S1 = close_1d - rang * 1.1 / 2
+    # Donchian upper: max(high, 20)
+    upper_6h = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    # Donchian lower: min(low, 20)
+    lower_6h = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA50 for trend filter
+    close_12h_series = pd.Series(df_12h['close'].values)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to primary timeframe (1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align all indicators to primary timeframe (6h)
+    upper_aligned = align_htf_to_ltf(prices, df_6h, upper_6h)
+    lower_aligned = align_htf_to_ltf(prices, df_6h, lower_6h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: current volume > 2.0 * 20-period average (tighter to reduce trades)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,40 +52,40 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need EMA50 (50), volume avg (20)
-    start_idx = max(50, 20)
+    # Warmup: need Donchian (20), EMA50 (50), volume avg (20)
+    start_idx = max(20, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
-        ema_1w_val = ema_50_1w_aligned[i]
+        upper_val = upper_aligned[i]
+        lower_val = lower_aligned[i]
+        ema_12h_val = ema_50_12h_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Determine 1w trend: price > EMA50 = uptrend, price < EMA50 = downtrend
-            is_uptrend = close_val > ema_1w_val
-            is_downtrend = close_val < ema_1w_val
+            # Determine 12h trend: price > EMA50 = uptrend, price < EMA50 = downtrend
+            is_uptrend = close_val > ema_12h_val
+            is_downtrend = close_val < ema_12h_val
             
             if is_uptrend:
-                # Uptrend: long when price breaks above R1 and volume confirms
-                if (close_val > R1_val) and vol_conf:
+                # Uptrend: long when price breaks above upper band and volume confirms
+                if (close_val > upper_val) and vol_conf:
                     signals[i] = size
                     position = 1
             elif is_downtrend:
-                # Downtrend: short when price breaks below S1 and volume confirms
-                if (close_val < S1_val) and vol_conf:
+                # Downtrend: short when price breaks below lower band and volume confirms
+                if (close_val < lower_val) and vol_conf:
                     signals[i] = -size
                     position = -1
         elif position == 1:
-            # Exit long: price touches S1 (support) or trend changes to downtrend
-            exit_condition = (close_val < S1_val) or (close_val < ema_1w_val)
+            # Exit long: price touches lower band (support) or trend changes to downtrend
+            exit_condition = (close_val < lower_val) or (close_val < ema_12h_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -95,8 +93,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price touches R1 (resistance) or trend changes to uptrend
-            exit_condition = (close_val > R1_val) or (close_val > ema_1w_val)
+            # Exit short: price touches upper band (resistance) or trend changes to uptrend
+            exit_condition = (close_val > upper_val) or (close_val > ema_12h_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -106,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
