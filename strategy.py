@@ -21,7 +21,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate daily EMA(34) for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -37,20 +36,16 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 4h Donchian channels (20-period) for breakout signals
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
-    
-    # Calculate 4h volume moving average for confirmation
-    vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Calculate 6-period RSI on 6h for mean reversion signals
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=6, min_periods=6).mean().values
+    avg_loss = pd.Series(loss).rolling(window=6, min_periods=6).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad first value with NaN since diff loses one element
+    rsi = np.concatenate([np.array([np.nan]), rsi])
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -65,10 +60,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_4h_aligned[i])):
+            np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
@@ -85,24 +78,19 @@ def generate_signals(prices):
         atr_threshold = np.nanpercentile(atr_14_1d_aligned[max(0, i-100):i+1], 70) if i >= 30 else atr_14_1d_aligned[i]
         low_volatility = atr_14_1d_aligned[i] < atr_threshold
         
-        # Volume filter: current 4h volume above average
-        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 0.8
+        # Mean reversion signal: RSI extremes
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Breakout signals: price breaks 4h Donchian channels
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
-        
-        # Long conditions: bullish trend + low volatility + volume + upward breakout
+        # Long conditions: bullish trend + low volatility + RSI oversold
         long_condition = (price_above_ema and 
                          low_volatility and 
-                         volume_filter and 
-                         breakout_up)
+                         rsi_oversold)
         
-        # Short conditions: bearish trend + low volatility + volume + downward breakout
+        # Short conditions: bearish trend + low volatility + RSI overbought
         short_condition = (price_below_ema and 
                           low_volatility and 
-                          volume_filter and 
-                          breakout_down)
+                          rsi_overbought)
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -128,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_EMA34Trend_VolumeFilter"
-timeframe = "4h"
+name = "6h_EMA34Trend_RSI_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
