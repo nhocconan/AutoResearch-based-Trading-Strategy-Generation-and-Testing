@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR-based volatility regime
+    # Get daily data for ATR and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -22,34 +22,18 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate daily Bollinger Bands (20, 2)
+    sma_20 = np.full(len(close_1d), np.nan)
+    std_20 = np.full(len(close_1d), np.nan)
+    for i in range(19, len(close_1d)):
+        sma_20[i] = np.mean(close_1d[i-19:i+1])
+        std_20[i] = np.std(close_1d[i-19:i+1])
     
-    atr_14_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(tr_1d)):
-        atr_14_1d[i] = np.mean(tr_1d[i-14:i])
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
     
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Calculate ATR ratio: current ATR(5) / ATR(14) - volatility expansion signal
-    tr1_5 = high_1d[1:] - low_1d[1:]
-    tr2_5 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_5 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_5d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1_5, np.maximum(tr2_5, tr3_5))])
-    
-    atr_5_1d = np.full(len(df_1d), np.nan)
-    for i in range(5, len(tr_5d)):
-        atr_5_1d[i] = np.mean(tr_5d[i-5:i])
-    
-    atr_5_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_5_1d)
-    
-    # ATR ratio: ATR(5)/ATR(14) > 1.5 indicates volatility expansion
-    atr_ratio = np.full(n, np.nan)
-    valid_mask = (~np.isnan(atr_5_1d_aligned)) & (~np.isnan(atr_14_1d_aligned)) & (atr_14_1d_aligned > 0)
-    atr_ratio[valid_mask] = atr_5_1d_aligned[valid_mask] / atr_14_1d_aligned[valid_mask]
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
     # Get weekly data for trend filter: EMA(34) on weekly close
     df_1w = get_htf_data(prices, '1w')
@@ -70,7 +54,7 @@ def generate_signals(prices):
     
     ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
-    # Calculate 2-period RSI for mean reentry signals (more sensitive)
+    # Calculate RSI(2) for mean reversion signals
     delta = np.diff(close, prepend=close[0])
     gain = np.maximum(delta, 0)
     loss = np.maximum(-delta, 0)
@@ -82,8 +66,8 @@ def generate_signals(prices):
             avg_gain[i] = np.mean(gain[1:3])
             avg_loss[i] = np.mean(loss[1:3])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
-            avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+            avg_gain[i] = (avg_gain[i-1] + gain[i]) / 2
+            avg_loss[i] = (avg_loss[i-1] + loss[i]) / 2
     
     rs = np.full(n, np.nan)
     valid_rsi = (~np.isnan(avg_gain)) & (~np.isnan(avg_loss)) & (avg_loss > 0)
@@ -95,10 +79,11 @@ def generate_signals(prices):
     position = 0
     
     # Warmup
-    start_idx = max(14, 34, 2)
+    start_idx = max(19, 34, 2)
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_ratio[i]) or 
+        if (np.isnan(upper_band_aligned[i]) or 
+            np.isnan(lower_band_aligned[i]) or
             np.isnan(ema_1w_34_aligned[i]) or
             np.isnan(rsi_2[i])):
             signals[i] = 0.0
@@ -106,35 +91,32 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Volatility regime filter: ATR ratio > 1.5 = expansion (favor trend)
-        vol_expansion = atr_ratio[i] > 1.5
-        
         if position == 0:
-            # Long: RSI < 20 (deeply oversold) + volatility expansion + weekly uptrend
-            if (rsi_2[i] < 20 and 
-                vol_expansion and 
+            # Long: Price touches lower Bollinger Band + RSI(2) < 10 + weekly uptrend
+            if (price <= lower_band_aligned[i] and 
+                rsi_2[i] < 10 and 
                 ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 80 (deeply overbought) + volatility expansion + weekly downtrend
-            elif (rsi_2[i] > 80 and 
-                  vol_expansion and 
+            # Short: Price touches upper Bollinger Band + RSI(2) > 90 + weekly downtrend
+            elif (price >= upper_band_aligned[i] and 
+                  rsi_2[i] > 90 and 
                   ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI > 80 or weekly trend turns down
-            if (rsi_2[i] > 80 or 
+            # Long exit: Price touches upper Bollinger Band or weekly trend turns down
+            if (price >= upper_band_aligned[i] or 
                 ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 20 or weekly trend turns up
-            if (rsi_2[i] < 20 or 
+            # Short exit: Price touches lower Bollinger Band or weekly trend turns up
+            if (price <= lower_band_aligned[i] or 
                 ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
@@ -143,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolatilityExpansion_RSI2_WeeklyEMA34_v1"
-timeframe = "12h"
+name = "1d_BollingerBandTouch_RSI2_WeeklyEMA34_v1"
+timeframe = "1d"
 leverage = 1.0
