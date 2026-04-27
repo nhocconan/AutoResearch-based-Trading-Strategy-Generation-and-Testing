@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_TK_Cross_1dTrend_VolumeConfirm
-Hypothesis: Uses 1d Ichimoku cloud (Senkou Span A/B) for trend direction and TK Cross (Tenkan/Kijun) for momentum.
-Enter long when price > cloud (bullish) AND TK Cross bullish (Tenkan > Kijun) AND volume confirmation.
-Enter short when price < cloud (bearish) AND TK Cross bearish (Tenkan < Kijun) AND volume confirmation.
-Exit when TK Cross reverses or price crosses cloud middle. Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
-Works in both bull and bear markets by following 1d Ichimoku trend while using TK Cross for timely entries.
-Volume confirmation filter reduces false signals. Discrete position sizing (0.25) minimizes fee drag.
+12h_KAMA_Direction_1dRSI_ChopFilter
+Hypothesis: Uses KAMA (adaptive trend) on 12h for trend direction, combined with 1d RSI extremes and 1d Choppiness Index regime filter.
+- Long: KAMA upward (close > KAMA) AND 1d RSI < 30 (oversold) AND 1d Choppiness > 61.8 (ranging market -> mean reversion)
+- Short: KAMA downward (close < KAMA) AND 1d RSI > 70 (overbought) AND 1d Choppiness > 61.8 (ranging market -> mean reversion)
+- Exit: Opposite KAMA cross OR RSI returns to neutral (40-60) OR chop regime ends (Choppiness < 38.2 -> trending)
+Works in both bull and bear markets by using adaptive trend (KAMA) and fading extremes in ranging regimes.
+Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
+Volume is not used as primary filter to avoid overtrading; instead relies on regime and extreme conditions.
 """
 
 import numpy as np
@@ -15,86 +16,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku calculation
+    # Get 1d data for RSI and Choppiness Index
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Ichimoku components
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h KAMA (adaptive trend)
+    # Efficiency Ratio: |close - close[10]| / sum(|close - close[1]|) over 10 periods
+    close_series = pd.Series(close)
+    change = abs(close_series - close_series.shift(10))
+    volatility = abs(close_series - close_series.shift(1)).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants: fastest EMA=2 (ER=1), slowest EMA=30 (ER=0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Handle NaN/inf
+    sc = sc.fillna(0.001)  # default to slow EMA when ER is NaN
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (high_tenkan + low_tenkan) / 2
+    # Calculate 1d RSI(14)
+    close_1d = pd.Series(df_1d['close'].values)
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.fillna(50)  # neutral when undefined
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (high_kijun + low_kijun) / 2
+    # Calculate 1d Choppiness Index(14)
+    # CHOP = 100 * log10(sum(ATR(1), 14) / (log10(highest_high - lowest_low) * log10(14)))
+    tr1 = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                     np.maximum(abs(df_1d['high'].values - close_1d.shift(1)),
+                                abs(df_1d['low'].values - close_1d.shift(1))))
+    atr1 = pd.Series(tr1).rolling(window=1, min_periods=1).sum()  # ATR(1) = TR
+    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum()
+    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min()
+    chop_denom = np.log10(highest_high - lowest_low) * np.log10(14)
+    chop_denom = chop_denom.replace(0, np.nan)  # avoid division by zero
+    chop_1d = 100 * np.log10(sum_atr1 / chop_denom)
+    chop_1d = chop_1d.fillna(50)  # neutral when undefined
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((high_senkou_b + low_senkou_b) / 2)
-    
-    # Align 1d Ichimoku components to 6h timeframe (completed bars only)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Volume confirmation: current volume > 1.8 * 30-period average (slightly looser for more trades)
-    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (1.8 * vol_avg)
+    # Align 1d indicators to 12h timeframe (completed bars only)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama.values)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need Senkou B (52) + TK Cross (26) + volume avg (30)
-    start_idx = max(52, 30)
+    # Warmup: need KAMA (10), RSI (14), Chop (14)
+    start_idx = max(14, 10)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        tenkan_val = tenkan_aligned[i]
-        kijun_val = kijun_aligned[i]
-        senkou_a_val = senkou_a_aligned[i]
-        senkou_b_val = senkou_b_aligned[i]
-        vol_conf = volume_confirm[i]
-        
-        # Determine cloud boundaries (Senkou Span A/B)
-        top_cloud = max(senkou_a_val, senkou_b_val)
-        bottom_cloud = min(senkou_a_val, senkou_b_val)
-        cloud_middle = (top_cloud + bottom_cloud) / 2
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
+        chop_val = chop_1d_aligned[i]
         
         if position == 0:
-            # Look for entry: TK Cross with price/cloud relationship AND volume confirmation
-            # Long: TK Cross bullish (Tenkan > Kijun) AND price above cloud AND volume confirmation
-            long_condition = (tenkan_val > kijun_val) and (close_val > top_cloud) and vol_conf
-            # Short: TK Cross bearish (Tenkan < Kijun) AND price below cloud AND volume confirmation
-            short_condition = (tenkan_val < kijun_val) and (close_val < bottom_cloud) and vol_conf
+            # Look for entry: KAMA direction + RSI extreme + Chop regime (ranging)
+            # Long: KAMA up (close > KAMA) AND RSI < 30 (oversold) AND Chop > 61.8 (ranging -> mean reversion)
+            long_condition = (close_val > kama_val) and (rsi_val < 30) and (chop_val > 61.8)
+            # Short: KAMA down (close < KAMA) AND RSI > 70 (overbought) AND Chop > 61.8 (ranging -> mean reversion)
+            short_condition = (close_val < kama_val) and (rsi_val > 70) and (chop_val > 61.8)
             
             if long_condition:
                 signals[i] = size
@@ -103,8 +104,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when TK Cross turns bearish OR price crosses below cloud middle
-            exit_condition = (tenkan_val <= kijun_val) or (close_val < cloud_middle)
+            # Exit long when KAMA turns down OR RSI returns to neutral OR chop regime ends (trending)
+            exit_condition = (close_val < kama_val) or (rsi_val >= 40) or (chop_val < 38.2)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -112,8 +113,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when TK Cross turns bullish OR price crosses above cloud middle
-            exit_condition = (tenkan_val >= kijun_val) or (close_val > cloud_middle)
+            # Exit short when KAMA turns up OR RSI returns to neutral OR chop regime ends (trending)
+            exit_condition = (close_val > kama_val) or (rsi_val <= 60) or (chop_val < 38.2)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -123,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_TK_Cross_1dTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_KAMA_Direction_1dRSI_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
