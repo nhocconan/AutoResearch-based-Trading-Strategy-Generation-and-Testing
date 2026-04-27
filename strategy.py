@@ -31,27 +31,22 @@ def generate_signals(prices):
     atr_1d_raw = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
     
-    # 1d ADX(14) for trend strength
-    # Calculate +DM and -DM
-    up_move = df_1d['high'].values - np.roll(df_1d['high'].values, 1)
-    down_move = np.roll(df_1d['low'].values, 1) - df_1d['low'].values
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # 12h ATR(14) for volatility filter
+    tr1_h = high - low
+    tr2_h = np.abs(high - np.roll(close, 1))
+    tr3_h = np.abs(low - np.roll(close, 1))
+    tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
+    tr_h[0] = tr1_h[0]
+    atr_12h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
     
-    # TR already calculated as tr_d
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    tr_r14 = pd.Series(tr_d).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # DI values
-    plus_di14 = 100 * plus_dm14 / (tr_r14 + 1e-10)
-    minus_di14 = 100 * minus_dm14 / (tr_r14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14 + 1e-10)
-    adx_1d_raw = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_raw)
+    # 12h RSI(14) for momentum confirmation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,39 +57,44 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_12h[i]) or 
+            i >= len(atr_1d_aligned) or np.isnan(atr_1d_aligned[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_1d_aligned[i]
+        atr_12h_val = atr_12h[i]
         atr_1d_val = atr_1d_aligned[i]
-        adx_val = adx_1d_aligned[i]
+        rsi_val = rsi[i]
         
-        # ADX filter: only trade when trend is strong (ADX > 25)
-        trend_filter = adx_val > 25
+        # Volatility filter: 12h ATR > 0.5 * daily ATR (higher volatility regime)
+        vol_filter = atr_12h_val > (atr_1d_val * 0.5)
+        
+        # RSI filter: avoid overbought/oversold extremes
+        rsi_filter = (rsi_val > 30) & (rsi_val < 70)
         
         if position == 0:
-            # Long: price above EMA with trend strength
-            if close[i] > ema_trend and trend_filter:
+            # Long: price above EMA with volatility and RSI filter
+            if close[i] > ema_trend and vol_filter and rsi_filter:
                 signals[i] = size
                 position = 1
-            # Short: price below EMA with trend strength
-            elif close[i] < ema_trend and trend_filter:
+            # Short: price below EMA with volatility and RSI filter
+            elif close[i] < ema_trend and vol_filter and rsi_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA OR trend weakens
-            if close[i] < ema_trend or adx_val < 20:
+            # Exit long: price crosses below EMA
+            if close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA OR trend weakens
-            if close[i] > ema_trend or adx_val < 20:
+            # Exit short: price crosses above EMA
+            if close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_ADX25_TrendFilter_v1"
-timeframe = "1d"
+name = "12h_EMA34_Trend_VolumeRSIFilter_v1"
+timeframe = "12h"
 leverage = 1.0
