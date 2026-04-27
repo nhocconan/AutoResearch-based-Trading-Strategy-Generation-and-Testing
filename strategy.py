@@ -13,113 +13,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Choppiness Index
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Weekly EMA(50) for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Get daily data for Donchian channel
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 14-period Choppiness Index
-    atr14 = np.zeros(len(df_1d))
-    for i in range(14, len(df_1d)):
-        tr = max(df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-                 abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-                 abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1]))
-        atr14[i] = (atr14[i-1] * 13 + tr) / 14
-    atr14[:14] = np.nan
+    # Daily Donchian channel (20-period)
+    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    # Get daily volume average
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
     
-    chop = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        if not np.isnan(atr14[i]) and not np.isnan(highest_high[i]) and not np.isnan(lowest_low[i]):
-            sum_atr = atr14[i] * 14
-            if highest_high[i] - lowest_low[i] > 0:
-                chop[i] = 100 * np.log10(sum_atr / (highest_high[i] - lowest_low[i])) / np.log10(14)
+    # Align weekly EMA to daily timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    chop_ma = pd.Series(chop).rolling(window=5, min_periods=5).mean().values
-    
-    # Get 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_ma)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # 4h volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align daily Donchian and volume to daily timeframe (no shift needed as already daily)
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need chop data, 4h EMA, and volume data
-    start_idx = max(14, 50, 20)
+    # Warmup: need weekly EMA, daily Donchian, and volume data
+    start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(chop_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        chop_val = chop_aligned[i]
-        ema_trend = ema50_4h_aligned[i]
-        vol_ma_val = vol_ma[i]
-        vol_current = volume[i]
+        ema_trend = ema50_1w_aligned[i]
+        donch_high_val = donch_high_aligned[i]
+        donch_low_val = donch_low_aligned[i]
+        vol_ma_val = vol_ma_1d_aligned[i]
+        vol_current = df_1d['volume'].iloc[i] if i < len(df_1d) else 0
         
-        # Volume filter: current volume > 1.5 * 20-period average (volume surge)
+        # Volume filter: current volume > 1.5 * 20-day average
         vol_filter = vol_current > (vol_ma_val * 1.5)
         
-        # Regime filter: Chop > 61.8 = ranging market (mean reversion)
-        ranging = chop_val > 61.8
-        
         if position == 0:
-            # Long: price touches lower Bollinger Band in ranging market with volume surge
-            # Calculate Bollinger Bands (20, 2) on 4h close
-            if i >= 20:
-                bb_middle = np.mean(close[i-19:i+1])
-                bb_std = np.std(close[i-19:i+1])
-                bb_lower = bb_middle - 2 * bb_std
-                
-                if close[i] <= bb_lower and ranging and vol_filter:
-                    signals[i] = size
-                    position = 1
-                else:
-                    signals[i] = 0.0
+            # Long: price breaks above Donchian high with weekly uptrend and volume
+            if close[i] > donch_high_val and close[i] > ema_trend and vol_filter:
+                signals[i] = size
+                position = 1
+            # Short: price breaks below Donchian low with weekly downtrend and volume
+            elif close[i] < donch_low_val and close[i] < ema_trend and vol_filter:
+                signals[i] = -size
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price touches middle Bollinger Band or trend turns down
-            if i >= 20:
-                bb_middle = np.mean(close[i-19:i+1])
-                if close[i] >= bb_middle or close[i] < ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = size
-            else:
+            # Exit long: price crosses below Donchian low or weekly trend turns down
+            if close[i] < donch_low_val or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = size
         elif position == -1:
-            # Exit short: price touches middle Bollinger Band or trend turns up
-            if i >= 20:
-                bb_middle = np.mean(close[i-19:i+1])
-                if close[i] >= bb_middle or close[i] > ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -size
-            else:
+            # Exit short: price crosses above Donchian high or weekly trend turns up
+            if close[i] > donch_high_val or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = -size
     
     return signals
 
-name = "4h_Choppiness_BB_MeanReversion_VolumeSurge"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyEMA50_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
