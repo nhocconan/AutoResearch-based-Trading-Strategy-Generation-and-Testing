@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot R3/S3 breakout with 1d trend filter and volume spike
-# Camarilla levels identify strong support/resistance. Breakouts above R3 or below S3
-# indicate strong momentum. Works in both bull and bear:
-# - Bull market: Buy when price breaks above R3 with volume + price > 1d EMA50
-# - Bear market: Sell when price breaks below S3 with volume + price < 1d EMA50
-# Volume spike filters weak moves. Target: 20-30 trades/year per symbol.
+# Hypothesis: 4h Choppiness Index regime filter + Donchian(20) breakout + volume confirmation
+# Choppiness Index > 61.8 = ranging (mean revert at Donchian bands)
+# Choppiness Index < 38.2 = trending (breakout in direction of price)
+# Volume spike confirms breakout strength. Target: 20-40 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,65 +18,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 14-period Choppiness Index on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for current day based on previous day
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.abs(high_1d[0] - low_1d[0])], tr])
     
-    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Sum of TR over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # 1d EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Choppiness Index formula
+    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
+    chop = np.where((hh - ll) == 0, 50, chop)  # Avoid division by zero
+    chop = np.nan_to_num(chop, nan=50.0)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Donchian channels (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: Price breaks above R3 + volume + uptrend (price > EMA50)
-        if (close[i] > camarilla_r3_aligned[i] and 
-            volume_filter[i] and 
-            close[i] > ema50_1d_aligned[i]):
+        chop_val = chop_aligned[i]
+        
+        # Long conditions: Trending market (CHOP < 38.2) + price breaks above Donchian high + volume
+        if (chop_val < 38.2 and 
+            close[i] > highest_high[i] and 
+            volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short conditions: Price breaks below S3 + volume + downtrend (price < EMA50)
-        elif (close[i] < camarilla_s3_aligned[i] and 
-              volume_filter[i] and 
-              close[i] < ema50_1d_aligned[i]):
+        # Short conditions: Trending market (CHOP < 38.2) + price breaks below Donchian low + volume
+        elif (chop_val < 38.2 and 
+              close[i] < lowest_low[i] and 
+              volume_filter[i]):
             signals[i] = -0.25
             position = -1
+        # Mean reversion in ranging market: CHOP > 61.8
+        elif chop_val > 61.8:
+            # Near lower band -> long
+            if close[i] <= lowest_low[i] * 1.001:  # Within 0.1% of low
+                signals[i] = 0.25
+                position = 1
+            # Near upper band -> short
+            elif close[i] >= highest_high[i] * 0.999:  # Within 0.1% of high
+                signals[i] = -0.25
+                position = -1
+            else:
+                # Hold current position
+                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
         else:
-            # Hold current position
+            # Transition zone or no clear signal
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Chop_Donchian_Breakout_MeanRev_Volume"
+timeframe = "4h"
 leverage = 1.0
