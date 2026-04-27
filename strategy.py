@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike
-Hypothesis: Combines 1d Camarilla R3/S3 breakout with 12h EMA50 trend and volume spike (>2x 20-period average) for high-probability momentum entries. Designed for low trade frequency (~20-30 trades/year) to minimize fee drag, working in both bull and bear markets by aligning with dominant trend.
+4h_PriceAction_1dSupportResistance_VolumeBreakout
+Hypothesis: Uses 1-day high/low as dynamic support/resistance with volume confirmation and ATR-based risk management. Designed for low trade frequency (~20-30 trades/year) by requiring price to break and hold beyond daily extremes with volume surge, working in both trending and ranging markets.
 """
 
 import numpy as np
@@ -18,73 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from 1d timeframe
+    # Calculate 1-day high and low
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
+    # Previous day's high and low for support/resistance
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # Align 1-day levels to 4h timeframe
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
     
-    # Align Camarilla levels to 4h timeframe (wait for previous day's close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # ATR for volatility filtering and stop management
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h EMA50 for trend confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and volume
-    start_idx = 50
+    # Warmup: need enough data for ATR and volume
+    start_idx = 35
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        ema50_val = ema50_12h_aligned[i]
+        daily_high = daily_high_aligned[i]
+        daily_low = daily_low_aligned[i]
+        atr_val = atr[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: price breaks above R3, above EMA50 trend, volume confirmation
-            if close[i] > camarilla_r3_val and close[i] > ema50_val and vol_conf:
+            # Long: price breaks above daily high with volume confirmation
+            if close[i] > daily_high and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3, below EMA50 trend, volume confirmation
-            elif close[i] < camarilla_s3_val and close[i] < ema50_val and vol_conf:
+            # Short: price breaks below daily low with volume confirmation
+            elif close[i] < daily_low and vol_conf:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA50
-            if close[i] < ema50_val:
+            # Exit long: price closes below daily low or ATR-based stop
+            if close[i] < daily_low or (i > 0 and close[i] < close[i-1] - 1.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA50
-            if close[i] > ema50_val:
+            # Exit short: price closes above daily high or ATR-based stop
+            if close[i] > daily_high or (i > 0 and close[i] > close[i-1] + 1.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike"
+name = "4h_PriceAction_1dSupportResistance_VolumeBreakout"
 timeframe = "4h"
 leverage = 1.0
