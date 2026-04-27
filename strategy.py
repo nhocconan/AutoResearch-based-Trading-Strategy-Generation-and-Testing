@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_CCI_Mean_Reversion_v1
-Hypothesis: Uses weekly CCI to detect overbought/oversold conditions for mean reversion on daily timeframe.
-In bull markets, oversold bounces capture dips; in bear markets, overbought reversals catch rallies.
-Combined with volume confirmation to avoid false signals and monthly volatility filter to adapt to market regimes.
-Target: 15-25 trades per year to minimize fee drag while capturing meaningful reversals.
+6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses Camarilla pivot levels from 1d timeframe to identify key S3/R3 levels for mean reversion entries and S4/R4 for breakout continuation. 
+Combined with 1d EMA34 trend filter and volume spike confirmation. Designed for low frequency (15-30 trades/year) to minimize fee drag while capturing 
+both mean reversion in ranges and breakout trends in trending markets. Works in bull/bear via adaptive entry logic.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 350:  # Need sufficient data for 1d indicators
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,67 +20,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly CCI (20-period)
-    typical_price_weekly = (df_weekly['high'] + df_weekly['low'] + df_weekly['close']) / 3
-    sma_tp = typical_price_weekly.rolling(window=20, min_periods=20).mean()
-    mad = typical_price_weekly.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci_weekly = (typical_price_weekly - sma_tp) / (0.015 * mad)
-    cci_weekly = cci_weekly.values
+    # Calculate Camarilla pivot levels from previous day
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+    # where C, H, L are from previous day
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align weekly CCI to daily with proper delay for indicator confirmation
-    cci_aligned = align_htf_to_ltf(prices, df_weekly, cci_weekly)
+    # Previous day's values (shifted by 1 to avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan  # First value has no previous day
     
-    # Daily volatility filter: monthly (20-day) volatility percentile
-    returns = np.diff(np.log(close), prepend=0)
-    vol_20d = pd.Series(returns).rolling(window=20, min_periods=20).std() * np.sqrt(252)
-    vol_percentile = pd.Series(vol_20d).rolling(window=252, min_periods=60).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
+    # Calculate Camarilla levels
+    R4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
+    R3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    S3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    S4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
     
-    # Volume confirmation: current volume > 1.3 * 20-day average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_avg)
+    # Align to 6t timeframe
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: current volume > 2.0 * 24-period average (approx 6d average)
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for all indicators
-    start_idx = 60  # Need weekly data + monthly volatility
+    start_idx = 24
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(cci_aligned[i]) or np.isnan(vol_percentile[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(R4_6h[i]) or 
+            np.isnan(S4_6h[i]) or np.isnan(ema_34_6h[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        cci_val = cci_aligned[i]
-        vol_regime = vol_percentile[i]
-        vol_conf = volume_confirm[i]
+        close_val = close[i]
+        r3_val = R3_6h[i]
+        s3_val = S3_6h[i]
+        r4_val = R4_6h[i]
+        s4_val = S4_6h[i]
+        ema_trend = ema_34_6h[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: weekly oversold (< -100) + low volatility regime (mean reversion works better in low vol) + volume confirmation
-            if cci_val < -100 and vol_regime < 0.7 and vol_conf:
+            # Mean reversion longs at S3 with volume spike in uptrend
+            if close_val <= s3_val and close_val > ema_trend and vol_spike:
                 signals[i] = size
                 position = 1
-            # Enter short: weekly overbought (> 100) + low volatility regime + volume confirmation
-            elif cci_val > 100 and vol_regime < 0.7 and vol_conf:
+            # Mean reversion shorts at R3 with volume spike in downtrend
+            elif close_val >= r3_val and close_val < ema_trend and vol_spike:
+                signals[i] = -size
+                position = -1
+            # Breakout longs above R4 with volume spike
+            elif close_val >= r4_val and vol_spike:
+                signals[i] = size
+                position = 1
+            # Breakout shorts below S4 with volume spike
+            elif close_val <= s4_val and vol_spike:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: weekly CCI returns to neutral (> -50) or volatility spikes (breakdown risk)
-            if cci_val > -50 or vol_regime > 0.9:
+            # Exit long: price crosses below S3 or above R4 (take profit)
+            if close_val < s3_val or close_val > r4_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: weekly CCI returns to neutral (< 50) or volatility spikes (breakout risk)
-            if cci_val < 50 or vol_regime > 0.9:
+            # Exit short: price crosses above R3 or below S4 (take profit)
+            if close_val > r3_val or close_val < s4_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_CCI_Mean_Reversion_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
