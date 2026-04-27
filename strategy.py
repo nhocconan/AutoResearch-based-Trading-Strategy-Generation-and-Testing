@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""
+6h_WilliamsVixFix_MeanReversion_1dTrend
+Hypothesis: Williams Vix Fix (WVF) identifies volatility spikes and mean reversion opportunities.
+In bull markets: buy WVF > 0.8 (panic) when price > 1d EMA50 (uptrend).
+In bear markets: sell short WVF > 0.8 when price < 1d EMA50 (downtrend).
+Uses volume confirmation to avoid false signals. Target: 50-150 trades over 4 years.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,131 +21,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA calculation
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on 1d close
+    # Calculate EMA(50) on 1d close
     close_1d = df_1d['close'].values
-    er_period = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    ema_period = 50
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
+        multiplier = 2 / (ema_period + 1)
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will fix in loop
+    # Align 1d EMA to 6h timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Recalculate volatility properly
-    volatility = np.zeros(len(close_1d))
-    for i in range(1, len(close_1d)):
-        volatility[i] = volatility[i-1] + np.abs(close_1d[i] - close_1d[i-1])
+    # Calculate Williams Vix Fix (WVF) on 6h data
+    # WVF = ((Highest High in period - Low) / Highest High in period) * 100
+    wvf_period = 22
+    highest_high = np.full(n, np.nan)
+    for i in range(wvf_period - 1, n):
+        highest_high[i] = np.max(high[i - wvf_period + 1:i + 1])
     
-    er = np.zeros(len(close_1d))
-    er[:er_period] = 0
-    for i in range(er_period, len(close_1d)):
-        if volatility[i] > 0:
-            er[i] = np.abs(close_1d[i] - close_1d[i-er_period]) / volatility[i]
+    wvf = np.full(n, np.nan)
+    for i in range(wvf_period - 1, n):
+        if highest_high[i] > 0:
+            wvf[i] = ((highest_high[i] - low[i]) / highest_high[i]) * 100
         else:
-            er[i] = 0
+            wvf[i] = 0
     
-    # Calculate SC and KAMA
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.full(len(close_1d), np.nan)
-    kama[er_period] = close_1d[er_period]
-    for i in range(er_period + 1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Align KAMA to 1d timeframe (already on 1d, just need to align to 1d index)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Calculate RSI(14) on 1d close
-    rsi_period = 14
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(len(close_1d), np.nan)
-    avg_loss = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= rsi_period:
-        avg_gain[rsi_period-1] = np.mean(gain[1:rsi_period+1])
-        avg_loss[rsi_period-1] = np.mean(loss[1:rsi_period+1])
-        for i in range(rsi_period, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
-    
-    rsi = np.full(len(close_1d), 50.0)
-    for i in range(rsi_period, len(close_1d)):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-    
-    # Align RSI to 1d
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Volume confirmation on 1d
+    # Volume confirmation
     vol_ma_period = 20
-    vol_ma = np.full(len(close_1d), np.nan)
-    for i in range(vol_ma_period, len(close_1d)):
-        vol_ma[i] = np.mean(close_1d[i-vol_ma_period:i])  # using close as proxy for volume, will fix
-    
-    # Actually calculate volume MA
-    vol_1d = df_1d['volume'].values
-    vol_ma = np.full(len(vol_1d), np.nan)
-    for i in range(vol_ma_period, len(vol_1d)):
-        vol_ma[i] = np.mean(vol_1d[i-vol_ma_period:i])
-    
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period:i])
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup
-    start_idx = max(er_period, rsi_period, vol_ma_period)
+    # Warmup: need WVF (22), EMA (50), volume MA (20)
+    start_idx = max(wvf_period, ema_period, vol_ma_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(wvf[i]) or
+            np.isnan(ema_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_aligned[i] if vol_ma_aligned[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend: price above/below KAMA
-        above_kama = price > kama_aligned[i]
-        below_kama = price < kama_aligned[i]
+        # Trend filter: price above/below 1d EMA(50)
+        uptrend = price > ema_aligned[i]
+        downtrend = price < ema_aligned[i]
         
-        # RSI conditions
-        rsi_oversold = rsi_aligned[i] < 30
-        rsi_overbought = rsi_aligned[i] > 70
+        # Volume confirmation: > 1.3x average volume
+        volume_confirmation = vol_ratio > 1.3
         
-        # Volume confirmation
-        volume_confirmation = vol_ratio > 1.5
+        # WVF threshold for volatility/spike detection
+        wvf_threshold = 0.8  # 80% of range
         
         if position == 0:
-            # Long: price above KAMA, RSI oversold, high volume
-            if above_kama and rsi_oversold and volume_confirmation:
+            # Long entry: WVF spike (fear) in uptrend with volume
+            if wvf[i] > wvf_threshold and uptrend and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: price below KAMA, RSI overbought, high volume
-            elif below_kama and rsi_overbought and volume_confirmation:
+            # Short entry: WVF spike (fear) in downtrend with volume
+            elif wvf[i] > wvf_threshold and downtrend and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price below KAMA or RSI overbought
-            if below_kama or rsi_overbought:
+            # Long exit: WVF normalizes or trend reverses
+            if wvf[i] < 0.3 or not uptrend:  # Exit when fear subsides or trend breaks
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price above KAMA or RSI oversold
-            if above_kama or rsi_oversold:
+            # Short exit: WVF normalizes or trend reverses
+            if wvf[i] < 0.3 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -145,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_EMA200_RSI_Momentum_VolFilter"
-timeframe = "1d"
+name = "6h_WilliamsVixFix_MeanReversion_1dTrend"
+timeframe = "6h"
 leverage = 1.0
