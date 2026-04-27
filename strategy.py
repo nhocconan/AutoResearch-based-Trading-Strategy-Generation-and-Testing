@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with daily ADX trend filter and volume spike confirmation
-# Uses daily ADX(14) > 25 to identify trending markets and avoid whipsaws in ranging conditions.
-# Donchian breakouts capture momentum in trending markets, with volume > 1.5x 20-period average
-# confirming breakout strength. Works in both bull and bear markets by following the trend
-# as indicated by ADX. Target: 20-30 trades/year to minimize fee decay while capturing strong moves.
+# Hypothesis: 1d 12-hour EMA trend with weekly Bollinger Band squeeze breakout
+# Uses weekly Bollinger Band width percentile to detect low volatility regimes (squeeze)
+# and breaks out in the direction of the 12-hour EMA trend. This captures explosive moves
+# after consolidation periods, working in both bull and bear markets by following the
+# intermediate-term trend. Target: 15-25 trades/year to minimize fee decay while capturing
+# significant momentum bursts. Focus on BTC/ETH as primary assets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,138 +20,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate ADX(14) on daily timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    n_1d = len(close_1d)
+    # Get 12h data for EMA trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 12:
+        return np.zeros(n)
     
-    # True Range
-    tr = np.zeros(n_1d)
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, n_1d):
-        hl = high_1d[i] - low_1d[i]
-        hc = abs(high_1d[i] - close_1d[i-1])
-        lc = abs(low_1d[i] - close_1d[i-1])
-        tr[i] = max(hl, hc, lc)
+    close_1w = df_1w['close'].values
+    n_1w = len(close_1w)
     
-    # Directional Movement
-    plus_dm = np.zeros(n_1d)
-    minus_dm = np.zeros(n_1d)
-    for i in range(1, n_1d):
-        up = high_1d[i] - high_1d[i-1]
-        down = low_1d[i-1] - low_1d[i]
-        if up > down and up > 0:
-            plus_dm[i] = up
-        else:
-            plus_dm[i] = 0
-        if down > up and down > 0:
-            minus_dm[i] = down
-        else:
-            minus_dm[i] = 0
+    # Weekly Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2.0
+    sma_1w = np.full(n_1w, np.nan)
+    std_1w = np.full(n_1w, np.nan)
+    upper_bb = np.full(n_1w, np.nan)
+    lower_bb = np.full(n_1w, np.nan)
+    bb_width = np.full(n_1w, np.nan)
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(x[:period])
-        # Subsequent values
-        for i in range(period, len(x)):
-            result[i] = result[i-1] - (result[i-1] / period) + x[i]
-        return result
+    for i in range(bb_period, n_1w):
+        sma_1w[i] = np.mean(close_1w[i-bb_period:i])
+        std_1w[i] = np.std(close_1w[i-bb_period:i])
+        upper_bb[i] = sma_1w[i] + bb_std * std_1w[i]
+        lower_bb[i] = sma_1w[i] - bb_std * std_1w[i]
+        bb_width[i] = upper_bb[i] - lower_bb[i]
     
-    tr_smooth = wilders_smoothing(tr, 14)
-    plus_dm_smooth = wilders_smoothing(plus_dm, 14)
-    minus_dm_smooth = wilders_smoothing(minus_dm, 14)
+    # Calculate BB width percentile (252-week lookback for regime)
+    lookback = min(252, n_1w)
+    bb_width_percentile = np.full(n_1w, np.nan)
+    for i in range(lookback, n_1w):
+        window = bb_width[i-lookback:i]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            bb_width_percentile[i] = (np.sum(valid <= bb_width[i]) / len(valid)) * 100
     
-    # Directional Indicators
-    plus_di = np.full(n_1d, np.nan)
-    minus_di = np.full(n_1d, np.nan)
-    dx = np.full(n_1d, np.nan)
-    for i in range(14, n_1d):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * (plus_dm_smooth[i] / tr_smooth[i])
-            minus_di[i] = 100 * (minus_dm_smooth[i] / tr_smooth[i])
-            if (plus_di[i] + minus_di[i]) > 0:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    # 12-hour EMA (12-period)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=12, adjust=False).values
     
-    # ADX = smoothed DX
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align daily ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian channel (20-period) on 4h
-    dc_period = 20
-    upper_dc = np.full(n, np.nan)
-    lower_dc = np.full(n, np.nan)
-    
-    for i in range(dc_period, n):
-        upper_dc[i] = np.max(high[i-dc_period:i])
-        lower_dc[i] = np.min(low[i-dc_period:i])
-    
-    # 20-period average volume for spike detection
-    vol_period = 20
-    vol_ma = np.full(n, np.nan)
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    # Align indicators to 1d
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1w, bb_width_percentile)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(dc_period, vol_period, 28)  # 28 for ADX calculation
+    start_idx = 30  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(upper_dc[i]) or 
-            np.isnan(lower_dc[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(bb_width_percentile_aligned[i]) or 
+            np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Squeeze condition: BB width in lowest 10% percentile (low volatility)
+        squeeze = bb_width_percentile_aligned[i] < 10
         
-        # Breakout conditions
-        breakout_up = price > upper_dc[i]
-        breakout_down = price < lower_dc[i]
-        
-        # Volume confirmation: spike > 1.5x average
-        volume_confirmation = vol_ratio > 1.5
+        # Trend direction from 12h EMA
+        uptrend = price > ema_12h_aligned[i]
+        downtrend = price < ema_12h_aligned[i]
         
         if position == 0:
-            # Long: bullish breakout in trending market with volume
-            if trending and breakout_up and volume_confirmation:
+            # Enter long on squeeze breakout in uptrend
+            if squeeze and uptrend:
                 signals[i] = size
                 position = 1
-            # Short: bearish breakout in trending market with volume
-            elif trending and breakout_down and volume_confirmation:
+            # Enter short on squeeze breakout in downtrend
+            elif squeeze and downtrend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below lower Donchian or ADX weakens
-            if price < lower_dc[i] or adx_aligned[i] < 20:
+            # Exit long when trend reverses or squeeze ends
+            if not uptrend or not squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above upper Donchian or ADX weakens
-            if price > upper_dc[i] or adx_aligned[i] < 20:
+            # Exit short when trend reverses or squeeze ends
+            if not downtrend or not squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -158,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_ADXTrend_Volume"
-timeframe = "4h"
+name = "1d_12hEMA_WeeklyBB_Squeeze"
+timeframe = "1d"
 leverage = 1.0
