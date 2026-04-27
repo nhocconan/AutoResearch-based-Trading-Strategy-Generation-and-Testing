@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h RSI Mean Reversion with 1d Trend Filter and Volume Spike.
-Long when: 1) RSI(14) < 30 (oversold), 2) Price > 1d EMA50 (bullish trend), 3) Volume > 2x 20-period average.
-Short when: 1) RSI(14) > 70 (overbought), 2) Price < 1d EMA50 (bearish trend), 3) Volume > 2x 20-period average.
-Exit when RSI returns to neutral zone (40-60) or trend reverses.
-Designed for 4h timeframe: targets 75-200 total trades over 4 years (19-50/year).
+12h Donchian Breakout with 1d Trend Filter and Volume Spike.
+Long when: 1) Price breaks above Donchian upper (20), 2) Price > 1d EMA50 (bullish trend), 3) Volume > 2x 20-period average.
+Short when: 1) Price breaks below Donchian lower (20), 2) Price < 1d EMA50 (bearish trend), 3) Volume > 2x 20-period average.
+Exit when price returns to Donchian middle (mean reversion) or trend reverses.
+Designed for 12h timeframe: targets 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -31,23 +31,16 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    # Use Wilder's smoothing (alpha = 1/period)
-    alpha = 1.0 / 14
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, n):
-        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)  # If no losses, RSI=100
-    rsi = np.where(avg_gain == 0, 0, rsi)    # If no gains, RSI=0
+    # Calculate Donchian channels (20-period)
+    donchian_window = 20
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    middle = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(donchian_window - 1, n):
+        upper[i] = np.max(high[i-donchian_window+1:i+1])
+        lower[i] = np.min(low[i-donchian_window+1:i+1])
+        middle[i] = (upper[i] + lower[i]) / 2.0
     
     # Volume filter: volume > 2x 20-period average
     vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
@@ -58,20 +51,22 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 1d EMA (50 periods), RSI (14 periods), volume MA (20 periods)
-    start_idx = max(50, 20)
+    # Warmup: need Donchian (20), 1d EMA50 (50), volume MA (20)
+    start_idx = max(donchian_window, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
         ema_trend = ema_50_1d_aligned[i]
-        rsi_now = rsi[i]
+        upper_channel = upper[i]
+        lower_channel = lower[i]
+        middle_channel = middle[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
@@ -79,26 +74,26 @@ def generate_signals(prices):
         vol_filter = vol_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: RSI oversold + bullish trend + volume spike
-            if rsi_now < 30 and price > ema_trend and vol_filter:
+            # Long: price breaks above upper channel + bullish trend + volume spike
+            if price > upper_channel and price > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: RSI overbought + bearish trend + volume spike
-            elif rsi_now > 70 and price < ema_trend and vol_filter:
+            # Short: price breaks below lower channel + bearish trend + volume spike
+            elif price < lower_channel and price < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral (40-60) or trend turns bearish
-            if rsi_now >= 40 or price < ema_trend:
+            # Exit long: price returns to middle (mean reversion) or trend turns bearish
+            if price <= middle_channel or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI returns to neutral (40-60) or trend turns bullish
-            if rsi_now <= 60 or price > ema_trend:
+            # Exit short: price returns to middle (mean reversion) or trend turns bullish
+            if price >= middle_channel or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_MeanReversion_1dEMA50_Trend_Volume"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_1dEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
