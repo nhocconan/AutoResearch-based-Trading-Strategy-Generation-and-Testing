@@ -26,7 +26,7 @@ def generate_signals(prices):
     prev_high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
     prev_low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align Donchian levels to 4h timeframe
+    # Align Donchian levels to 12h timeframe
     donch_high = align_htf_to_ltf(prices, df_1d, prev_high_max)
     donch_low = align_htf_to_ltf(prices, df_1d, prev_low_min)
     
@@ -53,7 +53,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Align ADX to 4h timeframe
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume filter: volume > 1.5x 20-period average
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_ADX25_VolumeSpike_1d_v3"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_ADX25_VolumeSpike_1d_v2"
+timeframe = "12h"
 leverage = 1.0
