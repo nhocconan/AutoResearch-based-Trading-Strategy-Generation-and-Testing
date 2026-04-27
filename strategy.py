@@ -1,3 +1,25 @@
+# 1. Hypothesis:
+# Strategy combines daily Camarilla pivot reversals (S3/R3) with weekly trend filter (EMA34)
+# and volume confirmation to capture mean-reversion bounces in established trends.
+# Works in bull markets by buying pullbacks to S3 in uptrends, and in bear markets by
+# selling rallies to R3 in downtrends. Volume confirmation reduces false signals.
+# Uses 12h timeframe for balance between signal quality and trade frequency.
+# Target: 20-40 trades/year per symbol to avoid fee drag.
+
+# 2. Implementation:
+# - Daily Camarilla S3/R3 levels calculated from prior day's HLC
+# - Weekly EMA(34) for trend filter
+# - Volume > 1.8x 20-period average for confirmation
+# - Entry: Price touches/passes S3/R3 with volume and weekly trend alignment
+# - Exit: Price reaches opposite level (R3 for longs, S3 for shorts) or trend reverses
+# - Position size: 0.25 (25% of capital) to balance risk and return
+
+# 3. Risk Management:
+# - Weekly trend filter prevents counter-trend trading in strong moves
+# - Volume confirmation ensures institutional participation
+# - Fixed position size avoids over-leveraging
+# - Exit on trend change or opposite level hit limits losses
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +27,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,99 +35,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and trend
+    # Get daily data for Camarilla pivot levels (high, low, close of previous day)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Camarilla levels for each day using previous day's HLC
+    # R3 = C + ((H-L)*1.1/4)
+    # S3 = C - ((H-L)*1.1/4)
+    camarilla_r3 = np.zeros(len(df_1d))
+    camarilla_s3 = np.zeros(len(df_1d))
     
-    atr_1d = np.full(len(tr_1d), np.nan)
-    for i in range(14, len(tr_1d)):
-        atr_1d[i] = np.mean(tr_1d[i-14:i])
+    for i in range(1, len(df_1d)):
+        h = high_1d[i-1]
+        l = low_1d[i-1]
+        c = close_1d[i-1]
+        range_hl = h - l
+        camarilla_r3[i] = c + (range_hl * 1.1 / 4)
+        camarilla_s3[i] = c - (range_hl * 1.1 / 4)
     
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate daily EMA(50) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_1d_50 = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    # Get weekly trend filter: EMA(34) on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # Calculate 60-period ATR for volatility filter (on 6h data)
-    tr6h_1 = high[1:] - low[1:]
-    tr6h_2 = np.abs(high[1:] - close[:-1])
-    tr6h_3 = np.abs(low[1:] - close[:-1])
-    tr_6h = np.concatenate([[high[0] - low[0]], np.maximum(tr6h_1, np.maximum(tr6h_2, tr6h_3))])
+    close_1w = df_1w['close'].values
+    ema_1w_34 = np.full(len(df_1w), np.nan)
+    # Use pandas EMA for accuracy and simplicity
+    ema_series = pd.Series(close_1w).ewm(span=34, adjust=False).mean()
+    ema_1w_34 = ema_series.values
     
-    atr_60 = np.full(n, np.nan)
-    for i in range(60, n):
-        atr_60[i] = np.mean(tr_6h[i-60:i])
+    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
-    # Calculate Bollinger Bands (20, 2.0) on 6h close
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2.0 * bb_std
-    bb_lower = bb_mid - 2.0 * bb_std
+    # Calculate volume average (20-period)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(60, 50)  # ATR60 needs 60, EMA50 needs 50
+    start_idx = max(20, 34)  # volume MA needs 20, weekly EMA needs 34
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_1d_aligned[i]) or
-            np.isnan(ema_1d_50_aligned[i]) or
-            np.isnan(atr_60[i]) or
-            np.isnan(bb_upper[i]) or
-            np.isnan(bb_lower[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_1w_34_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_factor = atr_60[i] / atr_1d_aligned[i] if atr_1d_aligned[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Volatility filter: trade only when 6h ATR is between 0.5x and 2.0x daily ATR
-        vol_filter = (vol_factor > 0.5) and (vol_factor < 2.0)
+        # Volume confirmation: > 1.8x average volume (strict to reduce trades)
+        volume_confirmation = vol_ratio > 1.8
         
         if position == 0:
-            # Long: price touches lower BB with low volatility and uptrend
-            if (vol_filter and 
-                price <= bb_lower[i] and 
-                close[i-1] > bb_lower[i] and  # just touched
-                close[i] > ema_1d_50_aligned[i]):  # above daily EMA50 (uptrend)
+            # Long: price touches or breaks above S3 with volume and weekly uptrend
+            if (volume_confirmation and 
+                price >= camarilla_s3_aligned[i] and 
+                close[i-1] < camarilla_s3_aligned[i] and  # just touched/broke
+                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):  # weekly uptrend
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches upper BB with low volatility and downtrend
-            elif (vol_filter and 
-                  price >= bb_upper[i] and 
-                  close[i-1] < bb_upper[i] and  # just touched
-                  close[i] < ema_1d_50_aligned[i]):  # below daily EMA50 (downtrend)
+            # Short: price touches or breaks below R3 with volume and weekly downtrend
+            elif (volume_confirmation and 
+                  price <= camarilla_r3_aligned[i] and 
+                  close[i-1] > camarilla_r3_aligned[i] and  # just touched/broke
+                  ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):  # weekly downtrend
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price reaches middle BB or volatility expands too much
-            if (price >= bb_mid[i] or 
-                vol_factor > 2.5):
+            # Long exit: price reaches R3 or weekly trend turns down
+            if (price >= camarilla_r3_aligned[i] or 
+                ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price reaches middle BB or volatility expands too much
-            if (price <= bb_mid[i] or 
-                vol_factor > 2.5):
+            # Short exit: price reaches S3 or weekly trend turns up
+            if (price <= camarilla_s3_aligned[i] or 
+                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BollingerBands_ATRVolatilityFilter_DailyEMA50"
-timeframe = "6h"
+name = "12h_Camarilla_S3R3_WeeklyEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
