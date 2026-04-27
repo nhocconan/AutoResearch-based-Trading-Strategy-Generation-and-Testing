@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot calculation and trend
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -22,18 +22,14 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get weekly data for pivot direction
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points (using prior week OHLC)
-    # Pivot = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    # Calculate daily pivot points (using previous day OHLC)
     high_prev = np.roll(high_1d, 1)
     low_prev = np.roll(low_1d, 1)
     close_prev = np.roll(close_1d, 1)
@@ -44,25 +40,17 @@ def generate_signals(prices):
     pivot = (high_prev + low_prev + close_prev) / 3.0
     r1 = 2 * pivot - low_prev
     s1 = 2 * pivot - high_prev
-    r2 = pivot + (high_prev - low_prev)
-    s2 = pivot - (high_prev - low_prev)
-    r3 = high_prev + 2 * (pivot - low_prev)
-    s3 = low_prev - 2 * (high_prev - pivot)
     
-    # Align daily pivots to 6h
+    # Align daily pivots to 12h
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Weekly trend: price above/below weekly EMA(8)
-    ema_8_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
+    # Weekly trend filter: price above/below weekly EMA(13)
+    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
     
-    # Volume filter: volume > 1.5 x 20-period average (6h)
+    # Volume filter: volume > 1.8 x 20-period average (12h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -71,14 +59,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need pivots (1), weekly EMA (8), volume MA (20)
-    start_idx = max(1, 8, 20)
+    # Warmup: need pivots (1), weekly EMA (13), volume MA (20)
+    start_idx = max(1, 13, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(ema_8_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(ema_13_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -87,11 +74,11 @@ def generate_signals(prices):
         vol_avg = vol_ma_20[i]
         
         # Volume filter
-        vol_filter = vol_now > 1.5 * vol_avg
+        vol_filter = vol_now > 1.8 * vol_avg
         
         # Weekly trend filter
-        bullish_weekly = price > ema_8_1w_aligned[i]
-        bearish_weekly = price < ema_8_1w_aligned[i]
+        bullish_weekly = price > ema_13_1w_aligned[i]
+        bearish_weekly = price < ema_13_1w_aligned[i]
         
         if position == 0:
             # Long: price crosses above S1 with volume and bullish weekly trend
@@ -121,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_S1R1_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_Pivot_S1R1_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
