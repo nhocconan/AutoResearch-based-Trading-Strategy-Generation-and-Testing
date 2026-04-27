@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_Volume_And_Chop_Filter
-Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) to determine trend direction on 1d timeframe.
-Enter long when price > KAMA AND volume > 1.5x 20-period average AND choppiness index < 50 (trending market).
-Enter short when price < KAMA AND volume > 1.5x 20-period average AND choppiness index < 50.
-Exit when price crosses back over KAMA or volume drops below average.
-Designed for 1d timeframe to achieve 30-100 total trades over 4 years (7-25/year).
-KAMA adapts to market noise, reducing false signals in ranging markets when combined with chop filter.
-Volume confirmation ensures trades occur with participation. Works in both bull and bear markets by following adaptive trend.
+6h_Ichimoku_Cloud_TK_Cross_1dTrend_VolumeConfirm
+Hypothesis: Uses 1d Ichimoku cloud (Senkou Span A/B) for trend direction and TK Cross (Tenkan/Kijun) for momentum.
+Enter long when price > cloud (bullish) AND TK Cross bullish (Tenkan > Kijun) AND volume confirmation.
+Enter short when price < cloud (bearish) AND TK Cross bearish (Tenkan < Kijun) AND volume confirmation.
+Exit when TK Cross reverses or price crosses cloud middle. Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
+Works in both bull and bear markets by following 1d Ichimoku trend while using TK Cross for timely entries.
+Volume confirmation filter reduces false signals. Discrete position sizing (0.25) minimizes fee drag.
 """
 
 import numpy as np
@@ -16,81 +15,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA and choppiness index
+    # Get 1d data for Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d KAMA ( Kaufman Adaptive Moving Average )
-    close_1d = pd.Series(df_1d['close'].values)
-    # Efficiency Ratio: |net change| / sum of absolute changes over 10 periods
-    change = abs(close_1d.diff(10))
-    volatility = close_1d.diff().abs().rolling(10).sum()
-    er = change / volatility.replace(0, np.nan)  # Avoid division by zero
-    # Smoothing constants: fastest EMA=2, slowest EMA=30
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # ER*(0.4667) + 0.0667 squared
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan, dtype=float)
-    kama[9] = close_1d.iloc[9]  # Start after 10 periods
-    for i in range(10, len(close_1d)):
-        if not np.isnan(sc.iloc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close_1d.iloc[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    kama_values = kama.values
+    # Calculate 1d Ichimoku components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Choppiness Index
-    # True Range = max(high-low, abs(high-previous close), abs(low-previous close))
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(14).sum()  # ATR(14) as sum of TR
-    # Chop = 100 * log10( sum(tr14) / (atr(14) * 14) ) / log10(14)
-    sum_tr14 = tr.rolling(14).sum()
-    chop = 100 * np.log10(sum_tr14 / (atr * 14)) / np.log10(14)
-    chop_values = chop.values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (high_tenkan + low_tenkan) / 2
     
-    # Volume average for confirmation
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (high_kijun + low_kijun) / 2
     
-    # Align 1d indicators to 1d timeframe (same timeframe, no alignment needed for same TF)
-    # But we still use align_htf_to_ltf for safety and consistency with rules
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_values)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((high_senkou_b + low_senkou_b) / 2)
+    
+    # Align 1d Ichimoku components to 6h timeframe (completed bars only)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Volume confirmation: current volume > 1.8 * 30-period average (slightly looser for more trades)
+    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need KAMA (10), Chop (14), Vol avg (20)
-    start_idx = max(20, 14)
+    # Warmup: need Senkou B (52) + TK Cross (26) + volume avg (30)
+    start_idx = max(52, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        kama_val = kama_aligned[i]
-        chop_val = chop_aligned[i]
-        vol_val = volume[i]
-        vol_avg_val = vol_avg[i]
+        tenkan_val = tenkan_aligned[i]
+        kijun_val = kijun_aligned[i]
+        senkou_a_val = senkou_a_aligned[i]
+        senkou_b_val = senkou_b_aligned[i]
+        vol_conf = volume_confirm[i]
+        
+        # Determine cloud boundaries (Senkou Span A/B)
+        top_cloud = max(senkou_a_val, senkou_b_val)
+        bottom_cloud = min(senkou_a_val, senkou_b_val)
+        cloud_middle = (top_cloud + bottom_cloud) / 2
         
         if position == 0:
-            # Look for entry: price vs KAMA with volume confirmation AND chop filter (trending market)
-            # Long: price > KAMA AND volume > 1.5x avg AND chop < 50 (trending)
-            long_condition = (close_val > kama_val) and (vol_val > 1.5 * vol_avg_val) and (chop_val < 50)
-            # Short: price < KAMA AND volume > 1.5x avg AND chop < 50 (trending)
-            short_condition = (close_val < kama_val) and (vol_val > 1.5 * vol_avg_val) and (chop_val < 50)
+            # Look for entry: TK Cross with price/cloud relationship AND volume confirmation
+            # Long: TK Cross bullish (Tenkan > Kijun) AND price above cloud AND volume confirmation
+            long_condition = (tenkan_val > kijun_val) and (close_val > top_cloud) and vol_conf
+            # Short: TK Cross bearish (Tenkan < Kijun) AND price below cloud AND volume confirmation
+            short_condition = (tenkan_val < kijun_val) and (close_val < bottom_cloud) and vol_conf
             
             if long_condition:
                 signals[i] = size
@@ -99,8 +103,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price crosses below KAMA OR volume drops below average
-            exit_condition = (close_val < kama_val) or (vol_val < vol_avg_val)
+            # Exit long when TK Cross turns bearish OR price crosses below cloud middle
+            exit_condition = (tenkan_val <= kijun_val) or (close_val < cloud_middle)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -108,8 +112,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price crosses above KAMA OR volume drops below average
-            exit_condition = (close_val > kama_val) or (vol_val < vol_avg_val)
+            # Exit short when TK Cross turns bullish OR price crosses above cloud middle
+            exit_condition = (tenkan_val >= kijun_val) or (close_val > cloud_middle)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -119,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_With_Volume_And_Chop_Filter"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_TK_Cross_1dTrend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
