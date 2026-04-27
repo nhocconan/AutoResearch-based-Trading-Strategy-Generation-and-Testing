@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT
-Hypothesis: 4h strategy using Camarilla R3/S3 levels from 1d for breakout entries with 1d EMA34 trend filter and volume spike confirmation. 
-Enter long when price closes above R3 with 1d uptrend (price > EMA34) and volume > 2.0x 20-period average. 
-Enter short when price closes below S3 with 1d downtrend (price < EMA34) and volume confirmation. 
-Exit on opposite Camarilla level touch (S3/R3) or 1d trend reversal (price crosses EMA34). 
-Designed for moderate trade frequency (~50-100/year) with discrete position sizing (0.25) to balance edge and fee drag.
-Works in both bull and bear markets by following the 1d trend while using Camarilla levels for precise breakout entries.
+1d_Donchian20_Breakout_1wTrend_VolumeSpike
+Hypothesis: 1d strategy using Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+Enter long when price closes above upper Donchian(20) with 1w uptrend (close > EMA50) and volume > 2.0x 20-period average.
+Enter short when price closes below lower Donchian(20) with 1w downtrend (close < EMA50) and volume confirmation.
+Exit on opposite Donchian level touch or 1w trend reversal (price crosses EMA50).
+Designed for low trade frequency (~10-30/year) with discrete position sizing (0.25) to minimize fee drag.
+Works in both bull and bear markets by following the 1w trend while using Donchian channels for precise breakout entries.
 """
 
 import numpy as np
@@ -23,30 +23,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA trend
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d OHLC for Camarilla levels
-    o_1d = df_1d['open'].values
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # 1w EMA50 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla levels: R3/S3 from 1d OHLC (wider than R1/S1 for fewer false breakouts)
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = c_1d + (h_1d - l_1d) * 1.1 / 4
-    camarilla_s3 = c_1d - (h_1d - l_1d) * 1.1 / 4
+    # Align 1w EMA to 1d timeframe (completed bars only)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1d EMA34 for trend filter
-    close_1d_series = pd.Series(c_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Donchian(20) channels on 1d
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align 1d indicators to 4h timeframe (completed bars only)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average (stricter for fewer trades)
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
@@ -54,28 +47,28 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need 1d EMA34 (34) + volume avg (20)
-    start_idx = max(34, 20)
+    # Warmup: need Donchian(20) (20) + 1w EMA50 (50) + volume avg (20)
+    start_idx = max(20, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        ema_val = ema_34_aligned[i]
+        upper_val = donchian_upper[i]
+        lower_val = donchian_lower[i]
+        ema_val = ema_50_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-            # Long: price closes above R3 AND above EMA34 (1d uptrend)
-            long_condition = (close_val > r3_val) and (close_val > ema_val) and vol_conf
-            # Short: price closes below S3 AND below EMA34 (1d downtrend)
-            short_condition = (close_val < s3_val) and (close_val < ema_val) and vol_conf
+            # Look for entry: Donchian breakout with 1w EMA50 trend filter and volume spike
+            # Long: price closes above upper Donchian AND above EMA50 (1w uptrend)
+            long_condition = (close_val > upper_val) and (close_val > ema_val) and vol_conf
+            # Short: price closes below lower Donchian AND below EMA50 (1w downtrend)
+            short_condition = (close_val < lower_val) and (close_val < ema_val) and vol_conf
             
             if long_condition:
                 signals[i] = size
@@ -84,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price touches S3 (opposite level) OR 1d EMA34 turns bearish (price below EMA)
-            if (close_val < s3_val) or (close_val < ema_val):
+            # Exit long: price touches lower Donchian (opposite level) OR 1w EMA50 turns bearish (price below EMA)
+            if (close_val < lower_val) or (close_val < ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price touches R3 (opposite level) OR 1d EMA34 turns bullish (price above EMA)
-            if (close_val > r3_val) or (close_val > ema_val):
+            # Exit short: price touches upper Donchian (opposite level) OR 1w EMA50 turns bullish (price above EMA)
+            if (close_val > upper_val) or (close_val > ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
