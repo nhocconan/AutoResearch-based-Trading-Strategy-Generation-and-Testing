@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,18 +21,17 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Williams %R (14-period) for overbought/oversold
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    williams_r[highest_high_14 == lowest_low_14] = -50  # avoid division by zero
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Calculate 1d EMA 34 for trend direction
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 60-period EMA for trend filter on 6h
-    ema_60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
+    # 12h Donchian channels (20-period for breakout)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 30-period average
+    # Volume filter: volume > 1.5x 30-period average (strong filter)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
@@ -40,40 +39,36 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema_60[i]) or np.isnan(vol_ma[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R levels: oversold < -80, overbought > -20
-        oversold = williams_r_aligned[i] < -80
-        overbought = williams_r_aligned[i] > -20
+        # Trend filter: price above/below 1d EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Trend filter: price above/below 60 EMA
-        price_above_ema = close[i] > ema_60[i]
-        price_below_ema = close[i] < ema_60[i]
+        # Long conditions: price breaks above upper Donchian + above 1d EMA + volume
+        long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_filter[i])
+        # Short conditions: price breaks below lower Donchian + below 1d EMA + volume
+        short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_filter[i])
         
-        # Long conditions: oversold + price above EMA + volume
-        long_signal = oversold and price_above_ema and volume_filter[i]
-        # Short conditions: overbought + price below EMA + volume
-        short_signal = overbought and price_below_ema and volume_filter[i]
-        
-        if long_signal:
+        if long_breakout:
             signals[i] = 0.25
             position = 1
-        elif short_signal:
+        elif short_breakout:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite Williams %R extreme
-        elif position == 1 and williams_r_aligned[i] > -20:
+        # Exit conditions: opposite Donchian breakout
+        elif position == 1 and close[i] < lowest_low[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and williams_r_aligned[i] < -80:
+        elif position == -1 and close[i] > highest_high[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -87,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR14_OversoldOverbought_60EMA_VolumeFilter"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
