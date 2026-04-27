@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend, volatility, and price channels
+    # Get 1d data for trend, volatility, and price channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,15 +31,15 @@ def generate_signals(prices):
     atr_1d_raw = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
     
-    # 4h ATR(14) for volatility filter
+    # 1h ATR(14) for volatility filter
     tr1_h = high - low
     tr2_h = np.abs(high - np.roll(close, 1))
     tr3_h = np.abs(low - np.roll(close, 1))
     tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
     tr_h[0] = tr1_h[0]
-    atr_4h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
+    atr_1h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
     
-    # 4h RSI(14) for momentum confirmation
+    # 1h RSI(14) for momentum confirmation
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -48,53 +48,63 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
+    # 1h Williams %R for mean reversion signals
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
     # Warmup
     start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_4h[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_1h[i]) or 
             i >= len(atr_1d_aligned) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(rsi[i])):
+            np.isnan(rsi[i]) or np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_1d_aligned[i]
-        atr_4h_val = atr_4h[i]
+        atr_1h_val = atr_1h[i]
         atr_1d_val = atr_1d_aligned[i]
         rsi_val = rsi[i]
+        williams_r_val = williams_r[i]
         
-        # Volatility filter: 4h ATR > 0.5 * daily ATR (higher volatility regime)
-        vol_filter = atr_4h_val > (atr_1d_val * 0.5)
+        # Volatility filter: 1h ATR > 0.3 * daily ATR (avoid low volatility)
+        vol_filter = atr_1h_val > (atr_1d_val * 0.3)
         
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_filter = (rsi_val > 30) & (rsi_val < 70)
+        # RSI filter: avoid extremes
+        rsi_filter = (rsi_val > 25) & (rsi_val < 75)
+        
+        # Williams %R: oversold/overbought levels
+        wr_oversold = williams_r_val < -80
+        wr_overbought = williams_r_val > -20
         
         if position == 0:
-            # Long: price above EMA with volatility and RSI filter
-            if close[i] > ema_trend and vol_filter and rsi_filter:
+            # Long: price above EMA with volatility, RSI filter, and Williams %R oversold
+            if close[i] > ema_trend and vol_filter and rsi_filter and wr_oversold:
                 signals[i] = size
                 position = 1
-            # Short: price below EMA with volatility and RSI filter
-            elif close[i] < ema_trend and vol_filter and rsi_filter:
+            # Short: price below EMA with volatility, RSI filter, and Williams %R overbought
+            elif close[i] < ema_trend and vol_filter and rsi_filter and wr_overbought:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA
-            if close[i] < ema_trend:
+            # Exit long: price crosses below EMA or Williams %R overbought
+            if close[i] < ema_trend or williams_r_val > -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA
-            if close[i] > ema_trend:
+            # Exit short: price crosses above EMA or Williams %R oversold
+            if close[i] > ema_trend or williams_r_val < -80:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_Trend_VolumeRSIFilter_v1"
-timeframe = "4h"
+name = "1h_EMA34_Trend_WilliamsR_VolumeFilter_v1"
+timeframe = "1h"
 leverage = 1.0
