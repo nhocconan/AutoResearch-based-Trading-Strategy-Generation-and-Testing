@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d EMA50 trend filter and volume confirmation.
-# Williams %R measures overbought/oversold levels. Values above -20 indicate overbought,
-# below -80 indicate oversold. In trending markets, we buy pullbacks in uptrends
-# (when %R crosses above -80 from below) and sell rallies in downtrends
-# (when %R crosses below -20 from above). Uses 1d EMA50 for trend filter to avoid
-# counter-trend trades. Volume spike (>1.5x 20-period average) confirms participation.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation.
+# Williams Alligator consists of three SMAs (Jaw=13, Teeth=8, Lips=5) smoothed with future offset.
+# In uptrend: Lips > Teeth > Jaw; in downtrend: Lips < Teeth < Jaw.
+# Uses 1d EMA50 for trend filter to avoid counter-trend trades.
+# Volume spike (>1.5x 20-period average) confirms institutional participation.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,11 +20,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Williams Alligator: Three SMAs with future offset (smoothed)
+    # Jaw: 13-period SMA, smoothed by 8 bars
+    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    jaw = pd.Series(jaw_raw).rolling(window=8, min_periods=8).mean().values  # Smoothed by 8
+    
+    # Teeth: 8-period SMA, smoothed by 5 bars
+    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(teeth_raw).rolling(window=5, min_periods=5).mean().values  # Smoothed by 5
+    
+    # Lips: 5-period SMA, smoothed by 3 bars
+    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(lips_raw).rolling(window=3, min_periods=3).mean().values  # Smoothed by 3
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -49,28 +55,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trending market logic with Williams %R and volume filter
+        # Trending market logic with Alligator alignment and volume filter
         if close[i] > ema50_1d_aligned[i] and volume_filter[i]:  # Uptrend filter
-            # Buy when Williams %R crosses above -80 from below (end of pullback)
-            if williams_r[i] > -80 and williams_r[i-1] <= -80:
+            # Bullish when Lips > Teeth > Jaw (Alligator aligned up)
+            if lips[i] > teeth[i] and teeth[i] > jaw[i]:
                 signals[i] = 0.25
                 position = 1
-            # Sell when Williams %R rises above -20 (overbought in uptrend)
-            elif position == 1 and williams_r[i] >= -20:
+            # Exit long when Alligator alignment breaks
+            elif position == 1 and not (lips[i] > teeth[i] and teeth[i] > jaw[i]):
                 signals[i] = 0.0
                 position = 0
         elif close[i] < ema50_1d_aligned[i] and volume_filter[i]:  # Downtrend filter
-            # Sell short when Williams %R crosses below -20 from above (end of rally)
-            if williams_r[i] < -20 and williams_r[i-1] >= -20:
+            # Bearish when Lips < Teeth < Jaw (Alligator aligned down)
+            if lips[i] < teeth[i] and teeth[i] < jaw[i]:
                 signals[i] = -0.25
                 position = -1
-            # Cover when Williams %R falls below -80 (oversold in downtrend)
-            elif position == -1 and williams_r[i] <= -80:
+            # Exit short when Alligator alignment breaks
+            elif position == -1 and not (lips[i] < teeth[i] and teeth[i] < jaw[i]):
                 signals[i] = 0.0
                 position = 0
         else:
@@ -84,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dEMA50_VolumeFilter"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dEMA50_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
