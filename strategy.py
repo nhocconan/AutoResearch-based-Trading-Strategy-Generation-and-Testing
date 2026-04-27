@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1-day EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Donchian(20) high, price > 1d EMA34, and volume > 1.5x average.
-# Short when price breaks below Donchian(20) low, price < 1d EMA34, and volume > 1.5x average.
-# Exit when price crosses back through Donchian midpoint (mean reversion within the channel).
-# Uses daily EMA34 for trend filter to capture intermediate trend while avoiding whipsaw.
-# Target: 20-40 trades/year to minimize fee drag while capturing strong trending moves.
+# Hypothesis: 4h Williams %R mean reversion with 1d EMA200 trend filter and volume confirmation.
+# Long when %R < -80 (oversold) and price > 1d EMA200 with volume > 1.5x average.
+# Short when %R > -20 (overbought) and price < 1d EMA200 with volume > 1.5x average.
+# Exit when %R crosses back above -50 (for longs) or below -50 (for shorts).
+# Williams %R identifies overextended moves likely to revert. EMA200 filter ensures
+# alignment with long-term trend to avoid counter-trend trades in strong moves.
+# Volume confirmation reduces false signals. Target: 20-40 trades/year for low frequency.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,21 +21,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA34 trend filter
+    # Williams %R (14-period) on 4h
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    # Avoid division by zero
+    rr = highest_high - lowest_low
+    willr = np.where(rr != 0, -100 * (highest_high - close) / rr, -50.0)
+    
+    # Get 1d data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Donchian channel (20-period) on 4h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2
+    # 1-day EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,46 +48,45 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 34
+    start_idx = max(200, 20)  # Ensure EMA200 and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(donchian_mid[i]) or 
+        if (np.isnan(willr[i]) or np.isnan(ema200_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above Donchian high, above daily EMA34, volume spike
-        if (close[i] > high_20[i] and 
-            close[i] > ema34_1d_aligned[i] and 
+        # Long condition: %R oversold (< -80), above EMA200, volume confirmation
+        if (willr[i] < -80 and 
+            close[i] > ema200_1d_aligned[i] and 
             volume_filter[i]):
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below Donchian low, below daily EMA34, volume spike
-        elif (close[i] < low_20[i] and 
-              close[i] < ema34_1d_aligned[i] and 
+        # Short condition: %R overbought (> -20), below EMA200, volume confirmation
+        elif (willr[i] > -20 and 
+              close[i] < ema200_1d_aligned[i] and 
               volume_filter[i]):
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
-        # Exit conditions: price crosses Donchian midpoint (mean reversion)
-        elif position == 1 and close[i] < donchian_mid[i]:
+        # Exit conditions: %R crosses back above -50 (for longs) or below -50 (for shorts)
+        elif position == 1 and willr[i] > -50:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > donchian_mid[i]:
+        elif position == -1 and willr[i] < -50:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeFilter"
+name = "4h_WilliamsR_MeanRev_1dEMA200_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
