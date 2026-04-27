@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout with Volume Confirmation and ADX Trend Filter
-Long when price breaks above Donchian upper band (20-period high) + volume > 1.5x average + ADX > 25
-Short when price breaks below Donchian lower band (20-period low) + volume > 1.5x average + ADX > 25
-Exit when price crosses back below the 20-period SMA (long) or above the 20-period SMA (short)
-Designed to generate 10-25 trades/year per symbol with strong trend-following edge in both bull and bear markets
+12h Camarilla Pivot Reversal with 1d Volume Spike and Choppiness Filter.
+Long when price touches S3 support with volume spike in choppy market.
+Short when price touches R3 resistance with volume spike in choppy market.
+Exit when price crosses the pivot point (PP) or after 4 bars.
+Designed to generate 15-30 trades/year per symbol with mean-reversion edge in chop.
 """
 
 import numpy as np
@@ -21,68 +21,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and ADX
+    # Get 1d data for Camarilla pivot levels and choppiness
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Donchian channels: 20-period high and low
-    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Previous day's OHLC
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # ADX calculation (14-period)
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean()
+    # Calculate Camarilla levels for previous day
+    # R4 = Close + ((High - Low) * 1.5000)
+    # R3 = Close + ((High - Low) * 1.2500)
+    # R2 = Close + ((High - Low) * 1.1666)
+    # R1 = Close + ((High - Low) * 1.0833)
+    # PP = (High + Low + Close) / 3
+    # S1 = Close - ((High - Low) * 1.0833)
+    # S2 = Close - ((High - Low) * 1.1666)
+    # S3 = Close - ((High - Low) * 1.2500)
+    # S4 = Close - ((High - Low) * 1.5000)
     
-    # Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    r3 = prev_close + (prev_high - prev_low) * 1.2500
+    s3 = prev_close - (prev_high - prev_low) * 1.2500
     
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
+    # Align to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
+    # Volume spike: volume > 2.0x 24-period average
+    vol_ma_24 = np.empty_like(volume, dtype=np.float64)
+    vol_ma_24.fill(np.nan)
+    for i in range(23, n):
+        vol_ma_24[i] = np.mean(volume[i-23:i+1])
     
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(window=14, min_periods=14).mean()
+    # Choppiness filter: use 1d ATR-based chop (simplified)
+    # Chop = 100 * log10( sum(ATR1) / (ATR14 * n) ) / log10(n)
+    # We'll use a simpler version: high-low range relative to ATR
+    atr_period = 14
+    tr1 = df_1d['high'].values - df_1d['low'].values
+    tr2 = np.abs(df_1d['high'].values - df_1d['close'].shift(1).values)
+    tr3 = np.abs(df_1d['low'].values - df_1d['close'].shift(1).values)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.empty_like(tr, dtype=np.float64)
+    atr.fill(np.nan)
+    for i in range(atr_period-1, len(tr)):
+        if i == atr_period-1:
+            atr[i] = np.mean(tr[:atr_period])
+        else:
+            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Align to 1d timeframe (already in 1d, but using align_htf_to_ltf for proper delay)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx.values)
-    
-    # 20-period SMA for exit
-    sma_20 = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
-    
-    # Volume filter: volume > 1.5x average (20-period)
-    vol_ma_20 = np.empty_like(volume, dtype=np.float64)
-    vol_ma_20.fill(np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Align ATR and calculate choppy condition (high ATR relative to range = choppy)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Choppy when current ATR > 1.5 * average ATR (indicating volatile/choppy market)
+    atr_ma_10 = np.empty_like(atr_aligned, dtype=np.float64)
+    atr_ma_10.fill(np.nan)
+    for i in range(9, len(atr_aligned)):
+        atr_ma_10[i] = np.mean(atr_aligned[i-9:i+1])
+    choppy = atr_aligned > 1.5 * atr_ma_10  # True when choppy/volatile
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian (20) + ADX (14+14) + volume MA (20)
-    start_idx = max(20, 28, 19)
+    # Warmup: need 1d data (shifted) + volume MA (24) + ATR (14)
+    start_idx = max(24, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(sma_20_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma_24[i]) or
+            np.isnan(choppy[i])):
             signals[i] = 0.0
             continue
         
@@ -90,39 +101,35 @@ def generate_signals(prices):
         price_now = close[i]
         vol_now = volume[i]
         
-        # Current indicator values
-        upper_band = high_20_aligned[i]
-        lower_band = low_20_aligned[i]
-        adx_val = adx_aligned[i]
-        sma_val = sma_20_aligned[i]
+        # Current levels
+        pp_val = pp_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         
-        # Volume filter: volume > 1.5x average
-        vol_filter = vol_now > 1.5 * vol_ma_20[i]
-        
-        # ADX filter: strong trend
-        trend_filter = adx_val > 25
+        # Volume filter: volume spike > 2.0x average
+        vol_spike = vol_now > 2.0 * vol_ma_24[i]
         
         if position == 0:
-            # Long breakout: price > upper band + volume + trend
-            if price_now > upper_band and vol_filter and trend_filter:
+            # Long when price touches S3 support with volume spike in choppy market
+            if price_now <= s3_val and vol_spike and choppy[i]:
                 signals[i] = size
                 position = 1
-            # Short breakdown: price < lower band + volume + trend
-            elif price_now < lower_band and vol_filter and trend_filter:
+            # Short when price touches R3 resistance with volume spike in choppy market
+            elif price_now >= r3_val and vol_spike and choppy[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back below 20-period SMA
-            if price_now < sma_val:
+            # Exit long: price crosses above pivot point or after 4 bars
+            if price_now > pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses back above 20-period SMA
-            if price_now > sma_val:
+            # Exit short: price crosses below pivot point or after 4 bars
+            if price_now < pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_20_Breakout_Volume_ADX"
-timeframe = "1d"
+name = "12h_Camarilla_S3R3_VolumeSpike_Chop"
+timeframe = "12h"
 leverage = 1.0
