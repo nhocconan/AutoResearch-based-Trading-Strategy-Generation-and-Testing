@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation (1d timeframe)
+    # Get daily data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
@@ -31,10 +31,10 @@ def generate_signals(prices):
         week_close = close_1d[i]
         weekly_pivot[i] = (week_high + week_low + week_close) / 3
     
-    # Align weekly pivot to 12h timeframe
+    # Align weekly pivot to 4h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # Calculate 20-period Donchian channels directly on 12h data
+    # Calculate 20-period Donchian channels directly on 4h data
     lookback = 20
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_WeeklyPivot_Trend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_WeeklyPivot_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
