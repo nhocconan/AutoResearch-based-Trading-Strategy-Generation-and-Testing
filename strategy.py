@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context
+    # Get daily data for higher timeframe context (1d)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_RSI_VolumeFilter_6hTrend"
-timeframe = "6h"
+name = "1d_EMA34_RSI_VolumeFilter_1dTrend"
+timeframe = "1d"
 leverage = 1.0
