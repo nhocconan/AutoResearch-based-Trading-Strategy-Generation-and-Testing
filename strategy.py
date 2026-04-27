@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R1/S1 breakout with daily trend filter and volume spike on 12h timeframe.
-Targets 12-37 trades per year by requiring strict confluence: price must close beyond daily pivot level,
-volume must spike above 3x 20-period average, and trend must align with daily EMA34.
-Designed to work in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v3
+Hypothesis: Use volume spike (volume > 3x 20-bar average) combined with price closing beyond Camarilla R1/S1 levels and daily EMA34 trend filter. 
+Exit when price closes back below/above the opposite level or trend changes. Target 15-25 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -38,11 +36,11 @@ def generate_signals(prices):
     r1 = typical_price + (range_ * 1.0 / 12)
     s1 = typical_price - (range_ * 1.0 / 12)
     
-    # Align levels to 12h timeframe (use previous day's levels)
+    # Align levels to 4h timeframe (use previous day's levels)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Volume confirmation: volume > 3.0 * 20-period average (stricter)
+    # Volume confirmation: volume > 3.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 3.0)
     
@@ -92,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v3"
+timeframe = "4h"
 leverage = 1.0
