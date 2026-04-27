@@ -13,39 +13,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly high/low
+    # Get daily data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 10:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily high and low
+    # Calculate daily ATR(34)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly high (max of last 5 daily highs) and low (min of last 5 daily lows)
-    weekly_high = np.full(len(df_1d), np.nan)
-    weekly_low = np.full(len(df_1d), np.nan)
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    for i in range(5, len(df_1d)):
-        weekly_high[i] = np.max(high_1d[i-5:i])
-        weekly_low[i] = np.min(low_1d[i-5:i])
-    
-    # Align weekly high/low to 12h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1d, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1d, weekly_low)
-    
-    # Calculate ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    for i in range(n):
-        if i < 14:
-            atr[i] = np.mean(tr[:i+1]) if i > 0 else tr[0]
+    atr_1d = np.full(len(df_1d), np.nan)
+    for i in range(len(tr_1d)):
+        if i < 33:
+            atr_1d[i] = np.mean(tr_1d[:i+1]) if i > 0 else tr_1d[i]
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            atr_1d[i] = (atr_1d[i-1] * 33 + tr_1d[i]) / 34
+    
+    # Align daily ATR to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Get 12h data for trend (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema_12h_50 = np.full(len(df_12h), np.nan)
+    alpha = 2 / (50 + 1)
+    for i in range(len(close_12h)):
+        if i < 49:
+            ema_12h_50[i] = np.mean(close_12h[:i+1]) if i > 0 else close_12h[i]
+        else:
+            if np.isnan(ema_12h_50[i-1]):
+                ema_12h_50[i] = np.mean(close_12h[i-49:i+1])
+            else:
+                ema_12h_50[i] = close_12h[i] * alpha + ema_12h_50[i-1] * (1 - alpha)
+    
+    # Align 12h EMA50 to 4h timeframe
+    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
+    
+    # Calculate ATR(14) for 4h volatility filter
+    tr1_4h = high[1:] - low[1:]
+    tr2_4h = np.abs(high[1:] - close[:-1])
+    tr3_4h = np.abs(low[1:] - close[:-1])
+    tr_4h = np.concatenate([[high[0] - low[0]], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
+    
+    atr_4h = np.zeros(n)
+    for i in range(n):
+        if i < 13:
+            atr_4h[i] = np.mean(tr_4h[:i+1]) if i > 0 else tr_4h[i]
+        else:
+            atr_4h[i] = (atr_4h[i-1] * 13 + tr_4h[i]) / 14
     
     # Calculate volume average (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -56,11 +80,11 @@ def generate_signals(prices):
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(20, 14, 5)  # volume MA needs 20, ATR needs 14, weekly needs 5
+    start_idx = max(20, 34, 50)  # volume MA needs 20, ATR needs 34, EMA needs 50
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_high_aligned[i]) or
-            np.isnan(weekly_low_aligned[i]) or
+        if (np.isnan(atr_1d_aligned[i]) or
+            np.isnan(ema_12h_50_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -68,47 +92,40 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Volume confirmation: > 2.0x average volume (reduced from 2.5 for more signals)
+        # Volume confirmation: > 2.0x average volume
         volume_confirmation = vol_ratio > 2.0
         
-        # ATR volatility filter: avoid low volatility periods
-        # Only trade when ATR is above 40% of its 50-period average
-        if i >= 50:
-            atr_avg = np.mean(atr[i-50:i+1])
-            vol_filter = atr[i] > atr_avg * 0.4
-        else:
-            vol_filter = True  # No filter during warmup
+        # ATR volatility filter: only trade when 4h ATR is above 60% of daily ATR
+        vol_filter = atr_4h[i] > atr_1d_aligned[i] * 0.6
         
         if position == 0:
-            # Long: break above weekly high with volume and volatility
-            if volume_confirmation and vol_filter and price > weekly_high_aligned[i]:
-                signals[i] = 0.30
+            # Long: price above 12h EMA50 with volume and volatility
+            if volume_confirmation and vol_filter and price > ema_12h_50_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below weekly low with volume and volatility
-            elif volume_confirmation and vol_filter and price < weekly_low_aligned[i]:
-                signals[i] = -0.30
+            # Short: price below 12h EMA50 with volume and volatility
+            elif volume_confirmation and vol_filter and price < ema_12h_50_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to weekly midpoint or volatility drops significantly
-            weekly_mid = (weekly_high_aligned[i] + weekly_low_aligned[i]) / 2
-            if price < weekly_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
+            # Long exit: price crosses below 12h EMA50 or volatility drops
+            if price < ema_12h_50_aligned[i] or atr_4h[i] < atr_1d_aligned[i] * 0.4:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30  # Maintain position
+                signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price returns to weekly midpoint or volatility drops significantly
-            weekly_mid = (weekly_high_aligned[i] + weekly_low_aligned[i]) / 2
-            if price > weekly_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
+            # Short exit: price crosses above 12h EMA50 or volatility drops
+            if price > ema_12h_50_aligned[i] or atr_4h[i] < atr_1d_aligned[i] * 0.4:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30  # Maintain position
+                signals[i] = -0.25  # Maintain position
     
     return signals
 
-name = "12h_1W_HighLow_Breakout_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_12h_EMA50_Trend_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
