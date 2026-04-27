@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Bollinger Band squeeze breakout with weekly trend filter and volume confirmation.
-Trades only during low volatility (BB squeeze) followed by expansion breakout in the direction of the weekly trend.
-Designed to capture volatility breakouts in both bull and bear markets by using the weekly trend as filter.
-Target: 10-25 trades/year per symbol (40-100 total over 4 years) to minimize fee drag.
+Hypothesis: 6-hour Williams %R mean reversion with 1-day trend filter and volume confirmation.
+Buys when W%R < -80 (oversold) in 1-day uptrend, sells when W%R > -20 (overbought) in 1-day downtrend.
+Uses volume spike to confirm mean reversion bounce. Designed for range-bound markets with occasional trends.
+Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -11,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,83 +19,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1-day data for trend filter and Williams %R
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1-day Williams %R (14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily Bollinger Bands (20, 2)
-    close_d = pd.Series(close)
-    ma_20 = close_d.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_d.rolling(window=20, min_periods=20).std().values
-    upper = ma_20 + 2 * std_20
-    lower = ma_20 - 2 * std_20
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    willr = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
     
-    # Calculate daily Bollinger Band width for squeeze detection
-    bb_width = (upper - lower) / ma_20
-    bb_width_ma_50 = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    # Calculate 1-day EMA(50) for trend
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate daily volume MA(20)
-    volume_d = pd.Series(volume)
-    vol_ma_20 = volume_d.rolling(window=20, min_periods=20).mean().values
+    # Align 1-day indicators to 6-hour timeframe
+    willr_aligned = align_htf_to_ltf(prices, df_1d, willr)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Get 6-day data for volume filter (using 6h close as proxy for recent volume context)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    vol_6h = df_6h['volume'].values
+    vol_ma_20_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need BB width MA, volume MA, and weekly EMA
-    start_idx = max(50, 20, 34)
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    # Warmup: need Williams %R, EMA, and volume MA
+    start_idx = max(14, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ma_20[i]) or np.isnan(std_20[i]) or 
-            np.isnan(bb_width_ma_50[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(willr_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        upper_band = upper[i]
-        lower_band = lower[i]
-        ma = ma_20[i]
-        bb_width_now = bb_width[i]
-        bb_width_ma = bb_width_ma_50[i]
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
+        willr_val = willr_aligned[i]
+        trend_1d = ema_50_1d_aligned[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20[i]
-        trend_1w = ema_34_1w_aligned[i]
+        vol_ma = vol_ma_20_6h_aligned[i]
         
-        # Squeeze condition: BB width below 50-day average (low volatility)
-        squeeze = bb_width_now < bb_width_ma
+        # Volume filter: volume > 2.0x 6h average (strict to reduce trades)
+        vol_filter = vol_now > 2.0 * vol_ma
         
-        # Volume filter: volume > 1.5x daily average
-        vol_filter = vol_now > 1.5 * vol_ma
-        
-        # Entry conditions: Bollinger Band breakout after squeeze with volume and weekly trend alignment
+        # Entry conditions: Williams %R mean reversion with trend and volume
         if position == 0:
-            # Long: break above upper band after squeeze + volume + weekly uptrend
-            if close[i] > upper_band and squeeze and vol_filter and close[i] > trend_1w:
+            # Long: W%R < -80 (oversold) + 1-day uptrend + volume spike
+            if willr_val < -80 and close[i] > trend_1d and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: break below lower band after squeeze + volume + weekly downtrend
-            elif close[i] < lower_band and squeeze and vol_filter and close[i] < trend_1w:
+            # Short: W%R > -20 (overbought) + 1-day downtrend + volume spike
+            elif willr_val > -20 and close[i] < trend_1d and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below weekly EMA or Bollinger mid-band
-            if close[i] < trend_1w or close[i] < ma:
+            # Exit long: W%R > -50 (return to midpoint) or trend breakdown
+            if willr_val > -50 or close[i] < trend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above weekly EMA or Bollinger mid-band
-            if close[i] > trend_1w or close[i] > ma:
+            # Exit short: W%R < -50 (return to midpoint) or trend reversal
+            if willr_val < -50 or close[i] > trend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_BollingerSqueezeBreakout_WeeklyTrendFilter_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR_MeanReversion_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
