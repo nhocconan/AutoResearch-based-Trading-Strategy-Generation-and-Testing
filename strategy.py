@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily RSI(14) mean-reversion with weekly trend filter and volume confirmation.
-# RSI < 30 = oversold (long), RSI > 70 = overbought (short) only when aligned with weekly trend.
-# Weekly EMA20 trend filter ensures trades follow higher timeframe momentum.
-# Volume > 1.5x 20-day average confirms institutional participation.
-# Target: 15-25 trades/year to minimize fee drag while capturing mean-reversion edges.
+# Hypothesis: 12-hour strategy using Williams Alligator (SMMA-based) from 1-day timeframe with volume confirmation.
+# The Alligator identifies trend direction via jaw/teeth/lips alignment. 
+# Long when lips > teeth > jaw (bullish alignment), short when lips < teeth < jaw (bearish alignment).
+# Volume confirmation (>1.5x 20-period average) filters weak breakouts.
+# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
+# Works in bull markets (trend following) and bear markets (trend following).
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,46 +18,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI calculation
+    # Get 1d data for Williams Alligator calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2.0
     
-    # Calculate RSI(14) on daily closes
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Williams Alligator: three SMMA lines
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars forward
+    # Teeth (Red): 8-period SMMA, shifted 5 bars forward
+    # Lips (Green): 5-period SMMA, shifted 3 bars forward
+    def smma(series, period):
+        """Smoothed Moving Average"""
+        sma = np.zeros_like(series)
+        sma[:] = np.nan
+        if len(series) >= period:
+            sma[period-1] = np.mean(series[:period])
+            for i in range(period, len(series)):
+                sma[i] = (sma[i-1] * (period-1) + series[i]) / period
+        return sma
     
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
+    jaw = smma(median_1d, 13)
+    teeth = smma(median_1d, 8)
+    lips = smma(median_1d, 5)
     
-    # Wilder's smoothing
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
+    # Shift jaw forward by 8, teeth by 5, lips by 3 (Alligator rules)
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    # Fill shifted values with nan
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
     
-    for i in range(15, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Align Alligator lines to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d[:14] = np.nan  # Not enough data for first 14 periods
-    
-    # Align RSI to daily timeframe (already aligned, just need to map)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Weekly EMA20 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Volume filter: volume > 1.5x 20-day average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
@@ -68,28 +69,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long: RSI oversold (<30) with weekly uptrend and volume confirmation
-        if (rsi_1d_aligned[i] < 30 and 
-            close[i] > ema20_1w_aligned[i] and 
-            volume_filter[i]):
+        # Bullish alignment: Lips > Teeth > Jaw
+        bullish = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
+        # Bearish alignment: Lips < Teeth < Jaw
+        bearish = lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]
+        
+        # Enter long on bullish alignment with volume
+        if bullish and volume_filter[i]:
             signals[i] = 0.25
             position = 1
-        # Short: RSI overbought (>70) with weekly downtrend and volume confirmation
-        elif (rsi_1d_aligned[i] > 70 and 
-              close[i] < ema20_1w_aligned[i] and 
-              volume_filter[i]):
+        # Enter short on bearish alignment with volume
+        elif bearish and volume_filter[i]:
             signals[i] = -0.25
             position = -1
-        # Exit: RSI returns to neutral zone (40-60) or opposite extreme
-        elif position == 1 and (rsi_1d_aligned[i] > 50 or rsi_1d_aligned[i] > 70):
+        # Exit when alignment breaks
+        elif position == 1 and not bullish:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (rsi_1d_aligned[i] < 50 or rsi_1d_aligned[i] < 30):
+        elif position == -1 and not bearish:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -103,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI14_MeanReversion_1wEMA20_VolumeFilter"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dVolumeFilter"
+timeframe = "12h"
 leverage = 1.0
