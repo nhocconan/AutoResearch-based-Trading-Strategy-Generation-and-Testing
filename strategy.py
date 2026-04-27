@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,14 +13,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and volatility regime
+    # Get daily data for ATR and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR(14) for volatility regime
     tr1 = high_1d[1:] - low_1d[1:]
@@ -143,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
-timeframe = "12h"
+name = "4h_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
+timeframe = "4h"
 leverage = 1.0
