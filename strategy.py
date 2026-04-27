@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d volume spike and 1d EMA34 trend filter.
-Only trade breakouts in the direction of the 1d trend to avoid counter-trend whipsaws.
-Volume spike confirms institutional interest. Designed for lower trade frequency on 12h timeframe
-to minimize fee drag while capturing sustained moves in both bull and bear markets.
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h only when 12h EMA50 confirms trend and volume > 1.5x 20-bar average. Uses discrete position sizing (0.25) to minimize fee churn. Designed to work in both bull (breakouts with trend) and bear (avoid false breakouts in ranging/weak trend) markets by requiring strong trend confirmation from HTF.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,7 +18,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels (R1/S1 only)
+    # Calculate 1d Camarilla pivot levels (R1 and S1 only for breakout)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -36,63 +33,66 @@ def generate_signals(prices):
     R1 = PP + range_1d * 1.0 / 4.0
     S1 = PP - range_1d * 1.0 / 4.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_avg)
     
-    # 1d volume spike: current volume > 2.0 * 20-period average
-    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = df_1d['volume'].values > (2.0 * vol_avg_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    # 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need enough for EMA34 and volume average
-    start_idx = max(34, 20)
+    # Warmup: need enough for all indicators
+    start_idx = max(100, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+            np.isnan(volume_confirm[i]) or np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_trend = ema_34_aligned[i]
-        vol_spike = bool(volume_spike_aligned[i])
         size = 0.25  # 25% position size
         
         if position == 0:
-            # Flat - look for entry in direction of 1d trend with volume confirmation
-            if close_val > ema_trend:  # Uptrend
-                long_entry = (close_val > R1_aligned[i]) and vol_spike
-                if long_entry:
-                    signals[i] = size
-                    position = 1
-                    entry_price = close_val
-            else:  # Downtrend
-                short_entry = (close_val < S1_aligned[i]) and vol_spike
-                if short_entry:
-                    signals[i] = -size
-                    position = -1
-                    entry_price = close_val
+            # Flat - look for breakout entry with trend and volume confirmation
+            long_breakout = close_val > R1_aligned[i]
+            short_breakout = close_val < S1_aligned[i]
+            trend_up = close_val > ema_50_12h_aligned[i]
+            trend_down = close_val < ema_50_12h_aligned[i]
+            
+            if long_breakout and trend_up and volume_confirm[i]:
+                signals[i] = size
+                position = 1
+                entry_price = close_val
+            elif short_breakout and trend_down and volume_confirm[i]:
+                signals[i] = -size
+                position = -1
+                entry_price = close_val
         elif position == 1:
-            # Long - exit if price breaks below S1 (trend failure) or reverses below EMA
-            if close_val < S1_aligned[i] or close_val < ema_trend:
+            # Long - exit on retracement to S1 or trend reversal
+            if close_val < S1_aligned[i] or close_val < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit if price breaks above R1 (trend failure) or reverses above EMA
-            if close_val > R1_aligned[i] or close_val > ema_trend:
+            # Short - exit on retracement to R1 or trend reversal
+            if close_val > R1_aligned[i] or close_val > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
