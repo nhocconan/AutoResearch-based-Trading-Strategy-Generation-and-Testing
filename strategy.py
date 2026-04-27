@@ -1,11 +1,11 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,41 +13,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly context
+    # Get 1d data for trend and volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 1d EMA34 for trend
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d daily range (high-low) for volatility
-    daily_range = high - low
-    daily_range_ma_20 = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate weekly EMA(20) for trend
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate weekly ATR(14) for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_shift = np.roll(close_1w, 1)
-    close_1w_shift[0] = close_1w[0]
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - close_1w_shift)
-    tr3 = np.abs(low_1w - close_1w_shift)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
-    
-    # Calculate daily volume MA(20)
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d volume MA20 for volume filter
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Get 6h Donchian(20) for entry
+    high_6h = high
+    low_6h = low
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    for i in range(20, n):
+        upper[i] = np.max(high_6h[i-20:i])
+        lower[i] = np.min(low_6h[i-20:i])
+    upper[:20] = np.nan
+    lower[:20] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,15 +46,14 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need at least 20 days for daily range and weekly indicators
-    start_idx = 20
+    # Warmup: need EMA, volume, Donchian
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(daily_range_ma_20[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(atr_14_1w_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(upper[i]) or np.isnan(lower[i])):
             signals[i] = 0.0
             continue
         
@@ -74,45 +63,55 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        daily_range_now = daily_range[i]
-        daily_range_ma = daily_range_ma_20[i]
-        ema_trend = ema_20_1w_aligned[i]
-        atr_vol = atr_14_1w_aligned[i]
-        vol_now = volume[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
+        # 1d trend filter
+        trend_up = close_1d[-1] > ema_34_1d[-1] if i == n-1 else pd.Series(close_1d[:i+1]).ewm(span=34, adjust=False, mean=False).mean().iloc[-1] > ema_34_1d[i]
+        # Simplified: use aligned EMA value from previous day
+        trend = ema_34_1d_aligned[i]  # This is the EMA value aligned to 6h
+        # Actual trend: close > EMA
+        # Since we can't use future close, we use the condition that close > EMA at previous bar
+        # But for simplicity and to avoid lookahead, we'll use the EMA slope
+        # Instead, we'll use: price above EMA = bullish
+        # We need current close vs current EMA - but EMA is lagging, so this is OK
+        # We'll compute EMA on the fly for current close using historical data
         
-        # Volatility filter: daily range > 1.5x weekly ATR
-        vol_filter = daily_range_now > 1.5 * atr_vol
+        # Recalculate EMA up to current point to avoid lookahead
+        if i >= 34:
+            close_series = pd.Series(close[:i+1])
+            ema_34_current = close_series.ewm(span=34, adjust=False, mean=False).mean().iloc[-1]
+        else:
+            ema_34_current = np.nan
         
-        # Volume filter: volume > 1.3x 20-day MA
-        vol_ma_filter = vol_now > 1.3 * vol_ma
+        if np.isnan(ema_34_current):
+            signals[i] = 0.0
+            continue
+            
+        trend_filter = close[i] > ema_34_current  # bullish if price > EMA34
         
-        # Trend filter: price above/below weekly EMA
-        price_above_ema = close[i] > ema_trend
-        price_below_ema = close[i] < ema_trend
+        # Volume filter: volume > 1.5x 1d MA
+        vol_filter = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
         
-        # Entry conditions
+        # Entry conditions: breakout with volume and trend
         if position == 0:
-            # Long: price above weekly EMA + volatility expansion + volume surge
-            if price_above_ema and vol_filter and vol_ma_filter:
+            # Long: break above upper band + volume + uptrend
+            if close[i] > upper[i] and vol_filter and trend_filter:
                 signals[i] = size
                 position = 1
-            # Short: price below weekly EMA + volatility expansion + volume surge
-            elif price_below_ema and vol_filter and vol_ma_filter:
+            # Short: break below lower band + volume + downtrend
+            elif close[i] < lower[i] and vol_filter and not trend_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below weekly EMA or volatility contraction
-            if close[i] < ema_trend or daily_range_now < 0.8 * atr_vol:
+            # Exit long: close below lower band or trend change
+            if close[i] < lower[i] or close[i] < ema_34_current:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above weekly EMA or volatility contraction
-            if close[i] > ema_trend or daily_range_now < 0.8 * atr_vol:
+            # Exit short: close above upper band or trend change
+            if close[i] > upper[i] or close[i] > ema_34_current:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA_VolatilityBreakout"
-timeframe = "1d"
+name = "6h_EMA34_Donchian20_VolumeTrendFilter"
+timeframe = "6h"
 leverage = 1.0
