@@ -1,10 +1,3 @@
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
-# Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag while maintaining signal quality.
-# Uses weekly trend filter (EMA50) for major trend direction, daily Camarilla R1/S1 for entry/exit,
-# and volume confirmation to avoid false breakouts. Designed to work in both bull (trend following)
-# and bear (mean reversion at extremes) markets by aligning with higher timeframe structure.
-# Target: 15-30 trades/year to stay under fee drag threshold.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -12,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,83 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get daily data for ATR and close
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Daily ATR(14)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
     
-    # Weekly EMA(50) for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Weekly EMA(34) for trend filter
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Daily Camarilla levels (based on previous day)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Daily ATR-based breakout levels
+    atr_mult = 0.5
+    upper_break = df_1d['close'].shift(1) + atr14 * atr_mult
+    lower_break = df_1d['close'].shift(1) - atr14 * atr_mult
+    upper_break_aligned = align_htf_to_ltf(prices, df_1d, upper_break)
+    lower_break_aligned = align_htf_to_ltf(prices, df_1d, lower_break)
     
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    
-    # Resistance and Support levels (R1, S1)
-    R1 = pivot + (range_hl * 1.1 / 12)
-    S1 = pivot - (range_hl * 1.1 / 12)
-    
-    # Align to 12h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # 12h volume average (20-period)
+    # 4h volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need weekly EMA50 and daily data
-    start_idx = max(50, 20)
+    # Warmup: need weekly EMA34 and daily ATR
+    start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(atr14_aligned[i]) or 
+            np.isnan(upper_break_aligned[i]) or np.isnan(lower_break_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema50_1w_aligned[i]
+        ema_trend = ema34_1w_aligned[i]
+        atr_val = atr14_aligned[i]
+        upper_break_val = upper_break_aligned[i]
+        lower_break_val = lower_break_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_filter = vol_current > (vol_ma_val * 1.5)
+        # Volume filter: current volume > 1.3 * 20-period average
+        vol_filter = vol_current > (vol_ma_val * 1.3)
         
         if position == 0:
-            # Long: price breaks above R1 with weekly uptrend and volume
-            if close[i] > R1_aligned[i] and close[i] > ema_trend and vol_filter:
+            # Long: price breaks above upper level with weekly uptrend and volume
+            if close[i] > upper_break_val and close[i] > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S1 with weekly downtrend and volume
-            elif close[i] < S1_aligned[i] and close[i] < ema_trend and vol_filter:
+            # Short: price breaks below lower level with weekly downtrend and volume
+            elif close[i] < lower_break_val and close[i] < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below S1 or weekly trend turns down
-            if close[i] < S1_aligned[i] or close[i] < ema_trend:
+            # Exit long: price closes below EMA or ATR-based trailing stop
+            if close[i] < ema_trend or close[i] < (high[i] - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above R1 or weekly trend turns up
-            if close[i] > R1_aligned[i] or close[i] > ema_trend:
+            # Exit short: price closes above EMA or ATR-based trailing stop
+            if close[i] > ema_trend or close[i] > (low[i] + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
-timeframe = "12h"
+name = "4h_ATR_Breakout_EMA34Trend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
