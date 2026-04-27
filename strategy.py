@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_CamarillaR3S3_Breakout_4hTrend_VolumeSpike
-Hypothesis: Use 4h-derived Camarilla R3/S3 levels for breakout signals, filtered by 4h EMA50 trend and volume spikes (>2x 20-period average). Only take long when price > EMA50 (uptrend) and short when price < EMA50 (downtrend). Designed for 1h timeframe with 4h trend filter to reduce false breakouts and limit trades to 15-37/year. Works in bull (breakouts with trend) and bear (mean reversion at extremes with trend filter).
+6h_OrderFlowImbalance_Reversal_v1
+Hypothesis: In choppy markets (low ADX), price tends to revert from extreme order flow imbalances.
+Uses: 1) 6h price closes outside 1.5*ATR from VWAP (extreme), 2) 1d ADX < 20 (chop regime), 3) 6h RSI divergence (confirmation).
+Only takes mean-reversion trades when all three align. Works in bull/bear because it fades extremes in chop.
+Target: 20-40 trades/year to minimize fee drag. Size: 0.25.
 """
 
 import numpy as np
@@ -18,75 +21,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from 4h timeframe
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # 6h VWAP (typical price * volume)
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, 0.0)
+    
+    # 6h ATR(14)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = np.zeros(n)
+    atr[13] = np.mean(tr[:14])
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # 6h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[13] = np.mean(gain[:14])
+    avg_loss[13] = np.mean(loss[:14])
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1d ADX(14) for chop regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous 4h bar's OHLC for Camarilla calculation
-    prev_close = df_4h['close'].shift(1).values
-    prev_high = df_4h['high'].shift(1).values
-    prev_low = df_4h['low'].shift(1).values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # True Range
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d[0] = tr1_1d[0]
     
-    # Align Camarilla levels to 1h timeframe (wait for previous 4h bar's close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # 4h EMA50 for trend filter
-    ema_50 = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        smoothed = np.zeros_like(arr)
+        smoothed[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            smoothed[i] = (smoothed[i-1] * (period-1) + arr[i]) / period
+        return smoothed
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    atr_1d = smooth_wilder(tr_1d, 14)
+    plus_di_1d = 100 * smooth_wilder(plus_dm, 14) / np.where(atr_1d != 0, atr_1d, 1)
+    minus_di_1d = 100 * smooth_wilder(minus_dm, 14) / np.where(atr_1d != 0, atr_1d, 1)
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / np.where((plus_di_1d + minus_di_1d) != 0, (plus_di_1d + minus_di_1d), 1)
+    adx_1d = smooth_wilder(dx_1d, 14)
     
-    # Session filter: 08-20 UTC (only trade during active hours)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align 1d ADX to 6h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Conditions
+    price_above_vwap = close > vwap + (1.5 * atr)
+    price_below_vwap = close < vwap - (1.5 * atr)
+    rsi_overbought = rsi > 70
+    rsi_oversold = rsi < 30
+    chop_regime = adx_1d_aligned < 20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # Position size: 20% of capital
+    size = 0.25
     
-    # Warmup: need enough data for volume average and EMA
-    start_idx = max(20, 50)
+    start_idx = max(30, 14)  # need ADX and ATR/RSI warmup
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i]) or
-            not session_filter[i]):
+        # Skip if any data not ready
+        if (np.isnan(price_above_vwap[i]) or np.isnan(price_below_vwap[i]) or 
+            np.isnan(rsi_overbought[i]) or np.isnan(rsi_oversold[i]) or 
+            np.isnan(chop_regime[i])):
             signals[i] = 0.0
             continue
         
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        ema_50_val = ema_50_aligned[i]
-        vol_conf = volume_confirm[i]
-        
         if position == 0:
-            # Long: price breaks above R3 with volume confirmation AND above 4h EMA50 (uptrend)
-            if close[i] > camarilla_r3_val and vol_conf and close[i] > ema_50_val:
+            # Long: price far below VWAP + RSI oversold + chop regime
+            if price_below_vwap[i] and rsi_oversold[i] and chop_regime[i]:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3 with volume confirmation AND below 4h EMA50 (downtrend)
-            elif close[i] < camarilla_s3_val and vol_conf and close[i] < ema_50_val:
+            # Short: price far above VWAP + RSI overbought + chop regime
+            elif price_above_vwap[i] and rsi_overbought[i] and chop_regime[i]:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 (opposite level)
-            if close[i] < camarilla_s3_val:
+            # Exit long: price returns to VWAP or RSI neutral
+            if close[i] >= vwap[i] or rsi[i] >= 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R3 (opposite level)
-            if close[i] > camarilla_r3_val:
+            # Exit short: price returns to VWAP or RSI neutral
+            if close[i] <= vwap[i] or rsi[i] <= 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_CamarillaR3S3_Breakout_4hTrend_VolumeSpike"
-timeframe = "1h"
+name = "6h_OrderFlowImbalance_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
