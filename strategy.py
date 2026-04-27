@@ -1,16 +1,14 @@
-# 4h CAMARILLA PIVOT R1 S1 BREAKOUT WITH VOLUME CONFIRMATION AND TREND FILTER
-# Hypothesis: CAMARILLA PIVOT LEVELS ARE SIGNIFICANT SUPPORT/RESISTANCE LEVELS
-# BREAKOUTS ABOVE R1 OR BELOW S1 WITH VOLUME CONFIRMATION AND TREND FILTER
-# ARE HIGH PROBABILITY TRADES THAT WORK IN BOTH BULL AND BEAR MARKETS
-# TREND FILTER: 1D EMA34 ENSURES WE TRADE IN DIRECTION OF HIGHER TIMEFRAME TREND
-# VOLUME CONFIRMATION: VOLUME > 1.5X 20-PERIOD AVERAGE
-# POSITION SIZE: 0.25 (25%) TO BALANCE RISK AND RETURN
-# TARGET: 20-50 TRADES/YEAR TO AVOID FEE DRAG
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 1d strategy using Weekly Bollinger Band squeeze breakout with weekly trend filter.
+# Long when price breaks above upper BB(20,2) on daily chart with weekly EMA50 uptrend and volume > 1.5x average.
+# Short when price breaks below lower BB(20,2) with weekly EMA50 downtrend and volume > 1.5x average.
+# Exit when price crosses the middle BB(20).
+# Uses Bollinger Bands for volatility breakout, weekly EMA50 for trend filter, volume for confirmation.
+# Target: 7-25 trades/year to avoid fee drag. Works in bull/bear via trend-aligned breakouts.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,54 +20,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for CAMARILLA PIVOT AND EMA34 TREND FILTER
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for EMA50 trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate CAMARILLA PIVOT LEVELS FROM PREVIOUS DAY
-    # PIVOT = (HIGH + LOW + CLOSE) / 3
-    # R1 = CLOSE + (HIGH - LOW) * 1.1 / 12
-    # S1 = CLOSE - (HIGH - LOW) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate Bollinger Bands (20, 2) on daily data
+    bb_period = 20
+    bb_std = 2
     
-    # Calculate 1-day EMA34 FOR TREND FILTER
-    ema_period = 34
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
-                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
+    # Middle band = SMA(20)
+    sma = np.full(n, np.nan)
+    for i in range(bb_period - 1, n):
+        sma[i] = np.mean(close[i - bb_period + 1:i + 1])
     
-    # Get volume MA FOR CONFIRMATION
+    # Standard deviation
+    bb_std_dev = np.full(n, np.nan)
+    for i in range(bb_period - 1, n):
+        bb_std_dev[i] = np.std(close[i - bb_period + 1:i + 1])
+    
+    upper_band = sma + bb_std * bb_std_dev
+    lower_band = sma - bb_std * bb_std_dev
+    
+    # Calculate weekly EMA50 for trend filter
+    ema_period = 50
+    ema_weekly = np.full(len(close_weekly), np.nan)
+    if len(close_weekly) >= ema_period:
+        ema_weekly[ema_period - 1] = np.mean(close_weekly[:ema_period])
+        for i in range(ema_period, len(close_weekly)):
+            ema_weekly[i] = (close_weekly[i] * (2 / (ema_period + 1)) + 
+                             ema_weekly[i - 1] * (1 - (2 / (ema_period + 1))))
+    
+    # Get volume MA for confirmation
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
     
-    # ALIGN 1-DAY INDICATORS TO 4H TIMEFRAME
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align weekly indicators to daily timeframe
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
     signals = np.zeros(n)
-    position = 0  # 0: FLAT, 1: LONG, -1: SHORT
-    size = 0.25   # 25% POSITION SIZE
+    position = 0  # 0: flat, 1: long, -1: short
+    size = 0.25   # 25% position size
     
-    # WARMUP: NEED PIVOT, R1, S1, EMA34, AND VOLUME MA20
-    start_idx = max(19, ema_period - 1)  # 20 for VOLUME, 33 FOR EMA
+    # Warmup: need BB(20), weekly EMA50, and volume MA20
+    start_idx = max(bb_period - 1, ema_period - 1, 19)
     
     for i in range(start_idx, n):
-        # SKIP IF ANY DATA NOT READY
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+        # Skip if any data not ready
+        if (np.isnan(sma[i]) or np.isnan(ema_weekly_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -78,32 +79,32 @@ def generate_signals(prices):
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
-        # VOLUME FILTER
+        # Volume filter
         vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # LONG: BREAK ABOVE R1 WITH UPTREND AND VOLUME
-            if (price > r1_1d_aligned[i] and 
-                price > ema_1d_aligned[i] and vol_filter):
+            # Long: break above upper BB with weekly EMA50 uptrend and volume
+            if (price > upper_band[i] and 
+                price > ema_weekly_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # SHORT: BREAK BELOW S1 WITH DOWNTREND AND VOLUME
-            elif (price < s1_1d_aligned[i] and 
-                  price < ema_1d_aligned[i] and vol_filter):
+            # Short: break below lower BB with weekly EMA50 downtrend and volume
+            elif (price < lower_band[i] and 
+                  price < ema_weekly_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: PRICE CROSSES BELOW PIVOT OR STOPLOSS
-            if price < pivot_1d_aligned[i]:
+            # Exit long: price crosses below middle BB
+            if price < sma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # EXIT SHORT: PRICE CROSSES ABOVE PIVOT OR STOPLOSS
-            if price > pivot_1d_aligned[i]:
+            # Exit short: price crosses above middle BB
+            if price > sma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_WeeklyBollingerSqueeze_Breakout_WeeklyEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
