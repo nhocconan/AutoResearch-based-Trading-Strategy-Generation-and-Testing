@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v2
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v3
 Hypothesis: Trade 4h timeframe with daily CAMARILLA R1/S1 breakouts filtered by 1d EMA34 trend and volume spikes.
 Breakouts at R1/S1 capture strong momentum, filtered by daily trend and volume confirmation.
 Designed for 20-50 trades/year to minimize fee drift. Works in bull via breakouts and bear via breakdowns.
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v3"
 timeframe = "4h"
 leverage = 1.0
