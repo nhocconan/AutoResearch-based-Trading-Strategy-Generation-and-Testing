@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_WilliamsFractal_Breakout_1dTrend_VolumeConfirm_HTF
-Hypothesis: Uses daily Williams Fractals for breakout entries on 4h timeframe.
-Enter long when price breaks above the most recent bullish fractal AND 1d EMA50 > EMA200 (uptrend) AND volume > 1.5 * 20-period average.
-Enter short when price breaks below the most recent bearish fractal AND 1d EMA50 < EMA200 (downtrend) AND volume > 1.5 * 20-period average.
-Exit when price returns to the opposite fractal level OR trend reverses.
-Williams Fractals identify key swing highs/lows; daily trend filter ensures alignment with higher timeframe structure.
-High volume threshold (1.5x) filters weak breakouts. Target: 75-150 total trades over 4 years (19-37/year) with 0.25 position size.
-Designed to work in both bull and bear markets via trend filter and breakout logic.
+1d_WilliamsAlligator_Trend_WeeklyFilter_VolumeConfirm
+Hypothesis: Uses Williams Alligator (Jaw/Teeth/Lips) on 1d for trend direction, 
+filtered by 1w EMA50 for higher timeframe alignment. Enters on Alligator alignment 
+with volume confirmation (>1.5x 20-period avg). Exits when Alligator reverses or 
+price crosses Jaw. Designed for low trade frequency (<25/year) to minimize fee drag 
+and work in both bull/bear markets via trend filter and weekly confirmation.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,28 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Fractals and daily trend filter
+    # Get 1d data for Alligator and weekly EMA50 filter
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d EMA50 and EMA200 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Williams Alligator on 1d: Jaw (13,8), Teeth (8,5), Lips (5,3) - SMMA
+    def smma(source, length):
+        # Smoothed Moving Average: first value is SMA, then recursive
+        result = np.full_like(source, np.nan, dtype=np.float64)
+        if len(source) < length:
+            return result
+        # Initial SMA
+        result[length-1] = np.mean(source[:length])
+        # Subsequent values: SMMA = (PREV_SMMA*(length-1) + PRICE) / length
+        for i in range(length, len(source)):
+            result[i] = (result[i-1] * (length-1) + source[i]) / length
+        return result
     
-    # Calculate Williams Fractals on 1d data
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Williams fractals need 2 extra 1d bars after the center bar for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    close_1d = df_1d['close'].values
+    jaw = smma(close_1d, 13)  # Blue line
+    teeth = smma(close_1d, 8)  # Red line
+    lips = smma(close_1d, 5)   # Green line
+    
+    # Align Alligator lines to 1d timeframe (no additional delay needed for SMMA)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Weekly EMA50 for trend filter (needs completed weekly bar)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,30 +62,32 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need 1d EMA200 (200), volume avg (20), fractal delay (2)
-    start_idx = max(200, 20, 2)
+    # Warmup: need Alligator (max 13), weekly EMA50 (50), volume avg (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_50_val = ema_50_1d_aligned[i]
-        ema_200_val = ema_200_1d_aligned[i]
-        bearish_fractal_val = bearish_fractal_aligned[i]
-        bullish_fractal_val = bullish_fractal_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema_wk_val = ema_50_1w_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: breakout of Williams Fractal levels with 1d trend filter AND volume
-            # Long: price breaks above bullish fractal AND 1d uptrend AND volume
-            long_condition = (close_val > bullish_fractal_val) and (ema_50_val > ema_200_val) and vol_conf
-            # Short: price breaks below bearish fractal AND 1d downtrend AND volume
-            short_condition = (close_val < bearish_fractal_val) and (ema_50_val < ema_200_val) and vol_conf
+            # Look for entry: Alligator aligned (Lips > Teeth > Jaw for long, reverse for short)
+            # Plus weekly trend filter and volume confirmation
+            bullish_alligator = (lips_val > teeth_val) and (teeth_val > jaw_val)
+            bearish_alligator = (lips_val < teeth_val) and (teeth_val < jaw_val)
+            
+            long_condition = bullish_alligator and (close_val > ema_wk_val) and vol_conf
+            short_condition = bearish_alligator and (close_val < ema_wk_val) and vol_conf
             
             if long_condition:
                 signals[i] = size
@@ -87,8 +96,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price returns to bearish fractal level OR trend breaks
-            exit_condition = (close_val <= bearish_fractal_val) or (ema_50_val <= ema_200_val)
+            # Exit long when Alligator reverses (Lips < Teeth) OR price crosses below Jaw
+            exit_condition = (lips_val < teeth_val) or (close_val < jaw_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -96,8 +105,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price returns to bullish fractal level OR trend breaks
-            exit_condition = (close_val >= bullish_fractal_val) or (ema_50_val >= ema_200_val)
+            # Exit short when Alligator reverses (Lips > Teeth) OR price crosses above Jaw
+            exit_condition = (lips_val > teeth_val) or (close_val > jaw_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -107,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsFractal_Breakout_1dTrend_VolumeConfirm_HTF"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_Trend_WeeklyFilter_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
