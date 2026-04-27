@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Bollinger Bands with RSI confirmation and volume filter.
-# Enters long when price closes below weekly BB lower band with RSI < 30 and volume > 1.5x average.
-# Enters short when price closes above weekly BB upper band with RSI > 70 and volume > 1.5x average.
-# Exits when price returns to weekly BB middle band or RSI reverts to neutral (40-60).
-# Designed for ~15-25 trades/year by requiring extreme conditions (BB bands + RSI extremes).
-# Works in bull/bear: buys oversold dips, sells overbought rallies.
-# Uses weekly timeframe for trend context to avoid counter-trend trades in strong trends.
-# Volume filter ensures breakouts have conviction.
+# Hypothesis: 12h strategy using daily pivot points (R3/S3 levels) with volume confirmation and daily EMA(34) trend filter.
+# Enters long when price breaks above S3 with volume, short when breaks below R3 with volume.
+# Designed for ~15-25 trades/year by requiring significant breakouts (R3/S3) rather than minor S1/R1 levels.
+# Works in bull/bear: buys support breaks, sells resistance breaks.
+# Uses strict volume filter (volume > 2x 30-period average) to avoid false breakouts.
+# Exit when price returns to pivot or trend changes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,97 +20,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands and RSI
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for pivot calculation and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Bollinger Bands (20, 2)
-    bb_length = 20
-    bb_mult = 2.0
+    # Calculate daily pivot points (using prior day OHLC)
+    high_prev = np.roll(high_1d, 1)
+    low_prev = np.roll(low_1d, 1)
+    close_prev = np.roll(close_1d, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
     
-    # Basis (SMA)
-    basis_1w = pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).mean().values
-    # Deviation
-    dev_1w = bb_mult * pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).std().values
-    # Upper and lower bands
-    upper_1w = basis_1w + dev_1w
-    lower_1w = basis_1w - dev_1w
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    r1 = 2 * pivot - low_prev
+    s1 = 2 * pivot - high_prev
+    r2 = pivot + (high_prev - low_prev)
+    s2 = pivot - (high_prev - low_prev)
+    r3 = high_prev + 2 * (pivot - low_prev)
+    s3 = low_prev - 2 * (high_prev - pivot)
     
-    # Calculate weekly RSI (14)
-    rsi_length = 14
-    delta = pd.Series(close_1w).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=rsi_length, min_periods=rsi_length).mean()
-    avg_loss = loss.rolling(window=rsi_length, min_periods=rsi_length).mean()
-    rs = avg_gain / avg_loss
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = rsi_1w.fillna(50).values  # Fill NaN with neutral 50
+    # Align daily pivots to 12h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Align weekly indicators to daily
-    basis_aligned = align_htf_to_ltf(prices, df_1w, basis_1w)
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Daily trend: price above/below daily EMA(34)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 1.5 x 20-period average (daily)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Volume filter: volume > 2.0 x 30-period average (12h) for significance
+    vol_ma_30 = np.full(n, np.nan)
+    for i in range(29, n):
+        vol_ma_30[i] = np.mean(volume[i-29:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need weekly BB (20), RSI (14), volume MA (20)
-    start_idx = max(20, 14, 19)
+    # Warmup: need pivots (1), daily EMA (34), volume MA (30)
+    start_idx = max(1, 34, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(basis_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        vol_avg = vol_ma_30[i]
         
-        # Volume filter
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Volume filter (strict)
+        vol_filter = vol_now > 2.0 * vol_avg
         
-        # RSI extremes
-        rsi_oversold = rsi_aligned[i] < 30
-        rsi_overbought = rsi_aligned[i] > 70
-        rsi_neutral = (rsi_aligned[i] >= 40) & (rsi_aligned[i] <= 60)
+        # Trend filters
+        daily_bullish = price > ema_34_1d_aligned[i]
+        daily_bearish = price < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price closes below lower BB with RSI oversold and volume
-            if price < lower_aligned[i] and rsi_oversold and vol_filter:
+            # Long: price breaks above S3 with volume and daily bullish
+            if price > s3_aligned[i] and vol_filter and daily_bullish:
                 signals[i] = size
                 position = 1
-            # Short: price closes above upper BB with RSI overbought and volume
-            elif price > upper_aligned[i] and rsi_overbought and vol_filter:
+            # Short: price breaks below R3 with volume and daily bearish
+            elif price < r3_aligned[i] and vol_filter and daily_bearish:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to basis or RSI becomes neutral
-            if price > basis_aligned[i] or rsi_neutral:
+            # Exit long: price returns below pivot or daily trend turns bearish
+            if price < pivot_aligned[i] or not daily_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to basis or RSI becomes neutral
-            if price < basis_aligned[i] or rsi_neutral:
+            # Exit short: price returns above pivot or daily trend turns bullish
+            if price > pivot_aligned[i] or not daily_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyBB_RSI_Volume"
-timeframe = "1d"
+name = "12h_Pivot_S3R3_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
