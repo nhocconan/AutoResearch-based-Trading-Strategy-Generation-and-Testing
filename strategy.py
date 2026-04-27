@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume spike confirmation. Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year). Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear markets by following 1d trend direction while using Camarilla R1/S1 levels for breakout confirmation. Volume spike filter reduces false breakouts. ATR-based trailing stop manages risk without look-ahead.
+6h_ElderRay_BullBearPower_1dTrend_VolumeSpike
+Hypothesis: Uses 1d Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) to measure buying/selling pressure.
+Enter long when Bull Power > 0 AND 1d close > EMA34 (uptrend) AND volume spike.
+Enter short when Bear Power < 0 AND 1d close < EMA34 (downtrend) AND volume spike.
+Exit when power reverses or volume dries up. Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
+Works in both bull and bear markets by following 1d trend while using Elder Ray for momentum confirmation.
+Volume spike filter reduces false signals. Discrete position sizing (0.25) minimizes fee drag.
 """
 
 import numpy as np
@@ -18,29 +23,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter and Camarilla levels
+    # Get 1d data for Elder Ray and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA13 for Elder Ray power calculations
     close_1d_series = pd.Series(df_1d['close'].values)
+    ema_13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate 1d EMA34 for trend filter
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power = high_1d - ema_13_1d  # Measures buying pressure above average
+    bear_power = low_1d - ema_13_1d   # Measures selling pressure below average (negative when strong)
+    
+    # Align 1d indicators to 6h timeframe (completed bars only)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate 1d OHLC for Camarilla levels
-    o_1d = df_1d['open'].values
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
-    
-    # Camarilla levels: R1/S1 from 1d OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = c_1d + (h_1d - l_1d) * 1.1 / 12
-    camarilla_s1 = c_1d - (h_1d - l_1d) * 1.1 / 12
-    
-    # Align 1d indicators to 12h timeframe (completed bars only)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,54 +51,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital (discrete level)
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Warmup: need 1d EMA34 (34) + volume avg (20)
+    # Warmup: need 1d EMA34 (34) and EMA13 (13) + volume avg (20)
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         ema_val = ema_34_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with 1d EMA34 trend filter AND volume spike
-            # Long: price closes above R1 AND above EMA34 (1d uptrend) AND volume spike
-            long_condition = (close_val > r1_val) and (close_val > ema_val) and vol_conf
-            # Short: price closes below S1 AND below EMA34 (1d downtrend) AND volume spike
-            short_condition = (close_val < s1_val) and (close_val < ema_val) and vol_conf
+            # Look for entry: Elder Ray power with 1d EMA34 trend filter AND volume spike
+            # Long: Bull Power > 0 (buying pressure) AND price above EMA34 (1d uptrend) AND volume spike
+            long_condition = (bull_val > 0) and (close_val > ema_val) and vol_conf
+            # Short: Bear Power < 0 (selling pressure) AND price below EMA34 (1d downtrend) AND volume spike
+            short_condition = (bear_val < 0) and (close_val < ema_val) and vol_conf
             
             if long_condition:
                 signals[i] = size
                 position = 1
-                entry_price = close_val
-                highest_since_entry = close_val
             elif short_condition:
                 signals[i] = -size
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = close_val
         elif position == 1:
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, close_val)
-            
-            # Exit conditions:
-            # 1. Price touches S1 (opposite Camarilla level)
-            # 2. 1d EMA34 turns bearish (price below EMA)
-            # 3. ATR-based trailing stop: price drops 2.5 * ATR from highest since entry
-            tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-            atr_val = pd.Series(tr).rolling(window=14, min_periods=14).mean().values[i]
-            exit_condition = (close_val < s1_val) or (close_val < ema_val) or (close_val < highest_since_entry - 2.5 * atr_val)
+            # Exit long when Bull Power turns negative (buying pressure fades) OR trend breaks
+            exit_condition = (bull_val <= 0) or (close_val < ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -104,16 +91,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, close_val)
-            
-            # Exit conditions:
-            # 1. Price touches R1 (opposite Camarilla level)
-            # 2. 1d EMA34 turns bullish (price above EMA)
-            # 3. ATR-based trailing stop: price rises 2.5 * ATR from lowest since entry
-            tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-            atr_val = pd.Series(tr).rolling(window=14, min_periods=14).mean().values[i]
-            exit_condition = (close_val > r1_val) or (close_val > ema_val) or (close_val > lowest_since_entry + 2.5 * atr_val)
+            # Exit short when Bear Power turns positive (selling pressure fades) OR trend breaks
+            exit_condition = (bear_val >= 0) or (close_val > ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -123,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_ElderRay_BullBearPower_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
