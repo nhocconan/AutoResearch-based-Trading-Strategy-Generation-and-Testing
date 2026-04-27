@@ -3,74 +3,122 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray with 1d trend filter.
-# Long when: Green phase (jaw<teeth<lips), Bull Power > 0, price > 1d EMA50.
-# Short when: Red phase (lips<teeth<jaw), Bear Power < 0, price < 1d EMA50.
-# Exit when: Alligator lines cross in opposite direction or power signal reverses.
-# Uses Williams Alligator (13,8,5 SMAs) for trend phase and Elder Ray (Bull/Bear Power) for strength.
-# 1d EMA50 filter ensures alignment with higher timeframe trend.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 12h 1-week Donchian breakout with 1-day volume confirmation and ADX trend filter.
+# Long when price breaks above 1-week Donchian upper with ADX > 20 and volume > 1.5x average.
+# Short when price breaks below 1-week Donchian lower with ADX > 20 and volume > 1.5x average.
+# Exit when price crosses the 1-week Donchian midpoint (reduces whipsaw).
+# Uses 1-week trend for direction and 1-day volume for confirmation to capture sustained moves.
+# Target: 12-37 trades/year to minimize fee decay while capturing strong trends.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator: 13,8,5 period SMAs (median price)
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1-week data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # 1-week Donchian channels (20-period)
+    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_mid_1w = (donchian_high_1w + donchian_low_1w) / 2
+    
+    # Align 1-week Donchian levels to 12h timeframe
+    donchian_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
+    donchian_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
+    donchian_mid_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid_1w)
+    
+    # Get 1-day data for volume and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_1d = df_1d['volume'].values
+    
+    # 1-day volume average (20-period)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # 1-day ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM (14-period)
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(donchian_high_1w_aligned[i]) or np.isnan(donchian_low_1w_aligned[i]) or 
+            np.isnan(donchian_mid_1w_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: Green phase (jaw < teeth < lips), Bull Power > 0, price > 1d EMA50
-        if (jaw[i] < teeth[i] and teeth[i] < lips[i] and
-            bull_power[i] > 0 and
-            close[i] > ema50_1d_aligned[i]):
+        # Volume filter: volume > 1.5x average
+        volume_filter = volume[i] > (vol_ma_1d_aligned[i] * 1.5)
+        
+        # Long condition: price breaks above Donchian high, ADX > 20, volume spike
+        if (close[i] > donchian_high_1w_aligned[i] and 
+            adx_aligned[i] > 20 and 
+            volume_filter):
             signals[i] = 0.25
             position = 1
-        # Short condition: Red phase (lips < teeth < jaw), Bear Power < 0, price < 1d EMA50
-        elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and
-              bear_power[i] < 0 and
-              close[i] < ema50_1d_aligned[i]):
+        # Short condition: price breaks below Donchian low, ADX > 20, volume spike
+        elif (close[i] < donchian_low_1w_aligned[i] and 
+              adx_aligned[i] > 20 and 
+              volume_filter):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: Alligator crosses opposite direction or power signal reverses
-        elif position == 1 and (jaw[i] > teeth[i] or bull_power[i] <= 0):
+        # Exit conditions: price crosses Donchian midpoint
+        elif position == 1 and close[i] < donchian_mid_1w_aligned[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (teeth[i] > jaw[i] or bear_power[i] >= 0):
+        elif position == -1 and close[i] > donchian_mid_1w_aligned[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -84,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_ElderRay_1dEMA50"
-timeframe = "6h"
+name = "12h_1wDonchian20_1dADX20_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
