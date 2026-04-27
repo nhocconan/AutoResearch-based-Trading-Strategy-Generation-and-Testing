@@ -1,3 +1,10 @@
+# 101469: 4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
+# Uses Camarilla pivot levels (R1, S1) from daily data for breakout signals
+# Confirmed by daily EMA34 trend and volume spike (2x average)
+# Entry only during London/NY session (08-16 UTC) to avoid low liquidity
+# Target: 20-40 trades/year, low frequency to minimize fee drag
+# Works in bull/bear via trend filter and volatility-adjusted volume
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,99 +20,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for higher timeframe context (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
-    
-    # Calculate weekly EMA(20) for trend direction
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate weekly ATR(10) for volatility filter
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr_10_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_10_1w)
-    
-    # Calculate daily pivot points (classic) for support/resistance
+    # Get daily data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    volume_1d = df_1d['volume'].values
     
-    # Precompute session filter (08-20 UTC)
+    # Calculate daily EMA(34) for trend direction
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Camarilla levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C, H, L are from previous day
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # handle first value
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    camarilla_range = prev_high - prev_low
+    camarilla_r1 = prev_close + camarilla_range * 1.1 / 12
+    camarilla_s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Calculate 4h volume moving average for spike detection
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    
+    # Session filter: London/NY overlap (08-16 UTC)
     hours = prices.index.hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    session_mask = (hours >= 8) & (hours <= 16)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
+    # Start after warmup
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(atr_10_1w_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during active hours
+        # Session filter
         if not session_mask[i]:
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA20
-        price_above_ema = close[i] > ema_20_1w_aligned[i]
-        price_below_ema = close[i] < ema_20_1w_aligned[i]
+        # Trend filter
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Volatility filter: avoid high volatility periods
-        atr_threshold = np.nanpercentile(atr_10_1w_aligned[max(0, i-50):i+1], 80) if i >= 20 else atr_10_1w_aligned[i]
-        low_volatility = atr_10_1w_aligned[i] < atr_threshold
+        # Volume spike: current volume > 2x 20-period average
+        volume_spike = volume[i] > vol_ma_4h_aligned[i] * 2.0
         
-        # Price near pivot levels (within 0.5% tolerance)
-        near_pivot = (abs(close[i] - pivot_aligned[i]) / pivot_aligned[i] < 0.005 or
-                     abs(close[i] - s1_aligned[i]) / s1_aligned[i] < 0.005 or
-                     abs(close[i] - r1_aligned[i]) / r1_aligned[i] < 0.005)
+        # Breakout signals: price breaks Camarilla R1/S1
+        breakout_r1 = close[i] > camarilla_r1_aligned[i]
+        breakout_s1 = close[i] < camarilla_s1_aligned[i]
         
-        # Long conditions: bullish trend + low volatility + near support
-        long_condition = (price_above_ema and 
-                         low_volatility and 
-                         near_pivot and
-                         close[i] > pivot_aligned[i])  # bullish bias
-        
-        # Short conditions: bearish trend + low volatility + near resistance
-        short_condition = (price_below_ema and 
-                          low_volatility and 
-                          near_pivot and
-                          close[i] < pivot_aligned[i])  # bearish bias
+        # Long: bullish trend + volume spike + R1 breakout
+        long_condition = price_above_ema and volume_spike and breakout_r1
+        # Short: bearish trend + volume spike + S1 breakout
+        short_condition = price_below_ema and volume_spike and breakout_s1
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -113,14 +105,14 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal or volatility spike
-        elif position == 1 and (not price_above_ema or not low_volatility):
+        # Exit: trend reversal
+        elif position == 1 and not price_above_ema:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (not price_below_ema or not low_volatility):
+        elif position == -1 and not price_below_ema:
             signals[i] = 0.0
             position = 0
-        # Hold position
+        # Hold
         else:
             if position == 1:
                 signals[i] = 0.25
@@ -131,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyEMA20_PivotBounce_VolatilityFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
