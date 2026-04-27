@@ -1,4 +1,13 @@
-#!/usr/bin/env python3
+# 1) Hypothesis
+# The strategy uses 1-day Exponential Moving Average (EMA) crossovers as the primary trend filter
+# combined with 1-week Relative Strength Index (RSI) extremes to capture momentum in both bull and bear markets.
+# Long entries occur when EMA(9) crosses above EMA(21) and weekly RSI is below 70 (avoiding overbought).
+# Short entries occur when EMA(9) crosses below EMA(21) and weekly RSI is above 30 (avoiding oversold).
+# Exits are triggered by the opposite EMA crossover.
+# Position sizing is fixed at 0.25 to manage risk and reduce fee churn.
+# This approach aims to capture trends while avoiding extreme readings, suitable for both bullish and bearish regimes.
+
+# 2) Implementation
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -9,46 +18,41 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context (1d)
+    # Get daily data for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate daily EMA(34) for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily EMA(9) and EMA(21)
+    ema_9_1d = pd.Series(close_1d).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Align EMAs to lower timeframe (1d candles)
+    ema_9_aligned = align_htf_to_ltf(prices, df_1d, ema_9_1d)
+    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
-    # Calculate 4h Donchian channels (20-period) for breakout signals
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for RSI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
     
-    # Calculate 4h volume moving average for confirmation
-    vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly RSI(14)
+    delta = pd.Series(close_1w).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_values = rsi_1w.values
+    
+    # Align RSI to lower timeframe (1d candles)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -62,11 +66,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(ema_9_aligned[i]) or 
+            np.isnan(ema_21_aligned[i]) or
+            np.isnan(rsi_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -75,31 +77,19 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # EMA crossover signals
+        ema_cross_up = ema_9_aligned[i] > ema_21_aligned[i]
+        ema_cross_down = ema_9_aligned[i] < ema_21_aligned[i]
         
-        # Volatility filter: current ATR above average (avoid choppy markets)
-        volatility_filter = atr_14_1d_aligned[i] > 0 and atr_14_1d_aligned[i] > np.nanmedian(atr_14_1d_aligned[:i+1]) * 0.8
+        # RSI conditions: avoid extremes
+        rsi_not_overbought = rsi_1w_aligned[i] < 70
+        rsi_not_oversold = rsi_1w_aligned[i] > 30
         
-        # Volume filter: current 4h volume above average
-        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 1.2
+        # Long conditions: bullish crossover + not overbought
+        long_condition = ema_cross_up and rsi_not_overbought
         
-        # Breakout signals: price breaks 4h Donchian channels
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
-        
-        # Long conditions: bullish trend + volatility + volume + upward breakout
-        long_condition = (price_above_ema and 
-                         volatility_filter and 
-                         volume_filter and 
-                         breakout_up)
-        
-        # Short conditions: bearish trend + volatility + volume + downward breakout
-        short_condition = (price_below_ema and 
-                          volatility_filter and 
-                          volume_filter and 
-                          breakout_down)
+        # Short conditions: bearish crossover + not oversold
+        short_condition = ema_cross_down and rsi_not_oversold
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -107,11 +97,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal OR volatility collapse
-        elif position == 1 and (not price_above_ema or not volatility_filter):
+        # Exit conditions: opposite EMA crossover
+        elif position == 1 and ema_cross_down:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (not price_below_ema or not volatility_filter):
+        elif position == -1 and ema_cross_up:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -125,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_ATR_VolumeFilter_4hDonchianBreakout"
-timeframe = "4h"
+name = "1d_EMA9_21_1wRSI_Crossover"
+timeframe = "1d"
 leverage = 1.0
