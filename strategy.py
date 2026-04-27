@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-#100952 - 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Breakout at Camarilla R1/S1 levels with volume confirmation and 1d EMA trend filter on 12h timeframe. Targets 12-37 trades/year to minimize fee drag. Uses 12h primary timeframe with 1d EMA50 for trend and daily pivot for Camarilla levels. Works in bull (breakouts with trend) and bear (mean reversion to pivot). Tight entry conditions reduce trade frequency and improve win rate.
+#100953 - 4h_TRIX_12hVolumeSpike_ChopRegime
+Hypothesis: TRIX momentum on 4h with 12h volume spike confirmation and 1d Choppiness regime filter. TRIX crosses above/below zero line with volume surge indicates strong momentum. Choppiness index filters for trending markets only (CHOP < 38.2) to avoid whipsaws in ranging conditions. Works in bull (TRIX up + volume) and bear (TRIX down + volume). Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,73 +13,110 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for volume spike filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 12h volume EMA20 for spike detection
+    vol_ema_12h = pd.Series(volume_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ema_12h)
     
-    # Get 1d data for Camarilla levels (daily pivot from previous day)
+    # Get 1d data for Choppiness index
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day (to avoid look-ahead)
-    daily_pivot = (high_1d + low_1d + close_1d) / 3
-    daily_range = high_1d - low_1d
-    daily_r1 = close_1d + daily_range * 1.1 / 12
-    daily_s1 = close_1d - daily_range * 1.1 / 12
+    # Calculate True Range and ADX-like components for Choppiness
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Align to 12h timeframe (previous day's levels for current period)
-    camarilla_r1 = align_htf_to_ltf(prices, df_1d, daily_r1)
-    camarilla_s1 = align_htf_to_ltf(prices, df_1d, daily_s1)
-    camarilla_pivot = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: volume > 1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    # Calculate +DM and -DM
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth DM values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Calculate DI values
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # Calculate DX and ADX
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Choppiness Index: higher = ranging, lower = trending
+    # CHOP = 100 * log10(sum(ATR)/ (max(high)-min(low)) ) / log10(period)
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+    chop[np.isnan(chop) | (max_high - min_low) == 0] = 50  # Neutral when range is zero
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate TRIX on 4h close
+    # TRIX = EMA(EMA(EMA(close, period), period), period) - 1 period ago
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1) * 100
+    trix[0] = 0  # First value
+    
+    # Volume spike: current 12h volume > 2.0 x EMA20
+    volume_spike = volume_12h > (vol_ema_12h * 2.0)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(camarilla_r1[i]) or 
-            np.isnan(camarilla_s1[i]) or np.isnan(camarilla_pivot[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(trix[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above R1, above 1d EMA50, volume spike
-        if (close[i] > camarilla_r1[i] and 
-            close[i] > ema50_1d_aligned[i] and 
-            volume_filter[i]):
+        # Long condition: TRIX crosses above zero, volume spike, trending market (CHOP < 38.2)
+        if (trix[i] > 0 and trix[i-1] <= 0 and 
+            volume_spike_aligned[i] and 
+            chop_aligned[i] < 38.2):
             signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below S1, below 1d EMA50, volume spike
-        elif (close[i] < camarilla_s1[i] and 
-              close[i] < ema50_1d_aligned[i] and 
-              volume_filter[i]):
+        # Short condition: TRIX crosses below zero, volume spike, trending market (CHOP < 38.2)
+        elif (trix[i] < 0 and trix[i-1] >= 0 and 
+              volume_spike_aligned[i] and 
+              chop_aligned[i] < 38.2):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to Camarilla Pivot (mean reversion)
-        elif position == 1 and close[i] < camarilla_pivot[i]:
+        # Exit conditions: TRIX crosses back through zero
+        elif position == 1 and trix[i] < 0:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > camarilla_pivot[i]:
+        elif position == -1 and trix[i] > 0:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -93,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_12hVolumeSpike_ChopRegime"
+timeframe = "4h"
 leverage = 1.0
