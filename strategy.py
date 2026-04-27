@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Elder Ray with 1d trend filter and volume confirmation.
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# Long when Bull Power > 0 and rising, Bear Power < 0, with volume > 1.5x average and 1d close > EMA50.
-# Short when Bear Power < 0 and falling, Bull Power < 0, with volume > 1.5x average and 1d close < EMA50.
-# Exit when power signals reverse or volume drops below average.
-# Designed for ~20-30 trades/year with strong trend and volume filters to avoid whipsaws.
+# Hypothesis: 6h Donchian channel breakout with weekly trend filter and volume confirmation.
+# Uses Donchian(20) on 6h for breakout signals, filtered by weekly trend (price above/below weekly SMA20).
+# Volume must be above 1.5x average to confirm breakout strength.
+# Designed for low-frequency, high-conviction trades (~15-25/year) to minimize fee drag.
+# Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,46 +19,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Elder Ray calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA13 for Elder Ray on 1d data
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate weekly SMA20 for trend filter
+    sma20_1w = np.full_like(close_1w, np.nan)
+    for i in range(19, len(close_1w)):
+        sma20_1w[i] = np.mean(close_1w[i-19:i+1])
     
-    # Calculate Elder Ray components on 1d data
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # Calculate Donchian channels (20-period) on 6h data
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d indicators to 12h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume filter: volume > 1.5x 20-period average (20*12h = 10 days)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
+    # Align weekly SMA20 to 6h timeframe
+    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 20-period volume MA and EMA13
-    start_idx = max(20, 13)
+    # Start after warmup period
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(sma20_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -70,37 +67,35 @@ def generate_signals(prices):
         # Volume filter
         vol_filter = vol_now > 1.5 * vol_avg
         
-        # Elder Ray signals
-        bull_power = bull_power_aligned[i]
-        bear_power = bear_power_aligned[i]
+        # Donchian breakout conditions
+        breakout_up = price > highest_high[i]
+        breakdown_down = price < lowest_low[i]
         
-        # Trend filter from 1d EMA50
-        bullish_trend = price > ema50_aligned[i]
-        bearish_trend = price < ema50_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = price > sma20_1w_aligned[i]
+        weekly_downtrend = price < sma20_1w_aligned[i]
         
         if position == 0:
-            # Long: Bull Power positive and rising, Bear Power negative, with volume and bullish trend
-            if bull_power > 0 and i > start_idx and bull_power > bull_power_aligned[i-1] and \
-               bear_power < 0 and vol_filter and bullish_trend:
+            # Long: upward breakout with volume and weekly uptrend
+            if breakout_up and vol_filter and weekly_uptrend:
                 signals[i] = size
                 position = 1
-            # Short: Bear Power negative and falling, Bull Power negative, with volume and bearish trend
-            elif bear_power < 0 and i > start_idx and bear_power < bear_power_aligned[i-1] and \
-                 bull_power < 0 and vol_filter and bearish_trend:
+            # Short: downward breakdown with volume and weekly downtrend
+            elif breakdown_down and vol_filter and weekly_downtrend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bull Power turns negative or Bear Power turns positive or volume drops
-            if bull_power <= 0 or bear_power >= 0 or vol_now <= vol_avg:
+            # Exit long: price crosses below weekly SMA20 or breakdown occurs
+            if price < sma20_1w_aligned[i] or breakdown_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Bear Power turns positive or Bull Power turns negative or volume drops
-            if bear_power >= 0 or bull_power <= 0 or vol_now <= vol_avg:
+            # Exit short: price crosses above weekly SMA20 or breakout occurs
+            if price > sma20_1w_aligned[i] or breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ElderRay_Volume_1dTrend"
-timeframe = "12h"
+name = "6h_Donchian_Breakout_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
