@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,84 +13,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations (called ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1-day Exponential Moving Average (34-period) for trend
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        multiplier = 2 / (34 + 1)
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * multiplier) + (ema_34_1d[i-1] * (1 - multiplier))
+    # Calculate weekly EMA(20) for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        multiplier = 2 / (20 + 1)
+        ema_20_1w[19] = np.mean(close_1w[:20])
+        for i in range(20, len(close_1w)):
+            ema_20_1w[i] = (close_1w[i] * multiplier) + (ema_20_1w[i-1] * (1 - multiplier))
     
-    # Calculate 1-day Bollinger Bands (20, 2.0)
-    sma_20_1d = np.full(len(close_1d), np.nan)
-    std_20_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        for i in range(19, len(close_1d)):
-            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
-            std_20_1d[i] = np.std(close_1d[i-19:i+1])
+    # Align weekly EMA to daily
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    # Calculate daily ATR(14) for volatility filter
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Align 1d indicators to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    atr = np.full(n, np.nan)
+    if n >= 14:
+        atr[13] = np.mean(tr[:14])
+        for i in range(14, n):
+            atr[i] = (tr[i] * 0.1) + (atr[i-1] * 0.9)  # Wilder's smoothing
     
-    # Calculate 6-period volume average for spike detection
-    vol_ma = np.full(n, np.nan)
-    vol_period = 6
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    # Calculate daily Donchian Channel(20)
+    upper_dc = np.full(n, np.nan)
+    lower_dc = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            upper_dc[i] = np.max(high[i-19:i+1])
+            lower_dc[i] = np.min(low[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
     # Warmup period
-    start_idx = max(34, vol_period) + 5
+    start_idx = max(20, 14) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(upper_bb_1d_aligned[i]) or 
-            np.isnan(lower_bb_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(upper_dc[i]) or 
+            np.isnan(lower_dc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        
-        # Volume spike filter: at least 1.5x average volume
-        vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price above EMA34 and breaks above upper Bollinger Band with volume
-            if price > ema_34_1d_aligned[i] and price > upper_bb_1d_aligned[i] and vol_filter:
+            # Long: Price above weekly EMA and breaks above upper Donchian with low volatility
+            if price > ema_20_1w_aligned[i] and price > upper_dc[i] and atr[i] < np.nanmedian(atr[max(0,i-20):i]):
                 signals[i] = size
                 position = 1
-            # Short: Price below EMA34 and breaks below lower Bollinger Band with volume
-            elif price < ema_34_1d_aligned[i] and price < lower_bb_1d_aligned[i] and vol_filter:
+            # Short: Price below weekly EMA and breaks below lower Donchian with low volatility
+            elif price < ema_20_1w_aligned[i] and price < lower_dc[i] and atr[i] < np.nanmedian(atr[max(0,i-20):i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below EMA34 or volatility spike (potential reversal)
-            if price < ema_34_1d_aligned[i] or (vol_ratio > 2.5):
+            # Long exit: Price crosses below weekly EMA or breaks below lower Donchian
+            if price < ema_20_1w_aligned[i] or price < lower_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses above EMA34 or volatility spike (potential reversal)
-            if price > ema_34_1d_aligned[i] or (vol_ratio > 2.5):
+            # Short exit: Price crosses above weekly EMA or breaks above upper Donchian
+            if price > ema_20_1w_aligned[i] or price > upper_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_BB20_Volume"
-timeframe = "4h"
+name = "1d_WeeklyEMA20_Donchian20_LowVol"
+timeframe = "1d"
 leverage = 1.0
