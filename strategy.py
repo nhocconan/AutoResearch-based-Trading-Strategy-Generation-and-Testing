@@ -3,11 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and volume confirmation
-# Uses 4h trend (EMA50) for direction, 1h for entry timing with volume surge
-# Session filter (08-20 UTC) reduces noise. Target 15-30 trades/year.
-# Works in bull (follows trend) and bear (avoids counter-trend trades)
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -18,72 +13,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get daily data for trend filter and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 4h close
-    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate EMA34 on daily close using pandas EWMA with min_periods
+    ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Volume filter: current volume > 2.0x 20-period average
+    # Calculate 14-period ATR using Wilder's smoothing equivalent
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                               np.abs(low_1d[1:] - close_1d[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr_1d = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr_1d[i] = np.mean(tr[1:15])
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    
+    # Align daily indicators to 12h
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Volume filter: current volume > 1.5x 24-period average
     vol_ma = np.full(n, np.nan)
-    vol_period = 20
+    vol_period = 24
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Warmup: need EMA and volume MA
-    start_idx = max(50, vol_period) + 5
+    # Warmup: need EMA, ATR, and volume MA
+    start_idx = max(34, 14, vol_period) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_4h_aligned[i]) or 
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter
-        hour = hours[i]
-        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        atr = atr_1d_aligned[i]
         
         if position == 0:
-            # Long: Price above 4h EMA50 with volume surge
-            if (price > ema_4h_aligned[i] and 
-                vol_ratio > 2.0):
+            # Long: Price above daily EMA34 with volume confirmation
+            if (price > ema_1d_aligned[i] and 
+                vol_ratio > 1.5):
                 signals[i] = size
                 position = 1
-            # Short: Price below 4h EMA50 with volume surge
-            elif (price < ema_4h_aligned[i] and 
-                  vol_ratio > 2.0):
+            # Short: Price below daily EMA34 with volume confirmation
+            elif (price < ema_1d_aligned[i] and 
+                  vol_ratio > 1.5):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below 4h EMA50
-            if price < ema_4h_aligned[i]:
+            # Long exit: Price closes below daily EMA34 or ATR-based stop
+            if (price < ema_1d_aligned[i] or 
+                price < close[i-1] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above 4h EMA50
-            if price > ema_4h_aligned[i]:
+            # Short exit: Price closes above daily EMA34 or ATR-based stop
+            if (price > ema_1d_aligned[i] or 
+                price > close[i-1] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMA50_Trend_Volume_Surge"
-timeframe = "1h"
+name = "12h_EMA34_Volume_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
