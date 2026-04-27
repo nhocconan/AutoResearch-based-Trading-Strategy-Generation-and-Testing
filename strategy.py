@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,102 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR calculation
+    # Get daily data for ATR and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for volatility measurement
+    # Calculate daily ATR(14)
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    atr_1d = np.full(len(close_1d), np.nan)
+    atr_1d = np.full(len(tr_1d), np.nan)
     for i in range(14, len(tr_1d)):
-        atr_1d[i] = np.mean(tr_1d[i-13:i+1])
+        atr_1d[i] = np.mean(tr_1d[i-14:i])
     
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1d SMA(50) for trend filter
-    sma_1d_50 = np.full(len(close_1d), np.nan)
-    for i in range(50, len(close_1d)):
-        sma_1d_50[i] = np.mean(close_1d[i-50:i])
+    # Calculate daily EMA(50) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_1d_50 = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    sma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
+    # Calculate 60-period ATR for volatility filter (on 6h data)
+    tr6h_1 = high[1:] - low[1:]
+    tr6h_2 = np.abs(high[1:] - close[:-1])
+    tr6h_3 = np.abs(low[1:] - close[:-1])
+    tr_6h = np.concatenate([[high[0] - low[0]], np.maximum(tr6h_1, np.maximum(tr6h_2, tr6h_3))])
     
-    # Calculate 4h Donchian(20) breakout levels
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    atr_60 = np.full(n, np.nan)
+    for i in range(60, n):
+        atr_60[i] = np.mean(tr_6h[i-60:i])
     
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Calculate volume average (20-period)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
+    # Calculate Bollinger Bands (20, 2.0) on 6h close
+    close_series = pd.Series(close)
+    bb_mid = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2.0 * bb_std
+    bb_lower = bb_mid - 2.0 * bb_std
     
     signals = np.zeros(n)
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(20, 50)  # Donchian needs 20, SMA needs 50
+    start_idx = max(60, 50)  # ATR60 needs 60, EMA50 needs 50
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(sma_1d_50_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_1d_aligned[i]) or
+            np.isnan(ema_1d_50_aligned[i]) or
+            np.isnan(atr_60[i]) or
+            np.isnan(bb_upper[i]) or
+            np.isnan(bb_lower[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
+        vol_factor = atr_60[i] / atr_1d_aligned[i] if atr_1d_aligned[i] > 0 else 0
         
-        # Volume confirmation: > 1.5x average volume
-        volume_confirmation = vol_ratio > 1.5
-        
-        # Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        volatility_filter = atr_1d_aligned[i] > (price * 0.005)
+        # Volatility filter: trade only when 6h ATR is between 0.5x and 2.0x daily ATR
+        vol_filter = (vol_factor > 0.5) and (vol_factor < 2.0)
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume, volatility filter, and price above SMA
-            if (volume_confirmation and 
-                volatility_filter and
-                price > donchian_high[i] and 
-                close[i-1] <= donchian_high[i] and  # just broke out
-                price > sma_1d_50_aligned[i]):      # above long-term trend
+            # Long: price touches lower BB with low volatility and uptrend
+            if (vol_filter and 
+                price <= bb_lower[i] and 
+                close[i-1] > bb_lower[i] and  # just touched
+                close[i] > ema_1d_50_aligned[i]):  # above daily EMA50 (uptrend)
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume, volatility filter, and price below SMA
-            elif (volume_confirmation and 
-                  volatility_filter and
-                  price < donchian_low[i] and 
-                  close[i-1] >= donchian_low[i] and  # just broke down
-                  price < sma_1d_50_aligned[i]):     # below long-term trend
+            # Short: price touches upper BB with low volatility and downtrend
+            elif (vol_filter and 
+                  price >= bb_upper[i] and 
+                  close[i-1] < bb_upper[i] and  # just touched
+                  close[i] < ema_1d_50_aligned[i]):  # below daily EMA50 (downtrend)
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Donchian low or volatility drops
-            if (price < donchian_low[i] or 
-                not volatility_filter):
+            # Long exit: price reaches middle BB or volatility expands too much
+            if (price >= bb_mid[i] or 
+                vol_factor > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price breaks above Donchian high or volatility drops
-            if (price > donchian_high[i] or 
-                not volatility_filter):
+            # Short exit: price reaches middle BB or volatility expands too much
+            if (price <= bb_mid[i] or 
+                vol_factor > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_VolumeVolatility_SMA50Trend_v1"
-timeframe = "4h"
+name = "6h_BollingerBands_ATRVolatilityFilter_DailyEMA50"
+timeframe = "6h"
 leverage = 1.0
