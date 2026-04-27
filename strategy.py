@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-day ATR with proper smoothing
+    # Calculate 14-day ATR
     tr = np.zeros(len(high_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(high_1d)):
@@ -57,57 +57,55 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align ATR and RSI to 12h timeframe
+    # Align ATR and RSI to 4h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate 12h EMA50 for trend filter
+    # Calculate 4-hour EMA50 for trend filter
     ema_period = 50
-    ema_12h = np.full(n, np.nan)
+    ema_4h = np.full(n, np.nan)
     if n >= ema_period:
-        ema_12h[ema_period - 1] = np.mean(close[:ema_period])
+        ema_4h[ema_period - 1] = np.mean(close[:ema_period])
         for i in range(ema_period, n):
-            ema_12h[i] = (close[i] * (2 / (ema_period + 1)) + 
-                         ema_12h[i-1] * (1 - (2 / (ema_period + 1))))
+            ema_4h[i] = (close[i] * (2 / (ema_period + 1)) + 
+                         ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate 12h volume SMA for volume filter
-    vol_sma_period = 20
-    vol_sma = np.full(n, np.nan)
-    if n >= vol_sma_period:
-        vol_sma[vol_sma_period - 1] = np.mean(volume[:vol_sma_period])
-        for i in range(vol_sma_period, n):
-            vol_sma[i] = (volume[i] + vol_sma[i-1] * (vol_sma_period - 1)) / vol_sma_period
+    # Calculate 4-hour volume average for volume confirmation
+    vol_avg = np.full(n, np.nan)
+    if n >= 20:
+        vol_avg[19] = np.mean(volume[:20])
+        for i in range(20, n):
+            vol_avg[i] = (volume[i] * (2 / (20 + 1)) + 
+                          vol_avg[i-1] * (1 - (2 / (20 + 1))))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ATR, RSI, EMA, and volume SMA
-    start_idx = max(14, ema_period - 1, vol_sma_period - 1)
+    # Warmup: need ATR, RSI, EMA, and volume average
+    start_idx = max(14, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema_12h[i]) or np.isnan(vol_sma[i])):
+            np.isnan(ema_4h[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         atr = atr_1d_aligned[i]
         rsi = rsi_1d_aligned[i]
-        ema_trend = ema_12h[i]
-        vol_avg = vol_sma[i]
-        
-        # Volume filter: require volume above average
-        vol_filter = volume[i] > vol_avg * 1.5
+        ema_trend = ema_4h[i]
+        vol_current = volume[i]
+        vol_ma = vol_avg[i]
         
         if position == 0:
             # Long: Oversold RSI with price above EMA in uptrend and volume confirmation
-            if (rsi < 30 and price > ema_trend and vol_filter):
+            if (rsi < 30 and price > ema_trend and vol_current > vol_ma):
                 signals[i] = size
                 position = 1
             # Short: Overbought RSI with price below EMA in downtrend and volume confirmation
-            elif (rsi > 70 and price < ema_trend and vol_filter):
+            elif (rsi > 70 and price < ema_trend and vol_current > vol_ma):
                 signals[i] = -size
                 position = -1
             else:
@@ -129,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_RSI_MeanReversion_1D_ATR_RSI_EMA50_VolumeFilter"
-timeframe = "12h"
+name = "4H_RSI_MeanReversion_1D_ATR_RSI_EMA50_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
