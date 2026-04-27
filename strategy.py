@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -38,14 +38,14 @@ def generate_signals(prices):
     upper_bb_1d = sma_20_1d + (2 * std_20_1d)
     lower_bb_1d = sma_20_1d - (2 * std_20_1d)
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 1d timeframe (since we're using 1d primary)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
     lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # Calculate 6-period volume average for spike detection
+    # Calculate 20-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 6
+    vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_BB20_Volume"
-timeframe = "4h"
+name = "1d_EMA34_BB20_Volume"
+timeframe = "1d"
 leverage = 1.0
