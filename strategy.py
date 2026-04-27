@@ -3,14 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Bollinger Band mean reversion on 1d timeframe with volume confirmation.
-# In ranging markets (common in 2025-2026 BTC/ETH), price tends to revert to the mean after touching
-# weekly Bollinger Bands. Volume spike confirms the reversal. Works in both bull and bear markets
-# as it's a mean-reversion strategy, not trend-following. Target: 50-80 trades over 4 years.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,24 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands (20-week, 2 std)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter (EMA50) and daily structure
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate Bollinger Bands on weekly data
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2.0 * std_20
-    lower_band = sma_20 - 2.0 * std_20
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align weekly Bollinger Bands to daily timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
+    # Get 1d data for daily range calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Volume filter: volume > 1.5x 20-day average
+    # Daily range for position sizing (volatility normalized)
+    daily_range = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        daily_range[i] = high_1d[i] - low_1d[i]
+    
+    # 20-period average daily range
+    avg_daily_range = np.full(len(df_1d), np.nan)
+    for i in range(19, len(df_1d)):
+        avg_daily_range[i] = np.mean(daily_range[i-19:i+1])
+    
+    avg_daily_range_aligned = align_htf_to_ltf(prices, df_1d, avg_daily_range)
+    
+    # Get 6h data for price structure (Support/Resistance from daily range)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 10:
+        return np.zeros(n)
+    
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    
+    # Volume filter: volume > 1.5x 20-period average (6h)
     vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -44,48 +55,57 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 20-week BB + 20-day volume MA
-    start_idx = max(20, 20)
+    # Warmup: need 1d EMA (50), 1d avg range (20), volume MA (20)
+    start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(sma_20_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_daily_range_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
+        ema_trend_1d = ema_50_1d_aligned[i]
+        avg_range = avg_daily_range_aligned[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
-        upper = upper_band_aligned[i]
-        lower = lower_band_aligned[i]
-        middle = sma_20_aligned[i]
         
         # Volume filter: volume > 1.5x average
         vol_filter = vol_now > 1.5 * vol_avg
         
+        # Trend filter: price relative to daily EMA50
+        bullish_trend = price > ema_trend_1d
+        bearish_trend = price < ema_trend_1d
+        
+        # Dynamic support/resistance based on daily range
+        # Support: EMA50 - 0.5 * avg_daily_range
+        # Resistance: EMA50 + 0.5 * avg_daily_range
+        support_level = ema_trend_1d - 0.5 * avg_range
+        resistance_level = ema_trend_1d + 0.5 * avg_range
+        
         if position == 0:
-            # Long: price touches or goes below lower band + volume spike → expect reversion to mean
-            if price <= lower and vol_filter:
+            # Long: price breaks above resistance + bullish trend + volume spike
+            if price > resistance_level and bullish_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price touches or goes above upper band + volume spike → expect reversion to mean
-            elif price >= upper and vol_filter:
+            # Short: price breaks below support + bearish trend + volume spike
+            elif price < support_level and bearish_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle (SMA) or touches upper band
-            if price >= middle or price >= upper:
+            # Exit long: price returns to EMA50 (mean reversion) or trend turns bearish
+            if price <= ema_trend_1d or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to middle (SMA) or touches lower band
-            if price <= middle or price <= lower:
+            # Exit short: price returns to EMA50 (mean reversion) or trend turns bullish
+            if price >= ema_trend_1d or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Bollinger_MeanReversion_Volume"
-timeframe = "1d"
+name = "6h_Dynamic_SR_EMA50_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
