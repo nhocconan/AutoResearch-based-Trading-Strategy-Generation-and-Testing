@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_Volume_Regime_CombinedFilter
-Hypothesis: 4h strategy using Donchian(20) breakout with volume confirmation and choppiness regime filter. 
-In trending markets (CHOP < 38.2), trade breakouts in direction of trend. 
-In ranging markets (CHOP > 61.8), fade breakouts at extremes. 
-Volume spike confirms institutional participation. 
-Designed for BTC/ETH robustness via regime adaptation. 
-Target 75-200 trades over 4 years (19-50/year) with position size 0.25.
-Uses discrete levels to minimize fee drag.
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike
+Hypothesis: 1h strategy using Camarilla R1/S1 breakouts with 4h EMA20 trend filter and volume confirmation. R1/S1 levels provide tighter entries than R3/S3, while 4h EMA20 filters for intermediate-term trend alignment. Volume spike confirms institutional participation. Designed for BTC/ETH robustness via trend filter and session restriction (08-20 UTC). Targets 60-150 total trades over 4 years (15-37/year) with 0.20 position size. Uses discrete levels to minimize fee drag.
 """
 
 import numpy as np
@@ -24,26 +18,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for choppiness regime filter
-    df_12h = get_htf_data(prices, '12h')
-    # Calculate choppiness index: CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
-    # Simplified: CHOP = 100 * log10(ATR_sum / (max_high - min_low)) / log10(period)
-    # We'll use a proxy: CHOP = 100 * (ATR(14) / (HHV(14) - LLV(14))) normalized
-    # For simplicity, use: CHOP = 100 * (ATR(14) / (max(high) - min(low) over 12h)) 
-    # But we need rolling. Instead, use standard formula approximation:
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
-    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr14 = tr.rolling(window=14, min_periods=14).mean().values
-    hh14 = df_12h['high'].rolling(window=14, min_periods=14).max().values
-    ll14 = df_12h['low'].rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr14 * 14 / (hh14 - ll14 + 1e-10)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop.values)
+    # Precompute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Donchian channels (20-period)
-    donch_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 4h data for EMA20 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema_20 = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20)
+    
+    # Get 4h data for Camarilla R1/S1 levels (from previous completed 4h bar)
+    prev_high = df_4h['high'].shift(1).values
+    prev_low = df_4h['low'].shift(1).values
+    prev_close = df_4h['close'].shift(1).values
+    rng = prev_high - prev_low
+    r1 = prev_close + (rng * 1.0833)  # R1 level
+    s1 = prev_close - (rng * 1.0833)  # S1 level
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,45 +43,33 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Fixed position size to minimize churn
+    size = 0.20   # Fixed position size to minimize churn
     
-    # Warmup: need Donchian(20), vol avg(20), 12h CHOP(14) -> max(20,20,14+12*? but aligned)
-    start_idx = 20  # Donchian and vol need 20
+    # Warmup: need 4h EMA20 (20), 4h shift(1) for Camarilla, vol avg (20)
+    start_idx = max(20 + 1, 1 + 1, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(donch_h[i]) or np.isnan(donch_l[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(volume_confirm[i])):
+        # Skip if outside session or any data not ready
+        if not in_session[i] or \
+           (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper = donch_h[i]
-        lower = donch_l[i]
-        chop_val = chop_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_val = ema_20_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Determine regime
-            if chop_val < 38.2:  # Trending regime
-                # Trade breakouts in direction of momentum (use price action)
-                # Simple momentum: close > open for bullish bias
-                momentum_bias = 1 if close[i] > prices['open'].iloc[i] else -1
-                long_condition = (close_val > upper and 
-                                momentum_bias > 0 and 
-                                vol_conf)
-                short_condition = (close_val < lower and 
-                                 momentum_bias < 0 and 
-                                 vol_conf)
-            elif chop_val > 61.8:  # Ranging regime
-                # Fade breakouts at extremes (mean reversion)
-                long_condition = (close_val < lower and  # Oversold bounce
-                                vol_conf)
-                short_condition = (close_val > upper and   # Overbought rejection
-                                 vol_conf)
-            else:  # Choppy regime (38.2-61.8) - no clear edge
-                long_condition = False
-                short_condition = False
+            # Look for entry: Camarilla R1/S1 breakout with 4h EMA20 alignment and volume confirmation
+            long_condition = (close_val > r1_val and 
+                            close_val > ema_val and 
+                            vol_conf)
+            short_condition = (close_val < s1_val and 
+                             close_val < ema_val and 
+                             vol_conf)
             
             if long_condition:
                 signals[i] = size
@@ -98,17 +78,15 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price retreats to midpoint or opposite band touch
-            midpoint = (upper + lower) / 2
-            if close_val < midpoint:
+            # Exit long: price crosses below 4h EMA20 (trend reversal)
+            if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price rises to midpoint or opposite band touch
-            midpoint = (upper + lower) / 2
-            if close_val > midpoint:
+            # Exit short: price crosses above 4h EMA20 (trend reversal)
+            if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_Volume_Regime_CombinedFilter"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
