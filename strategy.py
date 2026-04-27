@@ -13,25 +13,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for higher timeframe context (weekly trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 1d EMA 34 for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA 20 for trend direction
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 6-hour Donchian channels (20-period for structure)
+    # Daily Donchian channels (20-period for structure)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 24-period average (strong filter to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: volume > 1.5x 20-period average (strong filter to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
@@ -42,19 +42,19 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_20_1w_aligned[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        price_above_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_ema = close[i] < ema_20_1w_aligned[i]
         
-        # Long conditions: price breaks above upper Donchian + above 1d EMA + volume
+        # Long conditions: price breaks above upper Donchian + above weekly EMA + volume
         long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_filter[i])
-        # Short conditions: price breaks below lower Donchian + below 1d EMA + volume
+        # Short conditions: price breaks below lower Donchian + below weekly EMA + volume
         short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_filter[i])
         
         if long_breakout:
@@ -81,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dEMA34_VolumeFilter"
-timeframe = "6h"
+name = "1d_Donchian20_Breakout_1wEMA20_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
