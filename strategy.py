@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels (high, low, close of previous day)
+    # Get daily data for Camarilla pivot levels (H, L, C of previous day)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -23,30 +23,20 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for each day using previous day's HLC
-    # R4 = C + ((H-L)*1.1/2)
-    # R3 = C + ((H-L)*1.1/4)
-    # S3 = C - ((H-L)*1.1/4)
-    # S4 = C - ((H-L)*1.1/2)
-    camarilla_r4 = np.zeros(len(df_1d))
     camarilla_r3 = np.zeros(len(df_1d))
     camarilla_s3 = np.zeros(len(df_1d))
-    camarilla_s4 = np.zeros(len(df_1d))
     
     for i in range(1, len(df_1d)):
         h = high_1d[i-1]
         l = low_1d[i-1]
         c = close_1d[i-1]
         range_hl = h - l
-        camarilla_r4[i] = c + (range_hl * 1.1 / 2)
         camarilla_r3[i] = c + (range_hl * 1.1 / 4)
         camarilla_s3[i] = c - (range_hl * 1.1 / 4)
-        camarilla_s4[i] = c - (range_hl * 1.1 / 2)
     
     # Align Camarilla levels to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Get weekly trend filter: EMA(34) on weekly close
     df_1w = get_htf_data(prices, '1w')
