@@ -36,16 +36,16 @@ def generate_signals(prices):
     r4 = pivot + range_ * 1.5
     s4 = pivot - range_ * 1.5
     
-    # Align levels to 12h timeframe
+    # Align levels to 4h timeframe
     ema34_aligned = ema34_1d_aligned
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 1.8 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average (tighter filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.8)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_R4S4_FadeBreakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_R4S4_FadeBreakout_1dEMA34_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
