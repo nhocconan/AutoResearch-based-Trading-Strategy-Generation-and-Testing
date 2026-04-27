@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_VORTEX_Breakout_1dTrend_Volume
-Hypothesis: Vortex indicator identifies trend direction on 12h timeframe. Combining with 1d trend filter and volume spikes captures strong trends while avoiding whipsaws. Works in bull markets via long breakouts and bear markets via short breakdowns. Targets ~20-30 trades/year on 12h to minimize fee drag.
+12h_Camarilla_P1_P2_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels P1 (H5) and P2 (H6) from daily data act as strong resistance/support. Price breaking above P1 with 1d EMA34 uptrend and volume spike captures bullish moves; breaking below P2 with 1d EMA34 downtrend and volume spike captures bearish moves. Works in bull via P1 breakouts and bear via P2 breakdowns. Targets 15-25 trades/year on 12h to minimize fee drag.
 """
 
 import numpy as np
@@ -18,94 +18,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate Camarilla pivot levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla: H5 = C + (H-L)*1.1/2, H6 = C + (H-L)*1.1
+    # These are the outer resistance/support levels (P1 and P2 in some naming)
+    camarilla_range = (high_1d - low_1d) * 1.1
+    p1_1d = close_1d + camarilla_range * 0.5  # H5 level
+    p2_1d = close_1d + camarilla_range        # H6 level
+    
+    # Align P1/P2 to 12h timeframe (use previous day's levels)
+    p1_1d_aligned = align_htf_to_ltf(prices, df_1d, p1_1d)
+    p2_1d_aligned = align_htf_to_ltf(prices, df_1d, p2_1d)
+    
+    # Get 1d data for trend filter (EMA34)
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Vortex indicator on 12h data
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with original indices
-    
-    # Vortex Indicator
-    vm_plus = np.abs(high_12h[1:] - low_12h[:-1])
-    vm_minus = np.abs(low_12h[1:] - high_12h[:-1])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
-    
-    # Sum over 34 periods
-    sum_tr = pd.Series(tr).rolling(window=34, min_periods=34).sum().values
-    sum_vm_plus = pd.Series(vm_plus).rolling(window=34, min_periods=34).sum().values
-    sum_vm_minus = pd.Series(vm_minus).rolling(window=34, min_periods=34).sum().values
-    
-    vi_plus = sum_vm_plus / sum_tr
-    vi_minus = sum_vm_minus / sum_tr
-    
-    # Align Vortex to 12h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_12h, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_12h, vi_minus)
-    
-    # Volume confirmation: volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 2.0 * 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Vortex and volume MA
-    start_idx = max(34, 20)
+    # Warmup: need enough data for EMA and volume MA
+    start_idx = max(34, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
+        if (np.isnan(p1_1d_aligned[i]) or np.isnan(p2_1d_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vi_plus_val = vi_plus_aligned[i]
-        vi_minus_val = vi_minus_aligned[i]
+        p1 = p1_1d_aligned[i]
+        p2 = p2_1d_aligned[i]
         ema_trend = ema34_1d_aligned[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: VI+ > VI- (uptrend) with 1d uptrend and volume spike
-            if vi_plus_val > vi_minus_val and close[i] > ema_trend and vol_spike_val:
+            # Long: price breaks above P1 with uptrend and volume spike
+            if close[i] > p1 and vol_spike_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: VI- > VI+ (downtrend) with 1d downtrend and volume spike
-            elif vi_minus_val > vi_plus_val and close[i] < ema_trend and vol_spike_val:
+            # Short: price breaks below P2 with downtrend and volume spike
+            elif close[i] < p2 and vol_spike_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: trend weakens or price breaks below 1d EMA
-            if vi_plus_val <= vi_minus_val or close[i] < ema_trend:
+            # Exit long: price falls below P2 or trend turns down
+            if close[i] < p2 or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: trend weakens or price breaks above 1d EMA
-            if vi_minus_val <= vi_plus_val or close[i] > ema_trend:
+            # Exit short: price rises above P1 or trend turns up
+            if close[i] > p1 or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VORTEX_Breakout_1dTrend_Volume"
+name = "12h_Camarilla_P1_P2_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
