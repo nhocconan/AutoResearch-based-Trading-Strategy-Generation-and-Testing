@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-#100858 - 1d_Donchian20_Breakout_1wTrend_VolumeSpike
-Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume spike. Targets 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
-Uses 1d primary timeframe with 1w HTF for trend filter. Works in bull (breakouts with trend) and bear (mean reversion via opposite breakout).
+#100860 - 4h_Donchian20_Breakout_1dTrend_Volume
+Hypothesis: Donchian(20) breakout with 1d trend filter and volume confirmation.
+Works in bull (breakouts with trend) and bear (reversals against trend via mean reversion to 20-bar mean).
+Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -19,23 +20,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    close_1d = df_1d['close'].values
     
-    # Calculate daily Donchian channels (20-period)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Donchian channels (20-period)
     high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.8x 20-period average
+    # 20-period mean for mean reversion exit
+    close_mean = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    
+    # Volume filter: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -45,41 +50,42 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(close_mean[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above Donchian high, above weekly EMA50, volume spike
+        # Long condition: price breaks above Donchian high, above 1d EMA50, volume spike
         if (close[i] > high_max[i] and 
-            close[i] > ema50_1w_aligned[i] and 
+            close[i] > ema50_1d_aligned[i] and 
             volume_filter[i]):
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below Donchian low, below weekly EMA50, volume spike
+        # Short condition: price breaks below Donchian low, below 1d EMA50, volume spike
         elif (close[i] < low_min[i] and 
-              close[i] < ema50_1w_aligned[i] and 
+              close[i] < ema50_1d_aligned[i] and 
               volume_filter[i]):
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to opposite Donchian level (mean reversion)
-        elif position == 1 and close[i] < low_min[i]:
+        # Exit conditions: price returns to 20-period mean (mean reversion)
+        elif position == 1 and close[i] < close_mean[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > high_max[i]:
+        elif position == -1 and close[i] > close_mean[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
