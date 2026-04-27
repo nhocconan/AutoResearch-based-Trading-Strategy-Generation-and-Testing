@@ -1,3 +1,15 @@
+# 2025-06-23 09:45:00 UTC
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Uses 4h Donchian channels (20-period) for breakout signals
+# Trend filter: 1d EMA 34 to align with longer-term trend
+# Volume filter: >1.5x 20-period volume average to confirm momentum
+# Designed to work in both bull and bear markets by using trend-following with proper risk controls
+# Entry: Breakout above 4h Donchian high + above 1d EMA + volume confirmation (long)
+# Entry: Breakout below 4h Donchian low + below 1d EMA + volume confirmation (short)
+# Exit: Opposite 4h Donchian breakout (trailing stop via structure)
+# Position sizing: 0.25 (25% of capital) to balance risk and return
+# Target: 20-50 trades/year to minimize fee drag while capturing significant moves
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -47,12 +59,6 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
-    # Trend strength filter: avoid weak trends
-    ema_8_1h = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    trend_strength = np.abs(ema_8_1h - ema_21_1h) / (ema_21_1h + 1e-10)
-    trend_filter = trend_strength > np.percentile(trend_strength[~np.isnan(trend_strength)], 30)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -66,8 +72,7 @@ def generate_signals(prices):
             np.isnan(vol_ma[i]) or 
             np.isnan(highest_high_4h_aligned[i]) or 
             np.isnan(lowest_low_4h_aligned[i]) or 
-            np.isnan(volume_filter[i]) or
-            np.isnan(trend_filter[i])):
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
@@ -78,19 +83,17 @@ def generate_signals(prices):
         # Volatility filter: only trade when ATR is above average (avoid choppy markets)
         vol_filter = atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[max(0, i-50):i+1])
         
-        # Long conditions: price breaks above 4h Donchian high + above 1d EMA + volume + volatility + trend
+        # Long conditions: price breaks above 4h Donchian high + above 1d EMA + volume + volatility
         long_breakout = (close[i] > highest_high_4h_aligned[i-1] and 
                         price_above_ema and 
                         volume_filter[i] and 
-                        vol_filter and
-                        trend_filter[i])
+                        vol_filter)
         
-        # Short conditions: price breaks below 4h Donchian low + below 1d EMA + volume + volatility + trend
+        # Short conditions: price breaks below 4h Donchian low + below 1d EMA + volume + volatility
         short_breakout = (close[i] < lowest_low_4h_aligned[i-1] and 
                          price_below_ema and 
                          volume_filter[i] and 
-                         vol_filter and
-                         trend_filter[i])
+                         vol_filter)
         
         if long_breakout:
             signals[i] = 0.25
@@ -116,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_ATRVolTrendFilter"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
