@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -37,7 +37,7 @@ def generate_signals(prices):
         else:
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align daily indicators to 6h
+    # Align daily indicators to 4h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_Volume_Trend_Filter"
-timeframe = "6h"
+name = "4h_EMA34_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
