@@ -1,20 +1,12 @@
-# State the hypothesis and strategy
-# Hypothesis: A 12-hour strategy using the Williams Alligator (SMMA-based) to identify trends and trigger entries on price breaks of the Alligator's teeth (middle line) with volume confirmation. The Alligator acts as a trend filter and dynamic support/resistance. Works in bull markets by catching trends and in bear markets by avoiding false signals via the Alligator's sleep/awake phases. Targets 15-25 trades/year to minimize fee drag.
+#!/usr/bin/env python3
+"""
+1h_Chaikin_Money_Flow_4hTrend_Signal
+Hypothesis: Uses 4h Chaikin Money Flow (CMF) as a trend filter (long when CMF>0, short when CMF<0) and enters on 1h pullbacks to the 21-period EMA with volume confirmation. Targets 15-35 trades/year by combining trend alignment with precise entry timing, reducing false signals in ranging markets. Designed to work in both bull (trend-following pullsbacks) and bear (shorting bounces) regimes.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def smma(arr, period):
-    """Smoothed Moving Average (SMMA) - used in Williams Alligator"""
-    result = np.full_like(arr, np.nan, dtype=float)
-    if len(arr) < period:
-        return result
-    # First value is simple average
-    result[period-1] = np.mean(arr[:period])
-    for i in range(period, len(arr)):
-        result[i] = (result[i-1] * (period-1) + arr[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,75 +18,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams Alligator (13,8,5 periods)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # Get 4h data for trend filter (CMF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # Williams Alligator lines: Jaw (13), Teeth (8), Lips (5) - all SMMA
-    close_1d = df_1d['close'].values
-    jaw = smma(close_1d, 13)   # Blue line
-    teeth = smma(close_1d, 8)  # Red line
-    lips = smma(close_1d, 5)   # Green line
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Align to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Chaikin Money Flow (21-period)
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Money Flow Volume = Money Flow Multiplier * Volume
+    # CMF = SUM(Money Flow Volume, 21) / SUM(Volume, 21)
+    hl_range = high_4h - low_4h
+    # Avoid division by zero
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
+    mfm = ((close_4h - low_4h) - (high_4h - close_4h)) / hl_range
+    mfv = mfm * volume_4h
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Sum over 21 periods
+    mfv_sum = pd.Series(mfv).rolling(window=21, min_periods=21).sum().values
+    vol_sum = pd.Series(volume_4h).rolling(window=21, min_periods=21).sum().values
+    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0)
+    
+    # Align CMF to 1h timeframe
+    cmf_aligned = align_htf_to_ltf(prices, df_4h, cmf)
+    
+    # 1h EMA21 for pullback entries
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # 1h volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need enough data for Alligator (13 period) and volume MA
-    start_idx = max(13, 20)
+    # Warmup: need enough data for CMF, EMA21, volume MA
+    start_idx = max(21, 21, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i])):
+        # Skip if CMF not ready
+        if np.isnan(cmf_aligned[i]):
             signals[i] = 0.0
             continue
         
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        vol_spike_val = vol_spike[i]
-        
-        # Alligator sleep condition: all lines intertwined (no trend)
-        # When lips, teeth, and jaw are close, market is sleeping
-        alligator_sleep = (abs(lips_val - teeth_val) < 0.001 * jaws_val and 
-                          abs(teeth_val - jaw_val) < 0.001 * jaws_val)
+        trend = cmf_aligned[i]
+        vol_confirm = volume[i] > vol_threshold[i]
         
         if position == 0:
-            # Only enter if Alligator is awake (not sleeping) and volume spike
-            if not alligator_sleep and vol_spike_val:
-                # Long: price above teeth and lips above jaws (bullish alignment)
-                if close[i] > teeth_val and lips_val > jaw_val:
-                    signals[i] = size
-                    position = 1
-                # Short: price below teeth and lips below jaws (bearish alignment)
-                elif close[i] < teeth_val and lips_val < jaw_val:
-                    signals[i] = -size
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long: CMF positive (bullish 4h trend) + pullback to EMA21 + volume
+            if trend > 0 and close[i] <= ema21[i] * 1.005 and vol_confirm:
+                signals[i] = size
+                position = 1
+            # Short: CMF negative (bearish 4h trend) + bounce to EMA21 + volume
+            elif trend < 0 and close[i] >= ema21[i] * 0.995 and vol_confirm:
+                signals[i] = -size
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below teeth or Alligator starts sleeping
-            if close[i] < teeth_val or alligator_sleep:
+            # Exit long: CMF turns negative or price moves above EMA21 (momentum fade)
+            if trend <= 0 or close[i] > ema21[i] * 1.01:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above teeth or Alligator starts sleeping
-            if close[i] > teeth_val or alligator_sleep:
+            # Exit short: CMF turns positive or price moves below EMA21 (momentum fade)
+            if trend >= 0 or close[i] < ema21[i] * 0.99:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_TeethBreak_Volume"
-timeframe = "12h"
+name = "1h_Chaikin_Money_Flow_4hTrend_Signal"
+timeframe = "1h"
 leverage = 1.0
