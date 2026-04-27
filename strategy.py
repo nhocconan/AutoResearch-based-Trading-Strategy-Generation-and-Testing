@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_MACD_Histogram_Reversal_1dTrend_Filter
-Hypothesis: MACD histogram reversal (from negative to positive for longs, positive to negative for shorts) 
-on 6h timeframe captures momentum shifts. Filtered by 1d EMA50 trend to avoid counter-trend trades. 
-Works in bull via MACD bullish reversals above EMA50 and bear via bearish reversals below EMA50. 
-Target: ~25 trades/year on 6h to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag. Using daily Camarilla pivot levels (R1/S1) with 1d trend filter and volume confirmation captures significant moves while minimizing trades. Works in bull via R1 breakouts and bear via S1 breakdowns. Targets 15-30 trades/year.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,64 +18,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get daily data for Camarilla pivot and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate Camarilla pivot levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate MACD on 6h data
-    # MACD line: EMA12 - EMA26
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    # Signal line: EMA9 of MACD line
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    # MACD histogram: MACD line - Signal line
-    macd_hist = macd_line - signal_line
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1_1d = close_1d + camarilla_range
+    s1_1d = close_1d - camarilla_range
+    
+    # Align R1/S1 to 12h timeframe (use previous day's levels)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: volume > 2.0 * 30-period average (stricter for lower frequency)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for MACD (max period 26+9=35)
-    start_idx = max(35, 50)
+    # Warmup: need enough data for EMA and volume MA
+    start_idx = max(34, 30)
     
     for i in range(start_idx, n):
-        # Skip if trend data not ready
-        if np.isnan(ema50_1d_aligned[i]):
+        # Skip if any data not ready
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        hist = macd_hist[i]
-        hist_prev = macd_hist[i-1]
-        ema_trend = ema50_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        ema_trend = ema34_1d_aligned[i]
+        vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: MACD histogram crosses above zero (bullish reversal) with uptrend
-            if hist > 0 and hist_prev <= 0 and close[i] > ema_trend:
+            # Long: price breaks above R1 with uptrend and volume spike
+            if close[i] > r1 and vol_spike_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: MACD histogram crosses below zero (bearish reversal) with downtrend
-            elif hist < 0 and hist_prev >= 0 and close[i] < ema_trend:
+            # Short: price breaks below S1 with downtrend and volume spike
+            elif close[i] < s1 and vol_spike_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: MACD histogram crosses below zero or trend turns down
-            if hist < 0 and hist_prev >= 0 or close[i] < ema_trend:
+            # Exit long: price falls below S1 or trend turns down
+            if close[i] < s1 or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: MACD histogram crosses above zero or trend turns up
-            if hist > 0 and hist_prev <= 0 or close[i] > ema_trend:
+            # Exit short: price rises above R1 or trend turns up
+            if close[i] > r1 or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_MACD_Histogram_Reversal_1dTrend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
