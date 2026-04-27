@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using weekly Donchian(20) breakout with daily EMA50 trend filter and volume confirmation.
-Breakouts aligned with daily EMA50 trend (bullish above, bearish below) tend to continue in both bull and bear markets.
-Volume > 2.0x average confirms breakout strength. Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
-Target: 15-30 trades/year (60-120 over 4 years). Includes ATR-based stoploss to limit drawdown.
+Hypothesis: 4h strategy using 14-period ATR volatility breakout with 1-day ADX trend filter.
+Breakouts occur when price moves beyond ATR-based channels, filtered by daily ADX > 25
+to ensure trending conditions. Volume > 2x average confirms breakout strength.
+Uses discrete position sizes (±0.25) to minimize fee churn. Target: 20-50 trades/year.
+ATR-based stoploss limits drawdown. Works in bull/bear by capturing volatility expansion.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,130 +21,162 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels on weekly data
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    highest_high_weekly = np.full(len(df_weekly), np.nan)
-    lowest_low_weekly = np.full(len(df_weekly), np.nan)
+    # Calculate ADX(14) on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    for i in range(20, len(df_weekly)):
-        highest_high_weekly[i] = np.max(high_weekly[i-20:i])
-        lowest_low_weekly[i] = np.min(low_weekly[i-20:i])
+    # True Range
+    tr_1d = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        tr_1d[i] = max(high_1d[i] - low_1d[i], 
+                       abs(high_1d[i] - close_1d[i-1]), 
+                       abs(low_1d[i] - close_1d[i-1]))
     
-    # Align weekly Donchian to daily timeframe (waits for weekly bar close)
-    highest_high_aligned = align_htf_to_ltf(prices, df_weekly, highest_high_weekly)
-    lowest_low_aligned = align_htf_to_ltf(prices, df_weekly, lowest_low_weekly)
-    
-    # Get daily data for EMA50 trend filter and volume
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
-        return np.zeros(n)
-    
-    # Calculate EMA50 on daily close
-    close_daily = df_daily['close'].values
-    ema_50 = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 50:
-        ema_50[49] = np.mean(close_daily[:50])  # SMA seed
-        multiplier = 2 / (50 + 1)
-        for i in range(50, len(close_daily)):
-            ema_50[i] = (close_daily[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
-    
-    # Align daily EMA50 to daily timeframe (no alignment needed as same timeframe)
-    ema_50_aligned = ema_50  # Already on daily timeframe
-    
-    # Calculate 20-period average daily volume for spike detection
-    volume_daily = df_daily['volume'].values
-    vol_ma_daily = np.full(len(df_daily), np.nan)
-    for i in range(20, len(df_daily)):
-        vol_ma_daily[i] = np.mean(volume_daily[i-20:i])
-    
-    # Align daily volume MA to daily timeframe
-    vol_ma_aligned = vol_ma_daily  # Already on daily timeframe
-    
-    # ATR for stoploss (using daily data)
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily_arr = df_daily['close'].values
-    tr = np.zeros(len(df_daily))
-    atr = np.full(len(df_daily), np.nan)
-    for i in range(1, len(df_daily)):
-        tr[i] = max(high_daily[i] - low_daily[i], abs(high_daily[i] - close_daily_arr[i-1]), abs(low_daily[i] - close_daily_arr[i-1]))
-    
-    for i in range(14, len(df_daily)):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
+    # Directional Movement
+    plus_dm = np.zeros(len(close_1d))
+    minus_dm = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        up_move = high_1d[i] - high_1d[i-1]
+        down_move = low_1d[i-1] - low_1d[i]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            plus_dm[i] = 0
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+        else:
+            minus_dm[i] = 0
     
-    # Align ATR to daily timeframe
-    atr_aligned = atr  # Already on daily timeframe
+    # Smoothed TR, +DM, -DM (Wilder smoothing)
+    period = 14
+    tr_period = np.zeros(len(close_1d))
+    plus_dm_period = np.zeros(len(close_1d))
+    minus_dm_period = np.zeros(len(close_1d))
+    
+    if len(close_1d) >= period:
+        tr_period[period-1] = np.sum(tr_1d[1:period+1])
+        plus_dm_period[period-1] = np.sum(plus_dm[1:period+1])
+        minus_dm_period[period-1] = np.sum(minus_dm[1:period+1])
+        
+        for i in range(period, len(close_1d)):
+            tr_period[i] = tr_period[i-1] - (tr_period[i-1] / period) + tr_1d[i]
+            plus_dm_period[i] = plus_dm_period[i-1] - (plus_dm_period[i-1] / period) + plus_dm[i]
+            minus_dm_period[i] = minus_dm_period[i-1] - (minus_dm_period[i-1] / period) + minus_dm[i]
+    
+    # Directional Indicators
+    plus_di = np.zeros(len(close_1d))
+    minus_di = np.zeros(len(close_1d))
+    dx = np.zeros(len(close_1d))
+    
+    for i in range(period-1, len(close_1d)):
+        if tr_period[i] > 0:
+            plus_di[i] = 100 * (plus_dm_period[i] / tr_period[i])
+            minus_di[i] = 100 * (minus_dm_period[i] / tr_period[i])
+            if plus_di[i] + minus_di[i] > 0:
+                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    
+    # ADX = smoothed DX
+    adx_1d = np.zeros(len(close_1d))
+    if len(close_1d) >= 2 * period - 1:
+        adx_1d[2*period-2] = np.sum(dx[period-1:2*period-1]) / period
+        for i in range(2*period-1, len(close_1d)):
+            adx_1d[i] = (adx_1d[i-1] * (period - 1) + dx[i]) / period
+    
+    # Align 1d ADX to 4h timeframe (waits for 1d bar close)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate ATR(14) on 4h data for volatility channels
+    tr_4h = np.zeros(n)
+    for i in range(1, n):
+        tr_4h[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
+    
+    atr = np.full(n, np.nan)
+    for i in range(period, n):
+        if i == period:
+            atr[i] = np.mean(tr_4h[1:period+1])
+        else:
+            atr[i] = (atr[i-1] * (period - 1) + tr_4h[i]) / period
+    
+    # Calculate ATR-based channels (like Keltner)
+    ma_period = 20
+    ema_close = np.full(n, np.nan)
+    if n >= ma_period:
+        ema_close[ma_period-1] = np.mean(close[:ma_period])
+        multiplier = 2 / (ma_period + 1)
+        for i in range(ma_period, n):
+            ema_close[i] = (close[i] * multiplier) + (ema_close[i-1] * (1 - multiplier))
+    
+    upper_channel = ema_close + (2.0 * atr)
+    lower_channel = ema_close - (2.0 * atr)
+    
+    # Volume confirmation
+    vol_ma_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period:i])
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup: need 20 for weekly Donchian, 50 for daily EMA50, 20 for volume MA, 14 for ATR
-    start_idx = max(20, 50, 20, 14)
+    # Warmup: need ADX (28), ATR (14), EMA (20), volume MA (20)
+    start_idx = max(2*period-1, period, ma_period, vol_ma_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high_aligned[i]) or
-            np.isnan(lowest_low_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(ema_close[i]) or
+            np.isnan(upper_channel[i]) or
+            np.isnan(lower_channel[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_aligned[i] if vol_ma_aligned[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from daily EMA50
-        bullish = price > ema_50_aligned[i]
-        bearish = price < ema_50_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_aligned[i] > 25
         
-        # Volume confirmation: > 2.0x average volume
+        # Volume confirmation: > 2x average volume
         volume_confirmation = vol_ratio > 2.0
         
         if position == 0:
-            # Long breakout: price breaks above weekly Donchian high in bullish trend with volume
-            if bullish and price > highest_high_aligned[i] and volume_confirmation:
+            # Long entry: price breaks above upper channel in trending market with volume
+            if trending and price > upper_channel[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short breakdown: price breaks below weekly Donchian low in bearish trend with volume
-            elif bearish and price < lowest_low_aligned[i] and volume_confirmation:
+            # Short entry: price breaks below lower channel in trending market with volume
+            elif trending and price < lower_channel[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below weekly Donchian low or trend turns bearish or stoploss hit
-            if price < lowest_low_aligned[i] or bearish or price < (entry_price - 2.0 * atr_aligned[i]):
+            # Long exit: price crosses below EMA (middle) or trend weakens or stoploss
+            if price < ema_close[i] or adx_aligned[i] < 20 or price < (ema_close[i] - 3.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above weekly Donchian high or trend turns bullish or stoploss hit
-            if price > highest_high_aligned[i] or bullish or price > (entry_price + 2.0 * atr_aligned[i]):
+            # Short exit: price crosses above EMA (middle) or trend weakens or stoploss
+            if price > ema_close[i] or adx_aligned[i] < 20 or price > (ema_close[i] + 3.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -size
-        
-        # Track entry price for stoploss calculation
-        if position != 0 and signals[i] != 0:
-            if position == 1 and signals[i] == size:
-                entry_price = price
-            elif position == -1 and signals[i] == -size:
-                entry_price = price
     
     return signals
 
-name = "1d_WeeklyDonchian20_DailyEMA50_Volume"
-timeframe = "1d"
+name = "4h_ATRBreakout_ADXTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
