@@ -29,7 +29,7 @@ def generate_signals(prices):
         for i in range(20, len(close_1d)):
             ema_20_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_20_1d[i-1]
     
-    # Calculate previous day's OHLC for Camarilla R3/S3 (avoid look-ahead)
+    # Calculate previous day's OHLC for Camarilla (avoid look-ahead)
     prev_close = np.roll(close_1d, 1)
     prev_high = np.roll(df_1d['high'].values, 1)
     prev_low = np.roll(df_1d['low'].values, 1)
@@ -37,32 +37,20 @@ def generate_signals(prices):
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     
-    # Camarilla R3 and S3 calculation (levels for breakout)
+    # Camarilla R4 and S4 calculation (wider bands for fewer trades)
     range_hl = prev_high - prev_low
     camarilla_factor = range_hl * 1.1 / 4
-    r3 = prev_close + camarilla_factor
-    s3 = prev_close - camarilla_factor
+    r4 = prev_close + camarilla_factor
+    s4 = prev_close - camarilla_factor
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate 12h ATR(14) for volatility filter and stoploss
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Calculate 20-period volume average
+    # Calculate 4-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 20
+    vol_period = 4
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -71,11 +59,11 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(20, vol_period, 14) + 5
+    start_idx = max(20, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -86,26 +74,26 @@ def generate_signals(prices):
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price breaks above R3 with volume and above daily EMA20
-            if price > r3_aligned[i] and vol_filter and price > ema_20_1d_aligned[i]:
+            # Long: Price breaks above R4 with volume and above daily EMA20
+            if price > r4_aligned[i] and vol_filter and price > ema_20_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below S3 with volume and below daily EMA20
-            elif price < s3_aligned[i] and vol_filter and price < ema_20_1d_aligned[i]:
+            # Short: Price breaks below S4 with volume and below daily EMA20
+            elif price < s4_aligned[i] and vol_filter and price < ema_20_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below S3 or trailing stop
-            if price < s3_aligned[i] or price < ema_20_1d_aligned[i] - 1.5 * atr[i]:
+            # Long exit: Price closes below S4 or below daily EMA20
+            if price < s4_aligned[i] or price < ema_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above R3 or trailing stop
-            if price > r3_aligned[i] or price > ema_20_1d_aligned[i] + 1.5 * atr[i]:
+            # Short exit: Price closes above R4 or above daily EMA20
+            if price > r4_aligned[i] or price > ema_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA20_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R4_S4_Breakout_1dEMA20_Volume"
+timeframe = "4h"
 leverage = 1.0
