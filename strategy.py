@@ -1,3 +1,11 @@
+# [EXPERIMENT #98581]
+# Hypothesis: 4h RSI mean reversion with 1D ATR and EMA trend filter.
+# In both bull and bear markets, RSI extremes (oversold/overbought) tend to revert when aligned with the higher timeframe trend.
+# The 1D ATR provides dynamic volatility scaling for entries, and EMA50 on 4h filters for trend direction.
+# This strategy aims for low trade frequency (target: 20-50 trades/year) by requiring both RSI extreme and trend alignment.
+# Position size is fixed at 0.25 to manage drawdown, with exits on RSI mean reversion or trend failure.
+# Uses discrete signal levels to minimize fee churn.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
