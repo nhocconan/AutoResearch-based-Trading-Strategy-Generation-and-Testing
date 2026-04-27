@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike
-Hypothesis: Uses 4h Camarilla pivot levels (R1/S1) for breakout entries on 4h timeframe.
-Enter long when price breaks above 4h R1 AND 4h close > 4h EMA20 (uptrend) AND volume > 1.8 * 20-period average.
-Enter short when price breaks below 4h S1 AND 4h close < 4h EMA20 (downtrend) AND volume > 1.8 * 20-period average.
-Exit when price returns to 4h pivot (PP) level OR trend reverses.
-Camarilla R1/S1 represent strong breakout levels; 4h trend filter ensures alignment with higher timeframe structure (12h).
-High volume threshold (1.8x) filters weak breakouts. Target: 75-150 total trades over 4 years (19-38/year) with 0.28 position size.
-Designed to work in both bull and bear markets via 12h trend filter and breakout logic.
+1h_Camarilla_R1_S1_Breakout_4hTrend_1dRegime_VolumeSpike
+Hypothesis: Uses 1h Camarilla pivot breakouts filtered by 4h trend and 1d choppy regime.
+Enter long when 1h price breaks above R1, 4h close > 4h EMA20 (uptrend), 1d chop > 50 (range market), and volume > 1.5x average.
+Enter short when 1h price breaks below S1, 4h close < 4h EMA20 (downtrend), 1d chop > 50, and volume > 1.5x average.
+Exit when price returns to 1h pivot (PP) or 4h trend reverses.
+Designed for 1h timeframe with tight entries to avoid fee drag: target 15-35 trades/year.
+Works in both bull and bear markets via 4h trend filter and 1d regime filter (choppy markets favor mean reversion at pivots).
 """
 
 import numpy as np
@@ -24,23 +23,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivots and 4h trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1h data for Camarilla pivots and entry timing
+    df_1h = get_htf_data(prices, '1h')
     
-    # 4h EMA20 for trend filter
-    close_4h_series = pd.Series(df_4h['close'].values)
-    ema_20_4h = close_4h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate Camarilla pivots on 1h data (using previous 1h bar's OHLC)
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
     
-    # Calculate Camarilla pivots on 4h data (using previous 4h bar's OHLC)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Shift by 1 to get previous 4h bar's OHLC for current Camarilla levels
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
+    # Shift by 1 to get previous 1h bar's OHLC for current Camarilla levels
+    prev_high = np.roll(high_1h, 1)
+    prev_low = np.roll(low_1h, 1)
+    prev_close = np.roll(close_1h, 1)
     # First value will be invalid (rolled from last), set to nan
     prev_high[0] = np.nan
     prev_low[0] = np.nan
@@ -52,33 +46,66 @@ def generate_signals(prices):
     camarilla_r1 = camarilla_pp + (camarilla_range * 1.1 / 4.0)
     camarilla_s1 = camarilla_pp - (camarilla_range * 1.1 / 4.0)
     
-    # Align 4h Camarilla levels to 4h timeframe (identity alignment)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pp)
+    # Align 1h Camarilla levels to 1h timeframe (identity alignment)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1h, camarilla_s1)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1h, camarilla_pp)
     
-    # Get 12h data for higher timeframe trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # 12h EMA50 for trend filter
-    close_12h_series = pd.Series(df_12h['close'].values)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA20 for trend filter
+    close_4h_series = pd.Series(df_4h['close'].values)
+    ema_20_4h = close_4h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Get 1d data for choppy regime filter
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Choppiness Index (CHOP) on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = np.nan  # First value has no previous close
+    
+    # ATR(14) - sum of TR over 14 periods
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index: CHOP = 100 * log10(atr_14 / (hh_14 - ll_14)) / log10(14)
+    # Avoid division by zero and log of zero
+    hh_ll = hh_14 - ll_14
+    chop_raw = np.where((hh_ll > 0) & ~np.isnan(hh_ll), 
+                        atr_14 / hh_ll, 
+                        np.nan)
+    chop = 100 * np.log10(chop_raw) / np.log10(14)
+    
+    # Align 1d Chop to 1h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.28   # Position size: 28% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need 4h EMA20 (20), 12h EMA50 (50), volume avg (20), 4h data shifted (1)
-    start_idx = max(50, 20, 20, 1)
+    # Warmup: need 1h data shifted (1), 4h EMA20 (20), 1d CHOP (14), volume avg (20)
+    start_idx = max(1, 20, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(chop_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(camarilla_pp_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
@@ -86,18 +113,22 @@ def generate_signals(prices):
         
         close_val = close[i]
         ema_4h_val = ema_20_4h_aligned[i]
-        ema_12h_val = ema_50_12h_aligned[i]
+        chop_val = chop_aligned[i]
         r1_level = camarilla_r1_aligned[i]
         s1_level = camarilla_s1_aligned[i]
         pp_level = camarilla_pp_aligned[i]
         vol_conf = volume_confirm[i]
         
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        in_session = 8 <= hour <= 20
+        
         if position == 0:
-            # Look for entry: breakout of Camarilla R1/S1 levels with 4h AND 12h trend filter AND volume
-            # Long: price breaks above R1 AND 4h uptrend AND 12h uptrend AND volume
-            long_condition = (close_val > r1_level) and (close_val > ema_4h_val) and (close_val > ema_12h_val) and vol_conf
-            # Short: price breaks below S1 AND 4h downtrend AND 12h downtrend AND volume
-            short_condition = (close_val < s1_level) and (close_val < ema_4h_val) and (close_val < ema_12h_val) and vol_conf
+            # Look for entry: breakout of Camarilla R1/S1 levels with 4h trend filter, 1d chop > 50 (range), and volume
+            # Long: price breaks above R1 AND 4h uptrend AND chop > 50 AND volume AND session
+            long_condition = (close_val > r1_level) and (close_val > ema_4h_val) and (chop_val > 50) and vol_conf and in_session
+            # Short: price breaks below S1 AND 4h downtrend AND chop > 50 AND volume AND session
+            short_condition = (close_val < s1_level) and (close_val < ema_4h_val) and (chop_val > 50) and vol_conf and in_session
             
             if long_condition:
                 signals[i] = size
@@ -106,8 +137,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price returns to pivot level OR 4h trend breaks OR 12h trend breaks
-            exit_condition = (close_val <= pp_level) or (close_val < ema_4h_val) or (close_val < ema_12h_val)
+            # Exit long when price returns to pivot level OR 4h trend breaks
+            exit_condition = (close_val <= pp_level) or (close_val < ema_4h_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -115,8 +146,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price returns to pivot level OR 4h trend breaks OR 12h trend breaks
-            exit_condition = (close_val >= pp_level) or (close_val > ema_4h_val) or (close_val > ema_12h_val)
+            # Exit short when price returns to pivot level OR 4h trend breaks
+            exit_condition = (close_val >= pp_level) or (close_val > ema_4h_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -126,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dRegime_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
