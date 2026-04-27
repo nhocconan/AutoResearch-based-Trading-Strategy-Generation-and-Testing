@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1-week EMA50 trend filter and volume confirmation.
-# Williams %R measures momentum overbought/oversold levels: -20 to -80 range.
-# Long when %R crosses above -80 from below in uptrend with volume confirmation.
-# Short when %R crosses below -20 from above in downtrend with volume confirmation.
-# Uses 1-week EMA50 for trend filter to capture longer-term direction.
+# Hypothesis: 4h Supertrend (ATR=10, mult=3.0) with 1-day EMA34 trend filter and volume confirmation.
+# Supertrend identifies trend direction using ATR-based bands. 
+# Long when price closes above Supertrend upper band, short when closes below lower band.
+# Uses 1-day EMA34 for trend filter to align with higher timeframe direction.
 # Volume confirmation (>1.5x 20-period average) ensures institutional participation.
 # Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
-# Works in bull markets (captures pullbacks in uptrends) and bear markets (captures bounces in downtrends).
+# Works in bull markets (captures sustained uptrends) and bear markets (captures sustained downtrends).
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,23 +21,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # 1-week EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate ATR for Supertrend (period=10)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (3.0 * atr)
+    lower_band = hl2 - (3.0 * atr)
+    
+    # Initialize Supertrend arrays
+    supertrend = np.full(n, np.nan)
+    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
+    
+    # First valid value
+    supertrend[9] = upper_band[9]  # Start with upper band
+    direction[9] = 1
+    
+    for i in range(10, n):
+        if np.isnan(atr[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
+            supertrend[i] = supertrend[i-1]
+            direction[i] = direction[i-1]
+            continue
+            
+        if close[i] <= supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = 1
+            
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,32 +79,32 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(williams_r[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(supertrend[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: Williams %R crosses above -80 from below, uptrend, volume
-        if (williams_r[i] > -80 and williams_r[i-1] <= -80 and
-            close[i] > ema50_1w_aligned[i] and 
+        # Long condition: price above Supertrend (uptrend), uptrend on 1d EMA34, volume
+        if (close[i] > supertrend[i] and 
+            close[i] > ema34_1d_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: Williams %R crosses below -20 from above, downtrend, volume
-        elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and
-              close[i] < ema50_1w_aligned[i] and 
+        # Short condition: price below Supertrend (downtrend), downtrend on 1d EMA34, volume
+        elif (close[i] < supertrend[i] and 
+              close[i] < ema34_1d_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal or opposite Williams %R signal
-        elif position == 1 and (close[i] <= ema50_1w_aligned[i] or williams_r[i] < -50):
+        # Exit conditions: trend reversal
+        elif position == 1 and close[i] <= supertrend[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] >= ema50_1w_aligned[i] or williams_r[i] > -50):
+        elif position == -1 and close[i] >= supertrend[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -87,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1wEMA50_VolumeFilter"
-timeframe = "6h"
+name = "4h_Supertrend_1dEMA34_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
