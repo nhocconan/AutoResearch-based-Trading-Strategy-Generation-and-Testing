@@ -35,16 +35,17 @@ def generate_signals(prices):
     prev_low[0] = np.nan
     
     # Camarilla R3 and S3 calculation
-    camarilla_factor = 1.1 * (prev_high - prev_low) * 1.1 / 4
+    range_hl = prev_high - prev_low
+    camarilla_factor = range_hl * 1.1 / 4
     r3 = prev_close + camarilla_factor
     s3 = prev_close - camarilla_factor
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate 12h ATR(14) for volatility filter
+    # Calculate 4h ATR(14) for volatility filter
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
@@ -109,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
