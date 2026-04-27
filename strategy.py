@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,16 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and RSI
+    # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 14-day ATR
+    # Calculate 14-day ATR for volatility
     tr = np.zeros(len(high_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(high_1d)):
@@ -38,7 +39,12 @@ def generate_signals(prices):
         else:
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 14-day RSI
+    # Calculate 200-day SMA for trend filter
+    sma_200_1d = np.full(len(close_1d), np.nan)
+    for i in range(199, len(close_1d)):
+        sma_200_1d[i] = np.mean(close_1d[i-199:i+1])
+    
+    # Calculate RSI(14)
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -57,74 +63,62 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align ATR and RSI to 4h timeframe
+    # Calculate 50-day SMA for short-term trend
+    sma_50_1d = np.full(len(close_1d), np.nan)
+    for i in range(49, len(close_1d)):
+        sma_50_1d[i] = np.mean(close_1d[i-49:i+1])
+    
+    # Align indicators to daily timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    sma_200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Calculate 4-hour EMA50 for trend filter
-    ema_period = 50
-    ema_4h = np.full(n, np.nan)
-    if n >= ema_period:
-        ema_4h[ema_period - 1] = np.mean(close[:ema_period])
-        for i in range(ema_period, n):
-            ema_4h[i] = (close[i] * (2 / (ema_period + 1)) + 
-                         ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
-    
-    # Calculate 12h EMA100 for higher timeframe trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 100:
-        close_12h = df_12h['close'].values
-        ema_12h = np.full(len(close_12h), np.nan)
-        ema_12h[99] = np.mean(close_12h[:100])
-        for i in range(100, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * (2 / (100 + 1)) + 
-                         ema_12h[i-1] * (1 - (2 / (100 + 1))))
-        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    else:
-        ema_12h_aligned = np.full(n, np.nan)
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ATR, RSI, EMA50, EMA100
-    start_idx = max(14, ema_period - 1)
+    # Warmup
+    start_idx = 199
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema_4h[i]) or np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(sma_200_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(sma_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         atr = atr_1d_aligned[i]
+        sma_200 = sma_200_1d_aligned[i]
         rsi = rsi_1d_aligned[i]
-        ema_trend = ema_4h[i]
-        ema_12h_trend = ema_12h_aligned[i]
+        sma_50 = sma_50_1d_aligned[i]
         
-        # Only trade in alignment with 12h trend
+        # Trend filter: price above/below 200-day SMA
+        uptrend = price > sma_200
+        downtrend = price < sma_200
+        
         if position == 0:
-            # Long: Oversold RSI with price above EMA50 AND EMA100 in uptrend
-            if (rsi < 30 and price > ema_trend and ema_trend > ema_12h_trend):
+            # Long: Oversold RSI in uptrend with price above 50-day SMA
+            if (rsi < 30 and uptrend and price > sma_50):
                 signals[i] = size
                 position = 1
-            # Short: Overbought RSI with price below EMA50 AND EMA100 in downtrend
-            elif (rsi > 70 and price < ema_trend and ema_trend < ema_12h_trend):
+            # Short: Overbought RSI in downtrend with price below 50-day SMA
+            elif (rsi > 70 and downtrend and price < sma_50):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral or trend fails
-            if rsi > 50 or price < ema_trend:
+            # Exit long: RSI returns to neutral or trend breaks
+            if rsi > 50 or price < sma_200:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI returns to neutral or trend fails
-            if rsi < 50 or price > ema_trend:
+            # Exit short: RSI returns to neutral or trend breaks
+            if rsi < 50 or price > sma_200:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_RSI_MeanReversion_1D_ATR_RSI_EMA50_12H_TrendFilter"
-timeframe = "4h"
+name = "Daily_RSI_MeanReversion_200SMA_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
