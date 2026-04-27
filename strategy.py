@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_RSI14_VolumeFilter_1dTrend"
-timeframe = "12h"
+name = "1d_EMA34_RSI14_VolumeFilter_1dTrend"
+timeframe = "1d"
 leverage = 1.0
