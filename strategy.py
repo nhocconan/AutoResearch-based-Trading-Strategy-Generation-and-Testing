@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot breakouts (R1/S1) with volume confirmation and daily trend filter work in both bull and bear markets.
-Daily trend filter prevents counter-trend trades during strong moves. Target: 20-35 trades/year on 4h to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
+Hypothesis: Reduced trade frequency via stricter volume threshold (3x average) and 
+requirement for price to close beyond pivot level (not just touch) improves robustness.
+Maintains edge in bull/bear via daily trend filter. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -29,7 +30,6 @@ def generate_signals(prices):
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Calculate Camarilla levels from previous day
-    # Typical price = (high + low + close) / 3
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     range_ = df_1d['high'] - df_1d['low']
     
@@ -41,9 +41,9 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Volume confirmation: volume > 3.0 * 20-period average (stricter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 3.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,25 +64,25 @@ def generate_signals(prices):
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: price breaks above R1 + volume spike + uptrend (price > EMA34)
+            # Long: price closes above R1 + volume spike + uptrend (price > EMA34)
             if close[i] > r1_level and vol_spike_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S1 + volume spike + downtrend (price < EMA34)
+            # Short: price closes below S1 + volume spike + downtrend (price < EMA34)
             elif close[i] < s1_level and vol_spike_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S1 or trend turns down
+            # Exit long: price closes below S1 or trend turns down
             if close[i] < s1_level or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R1 or trend turns up
+            # Exit short: price closes above R1 or trend turns up
             if close[i] > r1_level or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
@@ -91,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
