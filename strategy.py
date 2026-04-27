@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Williams %R reversal with volume confirmation and 1-day trend filter.
-Enters on extreme oversold/overbought conditions during low volatility periods.
-Designed to work in both bull and bear markets by using 1-day trend as filter.
-Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+Hypothesis: 1-day KAMA direction with RSI filter and weekly trend alignment.
+Trades in direction of weekly trend when price aligns with KAMA and RSI shows momentum.
+Designed to work in both bull and bear markets by using weekly trend as filter.
+Target: 10-25 trades/year per symbol (40-100 total over 4 years) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -19,93 +19,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day EMA(50) for trend
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA(30) for trend
+    close_1w = df_1w['close'].values
+    ema_30_1w = pd.Series(close_1w).ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_30_1w)
     
-    # Get 4-hour data for Williams %R and ATR
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
+    # Calculate KAMA on daily data
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close(t) - close(t-10)|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close(t) - close(t-1)| over 10 periods
+    # Handle array dimensions
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # using fast=2, slow=30
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # start after 10 periods
+    for i in range(10, len(close)):
+        if not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate 4-hour Williams %R (14)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_4h) / (highest_high - lowest_low)
-    
-    # Calculate 4-hour ATR(14) for volatility filter
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.concatenate([close_4h[0:1], close_4h[:-1]]))
-    tr3 = np.abs(low_4h - np.concatenate([close_4h[0:1], close_4h[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align all 4h indicators
-    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(14, np.nan), rsi])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # Warmup: need Williams %R, ATR, and 1d EMA
-    start_idx = max(14, 14, 50)
+    # Warmup: need KAMA, RSI, and weekly EMA
+    start_idx = max(30, 14, 30)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_30_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        trend_1w = ema_30_1w_aligned[i]
         
-        wr = williams_r_aligned[i]
-        atr_val = atr_aligned[i]
-        trend_1d = ema_50_1d_aligned[i]
-        
-        # Volatility filter: ATR < 0.02 * price (low volatility environment)
-        vol_filter = atr_val < 0.02 * close[i]
-        
-        # Entry conditions: Williams %R reversal with volume and 1d trend alignment
+        # Entry conditions: price aligned with KAMA + RSI momentum + weekly trend
         if position == 0:
-            # Long: Williams %R oversold (< -80) + low vol + price above 1d EMA
-            if wr < -80 and vol_filter and close[i] > trend_1d:
+            # Long: price > KAMA + RSI > 50 + weekly uptrend
+            if close[i] > kama_val and rsi_val > 50 and close[i] > trend_1w:
                 signals[i] = size
                 position = 1
-            # Short: Williams %R overbought (> -20) + low vol + price below 1d EMA
-            elif wr > -20 and vol_filter and close[i] < trend_1d:
+            # Short: price < KAMA + RSI < 50 + weekly downtrend
+            elif close[i] < kama_val and rsi_val < 50 and close[i] < trend_1w:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or trend reversal
-            if wr > -50 or close[i] < trend_1d:
+            # Exit long: price < KAMA or RSI < 40 or weekly trend turns down
+            if close[i] < kama_val or rsi_val < 40 or close[i] < trend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or trend reversal
-            if wr < -50 or close[i] > trend_1d:
+            # Exit short: price > KAMA or RSI > 60 or weekly trend turns up
+            if close[i] > kama_val or rsi_val > 60 or close[i] > trend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_Reversal_VolumeFilter_1dTrend"
-timeframe = "4h"
+name = "1d_KAMA_RSI_WeeklyTrendFilter"
+timeframe = "1d"
 leverage = 1.0
