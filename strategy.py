@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,40 +20,38 @@ def generate_signals(prices):
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels on daily data
-    upper = np.full(len(high_1d), np.nan)
-    lower = np.full(len(low_1d), np.nan)
+    # Calculate Donchian channels (20-period)
+    donch_high = np.full(len(high_1d), np.nan)
+    donch_low = np.full(len(low_1d), np.nan)
+    
     for i in range(20, len(high_1d)):
-        upper[i] = np.max(high_1d[i-19:i+1])
-        lower[i] = np.min(low_1d[i-19:i+1])
+        donch_high[i] = np.max(high_1d[i-20:i])
+        donch_low[i] = np.min(low_1d[i-20:i])
     
-    # Align Donchian levels to 4h timeframe
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    
-    # Get 4h data for EMA200 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
+    # Get 1w data for trend filter (EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA200
-    ema_period = 200
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= ema_period:
-        ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
-        for i in range(ema_period, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * (2 / (ema_period + 1)) + 
-                        ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 1w EMA200
+    ema_200 = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 200:
+        ema_200[199] = np.mean(close_1w[:200])
+        for i in range(200, len(close_1w)):
+            ema_200[i] = (close_1w[i] * 2 / 201) + (ema_200[i-1] * 199 / 201)
     
-    # Align EMA200 to 4h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Align indicators to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.8x 30-period average
     vol_ma = np.full(n, np.nan)
-    vol_period = 20
+    vol_period = 30
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -62,12 +60,12 @@ def generate_signals(prices):
     size = 0.25   # 25% position size
     
     # Warmup: need Donchian, EMA, and volume MA
-    start_idx = max(20, 200, vol_period) + 25
+    start_idx = max(20, 200, vol_period) + 10
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -75,32 +73,32 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: price breaks above 1d Donchian upper + volume spike + price > 4h EMA200
-            if (price > upper_1d_aligned[i] and 
-                vol_ratio > 1.5 and 
-                price > ema_4h_aligned[i]):
+            # Long: Price breaks above Donchian high + volume spike + price > weekly EMA200
+            if (price > donch_high_aligned[i] and 
+                vol_ratio > 1.8 and 
+                price > ema_200_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below 1d Donchian lower + volume spike + price < 4h EMA200
-            elif (price < lower_1d_aligned[i] and 
-                  vol_ratio > 1.5 and 
-                  price < ema_4h_aligned[i]):
+            # Short: Price breaks below Donchian low + volume spike + price < weekly EMA200
+            elif (price < donch_low_aligned[i] and 
+                  vol_ratio > 1.8 and 
+                  price < ema_200_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below 1d Donchian lower OR trend filter fails
-            if (price < lower_1d_aligned[i] or 
-                price < ema_4h_aligned[i]):
+            # Long exit: Price breaks below Donchian low OR volume drops
+            if (price < donch_low_aligned[i] or 
+                vol_ratio < 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above 1d Donchian upper OR trend filter fails
-            if (price > upper_1d_aligned[i] or 
-                price > ema_4h_aligned[i]):
+            # Short exit: Price breaks above Donchian high OR volume drops
+            if (price > donch_high_aligned[i] or 
+                vol_ratio < 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_1d_Volume_EMA200"
+name = "4h_Donchian_Breakout_WeeklyEMA200_Volume"
 timeframe = "4h"
 leverage = 1.0
