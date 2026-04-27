@@ -1,10 +1,3 @@
-# 1d_WeeklyDonchian20_1dTrend_Volume
-# Hypothesis: Weekly Donchian breakouts combined with daily trend filter and volume confirmation
-# work across both bull and bear markets by capturing momentum after volatility compression.
-# The daily EMA50 ensures we only trade in the direction of the intermediate-term trend,
-# reducing false breakouts in ranging markets. Weekly timeframe reduces trade frequency
-# to minimize fee drag while capturing significant moves.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -20,42 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get daily data for pivot calculation and EMA50
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period high/low)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate weekly EMA50 for trend filter (more robust than daily)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate weekly upper band (20-period high)
-    donchian_high = np.full(len(high_1w), np.nan)
-    for i in range(19, len(high_1w)):
-        donchian_high[i] = np.max(high_1w[i-19:i+1])
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 48) / 50  # EMA50
     
-    # Calculate weekly lower band (20-period low)
-    donchian_low = np.full(len(low_1w), np.nan)
-    for i in range(19, len(low_1w)):
-        donchian_low[i] = np.min(low_1w[i-19:i+1])
+    # Calculate daily pivot points (PP, R1, S1) from previous day's OHLC
+    # Using previous day's OHLC to avoid look-ahead
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50  # EMA50
+    # Pivot point formula: PP = (H + L + C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    pp = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pp - prev_low
+    s1 = 2 * pp - prev_high
     
-    # Align weekly indicators to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align weekly EMA50 and daily pivots to 4h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate 4h ATR(14) for volatility filter
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.maximum(np.abs(high[1:] - close[:-1]), 
+                               np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.mean(tr[1:15])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
     # Calculate 20-period volume average
     vol_ma = np.full(n, np.nan)
@@ -68,41 +73,41 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(50, vol_period) + 5
+    start_idx = max(50, vol_period, 14) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.5x average volume
-        vol_filter = vol_ratio > 1.5
+        # Volume spike filter: at least 1.8x average volume
+        vol_filter = vol_ratio > 1.8
         
         if position == 0:
-            # Long: Price breaks above weekly Donchian high with volume and above daily EMA50
-            if price > donchian_high_aligned[i] and vol_filter and price > ema_50_1d_aligned[i]:
+            # Long: Price breaks above R1 with volume and above weekly EMA50
+            if price > r1_aligned[i] and vol_filter and price > ema_50_1w_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below weekly Donchian low with volume and below daily EMA50
-            elif price < donchian_low_aligned[i] and vol_filter and price < ema_50_1d_aligned[i]:
+            # Short: Price breaks below S1 with volume and below weekly EMA50
+            elif price < s1_aligned[i] and vol_filter and price < ema_50_1w_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below weekly Donchian low or trailing stop
-            if price < donchian_low_aligned[i] or price < ema_50_1d_aligned[i] - 1.5 * np.abs(price - ema_50_1d_aligned[i-1]):
+            # Long exit: Price closes below S1 or trailing stop
+            if price < s1_aligned[i] or price < ema_50_1w_aligned[i] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above weekly Donchian high or trailing stop
-            if price > donchian_high_aligned[i] or price > ema_50_1d_aligned[i] + 1.5 * np.abs(price - ema_50_1d_aligned[i-1]):
+            # Short exit: Price closes above R1 or trailing stop
+            if price > r1_aligned[i] or price > ema_50_1w_aligned[i] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian20_1dTrend_Volume"
-timeframe = "1d"
+name = "4h_Pivot_R1S1_WeeklyEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
