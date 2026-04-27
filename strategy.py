@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_RSI_Momentum
-Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) as adaptive trend filter on 12h chart, combined with RSI momentum to catch trend continuations in both bull and bear markets. Designed for low trade frequency (12-37/year) to minimize fee drag while capturing sustained moves.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+Hypothesis: Combines tighter Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume spike confirmation, and ADX regime filter to reduce trades and improve selectivity. Targets 20-30 trades/year on 4h to minimize fee drag while capturing strong institutional moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,82 +18,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and RSI
+    # Get 1d data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate KAMA on 1d for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    # KAMA parameters: ER period=10, fast=2, slow=30
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align KAMA to 12h
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate ADX on 1d for regime filter (trending vs ranging)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Calculate RSI on 1d for momentum
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_1d = rsi
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d_arr[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d_arr[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align RSI to 12h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[1:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    tr_smooth = smooth_wilder(tr, 14)
+    dm_plus_smooth = smooth_wilder(dm_plus, 14)
+    dm_minus_smooth = smooth_wilder(dm_minus, 14)
+    
+    # DI and DX
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smooth_wilder(dx, 14)
+    
+    # Align ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Camarilla levels from previous day (tighter R1/S1 levels)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values
+    
+    # Camarilla formulas: range = (H - L), multiplier = 1.12
+    # R1 = C + (H-L)*1.12/12, S1 = C - (H-L)*1.12/12
+    rng = (high_1d - low_1d)
+    r1 = close_1d_prev + rng * 1.12 / 12
+    s1 = close_1d_prev - rng * 1.12 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume confirmation: volume > 2.0 * 20-period average (strong institutional interest)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for KAMA, RSI, volume MA
-    start_idx = max(30, 20)  # KAMA needs 30, RSI needs ~14, VolMA needs 20
+    # Warmup: need enough data for EMA, ADX, volume MA, and Camarilla
+    start_idx = max(34, 20, 34)  # EMA34, ADX(14+14), VolMA20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             signals[i] = 0.0
             continue
         
-        kama_val = kama_1d_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
-        vol_conf = vol_confirm[i]
+        ema_trend = ema34_1d_aligned[i]
+        adx_val = adx_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        vol_spike_val = vol_spike[i]
+        
+        # Only trade in trending markets (ADX > 25)
+        if adx_val < 25:
+            # In ranging markets, stay flat
+            signals[i] = 0.0
+            position = 0
+            continue
         
         if position == 0:
-            # Long: price above KAMA and RSI > 50 with volume confirmation
-            if close[i] > kama_val and rsi_val > 50 and vol_conf:
+            # Long: break above R1 with uptrend and volume spike
+            if close[i] > r1_level and vol_spike_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: price below KAMA and RSI < 50 with volume confirmation
-            elif close[i] < kama_val and rsi_val < 50 and vol_conf:
+            # Short: break below S1 with downtrend and volume spike
+            elif close[i] < s1_level and vol_spike_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price below KAMA or RSI < 40
-            if close[i] < kama_val or rsi_val < 40:
+            # Exit long: break below S1 or trend turns down
+            if close[i] < s1_level or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price above KAMA or RSI > 60
-            if close[i] > kama_val or rsi_val > 60:
+            # Exit short: break above R1 or trend turns up
+            if close[i] > r1_level or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_With_RSI_Momentum"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
