@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Regime
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
-Designed for 4h timeframe targeting 75-200 total trades over 4 years.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume confirmation.
+Designed for 12h timeframe targeting 50-150 total trades over 4 years.
 Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets:
 In trending regimes (price > EMA34 for longs, < EMA34 for shorts),
 breakouts at R1/S1 with volume spike capture strong momentum continuations.
@@ -34,7 +34,7 @@ def generate_signals(prices):
     r1 = prev_close + (rng * 1.1 / 12)
     s1 = prev_close - (rng * 1.1 / 12)
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 12h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Regime"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
