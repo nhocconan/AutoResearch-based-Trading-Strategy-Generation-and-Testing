@@ -16,7 +16,7 @@ def generate_signals(prices):
     # Get daily data for weekly high/low
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
     # Calculate daily high and low for weekly calculation
@@ -31,7 +31,7 @@ def generate_signals(prices):
         weekly_high[i] = np.max(high_1d[i-5:i])
         weekly_low[i] = np.min(low_1d[i-5:i])
     
-    # Align weekly high/low to 4h timeframe
+    # Align weekly high/low to daily timeframe (our primary timeframe is 1d)
     weekly_high_aligned = align_htf_to_ltf(prices, df_1d, weekly_high)
     weekly_low_aligned = align_htf_to_ltf(prices, df_1d, weekly_low)
     
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1W_HighLow_Breakout_VolumeFilter_v1"
-timeframe = "4h"
+name = "1d_1W_HighLow_Breakout_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
