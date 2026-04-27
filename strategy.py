@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and ATR
+    # Get daily data for price channel (Donchian)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -22,38 +22,43 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-day Donchian channels
-    donch_high_20 = np.full(len(df_1d), np.nan)
-    donch_low_20 = np.full(len(df_1d), np.nan)
+    # Calculate Donchian channels (20-day)
+    donchian_high = np.full(len(df_1d), np.nan)
+    donchian_low = np.full(len(df_1d), np.nan)
     for i in range(len(high_1d)):
         if i < 19:
-            donch_high_20[i] = np.max(high_1d[:i+1])
-            donch_low_20[i] = np.min(low_1d[:i+1])
+            donchian_high[i] = np.max(high_1d[:i+1]) if i > 0 else high_1d[i]
+            donchian_low[i] = np.min(low_1d[:i+1]) if i > 0 else low_1d[i]
         else:
-            donch_high_20[i] = np.max(high_1d[i-19:i+1])
-            donch_low_20[i] = np.min(low_1d[i-19:i+1])
+            donchian_high[i] = np.max(high_1d[i-19:i+1])
+            donchian_low[i] = np.min(low_1d[i-19:i+1])
     
-    # Align daily Donchian to 4h timeframe
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    # Align Donchian to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Calculate daily ATR(14)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Get weekly data for trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(len(tr_1d)):
-        if i < 13:
-            atr_1d[i] = np.mean(tr_1d[:i+1]) if i > 0 else tr_1d[i]
+    close_1w = df_1w['close'].values
+    # Calculate weekly EMA(34)
+    ema_1w_34 = np.full(len(df_1w), np.nan)
+    alpha_w = 2 / (34 + 1)
+    for i in range(len(close_1w)):
+        if i < 33:
+            ema_1w_34[i] = np.mean(close_1w[:i+1]) if i > 0 else close_1w[i]
         else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+            if np.isnan(ema_1w_34[i-1]):
+                ema_1w_34[i] = np.mean(close_1w[i-33:i+1])
+            else:
+                ema_1w_34[i] = close_1w[i] * alpha_w + ema_1w_34[i-1] * (1 - alpha_w)
     
-    # Align daily ATR to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align weekly EMA34 to daily timeframe
+    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
-    # Calculate volume average (20-period)
+    # Calculate average volume (20-day)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -62,12 +67,12 @@ def generate_signals(prices):
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(20, 20)  # Donchian needs 20, volume MA needs 20
+    start_idx = max(20, 34)  # Donchian needs 20, EMA needs 34
     
     for i in range(start_idx, n):
-        if (np.isnan(donch_high_20_aligned[i]) or
-            np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_1w_34_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -79,26 +84,26 @@ def generate_signals(prices):
         volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long: break above 20-day Donchian high with volume
-            if volume_confirmation and price > donch_high_20_aligned[i]:
+            # Long: price breaks above Donchian high with volume and above weekly EMA34
+            if volume_confirmation and price > donchian_high_aligned[i] and price > ema_1w_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-day Donchian low with volume
-            elif volume_confirmation and price < donch_low_20_aligned[i]:
+            # Short: price breaks below Donchian low with volume and below weekly EMA34
+            elif volume_confirmation and price < donchian_low_aligned[i] and price < ema_1w_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below 20-day Donchian low
-            if price < donch_low_20_aligned[i]:
+            # Long exit: price crosses below Donchian low
+            if price < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price crosses above 20-day Donchian high
-            if price > donch_high_20_aligned[i]:
+            # Short exit: price crosses above Donchian high
+            if price > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeConfirmation_v1"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyEMA34_Trend_Volume_v2"
+timeframe = "1d"
 leverage = 1.0
