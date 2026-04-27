@@ -1,133 +1,124 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Bollinger Band breakout with weekly trend filter and volume confirmation.
-In bull markets: long when price breaks above upper BB with weekly uptrend and high volume.
-In bear markets: short when price breaks below lower BB with weekly downtrend and high volume.
-Uses Bollinger Bands (20,2) for volatility breakouts, weekly EMA50 for trend filter,
-and volume > 1.5x 20-day average for confirmation. Designed for 1d timeframe to
-capture multi-day trends while minimizing trade frequency (<20 trades/year).
+Hypothesis: 4-hour ATR breakout with daily trend filter and volume confirmation.
+Breakouts above/below ATR-based channels capture momentum moves, daily trend filter
+ensures alignment with higher timeframe bias, and volume confirms institutional participation.
+ATR-based stops limit drawdown. Designed to work in both bull and bear markets by
+following the daily trend direction. Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_bollinger_bands(close, length=20, std_dev=2.0):
-    """Calculate Bollinger Bands: upper, middle (SMA), lower"""
-    if len(length) < length:
-        return np.full_like(close, np.nan), np.full_like(close, np.nan), np.full_like(close, np.nan)
+def calculate_atr(high, low, close, length=14):
+    """Average True Range"""
+    if len(high) < length:
+        return np.full_like(high, np.nan, dtype=np.float64)
     
-    sma = pd.Series(close).rolling(window=length, min_periods=length).mean().values
-    std = pd.Series(close).rolling(window=length, min_periods=length).std().values
+    tr = np.zeros_like(high)
+    tr[0] = high[0] - low[0]
+    for i in range(1, len(high)):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
+    atr = np.zeros_like(high)
+    atr[:length-1] = np.nan
+    atr[length-1] = np.mean(tr[:length])
+    for i in range(length, len(high)):
+        atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
     
-    return upper, sma, lower
-
-def calculate_ema(values, period):
-    """Exponential Moving Average"""
-    if len(values) < period:
-        return np.full_like(values, np.nan, dtype=np.float64)
-    
-    ema = np.full_like(values, np.nan, dtype=np.float64)
-    alpha = 2.0 / (period + 1)
-    ema[period-1] = np.mean(values[:period])
-    
-    for i in range(period, len(values)):
-        ema[i] = alpha * values[i] + (1 - alpha) * ema[i-1]
-    
-    return ema
+    return atr
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50 for trend
-    wk_close = df_1w['close'].values
-    ema_50_1w = calculate_ema(wk_close, 50)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate daily Bollinger Bands (20,2)
-    upper_bb, middle_bb, lower_bb = calculate_bollinger_bands(close, 20, 2.0)
-    
-    # Get daily volume for confirmation
+    # Get daily data for trend filter and ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate daily ATR(14) for breakout channels
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
+    atr_14_1d = calculate_atr(d_high, d_low, d_close, 14)
+    
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(d_close).ewm(span=50, adjust=False, min_periods=50).values
+    
+    # Calculate daily volume average for confirmation
     vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align daily indicators to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    
+    # Calculate 4-period high/low for breakout channels
+    high_4 = pd.Series(high).rolling(window=4, min_periods=4).max().values
+    low_4 = pd.Series(low).rolling(window=4, min_periods=4).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need BB (20) + EMA (50) + volume MA (20)
-    start_idx = max(20, 50, 20)
+    # Warmup: need ATR(14) + EMA(50) + volume avg(20) + 4-period channels
+    start_idx = max(14, 50, 20, 4)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i]) or np.isnan(high_4[i]) or np.isnan(low_4[i])):
             signals[i] = 0.0
             continue
         
         # Current price and volume
         price_now = close[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
+        vol_avg = vol_avg_aligned[i]
         
         # Current indicators
-        bb_upper = upper_bb[i]
-        bb_lower = lower_bb[i]
-        bb_middle = middle_bb[i]
-        ema_trend = ema_50_1w_aligned[i]
+        atr_now = atr_14_aligned[i]
+        ema_trend = ema_50_aligned[i]
+        high_channel = high_4[i]
+        low_channel = low_4[i]
         
         # Volume filter: volume > 1.5x daily average
-        vol_filter = vol_now > 1.5 * vol_ma
+        vol_filter = vol_now > 1.5 * vol_avg
         
-        # Trend filter: weekly close above/below weekly EMA50
-        wk_close_price = df_1w['close'].values
-        wk_close_aligned = align_htf_to_ltf(prices, df_1w, wk_close_price)
-        if np.isnan(wk_close_aligned[i]):
-            signals[i] = 0.0
-            continue
-        weekly_close = wk_close_aligned[i]
+        # Trend filter: price relative to daily EMA50
+        price_above_trend = price_now > ema_trend
+        price_below_trend = price_now < ema_trend
         
         if position == 0:
-            # Bullish breakout: price above upper BB with weekly uptrend and high volume
-            if price_now > bb_upper and weekly_close > ema_trend and vol_filter:
+            # Long breakout: price breaks above 4-period high + uptrend + volume
+            if price_now > high_channel and price_above_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Bearish breakout: price below lower BB with weekly downtrend and high volume
-            elif price_now < bb_lower and weekly_close < ema_trend and vol_filter:
+            # Short breakdown: price breaks below 4-period low + downtrend + volume
+            elif price_now < low_channel and price_below_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below middle BB or trend changes
-            if price_now < bb_middle or weekly_close < ema_trend:
+            # Exit long: breakdown below 4-period low or trend reversal
+            if price_now < low_channel or price_now < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above middle BB or trend changes
-            if price_now > bb_middle or weekly_close > ema_trend:
+            # Exit short: breakout above 4-period high or trend reversal
+            if price_now > high_channel or price_now > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_BollingerBreakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_ATRBreakout_DailyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
