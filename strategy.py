@@ -1,139 +1,156 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Ehlers Fisher Transform with daily volume confirmation and weekly trend filter.
-Enters long when Fisher crosses above -1.5 with above-average volume and weekly uptrend.
-Enters short when Fisher crosses below +1.5 with above-average volume and weekly downtrend.
-Fisher Transform identifies extreme price movements and reversals, effective in ranging markets.
-Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+Hypothesis: Daily RSI(14) with 200-day SMA trend filter and weekly volatility filter.
+Enters long when RSI crosses above 30 from below with price above 200-day SMA and weekly ATR contraction.
+Enters short when RSI crosses below 70 from above with price below 200-day SMA and weekly ATR contraction.
+Uses weekly ATR contraction (current ATR < 0.8 * ATR 4 weeks ago) to identify low volatility periods for mean reversion.
+Targets 10-25 trades/year per symbol (40-100 total over 4 years) to minimize fee drag.
+Works in both bull and bear markets by combining mean reversion with trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def fisher_transform(price, period=10):
-    """Ehlers Fisher Transform"""
-    if len(price) < period:
-        return np.full_like(price, np.nan, dtype=float)
+def rsi(close, period=14):
+    """Relative Strength Index"""
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Normalize price to [-1, 1] range
-    highest = np.max(price)
-    lowest = np.min(price)
-    if highest == lowest:
-        return np.zeros_like(price)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
     
-    value = 2 * ((price - lowest) / (highest - lowest) - 0.5)
-    # Clamp to [-0.999, 0.999] to avoid infinities
-    value = np.clip(value, -0.999, 0.999)
+    # First average
+    if len(close) >= period:
+        avg_gain[period-1] = np.mean(gain[:period])
+        avg_loss[period-1] = np.mean(loss[:period])
+        
+        # Subsequent values
+        for i in range(period, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
     
-    # Fisher transform
-    fish = 0.5 * np.log((1 + value) / (1 - value))
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_val = 100 - (100 / (1 + rs))
+    return rsi_val
+
+def atr(high, low, close, period=14):
+    """Average True Range"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    # Smoothed with delay
-    if len(fish) < 2:
-        return fish
-    
-    smoothed = np.full_like(fish, np.nan)
-    smoothed[0] = fish[0]
-    for i in range(1, len(fish)):
-        smoothed[i] = 0.5 * fish[i] + 0.5 * smoothed[i-1]
-    
-    return smoothed
+    atr_val = np.zeros_like(close)
+    if len(close) >= period:
+        atr_val[period-1] = np.mean(tr[:period])
+        for i in range(period, len(close)):
+            atr_val[i] = (atr_val[i-1] * (period-1) + tr[i]) / period
+    return atr_val
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for volume filter
+    # Get daily data for RSI and SMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
+    # Get weekly data for ATR volatility filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Typical price for Fisher
-    typical_price = (high + low + close) / 3.0
+    # Calculate daily RSI(14)
+    rsi_val = rsi(close, 14)
     
-    # Calculate 6h Fisher Transform
-    fish = fisher_transform(typical_price, 10)
-    fish_sma = pd.Series(fish).rolling(window=5, min_periods=5).mean().values
+    # Calculate daily SMA(200) for trend filter
+    sma_200 = np.full_like(close, np.nan)
+    if len(close) >= 200:
+        sma_200[199] = np.mean(close[:200])
+        for i in range(200, len(close)):
+            sma_200[i] = np.mean(close[i-199:i+1])
     
-    # Align Fisher to 6h
-    fish_aligned = align_htf_to_ltf(prices, prices, fish_sma)
-    
-    # Calculate daily volume MA(20)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Calculate weekly EMA(21) for trend filter
+    # Calculate weekly ATR(14) for volatility filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    atr_1w = atr(high_1w, low_1w, close_1w, 14)
+    
+    # Align indicators to daily timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_val)
+    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Fisher, volume MA, and weekly EMA
-    start_idx = max(10, 5, 20, 21)
+    # Warmup: need RSI, SMA, and ATR
+    start_idx = max(14, 200, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(fish_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(ema_21_1w_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(sma_200_aligned[i]) or 
+            np.isnan(atr_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 6h price and volume
+        # Current values
+        rsi_now = rsi_aligned[i]
+        rsi_prev = rsi_aligned[i-1]
+        sma_200_now = sma_200_aligned[i]
+        atr_now = atr_1w_aligned[i]
         price_now = close[i]
-        vol_now = volume[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        trend_1w = ema_21_1w_aligned[i]
         
-        # Current Fisher value
-        fish_now = fish_aligned[i]
+        # Weekly ATR contraction: current ATR < 0.8 * ATR 4 weeks ago
+        # Need to look back 4 weeks in weekly data
+        atr_contraction = False
+        if i >= 28:  # Need at least 4 weeks of data (approximate)
+            # Get ATR from approximately 4 weeks ago (28 days)
+            idx_4w_ago = i - 28
+            if idx_4w_ago >= 0 and not np.isnan(atr_1w_aligned[idx_4w_ago]):
+                atr_4w_ago = atr_1w_aligned[idx_4w_ago]
+                atr_contraction = atr_now < 0.8 * atr_4w_ago
         
-        # Volume filter: volume > 1.5x daily average
-        vol_filter = vol_now > 1.5 * vol_ma
+        # RSI crossing conditions
+        rsi_cross_above_30 = rsi_prev <= 30 and rsi_now > 30
+        rsi_cross_below_70 = rsi_prev >= 70 and rsi_now < 70
         
-        # Fisher signals
-        fish_cross_above = (i > start_idx and 
-                           fish_aligned[i-1] <= -1.5 and fish_now > -1.5)
-        fish_cross_below = (i > start_idx and 
-                           fish_aligned[i-1] >= 1.5 and fish_now < 1.5)
+        # Trend filter
+        above_sma200 = price_now > sma_200_now
+        below_sma200 = price_now < sma_200_now
         
         # Entry conditions
         if position == 0:
-            # Long: Fisher crosses above -1.5 with volume + weekly uptrend
-            if fish_cross_above and vol_filter and price_now > trend_1w:
+            # Long: RSI crosses above 30 + price above SMA200 + ATR contraction
+            if rsi_cross_above_30 and above_sma200 and atr_contraction:
                 signals[i] = size
                 position = 1
-            # Short: Fisher crosses below +1.5 with volume + weekly downtrend
-            elif fish_cross_below and vol_filter and price_now < trend_1w:
+            # Short: RSI crosses below 70 + price below SMA200 + ATR contraction
+            elif rsi_cross_below_70 and below_sma200 and atr_contraction:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Fisher crosses below +1.5 or weekly trend turns down
-            if fish_now < 1.5 or price_now < trend_1w:
+            # Exit long: RSI crosses below 50 or price closes below SMA200
+            if rsi_now < 50 or price_now < sma_200_now:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Fisher crosses above -1.5 or weekly trend turns up
-            if fish_now > -1.5 or price_now > trend_1w:
+            # Exit short: RSI crosses above 50 or price closes above SMA200
+            if rsi_now > 50 or price_now > sma_200_now:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_FisherTransform_1dVolume_1wTrend"
-timeframe = "6h"
+name = "daily_RSI14_SMA200_ATRcontraction"
+timeframe = "1d"
 leverage = 1.0
