@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high with 1d EMA50 uptrend and volume > 2x average.
-# Short when price breaks below Donchian(20) low with 1d EMA50 downtrend and volume > 2x average.
-# Exit when price crosses back through the opposite Donchian band (mean reversion).
-# Uses Donchian channels for clear breakout signals, targeting 15-30 trades per year.
+# Hypothesis: 1d Bollinger Band squeeze breakout with weekly EMA20 trend filter and volume confirmation.
+# Long when price breaks above upper BB with weekly EMA20 uptrend and volume > 1.5x average.
+# Short when price breaks below lower BB with weekly EMA20 downtrend and volume > 1.5x average.
+# Exit when price returns to middle BB.
+# Uses Bollinger Bands for volatility-based breakouts, targeting 20-40 trades per year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,33 +19,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_period = 50
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
-                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
+    # Calculate weekly EMA20 for trend filter
+    ema_period = 20
+    ema_weekly = np.full(len(close_weekly), np.nan)
+    if len(close_weekly) >= ema_period:
+        ema_weekly[ema_period - 1] = np.mean(close_weekly[:ema_period])
+        for i in range(ema_period, len(close_weekly)):
+            ema_weekly[i] = (close_weekly[i] * (2 / (ema_period + 1)) + 
+                            ema_weekly[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate Donchian channels (20-period)
-    donch_period = 20
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
+    # Calculate Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2.0
+    bb_middle = np.full(n, np.nan)
+    bb_upper = np.full(n, np.nan)
+    bb_lower = np.full(n, np.nan)
     
-    for i in range(donch_period - 1, n):
-        upper_band[i] = np.max(high[i - donch_period + 1:i + 1])
-        lower_band[i] = np.min(low[i - donch_period + 1:i + 1])
+    for i in range(bb_period - 1, n):
+        bb_middle[i] = np.mean(close[i - bb_period + 1:i + 1])
+        bb_std_dev = np.std(close[i - bb_period + 1:i + 1])
+        bb_upper[i] = bb_middle[i] + bb_std_dev * bb_std
+        bb_lower[i] = bb_middle[i] - bb_std_dev * bb_std
     
-    # Align 1d EMA to 4h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align weekly EMA to daily timeframe
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
     # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -56,13 +60,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian, EMA50, and volume MA20
-    start_idx = max(donch_period, ema_period - 1, 19)
+    # Warmup: need BB, weekly EMA, and volume MA20
+    start_idx = max(bb_period, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(bb_middle[i]) or np.isnan(ema_weekly_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -71,31 +76,29 @@ def generate_signals(prices):
         vol_avg = vol_ma_20[i]
         
         # Volume filter: require volume above average
-        vol_filter = vol_now > 2.0 * vol_avg
+        vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price breaks above Donchian upper band with 1d EMA50 uptrend and volume filter
-            if (price > upper_band[i] and 
-                price > ema_1d_aligned[i] and vol_filter):
+            # Long: price breaks above upper BB with weekly EMA20 uptrend and volume filter
+            if (price > bb_upper[i] and price > ema_weekly_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian lower band with 1d EMA50 downtrend and volume filter
-            elif (price < lower_band[i] and 
-                  price < ema_1d_aligned[i] and vol_filter):
+            # Short: price breaks below lower BB with weekly EMA20 downtrend and volume filter
+            elif (price < bb_lower[i] and price < ema_weekly_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian lower band
-            if price < lower_band[i]:
+            # Exit long: price returns to middle BB
+            if price <= bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above Donchian upper band
-            if price > upper_band[i]:
+            # Exit short: price returns to middle BB
+            if price >= bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA50_Volume"
-timeframe = "4h"
+name = "1d_BollingerBandSqueezeBreakout_WeeklyEMA20_Volume"
+timeframe = "1d"
 leverage = 1.0
