@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_HTF
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume confirmation.
-Designed for 12h timeframe targeting 50-150 trades over 4 years (12-37/year). Uses tight entry conditions
-(breakout + trend alignment + volume spike) to minimize overtrading and fee drag. Works in bull/bear markets:
-In trending regimes (price > EMA34 for longs, < EMA34 for shorts), breakouts at R1/S1 with volume spike
-capture momentum. Exit on trend reversal (close crosses EMA34) or range re-entry (price crosses opposite S1/R1).
+4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Filtered
+Hypothesis: Camarilla R3/S3 breakout (stronger levels) on 4h with 1d EMA34 trend filter and volume confirmation.
+Uses fixed position sizing (0.25) to minimize fee churn. Designed for 4h timeframe targeting 50-100 trades over 4 years.
+Works in bull/bear markets: In trending regimes (price > EMA34 for longs, < EMA34 for shorts),
+breakouts at R3/S3 with volume spike capture strong momentum. Exit on trend reversal or re-entry into R1/S1 range.
 """
 
 import numpy as np
@@ -35,7 +34,7 @@ def generate_signals(prices):
     r3 = prev_close + (rng * 1.1 / 4)
     s3 = prev_close - (rng * 1.1 / 4)
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
@@ -52,14 +51,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    signal_size = 0.25  # Fixed size to minimize churn
+    size = 0.25  # Fixed size to minimize fee churn
     
     # Warmup: need 1d shift, EMA34, vol avg
     start_idx = max(30, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
@@ -73,41 +72,41 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with EMA alignment and volume spike
-            long_condition = (close_val > r1_val and 
+            # Look for entry: Camarilla R3/S3 breakout with EMA alignment and volume spike
+            long_condition = (close_val > r3_val and 
                             close_val > ema_val and 
                             vol_spike)
-            short_condition = (close_val < s1_val and 
+            short_condition = (close_val < s3_val and 
                              close_val < ema_val and 
                              vol_spike)
             
             if long_condition:
-                signals[i] = signal_size
+                signals[i] = size
                 position = 1
                 entry_price = close_val
             elif short_condition:
-                signals[i] = -signal_size
+                signals[i] = -size
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Exit long: price re-enters Camarilla range (below S1) OR loses EMA alignment
-            if close_val < s1_val or close_val < ema_val:
+            # Exit long: price re-enters Camarilla R1/S1 range OR loses EMA alignment
+            if close_val < r1_val or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = signal_size
+                signals[i] = size
         elif position == -1:
-            # Exit short: price re-enters Camarilla range (above R1) OR loses EMA alignment
-            if close_val > r1_val or close_val > ema_val:
+            # Exit short: price re-enters Camarilla R1/S1 range OR loses EMA alignment
+            if close_val > s1_val or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -signal_size
+                signals[i] = -size
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_HTF"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Filtered"
+timeframe = "4h"
 leverage = 1.0
