@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_Dyn
-Hypothesis: Uses 4h timeframe with Camarilla R1/S1 breakouts filtered by 1d EMA34 trend, volume confirmation, and ATR-based dynamic position sizing. Designed for BTC/ETH to work in both bull and bear markets by only taking breakouts in the direction of the 1d trend. Target ~30-40 trades/year to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: Uses 12h timeframe with Camarilla R1/S1 breakouts filtered by 1d EMA34 trend and volume confirmation. Target 12-37 trades/year to minimize fee drag. Works in both bull and bear markets by only taking breakouts in the direction of the 1d trend. 12h timeframe reduces noise and avoids overtrading.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA34 trend filter
@@ -33,7 +33,7 @@ def generate_signals(prices):
     r1 = prev_close + (rng * 1.1 / 12)
     s1 = prev_close - (rng * 1.1 / 12)
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 12h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -41,25 +41,17 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.8 * vol_avg)
     
-    # ATR for dynamic position sizing (based on 14-period ATR)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
+    size = 0.30   # Fixed position size (30%)
     
-    # Warmup: need 1d EMA34 (34), 1d shift(1) for Camarilla, vol avg (20), ATR (14)
-    start_idx = max(34 + 1, 1 + 1, 20, 14)  # ~35 bars
+    # Warmup: need 1d EMA34 (34), 1d shift(1) for Camarilla, vol avg (20)
+    start_idx = max(34 + 1, 1 + 1, 20)  # ~35 bars
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i]) or
-            np.isnan(atr[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
@@ -68,7 +60,6 @@ def generate_signals(prices):
         s1_val = s1_aligned[i]
         ema_val = ema_34_aligned[i]
         vol_conf = volume_confirm[i]
-        atr_val = atr[i]
         
         if position == 0:
             # Look for entry: Camarilla R1/S1 breakout with 1d EMA34 alignment and volume confirmation
@@ -80,24 +71,16 @@ def generate_signals(prices):
                              vol_conf)
             
             if long_condition:
-                # Dynamic size based on ATR (normalized to 0.25-0.35 range)
-                atr_norm = min(max(atr_val / close_val, 0.01), 0.05)  # cap between 1%-5%
-                size = 0.25 + (atr_norm - 0.01) * (0.10 / 0.04)  # scale 0.01-0.05 to 0.25-0.35
                 signals[i] = size
                 position = 1
-                entry_price = close_val
             elif short_condition:
-                atr_norm = min(max(atr_val / close_val, 0.01), 0.05)
-                size = 0.25 + (atr_norm - 0.01) * (0.10 / 0.04)
                 signals[i] = -size
                 position = -1
-                entry_price = close_val
         elif position == 1:
             # Exit long: price crosses below 1d EMA34 (trend reversal)
             if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
@@ -105,12 +88,11 @@ def generate_signals(prices):
             if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_Dyn"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
