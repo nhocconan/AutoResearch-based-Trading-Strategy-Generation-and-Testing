@@ -1,9 +1,3 @@
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 12h breakout at Camarilla R1/S1 levels with 1d trend filter and volume confirmation.
-# Uses 1d EMA(34) for trend direction, daily pivots for R1/S1 levels, and volume spike to avoid false breakouts.
-# Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets by aligning with higher timeframe structure.
-# Target: 50-150 total trades over 4 years = 12-37/year. HARD MAX: 200 total.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,88 +13,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots (based on previous day)
+    # Get daily data for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    # Daily Camarilla levels (based on previous day)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate 14-period Choppiness Index
+    atr14 = np.zeros(len(df_1d))
+    for i in range(14, len(df_1d)):
+        tr = max(df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+                 abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+                 abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1]))
+        atr14[i] = (atr14[i-1] * 13 + tr) / 14
+    atr14[:14] = np.nan
     
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
     
-    # Resistance and Support levels (R1, S1)
-    R1 = pivot + (range_hl * 1.1 / 6)  # R1 level
-    S1 = pivot - (range_hl * 1.1 / 6)  # S1 level
+    chop = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        if not np.isnan(atr14[i]) and not np.isnan(highest_high[i]) and not np.isnan(lowest_low[i]):
+            sum_atr = atr14[i] * 14
+            if highest_high[i] - lowest_low[i] > 0:
+                chop[i] = 100 * np.log10(sum_atr / (highest_high[i] - lowest_low[i])) / np.log10(14)
     
-    # Get 1d data for trend filter
-    if len(df_1d) < 34:
+    chop_ma = pd.Series(chop).rolling(window=5, min_periods=5).mean().values
+    
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_ma)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # 12h volume average (20-period)
+    # 4h volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need daily pivots, 1d EMA, and volume data
-    start_idx = max(2, 34, 20)
+    # Warmup: need chop data, 4h EMA, and volume data
+    start_idx = max(14, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
+        chop_val = chop_aligned[i]
+        ema_trend = ema50_4h_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average (volume spike)
-        vol_filter = vol_current > (vol_ma_val * 2.0)
+        # Volume filter: current volume > 1.5 * 20-period average (volume surge)
+        vol_filter = vol_current > (vol_ma_val * 1.5)
+        
+        # Regime filter: Chop > 61.8 = ranging market (mean reversion)
+        ranging = chop_val > 61.8
         
         if position == 0:
-            # Long: price breaks above R1 with 1d uptrend and volume spike
-            if close[i] > R1_aligned[i] and close[i] > ema_trend and vol_filter:
-                signals[i] = size
-                position = 1
-            # Short: price breaks below S1 with 1d downtrend and volume spike
-            elif close[i] < S1_aligned[i] and close[i] < ema_trend and vol_filter:
-                signals[i] = -size
-                position = -1
+            # Long: price touches lower Bollinger Band in ranging market with volume surge
+            # Calculate Bollinger Bands (20, 2) on 4h close
+            if i >= 20:
+                bb_middle = np.mean(close[i-19:i+1])
+                bb_std = np.std(close[i-19:i+1])
+                bb_lower = bb_middle - 2 * bb_std
+                
+                if close[i] <= bb_lower and ranging and vol_filter:
+                    signals[i] = size
+                    position = 1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below S1 or 1d trend turns down
-            if close[i] < S1_aligned[i] or close[i] < ema_trend:
+            # Exit long: price touches middle Bollinger Band or trend turns down
+            if i >= 20:
+                bb_middle = np.mean(close[i-19:i+1])
+                if close[i] >= bb_middle or close[i] < ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = size
+            else:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above R1 or 1d trend turns up
-            if close[i] > R1_aligned[i] or close[i] > ema_trend:
+            # Exit short: price touches middle Bollinger Band or trend turns up
+            if i >= 20:
+                bb_middle = np.mean(close[i-19:i+1])
+                if close[i] >= bb_middle or close[i] > ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -size
+            else:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -size
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Choppiness_BB_MeanReversion_VolumeSurge"
+timeframe = "4h"
 leverage = 1.0
