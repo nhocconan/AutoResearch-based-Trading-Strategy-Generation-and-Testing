@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1w_SMA_Crossover_Volume_Confirmation_v1
-Hypothesis: Uses 1-week SMA crossover (SMA50/SMA200) for trend direction, 
-with 12h price action confirming breakouts above/below recent swing points,
-and volume surge for entry. Designed for low trade frequency (12-37/year) 
-to work in both bull and bear markets by capturing major trend changes 
-with institutional volume confirmation.
+4h_KAMA_Direction_RSI_Range_200MA_v2
+Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) for trend direction,
+combined with RSI for momentum confirmation and 200-period MA for long-term bias.
+Designed to capture strong trends while filtering choppy markets, with low trade frequency
+to minimize fee drag. Targets 20-50 trades per year for robustness in both bull and bear markets.
 """
 
 import numpy as np
@@ -17,83 +16,88 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1-week data for trend determination
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate KAMA (adaptive trend) - faster reaction in trends, slower in chop
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
     
-    # Calculate weekly SMAs for trend filter
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma200_1w = pd.Series(close_1w).rolling(window=200, min_periods=200).mean().values
+    # Proper KAMA calculation
+    diff = np.abs(np.diff(close, prepend=close[0]))
+    # Volatility sum over 10 periods
+    volatility_sum = np.zeros_like(close)
+    for i in range(10, len(close)):
+        volatility_sum[i] = np.sum(diff[i-9:i+1])
+    er = np.where(volatility_sum > 0, diff / volatility_sum, 0)
+    sc = (er * (0.6665 - 0.0645) + 0.0645) ** 2
     
-    # Align weekly SMAs to 12h timeframe
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
-    sma200_1w_aligned = align_htf_to_ltf(prices, df_1w, sma200_1w)
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Calculate 12h swing points for entry levels
-    # Use 24-period lookback for swing high/low (equivalent to 12 days on 12h)
-    lookback = 24
-    high_max = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    low_min = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # RSI (14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation: current volume > 2.5 * 30-period average
-    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (2.5 * vol_avg)
+    # 200-period MA for long-term trend filter
+    ma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     size = 0.25   # Position size: 25% of capital
     
-    # Start after all indicators are ready
-    start_idx = max(200, lookback, 30)
+    # Warmup: need enough data for all indicators
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(sma50_1w_aligned[i]) or np.isnan(sma200_1w_aligned[i]) or 
-            np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ma200[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        sma50 = sma50_1w_aligned[i]
-        sma200 = sma200_1w_aligned[i]
-        swing_high = high_max[i]
-        swing_low = low_min[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        ma200_val = ma200[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Determine trend from weekly SMA crossover
-            bullish_trend = sma50 > sma200
-            bearish_trend = sma50 < sma200
-            
-            if bullish_trend and vol_conf:
-                # Long: break above recent swing high with volume
-                if close_val > swing_high:
-                    signals[i] = size
-                    position = 1
-                    entry_price = close_val
-            elif bearish_trend and vol_conf:
-                # Short: break below recent swing low with volume
-                if close_val < swing_low:
-                    signals[i] = -size
-                    position = -1
-                    entry_price = close_val
+            # Long conditions: price above KAMA (uptrend), RSI > 50 (momentum), above MA200 (long-term bias), volume confirmation
+            if close_val > kama_val and rsi_val > 50 and close_val > ma200_val and vol_conf:
+                signals[i] = size
+                position = 1
+            # Short conditions: price below KAMA (downtrend), RSI < 50, below MA200, volume confirmation
+            elif close_val < kama_val and rsi_val < 50 and close_val < ma200_val and vol_conf:
+                signals[i] = -size
+                position = -1
         elif position == 1:
-            # Exit: price breaks below swing low or trend changes
-            if close_val < swing_low or sma50 < sma200:
+            # Exit long: price crosses below KAMA or RSI < 40 (loss of momentum)
+            if close_val < kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: price breaks above swing high or trend changes
-            if close_val > swing_high or sma50 > sma200:
+            # Exit short: price crosses above KAMA or RSI > 60 (loss of momentum)
+            if close_val > kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_SMA_Crossover_Volume_Confirmation_v1"
-timeframe = "12h"
+name = "4h_KAMA_Direction_RSI_Range_200MA_v2"
+timeframe = "4h"
 leverage = 1.0
