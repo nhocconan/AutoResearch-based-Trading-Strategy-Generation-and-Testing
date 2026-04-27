@@ -21,12 +21,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily EMA(34) for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 4-hour Donchian channels (20-period) for breakout signals
+    # Calculate 4h Donchian channels (20-period) for breakout signals
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 20:
         return np.zeros(n)
@@ -37,7 +38,7 @@ def generate_signals(prices):
     donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
     donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
     
-    # Calculate 4-hour volume moving average for confirmation
+    # Calculate 4h volume moving average for confirmation
     vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
@@ -111,5 +112,5 @@ def generate_signals(prices):
     return signals
 
 name = "1d_EMA34_4hDonchianBreakout_VolumeFilter"
-timeframe = "1d"
+timeframe = "4h"
 leverage = 1.0
