@@ -37,7 +37,7 @@ def generate_signals(prices):
         else:
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align daily indicators to 4h
+    # Align daily indicators to 1h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
@@ -47,9 +47,12 @@ def generate_signals(prices):
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
     # Warmup: need EMA, ATR, and volume MA
     start_idx = max(34, 14, vol_period) + 5
@@ -58,6 +61,11 @@ def generate_signals(prices):
         # Skip if any data not ready
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Skip if outside session
+        if hours[i] < 8 or hours[i] > 20:
             signals[i] = 0.0
             continue
         
@@ -97,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_Volume_Trend_Filter"
-timeframe = "4h"
+name = "1h_EMA34_Volume_Trend_Filter_Session"
+timeframe = "1h"
 leverage = 1.0
