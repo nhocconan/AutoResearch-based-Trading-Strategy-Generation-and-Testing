@@ -1,30 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1d volume filter and 1w trend filter.
-Enters long when Alligator jaws (13-period SMMA) crosses above teeth (8-period SMMA)
-with above-average daily volume and weekly uptrend.
-Enters short when jaws cross below teeth with above-average daily volume and weekly downtrend.
-Uses weekly timeframe for trend, daily for volume filter, 12h for execution.
-Williams Alligator uses smoothed moving averages (SMMA) which reduce whipsaw in ranging markets.
-Designed to work in both bull and bear markets by following the weekly trend and requiring volume confirmation.
-Target: 12-37 trades/year per symbol (48-148 total over 4 years) to minimize fee drag.
+Hypothesis: Daily KAMA trend with RSI momentum filter and volume confirmation.
+Enters long when KAMA turns up, RSI > 55, and volume > 1.5x 20-day average.
+Enters short when KAMA turns down, RSI < 45, and volume > 1.5x 20-day average.
+Uses weekly timeframe for trend confirmation (weekly KAMA direction).
+Designed to capture momentum in trending markets while avoiding whipsaws in ranging conditions.
+Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def smma(data, period):
-    """Smoothed Moving Average (SMMA) - also called Wilder's smoothing"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
-    result = np.full_like(data, np.nan, dtype=float)
-    # First value is simple average
-    result[period-1] = np.mean(data[:period])
-    # Subsequent values: SMMA = (Prev SMMA * (period-1) + Current Price) / period
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,82 +22,129 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume filter
+    # Get daily data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
+    # Calculate daily KAMA (adaptive moving average)
+    close_1d = df_1d['close'].values
+    # Efficiency ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        if np.sum(volatility[max(0, i-9):i+1]) > 0:
+            er[i] = np.sum(change[max(0, i-9):i+1]) / np.sum(volatility[max(0, i-9):i+1])
+        else:
+            er[i] = 0
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Calculate daily RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate daily volume average
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Get weekly data for trend confirmation
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily volume MA(20)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Calculate weekly EMA(34) for trend filter
+    # Calculate weekly KAMA for trend filter
     close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    change_w = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    volatility_w = np.abs(np.diff(close_1w))
+    er_w = np.zeros_like(close_1w)
+    for i in range(1, len(close_1w)):
+        if np.sum(volatility_w[max(0, i-9):i+1]) > 0:
+            er_w[i] = np.sum(change_w[max(0, i-9):i+1]) / np.sum(volatility_w[max(0, i-9):i+1])
+        else:
+            er_w[i] = 0
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc_w = (er_w * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama_w = np.zeros_like(close_1w)
+    kama_w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama_w[i] = kama_w[i-1] + sc_w[i] * (close_1w[i] - kama_w[i-1])
     
-    # Calculate Williams Alligator on 12h timeframe using SMMA
-    # Jaws: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    jaws = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Align daily indicators to lower timeframe (assumes 1h or similar)
+    # For 1d timeframe, we can use values directly with proper indexing
+    # Since we're using 1d timeframe, we need to align to 1d bars
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    kama_w_aligned = align_htf_to_ltf(prices, df_1w, kama_w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Alligator SMMA (13-period), daily volume MA, weekly EMA
-    start_idx = max(13, 20, 34)
+    # Warmup: need enough data for calculations
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(kama_w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 12h price and volume
+        # Current daily price and volume
         price_now = close[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        trend_1w = ema_34_1w_aligned[i]
+        vol_ma = vol_ma_20_aligned[i]
         
-        # Current Alligator values
-        jaws_now = jaws[i]
-        teeth_now = teeth[i]
-        lips_now = lips[i]
+        # Current indicators
+        kama_now = kama_aligned[i]
+        rsi_now = rsi_aligned[i]
+        kama_w_now = kama_w_aligned[i]
         
-        # Volume filter: volume > 1.3x daily average
-        vol_filter = vol_now > 1.3 * vol_ma
+        # Volume filter: volume > 1.5x 20-day average
+        vol_filter = vol_now > 1.5 * vol_ma
         
-        # Entry conditions: Williams Alligator crossover with volume and weekly trend alignment
+        # KAMA direction: current vs previous
+        kama_up = kama_now > kama_aligned[i-1]
+        kama_down = kama_now < kama_aligned[i-1]
+        
+        # Entry conditions
         if position == 0:
-            # Long: jaws cross above teeth with volume + weekly uptrend
-            if jaws_now > teeth_now and jaws[i-1] <= teeth[i-1] and vol_filter and price_now > trend_1w:
+            # Long: KAMA up, RSI > 55, volume confirmation, weekly uptrend
+            if kama_up and rsi_now > 55 and vol_filter and price_now > kama_w_now:
                 signals[i] = size
                 position = 1
-            # Short: jaws cross below teeth with volume + weekly downtrend
-            elif jaws_now < teeth_now and jaws[i-1] >= teeth[i-1] and vol_filter and price_now < trend_1w:
+            # Short: KAMA down, RSI < 45, volume confirmation, weekly downtrend
+            elif kama_down and rsi_now < 45 and vol_filter and price_now < kama_w_now:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: jaws cross below teeth or weekly trend turns down
-            if jaws_now < teeth_now or price_now < trend_1w:
+            # Exit long: KAMA turns down or RSI < 50
+            if not kama_up or rsi_now < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: jaws cross above teeth or weekly trend turns up
-            if jaws_now > teeth_now or price_now > trend_1w:
+            # Exit short: KAMA turns up or RSI > 50
+            if not kama_down or rsi_now > 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1dVolume_1wTrend"
-timeframe = "12h"
+name = "1d_KAMA_RSI_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
