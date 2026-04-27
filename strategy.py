@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike
-Hypothesis: Use price closing beyond stronger Camarilla R3/S3 levels (most significant breakout levels) combined with volume spike and daily EMA34 trend filter. R3/S3 breakouts indicate very strong momentum with minimal false signals. Target 12-25 trades/year to avoid fee drag. Works in both bull (breakouts continue) and bear (false breakdowns reversed quickly) by requiring strong momentum confirmation.
+4h_Adaptive_Trend_Strategy
+Hypothesis: Combine adaptive trend detection with volume confirmation and regime filtering. Uses EMA crossover with ATR-based dynamic thresholds to capture trends while avoiding whipsaws. In bull markets: captures uptrends with minimal drawdown. In bear markets: avoids false breakdowns through volatility-adjusted filters. Targets 20-30 trades/year by requiring multiple confirmations (trend + volume + volatility regime).
 """
 
 import numpy as np
@@ -18,70 +18,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend
+    # Get daily data for trend filter and volatility regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels from previous day
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_ = df_1d['high'] - df_1d['low']
+    # Daily ATR for volatility regime (14-period)
+    atr_14 = pd.Series(np.maximum(
+        df_1d['high'] - df_1d['low'],
+        np.maximum(
+            abs(df_1d['high'] - df_1d['close'].shift(1)),
+            abs(df_1d['low'] - df_1d['close'].shift(1))
+        )
+    )).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Camarilla R3 and S3 (strongest breakout levels)
-    r3 = typical_price + (range_ * 1.1 / 4)
-    s3 = typical_price - (range_ * 1.1 / 4)
+    # 4-hour EMA crossover system (8 and 21)
+    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align levels to 12h timeframe (use previous day's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
-    
-    # Volume confirmation: volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Volume confirmation: volume > 1.8 * 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_threshold = vol_ma * 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for volume MA and EMA
-    start_idx = max(34, 20)
+    # Warmup: need enough data for all indicators
+    start_idx = max(50, 30, 21)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
-        vol_spike_val = vol_spike[i]
+        ema_trend = ema50_1d_aligned[i]
+        atr_val = atr_14_aligned[i]
+        ema_fast = ema8[i]
+        ema_slow = ema21[i]
+        vol_ok = volume[i] > vol_threshold[i]
+        
+        # Dynamic threshold based on volatility
+        dyn_threshold = atr_val * 0.5
         
         if position == 0:
-            # Long: price closes above R3 + volume spike + uptrend (price > EMA34)
-            if close[i] > r3_level and vol_spike_val and close[i] > ema_trend:
+            # Long: EMA8 > EMA21 + volume + price above EMA50 + bullish momentum
+            if (ema_fast > ema_slow + dyn_threshold and 
+                vol_ok and 
+                close[i] > ema_trend and
+                close[i] > close[i-1]):  # additional momentum filter
                 signals[i] = size
                 position = 1
-            # Short: price closes below S3 + volume spike + downtrend (price < EMA34)
-            elif close[i] < s3_level and vol_spike_val and close[i] < ema_trend:
+            # Short: EMA8 < EMA21 - volume + price below EMA50 + bearish momentum
+            elif (ema_fast < ema_slow - dyn_threshold and 
+                  vol_ok and 
+                  close[i] < ema_trend and
+                  close[i] < close[i-1]):  # additional momentum filter
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below S3 or trend turns down
-            if close[i] < s3_level or close[i] < ema_trend:
+            # Exit long: EMA crossover down OR volatility spike against trend
+            if (ema_fast < ema_slow or 
+                close[i] < ema_trend - atr_val or
+                not vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above R3 or trend turns up
-            if close[i] > r3_level or close[i] > ema_trend:
+            # Exit short: EMA crossover up OR volatility spike against trend
+            if (ema_fast > ema_slow or 
+                close[i] > ema_trend + atr_val or
+                not vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike"
-timeframe = "12h"
+name = "4h_Adaptive_Trend_Strategy"
+timeframe = "4h"
 leverage = 1.0
