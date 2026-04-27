@@ -13,25 +13,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for higher timeframe context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data for higher timeframe context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 10-period EMA on weekly close
-    close_1w = df_1w['close'].values
-    ema_10 = np.full(len(close_1w), np.nan)
-    alpha = 2 / (10 + 1)
-    for i in range(len(close_1w)):
+    # Calculate 34-period EMA on daily close
+    close_1d = df_1d['close'].values
+    ema_34 = np.full(len(close_1d), np.nan)
+    alpha = 2 / (34 + 1)
+    for i in range(len(close_1d)):
         if i == 0:
-            ema_10[i] = close_1w[i]
-        elif np.isnan(ema_10[i-1]):
-            ema_10[i] = close_1w[i]
+            ema_34[i] = close_1d[i]
+        elif np.isnan(ema_34[i-1]):
+            ema_34[i] = close_1d[i]
         else:
-            ema_10[i] = alpha * close_1w[i] + (1 - alpha) * ema_10[i-1]
+            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
     
-    # Align weekly EMA to daily
-    ema_10_aligned = align_htf_to_ltf(prices, df_1w, ema_10)
+    # Align daily EMA to 4h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate 14-period ATR for volatility and stop
     tr = np.maximum(high[1:] - low[1:], 
@@ -67,7 +67,7 @@ def generate_signals(prices):
     start_idx = max(14, vol_period, period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_10_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
             signals[i] = 0.0
             continue
@@ -76,12 +76,12 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume and price above weekly EMA10
-            if price > high_max[i] and vol_ratio > 2.0 and price > ema_10_aligned[i]:
+            # Long: Price breaks above Donchian high with volume and price above daily EMA34
+            if price > high_max[i] and vol_ratio > 2.0 and price > ema_34_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume and price below weekly EMA10
-            elif price < low_min[i] and vol_ratio > 2.0 and price < ema_10_aligned[i]:
+            # Short: Price breaks below Donchian low with volume and price below daily EMA34
+            elif price < low_min[i] and vol_ratio > 2.0 and price < ema_34_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_EMA10_Trend_Volume_ATRStop_v1"
-timeframe = "1d"
+name = "4h_Donchian20_EMA34_Trend_Volume_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
