@@ -23,59 +23,59 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla levels (R3 and S3)
+    # Calculate Camarilla levels (R4 and S4) - more extreme levels
     range_hl = prev_high - prev_low
-    R3 = prev_close + range_hl * 1.1 / 4
-    S3 = prev_close - range_hl * 1.1 / 4
+    R4 = prev_close + range_hl * 1.1 / 2
+    S4 = prev_close - range_hl * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
+    # Align Camarilla levels to 4h timeframe
+    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Get daily EMA34 for trend filter
+    # Get daily EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume spike: current volume > 2.0 * 24-period average (48h lookback)
+    # Volume spike: current volume > 2.5 * 24-period average (48h lookback)
     vol_ma_24 = np.full(n, np.nan)
     for i in range(24, n):
         vol_ma_24[i] = np.mean(volume[i-24:i])
-    volume_spike = volume > (2.0 * vol_ma_24)
+    volume_spike = volume > (2.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup: need enough data for calculations
-    start_idx = max(34, 24) + 1
+    start_idx = max(50, 24) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(R4_4h[i]) or np.isnan(S4_4h[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 + 1-day uptrend + volume spike
-            if (close[i] > R3_12h[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]):
+            # Long entry: price breaks above R4 + 1-day uptrend + volume spike
+            if (close[i] > R4_4h[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 + 1-day downtrend + volume spike
-            elif (close[i] < S3_12h[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]):
+            # Short entry: price breaks below S4 + 1-day downtrend + volume spike
+            elif (close[i] < S4_4h[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below S3 (reversal) or trend changes
-            if (close[i] < S3_12h[i] or close[i] < ema34_1d_aligned[i]):
+            # Long exit: price breaks below S4 (reversal) or trend changes
+            if (close[i] < S4_4h[i] or close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 (reversal) or trend changes
-            if (close[i] > R3_12h[i] or close[i] > ema34_1d_aligned[i]):
+            # Short exit: price breaks above R4 (reversal) or trend changes
+            if (close[i] > R4_4h[i] or close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
