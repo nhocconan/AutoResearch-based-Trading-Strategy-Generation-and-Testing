@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kumo_Twist_With_Volume_Filter
-Long when Tenkan crosses above Kijun AND price is above Kumo (cloud) with volume > 1.5x average.
-Short when Tenkan crosses below Kijun AND price is below Kumo with volume > 1.5x average.
-Exit when Tenkan crosses back through Kijun.
-Uses Ichimoku cloud as dynamic support/resistance and trend filter.
-Target: 60-120 trades over 4 years (15-30/year).
+4h_4H_1D_RelativeStrengthIndex_MeanReversion_with_Volume_Filter
+Mean reversion strategy using RSI on 4h with 1d trend filter and volume confirmation.
+Long when RSI < 30 and 1d EMA50 uptrend with volume > 1.2x average.
+Short when RSI > 70 and 1d EMA50 downtrend with volume > 1.2x average.
+Exit when RSI returns to neutral zone (40-60).
+Targets 25-40 trades per year to minimize fee drag.
 """
 
 import numpy as np
@@ -14,101 +14,108 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    kumo_shift = 26
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate Tenkan-sen (Conversion Line): (highest high + lowest low)/2 for past 9 periods
-    tenkan = np.full(n, np.nan)
-    for i in range(tenkan_period - 1, n):
-        tenkan[i] = (np.max(high[i - tenkan_period + 1:i + 1]) + np.min(low[i - tenkan_period + 1:i + 1])) / 2
+    close_1d = df_1d['close'].values
     
-    # Calculate Kijun-sen (Base Line): (highest high + lowest low)/2 for past 26 periods
-    kijun = np.full(n, np.nan)
-    for i in range(kijun_period - 1, n):
-        kijun[i] = (np.max(high[i - kijun_period + 1:i + 1]) + np.min(low[i - kijun_period + 1:i + 1])) / 2
+    # Calculate 1d EMA50 for trend filter
+    ema_period = 50
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_span_a = np.full(n, np.nan)
-    for i in range(n):
-        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
-            idx = i + kumo_shift
-            if idx < n:
-                senkou_span_a[idx] = (tenkan[i] + kijun[i]) / 2
+    # Calculate RSI on 4h
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Senkou Span B (Leading Span B): (highest high + lowest low)/2 for past 52 periods shifted 26 ahead
-    senkou_span_b = np.full(n, np.nan)
-    for i in range(senkou_span_b_period - 1, n):
-        val = (np.max(high[i - senkou_span_b_period + 1:i + 1]) + np.min(low[i - senkou_span_b_period + 1:i + 1])) / 2
-        idx = i + kumo_shift
-        if idx < n:
-            senkou_span_b[idx] = val
+    # First average gain/loss
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    if n >= rsi_period:
+        avg_gain[rsi_period - 1] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period - 1] = np.mean(loss[:rsi_period])
+        for i in range(rsi_period, n):
+            avg_gain[i] = (avg_gain[i - 1] * (rsi_period - 1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i - 1] * (rsi_period - 1) + loss[i]) / rsi_period
     
-    # Volume moving average for confirmation
-    vol_ma = np.full(n, np.nan)
-    vol_period = 20
-    for i in range(vol_period - 1, n):
-        vol_ma[i] = np.mean(volume[i - vol_period + 1:i + 1])
+    # Calculate RSI
+    rsi = np.zeros(n)
+    rs = np.zeros(n)
+    for i in range(rsi_period, n):
+        if avg_loss[i] > 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100 if avg_gain[i] > 0 else 50
+    
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume MA for confirmation (20-period)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Tenkan, Kijun, Senkou spans, and volume MA
-    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period + kumo_shift, vol_period - 1)
+    # Warmup: need RSI, EMA1d, and volume MA20
+    start_idx = max(rsi_period, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma[i]
+        vol_avg = vol_ma_20[i]
         
         # Volume filter: require volume above average
-        vol_filter = vol_now > 1.5 * vol_avg
-        
-        # Determine Kumo (cloud) boundaries
-        senkou_top = max(senkou_span_a[i], senkou_span_b[i])
-        senkou_bottom = min(senkou_span_a[i], senkou_span_b[i])
+        vol_filter = vol_now > 1.2 * vol_avg
         
         if position == 0:
-            # Long: Tenkan crosses above Kijun AND price above Kumo with volume filter
-            if (tenkan[i] > kijun[i] and tenkan[i - 1] <= kijun[i - 1] and 
-                price > senkou_top and vol_filter):
+            # Long: RSI < 30 (oversold) with 1d EMA50 uptrend and volume filter
+            if (rsi[i] < 30 and 
+                price > ema_1d_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: Tenkan crosses below Kijun AND price below Kumo with volume filter
-            elif (tenkan[i] < kijun[i] and tenkan[i - 1] >= kijun[i - 1] and 
-                  price < senkou_bottom and vol_filter):
+            # Short: RSI > 70 (overbought) with 1d EMA50 downtrend and volume filter
+            elif (rsi[i] > 70 and 
+                  price < ema_1d_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Tenkan crosses below Kijun
-            if tenkan[i] < kijun[i] and tenkan[i - 1] >= kijun[i - 1]:
+            # Exit long: RSI returns to neutral zone (40-60)
+            if 40 <= rsi[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Tenkan crosses above Kijun
-            if tenkan[i] > kijun[i] and tenkan[i - 1] <= kijun[i - 1]:
+            # Exit short: RSI returns to neutral zone (40-60)
+            if 40 <= rsi[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Twist_With_Volume_Filter"
-timeframe = "6h"
+name = "4h_4H_1D_RelativeStrengthIndex_MeanReversion_with_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
