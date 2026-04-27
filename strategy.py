@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike
-Hypothesis: 1d strategy using weekly Camarilla R1/S1 breakouts with 1w EMA50 trend filter and volume confirmation.
-Targets 30-100 trades over 4 years (7-25/year) with 0.25 position size. Uses discrete levels to minimize fee drag.
-Designed for BTC/ETH robustness: weekly trend alignment filters false breakouts, volume confirms participation.
-Works in bull/bear via trend filter and avoids overtrading via strict entry conditions.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Trend
+Hypothesis: 12h strategy using Camarilla R1/S1 breakouts from prior 1d bar, with 1d EMA34 trend filter and volume spike confirmation. Designed for BTC/ETH robustness: trend alignment filters false breakouts, volume confirms participation. Targets 50-150 trades over 4 years (12-37/year) with 0.25 position size. Uses discrete levels to minimize fee drag. Works in bull/bear via trend filter.
 """
 
 import numpy as np
@@ -21,13 +18,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    
-    # Get 1d data for Camarilla R1/S1 levels (from previous completed 1d bar)
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    
+    # 1d EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Camarilla R1/S1 levels from prior completed 1d bar
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -37,32 +35,32 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 2.5 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.5 * vol_avg)
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Fixed position size to minimize churn
     
-    # Warmup: need 1w EMA50 (50), 1d shift(1) for Camarilla, vol avg (20)
-    start_idx = max(50 + 1, 1 + 1, 20)
+    # Warmup: need 1d EMA34 (34), 1d shift(1) for Camarilla, vol avg (20)
+    start_idx = max(34 + 1, 1 + 1, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema_val = ema_50_aligned[i]
+        ema_val = ema_34_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with 1w EMA50 alignment and volume confirmation
+            # Look for entry: Camarilla R1/S1 breakout with 1d EMA34 alignment and volume confirmation
             long_condition = (close_val > r1_val and 
                             close_val > ema_val and 
                             vol_conf)
@@ -77,14 +75,14 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 1w EMA50 (trend reversal)
+            # Exit long: price crosses below 1d EMA34 (trend reversal)
             if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 1w EMA50 (trend reversal)
+            # Exit short: price crosses above 1d EMA34 (trend reversal)
             if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -93,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Trend"
+timeframe = "12h"
 leverage = 1.0
