@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Camarilla Pivot S1/R1 breakout with volume confirmation and 1-day trend filter.
-Trades only during high-volume breakouts in the direction of the daily trend.
-Designed to work in both bull and bear markets by using the daily trend as filter.
-Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag.
+Hypothesis: 6-hour Williams Fractal breakout with daily trend filter and volume confirmation.
+In bear markets, price often makes lower highs (bearish fractals) before continuing down.
+In bull markets, higher lows (bullish fractals) precede continuation up.
+Using daily trend (EMA50) filters direction, volume confirms breakout strength.
+Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
+
+def williams_fractals(high, low):
+    """Williams Fractals: bearish = high[n-2] < high[n] and high[n-1] < high[n] and high[n+1] < high[n] and high[n+2] < high[n]; bullish inverse"""
+    n = len(high)
+    bearish = np.zeros(n, dtype=bool)
+    bullish = np.zeros(n, dtype=bool)
+    for i in range(2, n-2):
+        if (high[i] > high[i-1] and high[i] > high[i-2] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            bearish[i] = True
+        if (low[i] < low[i-1] and low[i] < low[i-2] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            bullish[i] = True
+    return bearish, bullish
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,47 +34,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter
+    # Get daily data for trend filter and fractals
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day EMA(34) for trend
+    # Calculate daily EMA(50) for trend
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_ltf_to_htf(prices, df_1d, ema_50_1d)
     
-    # Get 4-hour data for Camarilla pivots and volume filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate Williams Fractals on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal, bullish_fractal = williams_fractals(high_1d, low_1d)
+    # Fractals need 2-bar confirmation after the center bar
+    bearish_aligned = align_ltf_to_htf(prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2)
+    bullish_aligned = align_ltf_to_htf(prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2)
+    
+    # Get 6-hour data for volume confirmation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate 4-hour Camarilla levels (based on previous period's range)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Camarilla levels use previous period's close and range
-    prev_close = np.roll(close_4h, 1)
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close[0] = close_4h[0]  # first value
-    prev_high[0] = high_4h[0]
-    prev_low[0] = low_4h[0]
-    
-    range_4h = prev_high - prev_low
-    # Camarilla levels: S1 = C - (H-L)*1.1/12, R1 = C + (H-L)*1.1/12
-    s1 = prev_close - range_4h * 1.1 / 12
-    r1 = prev_close + range_4h * 1.1 / 12
-    
-    # Calculate 4-hour volume MA(20)
-    vol_4h = df_4h['volume'].values
-    vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all 4h indicators
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # Calculate 6-hour volume MA(20)
+    vol_6h = df_6h['volume'].values
+    vol_ma_20_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_6h_aligned = align_ltf_to_htf(prices, df_6h, vol_ma_20_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,13 +69,14 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need Camarilla levels, volume MA, and 1d EMA
-    start_idx = max(20, 34)  # max of lookbacks
+    # Warmup: need daily EMA, fractals, and 6h volume MA
+    start_idx = max(50, 50, 20)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(bearish_aligned[i]) or np.isnan(bullish_aligned[i]) or
+            np.isnan(vol_ma_20_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -84,37 +86,37 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        s1_level = s1_aligned[i]
-        r1_level = r1_aligned[i]
+        ema_50 = ema_50_1d_aligned[i]
+        bearish = bearish_aligned[i] > 0.5
+        bullish = bullish_aligned[i] > 0.5
         vol_now = volume[i]
-        vol_ma = vol_ma_20_4h_aligned[i]
-        trend_1d = ema_34_1d_aligned[i]
+        vol_ma = vol_ma_20_6h_aligned[i]
         
-        # Volume filter: volume > 1.5x 4h average (moderate to balance trades)
+        # Volume filter: volume > 1.5x 6h average
         vol_filter = vol_now > 1.5 * vol_ma
         
-        # Entry conditions: Camarilla breakout with volume and daily trend alignment
+        # Entry conditions: Williams Fractal breakout with volume and daily trend alignment
         if position == 0:
-            # Long: break above R1 + volume + daily uptrend
-            if close[i] > r1_level and vol_filter and close[i] > trend_1d:
+            # Long: bullish fractal + volume + daily uptrend
+            if bullish and vol_filter and close[i] > ema_50:
                 signals[i] = size
                 position = 1
-            # Short: break below S1 + volume + daily downtrend
-            elif close[i] < s1_level and vol_filter and close[i] < trend_1d:
+            # Short: bearish fractal + volume + daily downtrend
+            elif bearish and vol_filter and close[i] < ema_50:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below daily EMA or S1 level
-            if close[i] < trend_1d or close[i] < s1_level:
+            # Exit long: close below daily EMA or opposite fractal appears
+            if close[i] < ema_50 or bearish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above daily EMA or R1 level
-            if close[i] > trend_1d or close[i] > r1_level:
+            # Exit short: close above daily EMA or opposite fractal appears
+            if close[i] > ema_50 or bullish:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_CamarillaS1R1_Volume_1dTrendFilter"
-timeframe = "4h"
+name = "6h_WilliamsFractal_Breakout_DailyTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
