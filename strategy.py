@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with weekly pivot bias and volume confirmation.
-# Uses weekly pivot levels (R1/S1) to filter breakout direction for higher probability trades.
-# In bull markets, only take long breakouts above weekly R1; in bear markets, only short below weekly S1.
-# Volume confirmation filters out false breakouts. Designed for 15-30 trades/year to minimize fee drag.
+# Hypothesis: 12h Bollinger Band squeeze breakout with 1w trend filter and volume confirmation.
+# In low volatility periods, price breaks out of Bollinger Bands with continuation.
+# Uses 1-week EMA200 for trend direction and volume spike for confirmation.
+# Designed to work in both bull (breakouts up) and bear (breakouts down) markets.
+# Target: 12-37 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,87 +19,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
+    # Get weekly data for trend filter (EMA200)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using previous week's OHLC)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    close_1w = df_1w['close'].values
+    # Calculate EMA(200) on weekly close
+    ema_200_1w = np.full(len(df_1w), np.nan)
+    alpha = 2 / (200 + 1)
+    for i in range(len(close_1w)):
+        if i < 199:
+            ema_200_1w[i] = np.mean(close_1w[:i+1]) if i > 0 else close_1w[i]
+        else:
+            if np.isnan(ema_200_1w[i-1]):
+                ema_200_1w[i] = np.mean(close_1w[i-199:i+1])
+            else:
+                ema_200_1w[i] = close_1w[i] * alpha + ema_200_1w[i-1] * (1 - alpha)
     
-    pivot_w = np.full(len(df_1w), np.nan)
-    r1_w = np.full(len(df_1w), np.nan)
-    s1_w = np.full(len(df_1w), np.nan)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    for i in range(1, len(df_1w)):
-        # Use previous week's data to calculate current week's pivot
-        pp = (high_w[i-1] + low_w[i-1] + close_w[i-1]) / 3.0
-        pivot_w[i] = pp
-        r1_w[i] = 2 * pp - low_w[i-1]
-        s1_w[i] = 2 * pp - high_w[i-1]
+    # Bollinger Bands (20, 2) on 12h data
+    bb_period = 20
+    bb_std = 2
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
+    # Calculate rolling mean and std
+    rolling_mean = np.full(n, np.nan)
+    rolling_std = np.full(n, np.nan)
     
-    # Donchian channel (20-period) on 6h data
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    for i in range(bb_period - 1, n):
+        rolling_mean[i] = np.mean(close[i-bb_period+1:i+1])
+        rolling_std[i] = np.std(close[i-bb_period+1:i+1])
     
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
+    upper_band = rolling_mean + (bb_std * rolling_std)
+    lower_band = rolling_mean - (bb_std * rolling_std)
     
-    # Volume confirmation: current volume > 1.3 * 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    volume_confirmed = volume > (1.3 * vol_ma_20)
+    # Bollinger Band width (normalized)
+    bb_width = np.zeros(n)
+    for i in range(n):
+        if not np.isnan(rolling_mean[i]) and rolling_mean[i] != 0:
+            bb_width[i] = (upper_band[i] - lower_band[i]) / rolling_mean[i]
+        else:
+            bb_width[i] = np.nan
+    
+    # Bollinger Band width percentile (50-period)
+    bb_width_percentile = np.full(n, np.nan)
+    lookback = 50
+    for i in range(lookback - 1, n):
+        if not np.isnan(bb_width[i-lookback+1:i+1]).any():
+            bb_width_percentile[i] = np.percentile(bb_width[i-lookback+1:i+1], 20)  # 20th percentile = squeeze
+    
+    # Volume spike: current volume > 1.8 * 30-period average
+    vol_ma_30 = np.full(n, np.nan)
+    for i in range(30, n):
+        vol_ma_30[i] = np.mean(volume[i-30:i])
+    volume_spike = volume > (1.8 * vol_ma_30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup
-    start_idx = 20
+    # Warmup: need enough data for indicators
+    start_idx = max(bb_period, lookback, 30, 50)
     
     for i in range(start_idx, n):
-        # Skip if any data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or
-            np.isnan(s1_w_aligned[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(bb_width_percentile[i]) or
+            np.isnan(upper_band[i]) or
+            np.isnan(lower_band[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend direction from weekly EMA200
+        # Use previous bar's EMA to avoid look-ahead
+        if i > 0 and not np.isnan(ema_200_1w_aligned[i-1]):
+            trend_up = ema_200_1w_aligned[i] > ema_200_1w_aligned[i-1]
+            trend_down = ema_200_1w_aligned[i] < ema_200_1w_aligned[i-1]
+        else:
+            trend_up = False
+            trend_down = False
+        
+        # Squeeze condition: BB width below 20th percentile of last 50 periods
+        is_squeeze = bb_width_percentile[i] > bb_width[i] if not np.isnan(bb_width_percentile[i]) else False
+        
         if position == 0:
-            # Long entry: price breaks above Donchian high AND above weekly R1 with volume
-            if (close[i] > highest_high[i] and 
-                close[i] > r1_w_aligned[i] and 
-                volume_confirmed[i]):
+            # Long entry: Bollinger Band breakout up + uptrend + volume spike + squeeze
+            if (close[i] > upper_band[i] and 
+                trend_up and 
+                volume_spike[i] and
+                is_squeeze):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low AND below weekly S1 with volume
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < s1_w_aligned[i] and 
-                  volume_confirmed[i]):
+            # Short entry: Bollinger Band breakout down + downtrend + volume spike + squeeze
+            elif (close[i] < lower_band[i] and 
+                  trend_down and 
+                  volume_spike[i] and
+                  is_squeeze):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Donchian low or weekly S1
-            if (close[i] < lowest_low[i] or 
-                close[i] < s1_w_aligned[i]):
+            # Long exit: price returns to middle band or trend turns down
+            if (close[i] < rolling_mean[i] or 
+                not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian high or weekly R1
-            if (close[i] > highest_high[i] or 
-                close[i] > r1_w_aligned[i]):
+            # Short exit: price returns to middle band or trend turns up
+            if (close[i] > rolling_mean[i] or 
+                not trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_WeeklyPivot_R1S1_Volume_v1"
-timeframe = "6h"
+name = "12h_BollingerSqueeze_Breakout_1wEMA200_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
