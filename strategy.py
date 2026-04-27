@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for pivot levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate daily EMA(34) for trend filter
@@ -24,7 +24,7 @@ def generate_signals(prices):
     
     # Calculate weekly EMA(34) for additional trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
     ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -44,19 +44,19 @@ def generate_signals(prices):
     r4 = pivot + range_ * 1.5
     s4 = pivot - range_ * 1.5
     
-    # Align levels to 12h timeframe
+    # Align levels to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Volume confirmation: volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.28   # Position size: 28% of capital
     
     # Warmup: need enough data for EMA, pivots, volume MA
     start_idx = max(34, 20)
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_R4S4_FadeBreakout_1d1wEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_Camarilla_R3S3_R4S4_FadeBreakout_1d1wEMA34_Trend_VolumeSpike_v2"
+timeframe = "6h"
 leverage = 1.0
