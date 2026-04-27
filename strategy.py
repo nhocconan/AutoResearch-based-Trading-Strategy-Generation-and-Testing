@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels on 1d provide institutional support/resistance. 
-Breakout above R3 or below S3 with 1d EMA34 trend filter and volume surge captures 
-strong moves. Works in bull (breakouts up) and bear (breakdowns down) by using 
-1d trend direction. Target: 15-25 trades/year to minimize fee drag on 12h timeframe.
+4h_RollingBreakout_VolumeConfirm_ADXFilter_v1
+Hypothesis: Rolling 20-period high/low breakouts with volume confirmation and ADX trend filter
+capture strong momentum moves while avoiding false breakouts in ranging markets. Uses 4h timeframe
+to balance trade frequency and signal quality. Target: 20-40 trades/year for low fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,69 +20,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivots, EMA, and volume
+    # Get 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = calculate_ema(df_1d['close'].values, 34)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 1d ADX for trend strength filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d average volume for volume filter
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Need previous day's OHLC to calculate today's levels
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    # First value will be invalid (rolled), but alignment will handle timing
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Camarilla calculations
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Smooth TR, +DM, -DM
+    tr_period = 14
+    tr_smooth = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean()
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False).mean()
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False).mean()
     
-    # Volume confirmation: current 12h volume > 1.5x 1d average volume
-    vol_confirm = volume > (vol_ma_1d_aligned * 1.5)
+    atr = tr_smooth.values
+    plus_di = 100 * plus_dm_smooth.values / np.where(atr == 0, 1, atr)
+    minus_di = 100 * minus_dm_smooth.values / np.where(atr == 0, 1, atr)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Rolling 20-period high/low for breakout
+    lookback = 20
+    roll_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    roll_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA34 and rolled values
-    start_idx = max(35, 20)  # EMA34 needs ~34, plus 1 for roll
+    # Warmup: need enough data for ADX, roll_high/low, volume MA
+    start_idx = max(lookback, 34)  # ADX needs ~34, roll needs 20
     
     for i in range(start_idx, n):
-        # Skip if any data not ready (first rolled values will be NaN)
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
+        # Skip if any data not ready
+        if np.isnan(adx_aligned[i]) or np.isnan(roll_high[i]) or np.isnan(roll_low[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
+        adx_val = adx_aligned[i]
+        vol_confirm_val = vol_confirm[i]
+        
         if position == 0:
-            # Long: price breaks above R3, above 1d EMA34 (bullish trend), volume confirmation
-            if close[i] > R3_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_confirm[i]:
+            # Long: break above rolling high, ADX > 25, volume confirmation
+            if close[i] > roll_high[i] and adx_val > 25 and vol_confirm_val:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3, below 1d EMA34 (bearish trend), volume confirmation
-            elif close[i] < S3_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_confirm[i]:
+            # Short: break below rolling low, ADX > 25, volume confirmation
+            elif close[i] < roll_low[i] and adx_val > 25 and vol_confirm_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S3 (reversal) or below EMA34 (trend change)
-            if close[i] < S3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: break below rolling low or ADX weakens
+            if close[i] < roll_low[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above R3 (reversal) or above EMA34 (trend change)
-            if close[i] > R3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: break above rolling high or ADX weakens
+            if close[i] > roll_high[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RollingBreakout_VolumeConfirm_ADXFilter_v1"
+timeframe = "4h"
 leverage = 1.0
