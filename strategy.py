@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot breakouts on 12h timeframe filtered by 1d EMA trend and volume spike.
-This captures swing moves in both bull and bear markets by trading with the daily trend.
-Target: 15-25 trades/year on 12h to minimize fee drag and maximize edge.
+6h_WeeklyPivot_Reversion_1dTrend_Filter
+Hypothesis: Price reverses from weekly pivot levels (S1/S2/R1/R2) in the direction of daily trend.
+Works in bull/bear via trend filter: long only above daily EMA50, short only below.
+Targets weekly mean reversion with daily trend filter to avoid counter-trend trades.
+Target: 20-30 trades/year on 6h to minimize fee drag.
 """
 
 import numpy as np
@@ -18,79 +19,95 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot points
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly pivot points (standard formula)
+    # Using previous week's OHLC
+    wk_high = df_w['high'].values
+    wk_low = df_w['low'].values
+    wk_close = df_w['close'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla uses previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Pivot = (H + L + C) / 3
+    pivot = (wk_high + wk_low + wk_close) / 3.0
+    # Support 1 = (2 * P) - H
+    s1 = (2 * pivot) - wk_high
+    # Resistance 1 = (2 * P) - L
+    r1 = (2 * pivot) - wk_low
+    # Support 2 = P - (H - L)
+    s2 = pivot - (wk_high - wk_low)
+    # Resistance 2 = P + (H - L)
+    r2 = pivot + (wk_high - wk_low)
     
-    # True range for Camarilla
-    tr = np.maximum(prev_high - prev_low,
-                    np.maximum(np.abs(prev_high - prev_close),
-                               np.abs(prev_low - prev_close)))
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_w, s2)
     
-    # Camarilla levels (using previous day)
-    R1 = prev_close + 1.1 * tr / 12
-    S1 = prev_close - 1.1 * tr / 12
+    # Get daily data for trend filter
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 2:
+        return np.zeros(n)
     
-    # Align Camarilla levels to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume confirmation: volume > 2 * 24-period average (24*12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Daily trend: EMA50
+    ema50_d = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_d_aligned = align_htf_to_ltf(prices, df_d, ema50_d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and volume MA
-    start_idx = max(34, 24)
+    # Warmup: need enough data for EMA and pivot calculation
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]):
+        if np.isnan(ema50_d_aligned[i]) or np.isnan(pivot_aligned[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
-        r1_level = R1_aligned[i]
-        s1_level = S1_aligned[i]
-        vol_spike_val = vol_spike[i]
+        price = close[i]
+        ema_trend = ema50_d_aligned[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        
+        # Define pivot zones with small buffer
+        buffer = 0.001 * price  # 0.1% buffer
         
         if position == 0:
-            # Long: price breaks above R1 + volume spike + uptrend (price > EMA)
-            if close[i] > r1_level and vol_spike_val and close[i] > ema_trend:
+            # Long: price near S1/S2 and above daily EMA (uptrend)
+            near_s1 = abs(price - s1_val) <= buffer
+            near_s2 = abs(price - s2_val) <= buffer
+            in_s_zone = (price >= s2_val - buffer and price <= s1_val + buffer)
+            
+            if (near_s1 or near_s2 or in_s_zone) and price > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S1 + volume spike + downtrend (price < EMA)
-            elif close[i] < s1_level and vol_spike_val and close[i] < ema_trend:
+            # Short: price near R1/R2 and below daily EMA (downtrend)
+            elif (abs(price - r1_val) <= buffer or abs(price - r2_val) <= buffer or 
+                  (price >= r1_val - buffer and price <= r2_val + buffer)) and price < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S1 or trend reverses
-            if close[i] < s1_level or close[i] < ema_trend:
+            # Exit long: price crosses pivot or trend turns down
+            if price >= pivot_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R1 or trend reverses
-            if close[i] > r1_level or close[i] > ema_trend:
+            # Exit short: price crosses pivot or trend turns up
+            if price <= pivot_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Reversion_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
