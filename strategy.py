@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,94 +13,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and monthly data for momentum filter
-    df_1w = get_htf_data(prices, '1w')
-    df_1M = get_htf_data(prices, '1M')
-    
-    if len(df_1w) < 2 or len(df_1M) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    close_1M = df_1M['close'].values
-    
-    # Weekly EMA trend filter (21-period)
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Monthly EMA momentum filter (13-period)
-    ema_13_1M = pd.Series(close_1M).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1M_aligned = align_htf_to_ltf(prices, df_1M, ema_13_1M)
-    
-    # Daily ATR for volatility filter (14-period)
+    # Get daily data for Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (high_9 + low_9) / 2
     
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (high_26 + low_26) / 2
     
-    # Daily close for price action
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (high_52 + low_52) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Volume filter: volume > 2.0 x 48-period average (48 periods = 12 days in 6h)
+    vol_ma_48 = np.full(n, np.nan)
+    for i in range(47, n):
+        vol_ma_48[i] = np.mean(volume[i-47:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need weekly EMA (21), monthly EMA (13), daily ATR (14), daily close
-    start_idx = max(21, 13, 14)
+    # Warmup: need Ichimoku (52) and volume MA (48)
+    start_idx = max(52, 48)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(ema_13_1M_aligned[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(close_1d_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_21_1w = ema_21_1w_aligned[i]
-        ema_13_1M = ema_13_1M_aligned[i]
-        atr_14_1d = atr_14_1d_aligned[i]
-        close_1d_val = close_1d_aligned[i]
+        vol_now = volume[i]
+        vol_avg = vol_ma_48[i]
         
-        # Trend alignment: price above both weekly and monthly EMA
-        bullish_alignment = price > ema_21_1w and price > ema_13_1M
-        bearish_alignment = price < ema_21_1w and price < ema_13_1M
+        # Volume filter: significant volume spike
+        vol_filter = vol_now > 2.0 * vol_avg
         
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_14_1d > 0.01 * close_1d_val  # ATR > 1% of price
+        # Ichimoku signals
+        tenkan = tenkan_sen_aligned[i]
+        kijun = kijun_sen_aligned[i]
+        span_a = senkou_span_a_aligned[i]
+        span_b = senkou_span_b_aligned[i]
         
+        # Cloud top and bottom
+        cloud_top = max(span_a, span_b)
+        cloud_bottom = min(span_a, span_b)
+        
+        # Bullish: TK cross above cloud + volume
         if position == 0:
-            # Long: bullish alignment + volatility filter
-            if bullish_alignment and vol_filter:
+            if tenkan > kijun and price > cloud_top and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: bearish alignment + volatility filter
-            elif bearish_alignment and vol_filter:
+            # Bearish: TK cross below cloud + volume
+            elif tenkan < kijun and price < cloud_bottom and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bearish alignment or volatility collapse
-            if bearish_alignment or not vol_filter:
+            # Exit long: TK cross below or price drops below cloud
+            if tenkan < kijun or price < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: bullish alignment or volatility collapse
-            if bullish_alignment or not vol_filter:
+            # Exit short: TK cross above or price rises above cloud
+            if tenkan > kijun or price > cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyMonthlyEMA_Alignment_VolumeFilter"
-timeframe = "1d"
+name = "6h_Ichimoku_TK_Cross_Cloud_Filter_Volume"
+timeframe = "6h"
 leverage = 1.0
