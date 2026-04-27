@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d ADX trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) upper band with 1d ADX > 25 and volume > 1.5x average.
-# Short when price breaks below Donchian(20) lower band with 1d ADX > 25 and volume > 1.5x average.
-# Exit when price crosses back through Donchian midline.
-# Uses price channel breakouts with trend filter to avoid whipsaw in sideways markets.
-# Target: 20-50 trades per year on 4h timeframe.
+# Hypothesis: 1d Williams %R reversal with 1-week EMA34 trend filter and volume confirmation.
+# Long when Williams %R crosses above -20 from below (oversold reversal) with 1-week EMA34 uptrend and volume > 1.5x average.
+# Short when Williams %R crosses below -80 from above (overbought reversal) with 1-week EMA34 downtrend and volume > 1.5x average.
+# Exit when Williams %R crosses back through -50 (mean reversion).
+# Uses weekly trend filter to reduce whipsaw in sideways markets, targeting 7-25 trades per year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,83 +19,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 25:  # Need enough data for ADX calculation
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 14-period ADX for trend strength
-    adx_period = 14
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                               np.abs(low_1d[1:] - close_1d[:-1])))
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    # Calculate 1w EMA34 for trend filter
+    ema_period = 34
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
+                         ema_1w[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Directional movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smooth TR, +DM, -DM
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(arr[1:period])  # Skip first NaN
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]) and not np.isnan(arr[i]):
-                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    tr_smooth = smooth_wilder(tr, adx_period)
-    plus_dm_smooth = smooth_wilder(plus_dm, adx_period)
-    minus_dm_smooth = smooth_wilder(minus_dm, adx_period)
-    
-    # Calculate +DI and -DI
-    plus_di = np.full_like(tr_smooth, np.nan)
-    minus_di = np.full_like(tr_smooth, np.nan)
-    mask = tr_smooth != 0
-    plus_di[mask] = 100 * plus_dm_smooth[mask] / tr_smooth[mask]
-    minus_di[mask] = 100 * minus_dm_smooth[mask] / tr_smooth[mask]
-    
-    # Calculate DX and ADX
-    dx = np.full_like(tr_smooth, np.nan)
-    di_sum = plus_di + minus_di
-    mask = di_sum != 0
-    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / di_sum[mask]
-    
-    adx = np.full_like(tr_smooth, np.nan)
-    if len(dx) >= adx_period:
-        # First ADX is average of first 'adx_period' DX values
-        start_idx = adx_period - 1
-        if not np.isnan(dx[start_idx]):
-            adx[start_idx] = np.nanmean(dx[1:start_idx+1])  # Skip first NaN
-            for i in range(start_idx + 1, len(dx)):
-                if not np.isnan(adx[i-1]) and not np.isnan(dx[i]):
-                    adx[i] = adx[i-1] - (adx[i-1] / adx_period) + dx[i]
-    
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Donchian channels (20-period)
-    donch_period = 20
+    # Calculate Williams %R (14-period)
+    willr_period = 14
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
+    willr = np.full(n, np.nan)
     
-    for i in range(donch_period - 1, n):
-        highest_high[i] = np.max(high[i - donch_period + 1:i + 1])
-        lowest_low[i] = np.min(low[i - donch_period + 1:i + 1])
+    for i in range(willr_period - 1, n):
+        highest_high[i] = np.max(high[i - willr_period + 1:i + 1])
+        lowest_low[i] = np.min(low[i - willr_period + 1:i + 1])
+        if highest_high[i] != lowest_low[i]:
+            willr[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
     
-    # Donchian midline
-    donch_mid = (highest_high + lowest_low) / 2
+    # Williams %R previous value for crossover detection
+    willr_prev = np.full(n, np.nan)
+    willr_prev[1:] = willr[:-1]
+    
+    # Align 1w EMA to 1d timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -107,13 +63,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian, ADX, and volume MA20
-    start_idx = max(donch_period - 1, 19)
+    # Warmup: need Williams %R, EMA34, and volume MA20
+    start_idx = max(willr_period, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(willr[i]) or np.isnan(willr_prev[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -124,30 +80,29 @@ def generate_signals(prices):
         # Volume filter: require volume above average
         vol_filter = vol_now > 1.5 * vol_avg
         
-        # ADX filter: require trending market
-        adx_filter = adx_1d_aligned[i] > 25
-        
         if position == 0:
-            # Long: price breaks above Donchian upper band with ADX > 25 and volume filter
-            if (price > highest_high[i] and adx_filter and vol_filter):
+            # Long: Williams %R crosses above -20 from below with 1w EMA34 uptrend and volume filter
+            if (willr_prev[i] <= -20 and willr[i] > -20 and 
+                price > ema_1w_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian lower band with ADX > 25 and volume filter
-            elif (price < lowest_low[i] and adx_filter and vol_filter):
+            # Short: Williams %R crosses below -80 from above with 1w EMA34 downtrend and volume filter
+            elif (willr_prev[i] >= -80 and willr[i] < -80 and 
+                  price < ema_1w_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian midline
-            if price < donch_mid[i]:
+            # Exit long: Williams %R crosses below -50 from above
+            if willr_prev[i] >= -50 and willr[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above Donchian midline
-            if price > donch_mid[i]:
+            # Exit short: Williams %R crosses above -50 from below
+            if willr_prev[i] <= -50 and willr[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -155,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dADX25_Volume"
-timeframe = "4h"
+name = "1d_WilliamsR14_Reversal_1wEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
