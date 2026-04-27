@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations
+    # Get daily data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -31,27 +31,23 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
+    tr[0] = tr1[0]
     atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Volume filter: volume > 1.5x 20-period average (balanced to avoid overtrading)
+    # Volume filter: volume > 1.5x 20-period average (moderate filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
-    # Volatility filter: ATR below its 50-period median (low volatility regime)
-    atr_median = pd.Series(atr14_1d_aligned).rolling(window=50, min_periods=20).median().values
+    # Volatility filter: ATR below its 30-period median (low volatility regime)
+    atr_median = pd.Series(atr14_1d_aligned).rolling(window=30, min_periods=15).median().values
     vol_filter = atr14_1d_aligned < atr_median
-    
-    # Session filter: 08-20 UTC (avoid low liquidity hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -60,23 +56,18 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Apply session filter
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-        
         if position == 0:
             # Long: price above EMA50 + volume filter + low volatility
             if (close[i] > ema50_1d_aligned[i] and 
                 volume_filter[i] and 
                 vol_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # Short: price below EMA50 + volume filter + low volatility
             elif (close[i] < ema50_1d_aligned[i] and 
                   volume_filter[i] and 
                   vol_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
@@ -86,17 +77,17 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short exit: price crosses above EMA50 (trend change)
             if close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA50_Vol_LowVol_Session"
-timeframe = "1h"
+name = "6d_EMA50_Vol_LowVol_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
