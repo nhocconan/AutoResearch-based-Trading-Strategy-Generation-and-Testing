@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h trend filter and volume confirmation
+# Uses 1d for pivot calculation, 4h for trend direction, 1h for entry timing
+# Session filter (08-20 UTC) reduces noise. Target: 15-35 trades/year.
+# Works in bull/bear: trend filter adapts, breakouts capture momentum in both directions.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
@@ -13,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation and trend filter
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -33,30 +38,41 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Daily EMA trend filter (34-period)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
     
-    # Volume filter: volume > 2.5 x 24-period average (4h periods = 4 days)
+    close_4h = df_4h['close'].values
+    # 4h EMA(34) for trend filter
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    
+    # Volume filter: volume > 2.0 x 24-period average (6h periods = 6 hours)
     vol_ma_24 = np.full(n, np.nan)
     for i in range(23, n):
         vol_ma_24[i] = np.mean(volume[i-23:i+1])
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
     # Warmup: need Camarilla (1 day), EMA (34), volume MA (24)
     start_idx = max(1, 34, 24)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
+        # Skip if any data not ready or outside session
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_24[i])):
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma_24[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
@@ -64,22 +80,22 @@ def generate_signals(prices):
         vol_now = volume[i]
         vol_avg = vol_ma_24[i]
         
-        # Volume filter: significant volume spike (higher threshold = fewer trades)
-        vol_filter = vol_now > 2.5 * vol_avg
+        # Volume filter: significant volume spike
+        vol_filter = vol_now > 2.0 * vol_avg
         
-        # Trend filter from 1d EMA
-        bullish_trend = price > ema_34_aligned[i]
-        bearish_trend = price < ema_34_aligned[i]
+        # Trend filter from 4h EMA
+        bullish_trend = price > ema_34_4h_aligned[i]
+        bearish_trend = price < ema_34_4h_aligned[i]
         
         camarilla_r3 = camarilla_r3_aligned[i]
         camarilla_s3 = camarilla_s3_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3 + volume + bullish 1d trend
+            # Long: price breaks above R3 + volume + bullish 4h trend
             if price > camarilla_r3 and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3 + volume + bearish 1d trend
+            # Short: price breaks below S3 + volume + bearish 4h trend
             elif price < camarilla_s3 and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
@@ -102,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hTrend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
