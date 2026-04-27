@@ -1,4 +1,12 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+"""
+Hypothesis: 6h strategy using 6h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+In both bull and bear markets, breakouts aligned with higher timeframe trend (12h EMA50) tend to continue.
+Volume > 1.5x average confirms breakout strength. Target: 12-37 trades/year (50-150 over 4 years).
+Position size: 0.25. Uses discrete levels to minimize fee churn.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,33 +21,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for multi-timeframe analysis
+    # Get 12h data for EMA50 trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period EMA on 12h close for trend
+    # Calculate EMA50 on 12h close
     close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    ema_50 = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
+        ema_50[49] = np.mean(close_12h[:50])  # SMA seed
+        multiplier = 2 / (50 + 1)
+        for i in range(50, len(close_12h)):
+            ema_50[i] = (close_12h[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
     
-    # Calculate 20-period Donchian channels on 12h for structure
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    highest_high_12h = np.full(len(high_12h), np.nan)
-    lowest_low_12h = np.full(len(low_12h), np.nan)
+    # Align 12h EMA50 to 6h timeframe (waits for 12h bar close)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
+    # Calculate 20-period Donchian channels on 6h data
     lookback = 20
-    for i in range(lookback, len(high_12h)):
-        highest_high_12h[i] = np.max(high_12h[i-lookback:i])
-        lowest_low_12h[i] = np.min(low_12h[i-lookback:i])
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
-    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
     
-    # Calculate 20-period average volume on 4h for volume confirmation
-    vol_ma = np.full(n, np.nan)
+    # 20-period average volume for spike detection
     vol_period = 20
+    vol_ma = np.full(n, np.nan)
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -47,13 +57,13 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup period: need at least 20 for EMA, 20 for Donchian, 20 for volume
-    start_idx = max(vol_period, lookback) + 20  # Extra buffer for EMA
+    # Warmup: need 20 for Donchian, 20 for volume, 50 for EMA50 seed
+    start_idx = max(lookback, vol_period, 50)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_12h_aligned[i]) or
-            np.isnan(highest_high_12h_aligned[i]) or
-            np.isnan(lowest_low_12h_aligned[i]) or
+        if (np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
+            np.isnan(ema_50_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -61,34 +71,34 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine 12h trend
-        bullish_trend = ema_12h_aligned[i] > np.mean(ema_12h_aligned[max(0, i-5):i+1])
-        bearish_trend = ema_12h_aligned[i] < np.mean(ema_12h_aligned[max(0, i-5):i+1])
+        # Determine trend from 12h EMA50
+        bullish = price > ema_50_aligned[i]
+        bearish = price < ema_50_aligned[i]
         
-        # Volume confirmation: spike > 1.8x average
-        volume_confirmation = vol_ratio > 1.8
+        # Volume confirmation: > 1.5x average volume
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long: price breaks above 12h Donchian high in bullish trend with volume
-            if bullish_trend and price > highest_high_12h_aligned[i] and volume_confirmation:
+            # Long breakout: price breaks above Donchian high in bullish trend with volume
+            if bullish and price > highest_high[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below 12h Donchian low in bearish trend with volume
-            elif bearish_trend and price < lowest_low_12h_aligned[i] and volume_confirmation:
+            # Short breakdown: price breaks below Donchian low in bearish trend with volume
+            elif bearish and price < lowest_low[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below 12h Donchian low or trend turns bearish
-            if price < lowest_low_12h_aligned[i] or not bullish_trend:
+            # Long exit: price breaks below Donchian low or trend turns bearish
+            if price < lowest_low[i] or bearish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above 12h Donchian high or trend turns bullish
-            if price > highest_high_12h_aligned[i] or not bearish_trend:
+            # Short exit: price breaks above Donchian high or trend turns bullish
+            if price > highest_high[i] or bullish:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12hDonchian20_EMA20_Trend_Volume"
-timeframe = "4h"
+name = "6h_Donchian20_12hEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
