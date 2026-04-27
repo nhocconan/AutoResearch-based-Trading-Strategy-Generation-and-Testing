@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 14-period ATR volatility breakout with 1-day ADX trend filter.
-Breakouts occur when price moves beyond ATR-based channels, filtered by daily ADX > 25
-to ensure trending conditions. Volume > 2x average confirms breakout strength.
-Uses discrete position sizes (±0.25) to minimize fee churn. Target: 20-50 trades/year.
-ATR-based stoploss limits drawdown. Works in bull/bear by capturing volatility expansion.
+12h Williams Alligator + 1d/21 EMA Trend + Volume Spike + ADX(14) > 20 filter
+Williams Alligator: Jaw (13-period SMMA, offset 8), Teeth (8-period SMMA, offset 5), Lips (5-period SMMA, offset 3)
+Long when Lips > Teeth > Jaw and price > 1d EMA21; Short when Lips < Teeth < Jaw and price < 1d EMA21
+Volume > 1.5x average confirms momentum. ADX > 20 ensures trending conditions.
+Designed for 12h timeframe with ~15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(arr, period):
+    """Smoothed Moving Average (SMMA) - Wilder's smoothing"""
+    n = len(arr)
+    result = np.full(n, np.nan)
+    if n < period:
+        return result
+    # First value is simple average
+    result[period-1] = np.mean(arr[:period])
+    for i in range(period, n):
+        result[i] = (result[i-1] * (period - 1) + arr[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,10 +33,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for EMA21 and ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
+    
+    # Calculate EMA(21) on 1d close
+    close_1d = df_1d['close'].values
+    ema_period = 21
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
+        multiplier = 2 / (ema_period + 1)
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
     # Calculate ADX(14) on 1d data
     high_1d = df_1d['high'].values
@@ -62,7 +84,7 @@ def generate_signals(prices):
     if len(close_1d) >= period:
         tr_period[period-1] = np.sum(tr_1d[1:period+1])
         plus_dm_period[period-1] = np.sum(plus_dm[1:period+1])
-        minus_dm_period[period-1] = np.sum(plus_dm[1:period+1])  # BUG: should be minus_dm
+        minus_dm_period[period-1] = np.sum(minus_dm[1:period+1])
         
         for i in range(period, len(close_1d)):
             tr_period[i] = tr_period[i-1] - (tr_period[i-1] / period) + tr_1d[i]
@@ -88,34 +110,28 @@ def generate_signals(prices):
         for i in range(2*period-1, len(close_1d)):
             adx_1d[i] = (adx_1d[i-1] * (period - 1) + dx[i]) / period
     
-    # Align 1d ADX to 4h timeframe (waits for 1d bar close)
+    # Align 1d EMA21 and ADX to 12h timeframe (waits for 1d bar close)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate ATR(14) on 4h data for volatility channels
-    tr_4h = np.zeros(n)
-    for i in range(1, n):
-        tr_4h[i] = max(high[i] - low[i], 
-                       abs(high[i] - close[i-1]), 
-                       abs(low[i] - close[i-1]))
+    # Williams Alligator components on 12h data
+    jaw_period, teeth_period, lips_period = 13, 8, 5
+    jaw_offset, teeth_offset, lips_offset = 8, 5, 3
     
-    atr = np.full(n, np.nan)
-    for i in range(period, n):
-        if i == period:
-            atr[i] = np.mean(tr_4h[1:period+1])
-        else:
-            atr[i] = (atr[i-1] * (period - 1) + tr_4h[i]) / period
+    # SMMA for median price (HL/2)
+    median_price = (high + low) / 2
+    jaw = smma(median_price, jaw_period)
+    teeth = smma(median_price, teeth_period)
+    lips = smma(median_price, lips_period)
     
-    # Calculate ATR-based channels (like Keltner)
-    ma_period = 20
-    ema_close = np.full(n, np.nan)
-    if n >= ma_period:
-        ema_close[ma_period-1] = np.mean(close[:ma_period])
-        multiplier = 2 / (ma_period + 1)
-        for i in range(ma_period, n):
-            ema_close[i] = (close[i] * multiplier) + (ema_close[i-1] * (1 - multiplier))
-    
-    upper_channel = ema_close + (2.0 * atr)
-    lower_channel = ema_close - (2.0 * atr)
+    # Apply forward shift (offset) - Alligator lines are shifted into the future
+    jaw = np.roll(jaw, jaw_offset)
+    teeth = np.roll(teeth, teeth_offset)
+    lips = np.roll(lips, lips_offset)
+    # Set NaN for shifted-out values
+    jaw[:jaw_offset] = np.nan
+    teeth[:teeth_offset] = np.nan
+    lips[:lips_offset] = np.nan
     
     # Volume confirmation
     vol_ma_period = 20
@@ -127,49 +143,53 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup: need ADX (28), ATR (14), EMA (20), volume MA (20)
-    start_idx = max(2*period-1, period, ma_period, vol_ma_period)
+    # Warmup: need Alligator (13+8), EMA (21), ADX (28), volume MA (20)
+    start_idx = max(lips_period + lips_offset, jaw_period + jaw_offset, ema_period, 2*period-1, vol_ma_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_close[i]) or
-            np.isnan(upper_channel[i]) or
-            np.isnan(lower_channel[i]) or
+        if (np.isnan(lips[i]) or
+            np.isnan(teeth[i]) or
+            np.isnan(jaw[i]) or
+            np.isnan(ema_1d_aligned[i]) or
             np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(atr[i])):
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Trend filter: ADX > 20 indicates trending market
+        trending = adx_aligned[i] > 20
         
-        # Volume confirmation: > 2x average volume
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation: > 1.5x average volume
+        volume_confirmation = vol_ratio > 1.5
+        
+        # Alligator alignment: Lips > Teeth > Jaw (bullish) or Lips < Teeth < Jaw (bearish)
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:
-            # Long entry: price breaks above upper channel in trending market with volume
-            if trending and price > upper_channel[i] and volume_confirmation:
+            # Long entry: bullish alignment + price > 1d EMA21 + trending + volume
+            if bullish_alignment and price > ema_1d_aligned[i] and trending and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short entry: price breaks below lower channel in trending market with volume
-            elif trending and price < lower_channel[i] and volume_confirmation:
+            # Short entry: bearish alignment + price < 1d EMA21 + trending + volume
+            elif bearish_alignment and price < ema_1d_aligned[i] and trending and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below EMA (middle) or trend weakens or stoploss
-            if price < ema_close[i] or adx_aligned[i] < 20 or price < (ema_close[i] - 3.0 * atr[i]):
+            # Long exit: bearish alignment or price < 1d EMA21 or trend weakens
+            if bearish_alignment or price < ema_1d_aligned[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price crosses above EMA (middle) or trend weakens or stoploss
-            if price > ema_close[i] or adx_aligned[i] < 20 or price > (ema_close[i] + 3.0 * atr[i]):
+            # Short exit: bullish alignment or price > 1d EMA21 or trend weakens
+            if bullish_alignment or price > ema_1d_aligned[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -177,6 +197,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATRBreakout_ADXTrend_Volume"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dEMA21_ADX20_Volume"
+timeframe = "12h"
 leverage = 1.0
