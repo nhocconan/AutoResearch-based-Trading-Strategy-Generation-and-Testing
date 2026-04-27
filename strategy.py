@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -54,7 +54,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_RSI14_VolumeFilter_6hTrend"
-timeframe = "6h"
+name = "1d_EMA34_RSI14_VolumeFilter_1dTrend"
+timeframe = "1d"
 leverage = 1.0
