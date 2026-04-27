@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_VolumeBreakout_1dTrend_HighVolume
-Hypothesis: Volume breakouts above 1.8x 20-period average with 1d EMA34 trend filter capture momentum moves.
-Works in bull/bear by filtering with 1d EMA34 trend. Targets 15-25 trades/year on 12h to minimize fee drag.
+4h_3BarReversal_LiquidityCave_Momentum
+Hypothesis: Three-bar reversal patterns at liquidity caves (equal highs/lows) with momentum confirmation capture reversals in both trending and ranging markets.
+Works in bull/bear by requiring momentum confirmation and avoiding counter-trend entries. Targets 20-30 trades/year on 4h.
 """
 
 import numpy as np
@@ -11,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,53 +21,73 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA20 for trend filter
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Volume confirmation: volume > 1.8 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.8)
+    # Calculate ATR(14) for stop loss
+    high_low = high - low
+    high_close_prev = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    low_close_prev = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(high_low, np.maximum(high_close_prev, low_close_prev))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and volume MA
-    start_idx = max(35, 20)
+    # Warmup
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]):
+        if np.isnan(ema20_1d_aligned[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
-        vol_confirm_val = vol_confirm[i]
+        ema_trend = ema20_1d_aligned[i]
+        
+        # Three-bar reversal pattern
+        # Bullish: three consecutive higher lows
+        bullish_3br = (low[i] > low[i-1]) and (low[i-1] > low[i-2])
+        # Bearish: three consecutive lower highs
+        bearish_3br = (high[i] < high[i-1]) and (high[i-1] < high[i-2])
+        
+        # Liquidity cave: equal highs/lows within 0.1% tolerance
+        equal_high = abs(high[i] - high[i-1]) / high[i] < 0.001
+        equal_low = abs(low[i] - low[i-1]) / low[i] < 0.001
+        liquidity_cave = equal_high or equal_low
+        
+        # Momentum confirmation: price > VWAP for long, price < VWAP for short
+        vwap_num = (high + low + close) * volume
+        vwap_den = volume
+        vwap = np.nancumsum(vwap_num) / np.nancumsum(vwap_den)
+        price_above_vwap = close[i] > vwap[i]
+        price_below_vwap = close[i] < vwap[i]
         
         if position == 0:
-            # Long: volume breakout above close with uptrend
-            if close[i] > close[i-1] and vol_confirm_val and close[i] > ema_trend:
+            # Long: bullish 3-bar reversal at liquidity cave with momentum and uptrend
+            if bullish_3br and liquidity_cave and price_above_vwap and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: volume breakdown below close with downtrend
-            elif close[i] < close[i-1] and vol_confirm_val and close[i] < ema_trend:
+            # Short: bearish 3-bar reversal at liquidity cave with momentum and downtrend
+            elif bearish_3br and liquidity_cave and price_below_vwap and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: volume breakout down or trend turns down
-            if close[i] < close[i-1] and vol_confirm_val or close[i] < ema_trend:
+            # Exit long: bearish reversal or stop loss
+            if bearish_3br or close[i] < (high[i-1] - 1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: volume breakdown up or trend turns up
-            if close[i] > close[i-1] and vol_confirm_val or close[i] > ema_trend:
+            # Exit short: bullish reversal or stop loss
+            if bullish_3br or close[i] > (low[i-1] + 1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -75,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolumeBreakout_1dTrend_HighVolume"
-timeframe = "12h"
+name = "4h_3BarReversal_LiquidityCave_Momentum"
+timeframe = "4h"
 leverage = 1.0
