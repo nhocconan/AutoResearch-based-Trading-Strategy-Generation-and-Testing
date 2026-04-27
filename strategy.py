@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_SR_Reversal_1dTrend_Volume
-Hypothesis: Combines dynamic support/resistance from 14-period swing highs/lows with 1d trend (EMA50) and volume spike (>2x 20-period average) to capture reversals at key levels. Works in both bull and bear markets by trading pullbacks to support/resistance in the direction of higher timeframe trend. Designed for low trade frequency (~20-30 trades/year) to minimize fee drag.
+4h_VolumeSpike_CamarillaR3S3_Breakout
+Hypothesis: Focus on volume spikes (>2x 20-period average) combined with breakouts of 1d-derived Camarilla R3/S3 levels. Uses price action (close > level) for entry and opposite level for exit. Designed for low trade frequency (<30/year) to minimize fee drift, working in trending and ranging markets by requiring volatility expansion.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,17 +18,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 14-period swing highs and lows for dynamic S/R
-    window = 14
-    highest_high = pd.Series(high).rolling(window=window, center=False).max().values
-    lowest_low = pd.Series(low).rolling(window=window, center=False).min().values
-    
-    # 1d EMA50 for trend confirmation
+    # Calculate Camarilla levels from 1d timeframe
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe (wait for previous day's close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -38,40 +44,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for swing calculations and EMA
-    start_idx = 60
+    # Warmup: need enough data for volume average
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        hh = highest_high[i]
-        ll = lowest_low[i]
-        ema50 = ema50_1d_aligned[i]
+        camarilla_r3_val = camarilla_r3_aligned[i]
+        camarilla_s3_val = camarilla_s3_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: price pulls back to support (lowest_low) in uptrend with volume
-            if close[i] >= ll * 0.998 and close[i] <= ll * 1.002 and close[i] > ema50 and vol_conf:
+            # Long: price breaks above R3 with volume confirmation
+            if close[i] > camarilla_r3_val and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short: price pulls back to resistance (highest_high) in downtrend with volume
-            elif close[i] >= hh * 0.998 and close[i] <= hh * 1.002 and close[i] < ema50 and vol_conf:
+            # Short: price breaks below S3 with volume confirmation
+            elif close[i] < camarilla_s3_val and vol_conf:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price closes below 1d EMA50 or reaches resistance
-            if close[i] < ema50 or close[i] >= hh * 0.995:
+            # Exit long: price breaks below S3 (opposite level)
+            if close[i] < camarilla_s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above 1d EMA50 or reaches support
-            if close[i] > ema50 or close[i] <= ll * 1.005:
+            # Exit short: price breaks above R3 (opposite level)
+            if close[i] > camarilla_r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -79,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_SR_Reversal_1dTrend_Volume"
+name = "4h_VolumeSpike_CamarillaR3S3_Breakout"
 timeframe = "4h"
 leverage = 1.0
