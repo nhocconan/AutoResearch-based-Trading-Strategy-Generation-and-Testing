@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Williams Alligator with volume confirmation.
-# Long when price > Alligator's Jaw (13-period SMMA) with volume > 1.3x average.
-# Short when price < Alligator's Jaw with volume > 1.3x average.
-# Exit when price crosses the Jaw in opposite direction.
-# Uses Alligator for trend (SMMA = Smoothed Moving Average), volume for confirmation.
-# Target: 12-37 trades/year to avoid fee drag. Works in bull/bear via trend-following.
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high and 1d EMA(50) is rising.
+# Short when price breaks below Donchian(20) low and 1d EMA(50) is falling.
+# Uses volume > 1.5x 20-period average for confirmation.
+# Exit on opposite Donchian break or when 1d EMA direction changes.
+# Designed to work in both bull (breakouts) and bear (breakdowns) markets.
+# Target: 20-50 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,85 +21,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams Alligator: three smoothed moving averages
-    # Jaw (blue): 13-period SMMA, 8 bars ahead
-    # Teeth (red): 8-period SMMA, 5 bars ahead
-    # Lips (green): 5-period SMMA, 3 bars ahead
-    # We use Jaw (13,8) as the main trend indicator
+    # Calculate 1d EMA(50) for trend direction
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 0.04) + (ema_50_1d[i-1] * 0.96)
     
-    def smoothed_mma(data, period):
-        """Smoothed Moving Average (SMMA)"""
-        if len(data) < period:
-            return np.full(len(data), np.nan)
-        result = np.full(len(data), np.nan)
-        # First value is simple SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (Prev SMMA * (period-1) + Current Close) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Calculate 1d EMA direction (rising/falling)
+    ema_rising_1d = np.full(len(close_1d), False)
+    ema_falling_1d = np.full(len(close_1d), False)
+    for i in range(1, len(ema_50_1d)):
+        if not np.isnan(ema_50_1d[i]) and not np.isnan(ema_50_1d[i-1]):
+            ema_rising_1d[i] = ema_50_1d[i] > ema_50_1d[i-1]
+            ema_falling_1d[i] = ema_50_1d[i] < ema_50_1d[i-1]
     
-    jaw_1d = smoothed_mma(close_1d, 13)
-    # We don't need teeth/lips for this strategy, using only Jaw
+    # Align 1d EMA direction to 4h timeframe
+    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising_1d.astype(float))
+    ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_falling_1d.astype(float))
     
-    # Get volume MA for confirmation
+    # Calculate Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(19, n):
+        donch_high[i] = np.max(high[i-19:i+1])
+        donch_low[i] = np.min(low[i-19:i+1])
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    
-    # Align indicators to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 13-period Jaw and 20-period volume MA
-    start_idx = max(13, 19)
+    # Warmup: need 20-period Donchian, 20-period volume MA, and 50-period EMA
+    start_idx = max(19, 19, 49)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_rising_aligned[i]) or 
+            np.isnan(ema_falling_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
-        
-        # Volume filter
-        vol_filter = vol_now > 1.3 * vol_avg
+        vol_ok = vol_filter[i]
         
         if position == 0:
-            # Long: price > Jaw with volume confirmation
-            if price > jaw_aligned[i] and vol_filter:
+            # Long: price breaks above Donchian high, 1d EMA rising, volume confirmation
+            if price > donch_high[i] and ema_rising_aligned[i] > 0.5 and vol_ok:
                 signals[i] = size
                 position = 1
-            # Short: price < Jaw with volume confirmation
-            elif price < jaw_aligned[i] and vol_filter:
+            # Short: price breaks below Donchian low, 1d EMA falling, volume confirmation
+            elif price < donch_low[i] and ema_falling_aligned[i] > 0.5 and vol_ok:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Jaw
-            if price < jaw_aligned[i]:
+            # Exit long: price breaks below Donchian low OR 1d EMA starts falling
+            if price < donch_low[i] or ema_falling_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above Jaw
-            if price > jaw_aligned[i]:
+            # Exit short: price breaks above Donchian high OR 1d EMA starts rising
+            if price > donch_high[i] or ema_rising_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_Jaw_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
