@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h breakouts of daily Camarilla R3/S3 levels with volume confirmation and daily trend filter capture institutional moves. Works in bull (breakouts continue) and bear (breakdowns continue) markets. Target: 12-37 trades/year per symbol.
+4h_KAMA_Trend_With_200MA_Filter
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets. Combined with 200-period MA filter to avoid false signals during strong trends, this strategy captures sustained moves while minimizing whipsaws. Volume confirmation ensures institutional participation. Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,71 +18,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
     
-    # 1d EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Proper ER calculation over 10 periods
+    er_period = 10
+    change = np.abs(np.diff(close, prepend=close[0]))
+    # Sum of absolute changes over er_period for numerator
+    change_sum = np.zeros(n)
+    for i in range(er_period, n):
+        change_sum[i] = np.sum(change[i-er_period+1:i+1])
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Sum of absolute price changes over er_period for denominator (volatility)
+    volatility_sum = np.zeros(n)
+    for i in range(er_period, n):
+        volatility_sum[i] = np.sum(np.abs(np.diff(close[i-er_period:i+1], prepend=close[i-er_period])))
     
-    # Camarilla R3, S3 levels: H/L from previous day
-    R3 = close_1d_vals + (high_1d - low_1d) * 1.1 / 4
-    S3 = close_1d_vals - (high_1d - low_1d) * 1.1 / 4
+    # Avoid division by zero
+    er = np.zeros(n)
+    er[volatility_sum > 0] = change_sum[volatility_sum > 0] / volatility_sum[volatility_sum > 0]
     
-    # Align to 12h timeframe (previous day's levels available at open)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # for EMA(2)
+    slow_sc = 2 / (30 + 1)  # for EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Volume spike detection (20-period average on 12h)
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 200-period SMA for trend filter (avoid counter-trend in strong markets)
+    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    
+    # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup period
-    start_idx = 20  # need 20 for volume MA
+    start_idx = 200  # need 200 for SMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(sma200[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with volume spike and uptrend on 1d
-            if (close[i] > R3_aligned[i] and volume_spike[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long: price above KAMA and above SMA200 with volume spike
+            if (close[i] > kama[i] and close[i] > sma200[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume spike and downtrend on 1d
-            elif (close[i] < S3_aligned[i] and volume_spike[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: price below KAMA and below SMA200 with volume spike
+            elif (close[i] < kama[i] and close[i] < sma200[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns below S3 or trend fails
-            if (close[i] < S3_aligned[i] or 
-                close[i] < ema50_1d_aligned[i]):
+            # Long exit: price crosses below KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns above R3 or trend fails
-            if (close[i] > R3_aligned[i] or 
-                close[i] > ema50_1d_aligned[i]):
+            # Short exit: price crosses above KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_200MA_Filter"
+timeframe = "4h"
 leverage = 1.0
