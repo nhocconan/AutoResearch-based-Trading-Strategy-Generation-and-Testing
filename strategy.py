@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Chaikin_Money_Flow_Energy_1dTrend_Confirmation_v1
-Hypothesis: Chaikin Money Flow (CMF) measures buying/selling pressure via volume-weighted accumulation/distribution.
-Long when CMF > 0.15 + price > 1d EMA50 (uptrend); short when CMF < -0.15 + price < 1d EMA50 (downtrend).
-Uses 1d EMA50 trend filter to avoid counter-trend trades. Designed for 6h timeframe to target 12-37 trades/year.
-Works in both bull (follows strong money flow) and bear (avoids false signals via trend filter).
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: On 12h timeframe, breakouts above/below daily Camarilla R3/S3 levels with volume confirmation and aligned 1d trend capture significant moves in both bull and bear markets. Weekly trend filter avoids counter-trend trades. Discrete sizing (0.30) limits drawdown while maintaining sufficient profit potential. Target: 12-37 trades per year (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -21,68 +18,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d Camarilla levels (R3, S3) from prior day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.125 * range_1d
+    camarilla_s3 = close_1d - 1.125 * range_1d
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Money Flow Multiplier: [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = high - low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)  # small epsilon to prevent div/0
-    mfm = ((close - low) - (high - close)) / hl_range
+    # Get 1w data for weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    mfv = mfm * volume
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
     
-    # Chaikin Money Flow (20-period sum of MFV / 20-period sum of volume)
-    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vol_sum = np.where(vol_sum == 0, 1e-10, vol_sum)  # prevent div/0
-    cmf = mfv_sum / vol_sum
+    # Align all indicators to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.25   # Position size: 25% of capital (discrete level)
+    size = 0.30   # Position size: 30% of capital (discrete level)
     
-    # Warmup: need EMA50 (50) and CMF (20)
-    start_idx = max(50, 20)
+    # Warmup: need Camarilla (1), EMA34 (34), EMA50 (50), volume avg (20)
+    start_idx = max(1, 34, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(cmf[i]):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema50 = ema50_1d_aligned[i]
-        cmf_val = cmf[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        ema34 = ema34_1d_aligned[i]
+        ema50 = ema50_1w_aligned[i]
+        vol_conf = volume_confirm_aligned[i]
         
         if position == 0:
-            # Long: CMF > 0.15 (buying pressure) + uptrend (price > EMA50)
-            if cmf_val > 0.15 and close_val > ema50:
-                signals[i] = size
-                position = 1
-                entry_price = close_val
-            # Short: CMF < -0.15 (selling pressure) + downtrend (price < EMA50)
-            elif cmf_val < -0.15 and close_val < ema50:
-                signals[i] = -size
-                position = -1
-                entry_price = close_val
+            # Determine trend alignment: price vs EMA34 (1d) and EMA50 (1w)
+            uptrend = close_val > ema34 and close_val > ema50
+            downtrend = close_val < ema34 and close_val < ema50
+            
+            if uptrend and vol_conf:
+                # Long bias: long when price breaks above R3 with volume
+                if close_val > r3:
+                    signals[i] = size
+                    position = 1
+                    entry_price = close_val
+            elif downtrend and vol_conf:
+                # Short bias: short when price breaks below S3 with volume
+                if close_val < s3:
+                    signals[i] = -size
+                    position = -1
+                    entry_price = close_val
         elif position == 1:
-            # Exit long: CMF turns negative (< 0) or price breaks below EMA50
-            if cmf_val < 0 or close_val < ema50:
+            # Exit conditions: touch opposite Camarilla level (S3) or reverse signal
+            if close_val < s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: CMF turns positive (> 0) or price breaks above EMA50
-            if cmf_val > 0 or close_val > ema50:
+            # Exit conditions: touch opposite Camarilla level (R3) or reverse signal
+            if close_val > r3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Chaikin_Money_Flow_Energy_1dTrend_Confirmation_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
