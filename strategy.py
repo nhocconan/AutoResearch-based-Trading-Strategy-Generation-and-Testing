@@ -1,92 +1,133 @@
 #!/usr/bin/env python3
 """
-6h_Aroon_Oscillator_12hTrend_Filter
-Hypothesis: Aroon oscillator (down-up) identifies trend strength on 6h. 
-Filter with 12h EMA50 trend to avoid counter-trend trades. 
-Enter when Aroon > 50 (strong uptrend) or < -50 (strong downtrend) 
-with price pulling back to 20 EMA on 6h. Works in bull via pullbacks in uptrend,
-in bear via bounces in downtrend. Target: 20-35 trades/year.
+4h_KAMA_Trend_With_1d_ADX_Filter_v2
+Hypothesis: KAMA adapts to market noise - in trending markets it follows price closely,
+in ranging markets it stays flat. Combined with 1d ADX>25 trend filter and volume
+confirmation, this captures strong trends while avoiding whipsaws in ranging markets.
+Works in bull via upward KAMA slope with ADX strength, in bear via downward slope.
+Target: 20-35 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_kama(close, er_length=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), 
+                       axis=0, keepdims=True) if len(change.shape) > 1 else \
+                 np.abs(np.diff(close, prepend=close[0])).cumsum()
+    
+    # Avoid division by zero
+    volatility = np.where(volatility == 0, 1, volatility)
+    er = change / volatility
+    
+    # Smooth ER
+    er_smoothed = pd.Series(er).ewm(alpha=1/er_length, adjust=False).mean().values
+    
+    # Smoothing constants
+    sc = (er_smoothed * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d ADX for trend strength filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Aroon oscillator (25-period) on 6h
-    period = 25
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    for i in range(period - 1, n):
-        window_high = high[i - period + 1:i + 1]
-        window_low = low[i - period + 1:i + 1]
-        high_idx = np.argmax(window_high)
-        low_idx = np.argmin(window_low)
-        aroon_up[i] = ((period - 1 - high_idx) / (period - 1)) * 100
-        aroon_down[i] = ((period - 1 - low_idx) / (period - 1)) * 100
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
     
-    aroon_osc = aroon_up - aroon_down  # -100 to +100
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # 20 EMA on 6h for pullback entry
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Smooth TR, +DM, -DM
+    tr_period = 14
+    atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate KAMA on 4h data
+    kama = calculate_kama(close, er_length=10, fast=2, slow=30)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Aroon and EMAs
-    start_idx = max(period - 1, 20)
+    # Warmup: need enough data for ADX and volume MA
+    start_idx = max(30, 20)  # ADX needs ~30 periods, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(aroon_osc[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(ema_50_12h_aligned[i])):
+        if np.isnan(adx_aligned[i]) or np.isnan(kama[i]):
             signals[i] = 0.0
             continue
         
-        aroon_val = aroon_osc[i]
-        ema_20_val = ema_20[i]
-        ema_12h_val = ema_50_12h_aligned[i]
-        close_val = close[i]
+        adx_val = adx_aligned[i]
+        vol_confirm_val = vol_confirm[i]
         
         if position == 0:
-            # Long: strong uptrend (Aroon > 50) + pullback to EMA20 + 12h uptrend
-            if aroon_val > 50 and close_val <= ema_20_val * 1.001 and ema_12h_val < close_val:
+            # Long: price above KAMA, ADX > 25 (strong trend), volume confirmation
+            if close[i] > kama[i] and adx_val > 25 and vol_confirm_val:
                 signals[i] = size
                 position = 1
-            # Short: strong downtrend (Aroon < -50) + bounce to EMA20 + 12h downtrend
-            elif aroon_val < -50 and close_val >= ema_20_val * 0.999 and ema_12h_val > close_val:
+            # Short: price below KAMA, ADX > 25 (strong trend), volume confirmation
+            elif close[i] < kama[i] and adx_val > 25 and vol_confirm_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: trend weakness (Aroon < 0) or 12h trend change
-            if aroon_val < 0 or ema_12h_val > close_val:
+            # Exit long: price crosses below KAMA or ADX weakens (< 20)
+            if close[i] < kama[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: trend weakness (Aroon > 0) or 12h trend change
-            if aroon_val > 0 or ema_12h_val < close_val:
+            # Exit short: price crosses above KAMA or ADX weakens (< 20)
+            if close[i] > kama[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Aroon_Oscillator_12hTrend_Filter"
-timeframe = "6h"
+name = "4h_KAMA_Trend_With_1d_ADX_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
