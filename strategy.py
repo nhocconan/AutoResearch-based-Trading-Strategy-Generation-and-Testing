@@ -13,80 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR calculation
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly ATR for volatility filter
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily ATR(14) for volatility measurement
-    high_low = df_1d['high'] - df_1d['low']
-    high_close = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    low_close = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Weekly EMA(50) for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Weekly ATR(14) for volatility filter
-    high_low_w = df_1w['high'] - df_1w['low']
-    high_close_w = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    low_close_w = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr_w = np.maximum(high_low_w, np.maximum(high_close_w, low_close_w))
-    atr_14_w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
-    atr_14_w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_w)
+    # Daily Pivot Points (standard calculation)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily 200-period SMA for long-term trend filter
-    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Daily 20-period high/low for breakout levels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # R1 and S1 levels
+    R1 = pivot + (range_hl * 1.1 / 12)
+    S1 = pivot - (range_hl * 1.1 / 12)
+    
+    # Align to 12h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # 12h volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need 200-period SMA and 20-period breakout levels
-    start_idx = max(200, 20)
+    # Warmup: need weekly EMA50 and daily data
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(sma_200[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_14_w_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        atr_daily = atr_14_aligned[i]
-        atr_weekly = atr_14_w_aligned[i]
+        ema_trend = ema50_1w_aligned[i]
+        vol_ma_val = vol_ma[i]
+        vol_current = volume[i]
         
-        # Volatility filter: daily ATR < 1.5 * weekly ATR (avoid extremely high vol)
-        vol_filter = atr_daily < (1.5 * atr_weekly)
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_filter = vol_current > (vol_ma_val * 1.5)
         
         if position == 0:
-            # Long: price breaks above 20-day high with uptrend and volatility filter
-            if close[i] > high_20[i] and close[i] > sma_200[i] and vol_filter:
+            # Long: price breaks above R1 with weekly uptrend and volume
+            if close[i] > R1_aligned[i] and close[i] > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below 20-day low with downtrend and volatility filter
-            elif close[i] < low_20[i] and close[i] < sma_200[i] and vol_filter:
+            # Short: price breaks below S1 with weekly downtrend and volume
+            elif close[i] < S1_aligned[i] and close[i] < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below 20-day low or trend turns down
-            if close[i] < low_20[i] or close[i] < sma_200[i]:
+            # Exit long: price crosses below S1 or weekly trend turns down
+            if close[i] < S1_aligned[i] or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above 20-day high or trend turns up
-            if close[i] > high_20[i] or close[i] > sma_200[i]:
+            # Exit short: price crosses above R1 or weekly trend turns up
+            if close[i] > R1_aligned[i] or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ATR_Filtered_Breakout_200SMA"
-timeframe = "1d"
+name = "12h_Pivot_R1S1_Breakout_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
