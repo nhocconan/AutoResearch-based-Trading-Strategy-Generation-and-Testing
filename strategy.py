@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-#100881 - 4h_R1_S1_Breakout_Volume_Trend_Filter
-Hypothesis: Breakout at R1/S1 levels with volume confirmation and 1d EMA34 trend filter. Targets 15-40 trades/year (60-160 total) to minimize fee drag. Uses 4h primary timeframe with 1d EMA34 for trend and daily pivot for Camarilla levels. Works in bull (breakouts with trend) and bear (mean reversion to pivot).
+#100882 - 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Breakout at daily Camarilla R1/S1 levels with volume spike and 1d EMA34 trend filter on 12h timeframe. Targets 12-37 trades/year (50-150 total) to minimize fee drag. Uses daily EMA34 for trend filter and daily Camarilla levels for breakout. Works in bull (breakouts with trend) and bear (mean reversion to pivot).
 """
 
 import numpy as np
@@ -37,7 +37,7 @@ def generate_signals(prices):
     daily_r1 = close_1d + daily_range * 1.1 / 12
     daily_s1 = close_1d - daily_range * 1.1 / 12
     
-    # Align to 4h timeframe (previous day's levels for current period)
+    # Align to 12h timeframe (previous day's levels for current period)
     camarilla_r1 = align_htf_to_ltf(prices, df_1d, daily_r1)
     camarilla_s1 = align_htf_to_ltf(prices, df_1d, daily_s1)
     camarilla_pivot = align_htf_to_ltf(prices, df_1d, daily_pivot)
@@ -90,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_R1_S1_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
