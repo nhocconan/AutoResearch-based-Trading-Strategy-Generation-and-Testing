@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Volume Spike + ADX Trend Filter + ATR Stop.
-Long when price breaks above Donchian(20) high + ADX > 25 + volume spike.
-Short when price breaks below Donchian(20) low + ADX > 25 + volume spike.
-Exit when price crosses Donchian midline or ADX drops below 20.
-Designed for low trade frequency (15-30/year) with strong edge in trending markets.
+1d Ehlers Fisher Transform + Volume Spike + Weekly Trend Filter.
+Long when Fisher crosses above -1.5 with volume spike and weekly uptrend.
+Short when Fisher crosses below +1.5 with volume spike and weekly downtrend.
+Exit when Fisher crosses back through zero.
+Designed to capture reversals in both bull and bear markets with low trade frequency.
 """
 
 import numpy as np
@@ -13,77 +13,74 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate ADX on daily timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Ehlers Fisher Transform (9-period)
+    # Step 1: Normalize price over period
+    period = 9
+    hl2 = (high + low) / 2.0
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    for i in range(period - 1, n):
+        highest_high[i] = np.max(high[i - period + 1:i + 1])
+        lowest_low[i] = np.min(low[i - period + 1:i + 1])
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Avoid division by zero
+    diff = highest_high - lowest_low
+    diff[diff == 0] = 1e-10
     
-    # Smooth TR and DM (Wilder's smoothing)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[:period])
-        # Subsequent values: smoothed = prev - (prev/period) + current
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Normalize to [-1, 1]
+    value1 = 2.0 * ((hl2 - lowest_low) / diff - 0.5)
+    value1 = np.clip(value1, -0.999, 0.999)  # Prevent extreme values
     
-    period = 14
-    atr_1d = wilder_smooth(tr, period)
-    plus_di_1d = 100 * wilder_smooth(plus_dm, period) / atr_1d
-    minus_di_1d = 100 * wilder_smooth(minus_dm, period) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilder_smooth(dx_1d, period)
+    # Smooth with exponential moving average
+    alpha = 0.5
+    value2 = np.full(n, np.nan)
+    for i in range(n):
+        if i == 0:
+            value2[i] = value1[i]
+        elif np.isnan(value2[i-1]):
+            value2[i] = value1[i]
+        else:
+            value2[i] = alpha * value1[i] + (1 - alpha) * value2[i-1]
     
-    # Align daily ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Fisher transform
+    fish = np.full(n, np.nan)
+    for i in range(n):
+        if np.isnan(value2[i]):
+            fish[i] = np.nan
+        else:
+            fish[i] = 0.5 * np.log((1 + value2[i]) / (1 - value2[i]))
     
-    # Donchian channels (20-period) on 4h data
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
+    # Get weekly EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = np.full(len(close_1w), np.nan)
+    alpha_ew = 2.0 / (34 + 1)
+    for i in range(len(close_1w)):
+        if i == 0:
+            ema_1w[i] = close_1w[i]
+        elif np.isnan(ema_1w[i-1]):
+            ema_1w[i] = close_1w[i]
+        else:
+            ema_1w[i] = alpha_ew * close_1w[i] + (1 - alpha_ew) * ema_1w[i-1]
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
+    # Align weekly EMA to daily timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    donch_high = rolling_max(high, 20)
-    donch_low = rolling_min(low, 20)
-    donch_mid = (donch_high + donch_low) / 2.0
-    
-    # Volume filter: volume > 2.0x average (to avoid false breakouts)
-    vol_ma_20 = np.full_like(volume, np.nan, dtype=np.float64)
+    # Volume filter: volume > 2.0x average (to avoid false signals)
+    vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
@@ -91,51 +88,46 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian (20), ADX (14+14=28), volume MA (20)
-    start_idx = max(20, 28, 20)
+    # Warmup: need Fisher (9) + volume MA (20) + weekly EMA (34)
+    start_idx = max(9, 19, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(fish[i]) or np.isnan(fish[i-1]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Current price and volume
-        price_now = close[i]
+        # Current values
+        fish_now = fish[i]
+        fish_prev = fish[i-1]
         vol_now = volume[i]
-        
-        # Current indicators
-        upper_band = donch_high[i]
-        lower_band = donch_low[i]
-        mid_line = donch_mid[i]
-        adx_val = adx_1d_aligned[i]
+        trend_weekly = ema_1w_aligned[i]
         
         # Volume filter: volume > 2.0x average
         vol_filter = vol_now > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above upper band + ADX > 25 + volume spike
-            if price_now > upper_band and adx_val > 25 and vol_filter:
+            # Long: Fisher crosses above -1.5 with volume spike and weekly uptrend
+            if fish_prev <= -1.5 and fish_now > -1.5 and vol_filter and trend_weekly > close[i]:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below lower band + ADX > 25 + volume spike
-            elif price_now < lower_band and adx_val > 25 and vol_filter:
+            # Short: Fisher crosses below +1.5 with volume spike and weekly downtrend
+            elif fish_prev >= 1.5 and fish_now < 1.5 and vol_filter and trend_weekly < close[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below midline OR ADX drops below 20
-            if price_now < mid_line or adx_val < 20:
+            # Exit long: Fisher crosses below zero
+            if fish_prev > 0 and fish_now <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above midline OR ADX drops below 20
-            if price_now > mid_line or adx_val < 20:
+            # Exit short: Fisher crosses above zero
+            if fish_prev < 0 and fish_now >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -143,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_ADX25_Volume_Filter"
-timeframe = "4h"
+name = "1d_EhlerFisher_VolumeSpike_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
