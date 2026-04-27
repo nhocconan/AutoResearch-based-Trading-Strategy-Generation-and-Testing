@@ -36,14 +36,6 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate Bollinger Bands(20, 2.0) for range detection
-    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2.0 * bb_std
-    bb_lower = bb_middle - 2.0 * bb_std
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
     session_mask = (hours >= 8) & (hours <= 20)
@@ -57,9 +49,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(bb_upper_aligned[i]) or
-            np.isnan(bb_lower_aligned[i])):
+            np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -75,23 +65,19 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely high volatility periods
         vol_filter = atr_14_1d_aligned[i] > 0 and atr_14_1d_aligned[i] < np.median(atr_14_1d_aligned[:i+1]) * 3
         
-        # Range filter: price near Bollinger Bands edges (mean reversion setup)
-        near_upper = close[i] >= bb_upper_aligned[i] * 0.995  # within 0.5% of upper band
-        near_lower = close[i] <= bb_lower_aligned[i] * 1.005  # within 0.5% of lower band
-        
         # Volume filter: above average volume
         vol_ma_14_1d = pd.Series(volume_1d).rolling(window=14, min_periods=14).mean().values
         vol_ma_14_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_14_1d)
         if np.isnan(vol_ma_14_1d_aligned[i]):
             signals[i] = 0.0
             continue
-        vol_spike = volume[i] > vol_ma_14_1d_aligned[i] * 1.5  # 1.5x average volume
+        vol_spike = volume[i] > vol_ma_14_1d_aligned[i]
         
-        # Long conditions: price near lower BB + oversold + volume spike
-        long_condition = (near_lower and vol_filter and vol_spike)
+        # Long conditions: bullish trend + volatility filter + volume spike
+        long_condition = (price_above_ema and vol_filter and vol_spike)
         
-        # Short conditions: price near upper BB + overbought + volume spike
-        short_condition = (near_upper and vol_filter and vol_spike)
+        # Short conditions: bearish trend + volatility filter + volume spike
+        short_condition = (price_below_ema and vol_filter and vol_spike)
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -99,11 +85,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to middle of Bollinger Bands
-        elif position == 1 and close[i] <= bb_middle[i]:
+        # Exit conditions: trend reversal
+        elif position == 1 and not price_above_ema:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] >= bb_middle[i]:
+        elif position == -1 and not price_below_ema:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -117,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BollingerBandReversion_VolumeSpike"
-timeframe = "4h"
+name = "6h_DailyEMA34_VolumeFilter_Session"
+timeframe = "6h"
 leverage = 1.0
