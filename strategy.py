@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation
+# Uses Donchian(20) breakouts for trend capture, 12h EMA50 for trend filter, and volume spike for confirmation
+# Designed to work in both bull and bear markets by using breakouts with volume confirmation and trend alignment
+# Target: 20-50 trades/year to minimize fee drag while capturing significant moves
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -13,88 +18,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations (called ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data for Donchian channels (called ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1-day Exponential Moving Average (50-period) for trend
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
+    # Get 12h data for trend filter (called ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 4-period Donchian channels (20-period lookback)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    donchian_high = np.full(len(df_4h), np.nan)
+    donchian_low = np.full(len(df_4h), np.nan)
+    
+    for i in range(19, len(df_4h)):
+        donchian_high[i] = np.max(high_4h[i-19:i+1])
+        donchian_low[i] = np.min(low_4h[i-19:i+1])
+    
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
         multiplier = 2 / (50 + 1)
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * multiplier) + (ema_50_1d[i-1] * (1 - multiplier))
+        ema_50_12h[49] = np.mean(close_12h[:50])
+        for i in range(50, len(close_12h)):
+            ema_50_12h[i] = (close_12h[i] * multiplier) + (ema_50_12h[i-1] * (1 - multiplier))
     
-    # Calculate 1-day Average True Range (14-period) for volatility
-    if len(df_1d) >= 14:
-        tr = np.zeros(len(df_1d))
-        tr[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]
-        for i in range(1, len(df_1d)):
-            tr[i] = max(
-                df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-                abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-                abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
-            )
-        atr_14_1d = np.full(len(df_1d), np.nan)
-        atr_14_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_14_1d[i] = (tr[i] * (1/14)) + (atr_14_1d[i-1] * (13/14))
-    else:
-        atr_14_1d = np.full(len(df_1d), np.nan)
+    # Calculate 4-period average volume for spike detection
+    vol_ma_4h = np.full(len(df_4h), np.nan)
+    vol_period = 4
+    for i in range(vol_period, len(df_4h)):
+        vol_ma_4h[i] = np.mean(df_4h['volume'].values[i-vol_period:i])
     
-    # Align 1d indicators to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Calculate 12-period volume average for spike detection
-    vol_ma = np.full(n, np.nan)
-    vol_period = 12
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    # Align all indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
     # Warmup period
-    start_idx = max(50, vol_period) + 5
+    start_idx = max(20, 50) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma_4h_aligned[i] if vol_ma_4h_aligned[i] > 0 else 0
         
         # Volume spike filter: at least 1.5x average volume
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price above EMA50 and ATR-based breakout with volume
-            if price > ema_50_1d_aligned[i] and price > high[i-1] + 0.5 * atr_14_1d_aligned[i] and vol_filter:
+            # Long: Price breaks above Donchian high with volume and 12h uptrend
+            if price > donchian_high_aligned[i] and price > ema_50_12h_aligned[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price below EMA50 and ATR-based breakdown with volume
-            elif price < ema_50_1d_aligned[i] and price < low[i-1] - 0.5 * atr_14_1d_aligned[i] and vol_filter:
+            # Short: Price breaks below Donchian low with volume and 12h downtrend
+            elif price < donchian_low_aligned[i] and price < ema_50_12h_aligned[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below EMA50 or volatility spike (potential reversal)
-            if price < ema_50_1d_aligned[i] or (vol_ratio > 2.5):
+            # Long exit: Price breaks below Donchian low or trend reverses
+            if price < donchian_low_aligned[i] or price < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses above EMA50 or volatility spike (potential reversal)
-            if price > ema_50_1d_aligned[i] or (vol_ratio > 2.5):
+            # Short exit: Price breaks above Donchian high or trend reverses
+            if price > donchian_high_aligned[i] or price > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA50_ATR14_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
