@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakouts with volume spike and daily trend filter capture
-institutional breakout moves with controlled frequency. Uses R3/S3 for stronger breakouts
-than R1/S1, reducing false signals. Works in bull/bear by filtering with 1d EMA34 trend.
-Targets 15-30 trades/year on 6h to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v2
+Hypothesis: Refined version with stricter volume confirmation (2.0x volume MA) and 
+additional momentum filter (RSI > 50 for longs, < 50 for shorts) to reduce trades
+while maintaining edge. Focuses on high-probability breakouts in trending markets.
+Target: 20-30 trades/year to minimize fee drag on 4h timeframe.
 """
 
 import numpy as np
@@ -36,55 +36,70 @@ def generate_signals(prices):
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
     
-    # Camarilla R3, S3 levels (stronger breakout levels)
-    R3 = close_prev + (high_prev - low_prev) * 1.1 * 6 / 12  # = close_prev + (high-low)*0.55
-    S3 = close_prev - (high_prev - low_prev) * 1.1 * 6 / 12  # = close_prev - (high-low)*0.55
+    # Camarilla R1, S1 levels
+    R1 = close_prev + (high_prev - low_prev) * 1.1 / 12
+    S1 = close_prev - (high_prev - low_prev) * 1.1 / 12
     
-    # Align Camarilla levels to 6h timeframe (available after daily close)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align Camarilla levels to 4h timeframe (available after daily close)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume spike: volume > 2.5 * 20-period average (strong confirmation)
+    # Volume confirmation: volume > 2.0 * 20-period average (stricter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.5)
+    vol_confirm = volume > (vol_ma * 2.0)
+    
+    # RSI filter for momentum confirmation
+    rsi_period = 14
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, min_periods=rsi_period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, min_periods=rsi_period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and volume MA
-    start_idx = max(35, 20)
+    # Warmup: need enough data for EMA, volume MA, and RSI
+    start_idx = max(35, 20, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_1d_aligned[i]
-        r3_level = R3_aligned[i]
-        s3_level = S3_aligned[i]
-        vol_spike_val = vol_spike[i]
+        r1_level = R1_aligned[i]
+        s1_level = S1_aligned[i]
+        vol_confirm_val = vol_confirm[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: break above R3 with volume spike and uptrend
-            if close[i] > r3_level and vol_spike_val and close[i] > ema_trend:
+            # Long: break above R1 with volume, uptrend, and bullish momentum
+            if (close[i] > r1_level and vol_confirm_val and 
+                close[i] > ema_trend and rsi_val > 50):
                 signals[i] = size
                 position = 1
-            # Short: break below S3 with volume spike and downtrend
-            elif close[i] < s3_level and vol_spike_val and close[i] < ema_trend:
+            # Short: break below S1 with volume, downtrend, and bearish momentum
+            elif (close[i] < s1_level and vol_confirm_val and 
+                  close[i] < ema_trend and rsi_val < 50):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: close below S3 or trend turns down
-            if close[i] < s3_level or close[i] < ema_trend:
+            # Exit long: close below S1 or trend turns down or momentum fades
+            if (close[i] < s1_level or close[i] < ema_trend or rsi_val < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above R3 or trend turns up
-            if close[i] > r3_level or close[i] > ema_trend:
+            # Exit short: close above R1 or trend turns up or momentum fades
+            if (close[i] > r1_level or close[i] > ema_trend or rsi_val > 50):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
