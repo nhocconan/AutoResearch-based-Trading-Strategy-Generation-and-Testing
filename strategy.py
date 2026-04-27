@@ -92,10 +92,10 @@ def generate_signals(prices):
                           vol_filter)
         
         if long_condition and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_condition and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         # Exit conditions: trend reversal
         elif position == 1 and not price_above_ema:
@@ -107,14 +107,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_EMA34_RSI14_VolumeFilter_1dTrend"
-timeframe = "1d"
+name = "12h_EMA34_RSI14_VolumeFilter_1dTrend"
+timeframe = "12h"
 leverage = 1.0
