@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spike capture sustained moves. 1d EMA34 provides a responsive yet smooth trend filter, reducing whipsaws in chop. Volume spike (>2x 24-bar avg) confirms momentum. Discrete sizing (0.25) limits fee churn. Target: 75-200 trades over 4 years.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop
+Hypothesis: Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spike capture sustained moves in both bull and bear markets. ATR-based stoploss (2.5x ATR) controls drawdown. Discrete sizing (0.25) limits fee churn. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -44,17 +44,27 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
+    # ATR for dynamic stoploss (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need 1d EMA34 (34), volume avg (24)
-    start_idx = max(34, 24)
+    # Warmup: need 1d EMA34 (34), volume avg (24), ATR (14)
+    start_idx = max(34, 24, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(s3_aligned[i]) or np.isnan(volume_confirm[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -63,6 +73,7 @@ def generate_signals(prices):
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
         vol_conf = volume_confirm[i]
+        atr_val = atr[i]
         
         if position == 0:
             # Determine trend: price relative to 1d EMA34
@@ -74,25 +85,37 @@ def generate_signals(prices):
                 if (close_val > r3_val) and vol_conf:
                     signals[i] = size
                     position = 1
+                    entry_price = close_val
             elif is_downtrend:
                 # Downtrend: short when price breaks below S3 and volume confirms
                 if (close_val < s3_val) and vol_conf:
                     signals[i] = -size
                     position = -1
+                    entry_price = close_val
         elif position == 1:
-            # Exit long: price touches S3 (support) or trend changes to downtrend
-            exit_condition = (close_val < s3_val) or (close_val < ema_1d_val)
+            # Exit conditions: stoploss, trend reversal, or S3 touch
+            stop_loss = entry_price - 2.5 * atr_val
+            trend_reversal = close_val < ema_1d_val
+            support_touch = close_val < s3_val
             
-            if exit_condition:
+            if stop_loss > 0 and close_val <= stop_loss:
+                signals[i] = 0.0
+                position = 0
+            elif trend_reversal or support_touch:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price touches R3 (resistance) or trend changes to uptrend
-            exit_condition = (close_val > r3_val) or (close_val > ema_1d_val)
+            # Exit conditions: stoploss, trend reversal, or R3 touch
+            stop_loss = entry_price + 2.5 * atr_val
+            trend_reversal = close_val > ema_1d_val
+            resistance_touch = close_val > r3_val
             
-            if exit_condition:
+            if stop_loss > 0 and close_val >= stop_loss:
+                signals[i] = 0.0
+                position = 0
+            elif trend_reversal or resistance_touch:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
 timeframe = "4h"
 leverage = 1.0
