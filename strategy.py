@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,11 +18,19 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on daily close (vectorized)
+    # Calculate 34-period EMA on daily close
     close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34 = np.full(len(close_1d), np.nan)
+    alpha = 2 / (34 + 1)
+    for i in range(len(close_1d)):
+        if i == 0:
+            ema_34[i] = close_1d[i]
+        elif np.isnan(ema_34[i-1]):
+            ema_34[i] = close_1d[i]
+        else:
+            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
     
-    # Align daily EMA to 6h
+    # Align daily EMA to 4h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate 14-period ATR for volatility and stop
@@ -30,21 +38,33 @@ def generate_signals(prices):
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
     tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr[i] = np.mean(tr[1:15])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
     # Calculate 20-period volume average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = np.full(n, np.nan)
+    vol_period = 20
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     # Calculate 20-period high/low for Donchian breakout
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_max = np.full(n, np.nan)
+    low_min = np.full(n, np.nan)
+    period = 20
+    for i in range(period, n):
+        high_max[i] = np.max(high[i-period:i])
+        low_min[i] = np.min(low[i-period:i])
     
     signals = np.zeros(n)
     position = 0
-    size = 0.25
+    size = 0.30
     
     # Warmup period
-    start_idx = max(34, 20) + 5
+    start_idx = max(14, vol_period, period) + 5
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
@@ -83,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_EMA34_Trend_Volume_ATRStop_v1"
-timeframe = "6h"
+name = "4h_Donchian20_EMA34_Trend_Volume_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
