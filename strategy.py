@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Bollinger Band squeeze breakout with weekly EMA20 trend filter and volume confirmation.
-# Long when price breaks above upper BB with weekly EMA20 uptrend and volume > 1.5x average.
-# Short when price breaks below lower BB with weekly EMA20 downtrend and volume > 1.5x average.
-# Exit when price returns to middle BB.
-# Uses Bollinger Bands for volatility-based breakouts, targeting 20-40 trades per year.
+# Hypothesis: 6h Chaikin Money Flow (CMF) with 1d trend filter (EMA50).
+# Long when CMF crosses above 0.05 (bullish accumulation) and price > 1d EMA50.
+# Short when CMF crosses below -0.05 (bearish distribution) and price < 1d EMA50.
+# Exit when CMF crosses back through zero (distribution/accumulation ends).
+# Uses CMF for institutional flow confirmation, targeting 15-30 trades per year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,86 +19,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA20 for trend filter
-    ema_period = 20
-    ema_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= ema_period:
-        ema_weekly[ema_period - 1] = np.mean(close_weekly[:ema_period])
-        for i in range(ema_period, len(close_weekly)):
-            ema_weekly[i] = (close_weekly[i] * (2 / (ema_period + 1)) + 
-                            ema_weekly[i - 1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 1d EMA50 for trend filter
+    ema_period = 50
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2.0
-    bb_middle = np.full(n, np.nan)
-    bb_upper = np.full(n, np.nan)
-    bb_lower = np.full(n, np.nan)
+    # Calculate Chaikin Money Flow (20-period)
+    cmf_period = 20
+    mf_multiplier = np.full(n, np.nan)
+    mf_volume = np.full(n, np.nan)
+    cmf = np.full(n, np.nan)
     
-    for i in range(bb_period - 1, n):
-        bb_middle[i] = np.mean(close[i - bb_period + 1:i + 1])
-        bb_std_dev = np.std(close[i - bb_period + 1:i + 1])
-        bb_upper[i] = bb_middle[i] + bb_std_dev * bb_std
-        bb_lower[i] = bb_middle[i] - bb_std_dev * bb_std
+    for i in range(n):
+        if high[i] == low[i]:
+            mf_multiplier[i] = 0.0
+        else:
+            mf_multiplier[i] = ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i])
+        mf_volume[i] = mf_multiplier[i] * volume[i]
     
-    # Align weekly EMA to daily timeframe
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    for i in range(cmf_period - 1, n):
+        mf_volume_sum = np.sum(mf_volume[i - cmf_period + 1:i + 1])
+        volume_sum = np.sum(volume[i - cmf_period + 1:i + 1])
+        if volume_sum != 0:
+            cmf[i] = mf_volume_sum / volume_sum
     
-    # Volume MA for confirmation (20-period)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
+    # CMF previous value for crossover detection
+    cmf_prev = np.full(n, np.nan)
+    cmf_prev[1:] = cmf[:-1]
+    
+    # Align 1d EMA to 6h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need BB, weekly EMA, and volume MA20
-    start_idx = max(bb_period, ema_period - 1, 19)
+    # Warmup: need CMF(20) and EMA50
+    start_idx = max(cmf_period, ema_period - 1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(bb_middle[i]) or np.isnan(ema_weekly_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(cmf[i]) or np.isnan(cmf_prev[i]) or 
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
-        
-        # Volume filter: require volume above average
-        vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price breaks above upper BB with weekly EMA20 uptrend and volume filter
-            if (price > bb_upper[i] and price > ema_weekly_aligned[i] and vol_filter):
+            # Long: CMF crosses above 0.05 and price > 1d EMA50
+            if (cmf_prev[i] <= 0.05 and cmf[i] > 0.05 and 
+                price > ema_1d_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below lower BB with weekly EMA20 downtrend and volume filter
-            elif (price < bb_lower[i] and price < ema_weekly_aligned[i] and vol_filter):
+            # Short: CMF crosses below -0.05 and price < 1d EMA50
+            elif (cmf_prev[i] >= -0.05 and cmf[i] < -0.05 and 
+                  price < ema_1d_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle BB
-            if price <= bb_middle[i]:
+            # Exit long: CMF crosses below 0 from above
+            if cmf_prev[i] >= 0 and cmf[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to middle BB
-            if price >= bb_middle[i]:
+            # Exit short: CMF crosses above 0 from below
+            if cmf_prev[i] <= 0 and cmf[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_BollingerBandSqueezeBreakout_WeeklyEMA20_Volume"
-timeframe = "1d"
+name = "6h_CMF20_1dEMA50_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
