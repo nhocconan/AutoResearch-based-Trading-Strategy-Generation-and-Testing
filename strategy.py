@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,39 +13,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get 12h data for multi-timeframe analysis
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot from daily data (last 5 days)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 20-period EMA on 12h close for trend
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate weekly pivot using last 5 daily bars
-    weekly_pivot = np.full(len(high_1d), np.nan)
-    for i in range(4, len(high_1d)):  # Need at least 5 days
-        week_high = np.max(high_1d[i-4:i+1])
-        week_low = np.min(low_1d[i-4:i+1])
-        week_close = close_1d[i]
-        weekly_pivot[i] = (week_high + week_low + week_close) / 3
+    # Calculate 20-period Donchian channels on 12h for structure
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    highest_high_12h = np.full(len(high_12h), np.nan)
+    lowest_low_12h = np.full(len(low_12h), np.nan)
     
-    # Align weekly pivot to 12h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    lookback = 20
+    for i in range(lookback, len(high_12h)):
+        highest_high_12h[i] = np.max(high_12h[i-lookback:i])
+        lowest_low_12h[i] = np.min(low_12h[i-lookback:i])
     
-    # Calculate 12-period Donchian channels directly on 12h data
-    lookback = 12
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
+    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
     
-    for i in range(lookback, n):
-        highest_high[i] = np.max(high[i-lookback:i])
-        lowest_low[i] = np.min(low[i-lookback:i])
-    
-    # 12-period average volume for spike detection
-    vol_period = 12
+    # Calculate 20-period average volume on 4h for volume confirmation
     vol_ma = np.full(n, np.nan)
+    vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -53,13 +47,13 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup period: need at least 12 for Donchian, 12 for volume, 5 for weekly pivot
-    start_idx = max(lookback, vol_period, 5)
+    # Warmup period: need at least 20 for EMA, 20 for Donchian, 20 for volume
+    start_idx = max(vol_period, lookback) + 20  # Extra buffer for EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or
+        if (np.isnan(ema_12h_aligned[i]) or
+            np.isnan(highest_high_12h_aligned[i]) or
+            np.isnan(lowest_low_12h_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,34 +61,34 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from weekly pivot
-        bullish = price > weekly_pivot_aligned[i]
-        bearish = price < weekly_pivot_aligned[i]
+        # Determine 12h trend
+        bullish_trend = ema_12h_aligned[i] > np.mean(ema_12h_aligned[max(0, i-5):i+1])
+        bearish_trend = ema_12h_aligned[i] < np.mean(ema_12h_aligned[max(0, i-5):i+1])
         
-        # Volume confirmation: spike > 2.0x average
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation: spike > 1.8x average
+        volume_confirmation = vol_ratio > 1.8
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high in bullish trend with volume
-            if bullish and price > highest_high[i] and volume_confirmation:
+            # Long: price breaks above 12h Donchian high in bullish trend with volume
+            if bullish_trend and price > highest_high_12h_aligned[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short breakdown: price breaks below Donchian low in bearish trend with volume
-            elif bearish and price < lowest_low[i] and volume_confirmation:
+            # Short: price breaks below 12h Donchian low in bearish trend with volume
+            elif bearish_trend and price < lowest_low_12h_aligned[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Donchian low or trend turns bearish
-            if price < lowest_low[i] or bearish:
+            # Long exit: price breaks below 12h Donchian low or trend turns bearish
+            if price < lowest_low_12h_aligned[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above Donchian high or trend turns bullish
-            if price > highest_high[i] or bullish:
+            # Short exit: price breaks above 12h Donchian high or trend turns bullish
+            if price > highest_high_12h_aligned[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian12_WeeklyPivot_Trend_Volume"
-timeframe = "12h"
+name = "4h_12hDonchian20_EMA20_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
