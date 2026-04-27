@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: On 12h timeframe, Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spikes capture fewer, higher-quality moves. 
-Using 12h reduces trade frequency vs 4h while maintaining edge. Discrete sizing (0.25) controls fee drag. 
-Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag kill zone.
+4h_Camarilla_R3_S3_Breakout_1dEMA50_Trend_VolumeSpike_v1
+Hypothesis: Camarilla R3/S3 breakouts with 1d EMA50 trend filter and volume spikes capture high-probability moves in both bull and bear markets. Uses ATR-based stoploss and discrete sizing (0.30) to limit fee drag. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -31,44 +29,44 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.125 * range_1d
     camarilla_s3 = close_1d - 1.125 * range_1d
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current 12h volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
-    # Align all indicators to primary timeframe (12h)
+    # Align all indicators to primary timeframe (4h)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.25   # Position size: 25% of capital (discrete level)
+    size = 0.30   # Position size: 30% of capital (discrete level)
     
-    # Warmup: need Camarilla (1), EMA34 (34), volume avg (20)
-    start_idx = max(1, 34, 20)
+    # Warmup: need Camarilla (1), EMA50 (50), volume avg (20)
+    start_idx = max(1, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r3 = camarilla_r3_aligned[i]
         s3 = camarilla_s3_aligned[i]
-        ema34 = ema34_1d_aligned[i]
+        ema50 = ema50_1d_aligned[i]
         vol_conf = volume_confirm_aligned[i]
         
         if position == 0:
-            # Determine trend alignment: price vs EMA34 (1d)
-            uptrend = close_val > ema34
-            downtrend = close_val < ema34
+            # Determine trend: price vs EMA50 (1d)
+            uptrend = close_val > ema50
+            downtrend = close_val < ema50
             
             if uptrend and vol_conf:
                 # Long bias: long when price breaks above R3 with volume
@@ -111,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
