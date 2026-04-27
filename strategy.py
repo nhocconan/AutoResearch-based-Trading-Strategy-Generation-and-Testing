@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_1d_ADX_Filter_v2
-Hypothesis: KAMA adapts to market noise - in trending markets it follows price closely,
-in ranging markets it stays flat. Combined with 1d ADX>25 trend filter and volume
-confirmation, this captures strong trends while avoiding whipsaws in ranging markets.
-Works in bull via upward KAMA slope with ADX strength, in bear via downward slope.
-Target: 20-35 trades/year to minimize fee drag.
+12h_KAMA_TRIX_Confluence_v1
+Hypothesis: KAMA adapts to market noise while TRIX identifies momentum shifts.
+Combining KAMA direction (trend) with TRIX zero-cross (momentum) and volume confirmation
+creates a high-conviction signal that works in both bull and bear markets by avoiding
+whipsaws in ranging markets. Uses 1d ADX filter to ensure trades only in strong trends.
+Target: 15-25 trades/year to minimize fee drag on 12h timeframe.
 """
 
 import numpy as np
@@ -15,27 +15,29 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 def calculate_kama(close, er_length=10, fast=2, slow=30):
     """Calculate Kaufman Adaptive Moving Average"""
     change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), 
-                       axis=0, keepdims=True) if len(change.shape) > 1 else \
-                 np.abs(np.diff(close, prepend=close[0])).cumsum()
-    
-    # Avoid division by zero
+    volatility = np.abs(np.diff(close, prepend=close[0])).cumsum()
     volatility = np.where(volatility == 0, 1, volatility)
     er = change / volatility
     
-    # Smooth ER
     er_smoothed = pd.Series(er).ewm(alpha=1/er_length, adjust=False).mean().values
     
-    # Smoothing constants
     sc = (er_smoothed * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
     
-    # Calculate KAMA
     kama = np.zeros_like(close)
     kama[0] = close[0]
     for i in range(1, len(close)):
         kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     return kama
+
+def calculate_trix(close, period=15):
+    """Calculate TRIX indicator"""
+    ema1 = pd.Series(close).ewm(span=period, adjust=False).mean()
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False).mean()
+    ema3 = pd.Series(ema2).ewm(span=period, adjust=False).mean()
+    
+    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    return trix.fillna(0).values
 
 def generate_signals(prices):
     n = len(prices)
@@ -62,7 +64,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
     # Directional Movement
     up_move = high_1d - np.roll(high_1d, 1)
@@ -86,8 +88,11 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate KAMA on 4h data
+    # Calculate KAMA on 12h data
     kama = calculate_kama(close, er_length=10, fast=2, slow=30)
+    
+    # Calculate TRIX on 12h data
+    trix = calculate_trix(close, period=15)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -97,37 +102,38 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for ADX and volume MA
-    start_idx = max(30, 20)  # ADX needs ~30 periods, volume MA needs 20
+    # Warmup: need enough data for ADX, KAMA, TRIX and volume MA
+    start_idx = max(35, 20)  # ADX needs ~30, TRIX needs period, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(adx_aligned[i]) or np.isnan(kama[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(kama[i]) or np.isnan(trix[i]):
             signals[i] = 0.0
             continue
         
         adx_val = adx_aligned[i]
+        trix_val = trix[i]
         vol_confirm_val = vol_confirm[i]
         
         if position == 0:
-            # Long: price above KAMA, ADX > 25 (strong trend), volume confirmation
-            if close[i] > kama[i] and adx_val > 25 and vol_confirm_val:
+            # Long: price above KAMA, TRIX positive (bullish momentum), ADX > 25, volume confirmation
+            if close[i] > kama[i] and trix_val > 0 and adx_val > 25 and vol_confirm_val:
                 signals[i] = size
                 position = 1
-            # Short: price below KAMA, ADX > 25 (strong trend), volume confirmation
-            elif close[i] < kama[i] and adx_val > 25 and vol_confirm_val:
+            # Short: price below KAMA, TRIX negative (bearish momentum), ADX > 25, volume confirmation
+            elif close[i] < kama[i] and trix_val < 0 and adx_val > 25 and vol_confirm_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below KAMA or ADX weakens (< 20)
-            if close[i] < kama[i] or adx_val < 20:
+            # Exit long: price crosses below KAMA or TRIX turns negative or ADX weakens
+            if close[i] < kama[i] or trix_val < 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above KAMA or ADX weakens (< 20)
-            if close[i] > kama[i] or adx_val < 20:
+            # Exit short: price crosses above KAMA or TRIX turns positive or ADX weakens
+            if close[i] > kama[i] or trix_val > 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_With_1d_ADX_Filter_v2"
-timeframe = "4h"
+name = "12h_KAMA_TRIX_Confluence_v1"
+timeframe = "12h"
 leverage = 1.0
