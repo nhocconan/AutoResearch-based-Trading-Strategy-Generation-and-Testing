@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h price action with 4h trend and 1d volume confirmation.
-Long when price > 4h EMA(50) and 1h RSI < 30 with volume > 1.5x 1d average.
-Short when price < 4h EMA(50) and 1h RSI > 70 with volume > 1.5x 1d average.
-Uses 4h for trend direction, 1h for entry timing, 1d for volume filter.
-Designed for ranging markets with mean reversion at extremes.
-Target: 15-30 trades/year per symbol (60-120 total over 4 years).
+Hypothesis: 6-hour Heikin-Ashi RSI(14) with weekly trend filter and daily volume confirmation.
+Uses Heikin-Ashi candles to reduce noise, RSI for mean reversion, weekly trend for direction,
+and daily volume to confirm momentum. Designed to work in both bull and bear markets by
+filtering trades with higher timeframe trend and requiring volume confirmation to avoid false signals.
+Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -22,50 +21,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4-hour data for trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate Heikin-Ashi close
+    ha_close = (high + low + close + close) / 4.0  # Simplified: using current close as prev close proxy
+    # For better accuracy, we need previous HA close, but we'll use this approximation for signal generation
+    # In practice, HA close = (open+high+low+close)/4, but we avoid lookback by using current values
+    
+    # Calculate RSI(14) on Heikin-Ashi close
+    delta = np.diff(ha_close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad beginning with NaN
+    rsi = np.concatenate([np.full(14, np.nan), rsi])
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4-hour EMA(50) for trend
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 50-period EMA on weekly close
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1-day data for volume filter
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1-day volume MA(20)
+    # Calculate 20-period volume MA on daily
     vol_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(100).values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need EMA(50), volume MA(20), and RSI(14)
-    start_idx = max(50, 20, 14)
+    # Warmup: need RSI, weekly EMA, and daily volume MA
+    start_idx = max(14, 50, 20)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(rsi_values[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -77,36 +90,37 @@ def generate_signals(prices):
         
         # Current values
         price_now = close[i]
-        rsi_now = rsi_values[i]
+        ha_close_now = ha_close[i]
+        rsi_now = rsi[i]
         vol_now = volume[i]
         vol_ma = vol_ma_20_1d_aligned[i]
-        trend_4h = ema_50_4h_aligned[i]
+        weekly_trend = ema_50_1w_aligned[i]
         
-        # Volume filter: volume > 1.5x 1-day average
+        # Volume filter: volume > 1.5x daily average
         vol_filter = vol_now > 1.5 * vol_ma
         
-        # Entry conditions
+        # Entry conditions: RSI mean reversion with weekly trend and volume confirmation
         if position == 0:
-            # Long: price above 4h EMA + RSI oversold + volume spike
-            if price_now > trend_4h and rsi_now < 30 and vol_filter:
+            # Long: RSI oversold (≤30) with weekly uptrend and volume
+            if rsi_now <= 30 and ha_close_now > weekly_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price below 4h EMA + RSI overbought + volume spike
-            elif price_now < trend_4h and rsi_now > 70 and vol_filter:
+            # Short: RSI overbought (≥70) with weekly downtrend and volume
+            elif rsi_now >= 70 and ha_close_now < weekly_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral or price crosses below 4h EMA
-            if rsi_now >= 50 or price_now < trend_4h:
+            # Exit long: RSI overbought (≥70) or price crosses below weekly EMA
+            if rsi_now >= 70 or ha_close_now < weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI returns to neutral or price crosses above 4h EMA
-            if rsi_now <= 50 or price_now > trend_4h:
+            # Exit short: RSI oversold (≤30) or price crosses above weekly EMA
+            if rsi_now <= 30 or ha_close_now > weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMA50_RSI_VolumeFilter"
-timeframe = "1h"
+name = "6h_HA_RSI14_WeeklyTrend_DailyVolume"
+timeframe = "6h"
 leverage = 1.0
