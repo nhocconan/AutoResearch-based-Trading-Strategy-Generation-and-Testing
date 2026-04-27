@@ -3,13 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot with weekly trend filter and volume spike
-# Camarilla R3/S3 levels from daily provide mean reversion in range markets
-# Weekly trend filter (price vs weekly EMA20) adapts to bull/bear regimes
-# Volume spike confirms institutional participation
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag
-# Works in bull (buy R3 bounces in uptrend) and bear (sell S3 rallies in downtrend)
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -20,9 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -30,107 +23,87 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for previous day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R3 = C + (H-L) * 1.1/2
-    # S3 = C - (H-L) * 1.1/2
-    # R4 = C + (H-L) * 1.1
-    # S4 = C - (H-L) * 1.1
+    # Calculate daily EMA(34) for trend direction
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Previous day's OHLC
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Handle first day
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Calculate Bollinger Bands(20, 2.0) for range detection
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    rang = prev_high - prev_low
-    
-    r3 = pivot + rang * 1.1 / 2.0
-    s3 = pivot - rang * 1.1 / 2.0
-    r4 = pivot + rang * 1.1
-    s4 = pivot - rang * 1.1
-    
-    # Align Camarilla levels to 6h
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Weekly trend filter: EMA20 on weekly
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 1.5)
-    
-    # Session filter: 08-20 UTC
+    # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
     session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
+    # Start after warmup period
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(bb_upper_aligned[i]) or
+            np.isnan(bb_lower_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter
+        # Session filter: only trade during active hours
         if not session_mask[i]:
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA20
-        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: price above/below daily EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = vol_spike[i]
+        # Volatility filter: avoid extremely high volatility periods
+        vol_filter = atr_14_1d_aligned[i] > 0 and atr_14_1d_aligned[i] < np.median(atr_14_1d_aligned[:i+1]) * 3
         
-        # Long setup: price at S3/S4 with bullish weekly trend
-        near_s3 = abs(close[i] - s3_6h[i]) < (r3_6h[i] - s3_6h[i]) * 0.02  # Within 2% of S3
-        near_s4 = abs(close[i] - s4_6h[i]) < (r4_6h[i] - s4_6h[i]) * 0.02  # Within 2% of S4
-        at_support = near_s3 or near_s4
+        # Range filter: price near Bollinger Bands edges (mean reversion setup)
+        near_upper = close[i] >= bb_upper_aligned[i] * 0.995  # within 0.5% of upper band
+        near_lower = close[i] <= bb_lower_aligned[i] * 1.005  # within 0.5% of lower band
         
-        long_setup = at_support and price_above_weekly_ema and vol_confirm
+        # Volume filter: above average volume
+        vol_ma_14_1d = pd.Series(volume_1d).rolling(window=14, min_periods=14).mean().values
+        vol_ma_14_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_14_1d)
+        if np.isnan(vol_ma_14_1d_aligned[i]):
+            signals[i] = 0.0
+            continue
+        vol_spike = volume[i] > vol_ma_14_1d_aligned[i] * 1.5  # 1.5x average volume
         
-        # Short setup: price at R3/R4 with bearish weekly trend
-        near_r3 = abs(close[i] - r3_6h[i]) < (r3_6h[i] - s3_6h[i]) * 0.02  # Within 2% of R3
-        near_r4 = abs(close[i] - r4_6h[i]) < (r4_6h[i] - s4_6h[i]) * 0.02  # Within 2% of R4
-        at_resistance = near_r3 or near_r4
+        # Long conditions: price near lower BB + oversold + volume spike
+        long_condition = (near_lower and vol_filter and vol_spike)
         
-        short_setup = at_resistance and price_below_weekly_ema and vol_confirm
+        # Short conditions: price near upper BB + overbought + volume spike
+        short_condition = (near_upper and vol_filter and vol_spike)
         
-        # Entry logic
-        if long_setup and position <= 0:
+        if long_condition and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_setup and position >= 0:
+        elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit logic: opposite setup or extreme levels
-        elif position == 1 and (short_setup or close[i] > r4_6h[i]):
+        # Exit conditions: price returns to middle of Bollinger Bands
+        elif position == 1 and close[i] <= bb_middle[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (long_setup or close[i] < s4_6h[i]):
+        elif position == -1 and close[i] >= bb_middle[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -144,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "4h_BollingerBandReversion_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
