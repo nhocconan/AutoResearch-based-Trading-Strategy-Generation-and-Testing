@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Bollinger Band reversal with 1w EMA trend filter and volume confirmation.
-# Long when price crosses below lower BB(20,2) with 1w EMA50 uptrend and volume > 1.5x average.
-# Short when price crosses above upper BB(20,2) with 1w EMA50 downtrend and volume > 1.5x average.
-# Exit when price returns to middle BB(20,2).
-# Targets 10-25 trades per year, leveraging mean reversion in ranging markets while respecting weekly trend.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above 12h Donchian upper channel (20-period) with 1d EMA34 uptrend and volume > 1.5x average.
+# Short when price breaks below 12h Donchian lower channel with 1d EMA34 downtrend and volume > 1.5x average.
+# Exit when price crosses back through the 12h Donchian midline (mean reversion).
+# Uses Donchian channels for breakout detection, targeting 15-30 trades per year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,48 +19,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA50 for trend filter
-    ema_period = 50
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= ema_period:
-        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
-        for i in range(ema_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
-                         ema_1w[i - 1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 1d EMA34 for trend filter
+    ema_period = 34
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Bollinger Bands (20,2)
-    bb_period = 20
-    bb_std = 2
-    sma = np.full(n, np.nan)
-    std = np.full(n, np.nan)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    middle = np.full(n, np.nan)
+    # Calculate Donchian channels (20-period) for 12h timeframe
+    donch_period = 20
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    middle_channel = np.full(n, np.nan)
     
-    for i in range(bb_period - 1, n):
-        sma[i] = np.mean(close[i - bb_period + 1:i + 1])
-        std[i] = np.std(close[i - bb_period + 1:i + 1])
-        middle[i] = sma[i]
-        upper[i] = sma[i] + bb_std * std[i]
-        lower[i] = sma[i] - bb_std * std[i]
+    for i in range(donch_period - 1, n):
+        upper_channel[i] = np.max(high[i - donch_period + 1:i + 1])
+        lower_channel[i] = np.min(low[i - donch_period + 1:i + 1])
+        middle_channel[i] = (upper_channel[i] + lower_channel[i]) / 2
     
-    # Bollinger Bands previous values for crossover detection
-    upper_prev = np.full(n, np.nan)
-    lower_prev = np.full(n, np.nan)
-    middle_prev = np.full(n, np.nan)
-    upper_prev[1:] = upper[:-1]
-    lower_prev[1:] = lower[:-1]
-    middle_prev[1:] = middle[:-1]
-    
-    # Align 1w EMA to daily timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align 1d EMA to 12h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -71,14 +58,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Bollinger Bands, EMA50, and volume MA20
-    start_idx = max(bb_period, ema_period - 1, 19)
+    # Warmup: need Donchian channels, EMA34, and volume MA20
+    start_idx = max(donch_period, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or
-            np.isnan(upper_prev[i]) or np.isnan(lower_prev[i]) or np.isnan(middle_prev[i]) or
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(middle_channel[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -90,28 +77,28 @@ def generate_signals(prices):
         vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price crosses below lower BB with 1w EMA50 uptrend and volume filter
-            if (lower_prev[i] >= price and lower[i] < price and 
-                price > ema_1w_aligned[i] and vol_filter):
+            # Long: price breaks above upper channel with 1d EMA34 uptrend and volume filter
+            if (price > upper_channel[i] and 
+                price > ema_1d_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price crosses above upper BB with 1w EMA50 downtrend and volume filter
-            elif (upper_prev[i] <= price and upper[i] > price and 
-                  price < ema_1w_aligned[i] and vol_filter):
+            # Short: price breaks below lower channel with 1d EMA34 downtrend and volume filter
+            elif (price < lower_channel[i] and 
+                  price < ema_1d_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle BB from below
-            if middle_prev[i] <= price and middle[i] > price:
+            # Exit long: price crosses below middle channel
+            if price < middle_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to middle BB from above
-            if middle_prev[i] >= price and middle[i] < price:
+            # Exit short: price crosses above middle channel
+            if price > middle_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Bollinger20_2_Reversal_1wEMA50_Volume"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
