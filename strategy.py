@@ -30,60 +30,91 @@ def generate_signals(prices):
     pivot = (high_prev + low_prev + close_prev * 2) / 4
     range_ = high_prev - low_prev
     
-    # Focus on R3/S3 for fade entries
+    # Resistance and Support levels (focus on R3/S3 for fading, R4/S4 for breakout)
     r3 = pivot + range_ * 1.25
     s3 = pivot - range_ * 1.25
+    r4 = pivot + range_ * 1.5
+    s4 = pivot - range_ * 1.5
     
-    # Align levels to 12h timeframe
+    # Align levels to 4h timeframe
     ema34_aligned = ema34_1d_aligned
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 2.5 * 20-period average (tighter filter)
+    # Volume confirmation: volume > 2.0 * 20-period average (tighter filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.5)
+    vol_spike = volume > (vol_ma * 2.0)
+    
+    # Choppiness regime filter: avoid high volatility chop
+    # Calculate ATR(14) for choppiness filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Choppiness: high ATR relative to price indicates choppy market
+    price_level = (high + low + close) / 3
+    chop_ratio = atr / np.maximum(price_level, 0.001)
+    chop_ma = pd.Series(chop_ratio).rolling(window=20, min_periods=20).mean().values
+    # Only trade when choppiness is below average (trending market)
+    not_choppy = chop_ratio < chop_ma * 1.2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA, pivots, volume MA
-    start_idx = max(34, 20)
+    # Warmup: need enough data for EMA, pivots, volume MA, choppiness
+    start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema34_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(chop_ma[i])):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_aligned[i]
         vol_spike_val = vol_spike[i]
+        not_choppy_val = not_choppy[i]
         
         if position == 0:
             # Fade at R3/S3: price touches level and reverses
-            # Long: touch S3, close above it, in uptrend, volume spike
+            # Long: touch S3, close above it, in uptrend, volume spike, not choppy
             if (low[i] <= s3_aligned[i] and close[i] > s3_aligned[i] and 
-                close[i] > ema_trend and vol_spike_val):
+                close[i] > ema_trend and vol_spike_val and not_choppy_val):
                 signals[i] = size
                 position = 1
-            # Short: touch R3, close below it, in downtrend, volume spike
+            # Short: touch R3, close below it, in downtrend, volume spike, not choppy
             elif (high[i] >= r3_aligned[i] and close[i] < r3_aligned[i] and 
-                  close[i] < ema_trend and vol_spike_val):
+                  close[i] < ema_trend and vol_spike_val and not_choppy_val):
+                signals[i] = -size
+                position = -1
+            # Breakout continuation at R4/S4: strong break of extreme levels
+            # Long: break above R4 with volume spike and uptrend, not choppy
+            elif (high[i] > r4_aligned[i] and close[i] > r4_aligned[i] and 
+                  close[i] > ema_trend and vol_spike_val and not_choppy_val):
+                signals[i] = size
+                position = 1
+            # Short: break below S4 with volume spike and downtrend, not choppy
+            elif (low[i] < s4_aligned[i] and close[i] < s4_aligned[i] and 
+                  close[i] < ema_trend and vol_spike_val and not_choppy_val):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches S3 (mean reversion) or trend reverses
-            if low[i] <= s3_aligned[i] or close[i] < ema_trend:
+            # Exit long: price reaches S3 (mean reversion) or trend reverses or choppy
+            if low[i] <= s3_aligned[i] or close[i] < ema_trend or not_choppy_val == False:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price reaches R3 (mean reversion) or trend reverses
-            if high[i] >= r3_aligned[i] or close[i] > ema_trend:
+            # Exit short: price reaches R3 (mean reversion) or trend reverses or choppy
+            if high[i] >= r3_aligned[i] or close[i] > ema_trend or not_choppy_val == False:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Fade_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_R4S4_FadeBreakout_1dEMA34_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
