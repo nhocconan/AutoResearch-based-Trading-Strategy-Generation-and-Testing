@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
-# Works in bull/bear: Buys strength in uptrend, sells weakness in downtrend.
-# Volume filter prevents false breakouts. Target: 15-25 trades/year per symbol.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Works in bull/bear: Buys breakouts in uptrend, sells breakdowns in downtrend.
+# Volume filter prevents false breakouts. Target: 20-30 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,40 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculation
+    # Get 4h data for Donchian calculation (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Get 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # 12h EMA50 for trend filter
+    close_12h = pd.Series(df_12h['close'].values)
+    ema50_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # 1d EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # 12h ATR(14) for volatility
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # 4h ATR(14) for volatility filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr14_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr14_12h)
+    atr14_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr14_4h)
     
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_filter = volume > (vol_ma * 1.5)
     
     # Volatility filter: ATR below its 50-period median (low volatility regime)
-    atr_median = pd.Series(atr14_12h_aligned).rolling(window=50, min_periods=14).median().values
-    vol_filter = atr14_12h_aligned < atr_median
+    atr_median = pd.Series(atr14_4h_aligned).rolling(window=50, min_periods=14).median().values
+    vol_filter = atr14_4h_aligned < atr_median
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,42 +60,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr14_12h_aligned[i]) or 
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(atr14_4h_aligned[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(atr_median[i])):
             signals[i] = 0.0
             continue
         
-        if i < 2:  # Need at least 2 periods for Camarilla calculation
+        if i < 2:  # Need at least 2 periods for Donchian calculation
             signals[i] = 0.0
             continue
             
-        # Calculate Camarilla levels for current 12h bar (using previous bar's OHLC)
-        # We use the completed 12h bar at i-1 to calculate levels for bar i
-        if i-1 < len(df_12h):
-            # Get the index of the 12h bar that corresponds to current time
+        # Calculate Donchian levels for current 4h bar (using previous bar's OHLC)
+        # We use the completed 4h bar at i-1 to calculate levels for bar i
+        if i-1 < len(df_4h):
+            # Get the index of the 4h bar that corresponds to current time
             # Since we're using aligned data, we can use the current bar's relationship
-            # For simplicity, we use the previous completed 12h bar's data
-            idx_12h = min(i-1, len(df_12h)-1)
-            if idx_12h >= 1:
-                prev_high = df_12h['high'].iloc[idx_12h-1]
-                prev_low = df_12h['low'].iloc[idx_12h-1]
-                prev_close = df_12h['close'].iloc[idx_12h-1]
+            # For simplicity, we use the previous completed 4h bar's data
+            idx_4h = min(i-1, len(df_4h)-1)
+            if idx_4h >= 1:
+                prev_high = df_4h['high'].iloc[idx_4h-1]
+                prev_low = df_4h['low'].iloc[idx_4h-1]
                 
-                # Camarilla levels
-                range_val = prev_high - prev_low
-                r3 = prev_close + (range_val * 1.1 / 4)
-                s3 = prev_close - (range_val * 1.1 / 4)
+                # Donchian levels
+                upper = prev_high
+                lower = prev_low
                 
-                # Long: price breaks above R3 with trend and volume
-                if (close[i] > r3 and 
-                    close[i] > ema50_1d_aligned[i] and 
+                # Long: price breaks above upper with trend and volume
+                if (close[i] > upper and 
+                    close[i] > ema50_12h_aligned[i] and 
                     volume_filter[i] and 
                     vol_filter[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: price breaks below S3 with trend and volume
-                elif (close[i] < s3 and 
-                      close[i] < ema50_1d_aligned[i] and 
+                # Short: price breaks below lower with trend and volume
+                elif (close[i] < lower and 
+                      close[i] < ema50_12h_aligned[i] and 
                       volume_filter[i] and 
                       vol_filter[i]):
                     signals[i] = -0.25
@@ -109,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
