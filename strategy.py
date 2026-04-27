@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-#100810 - 4h_Price_Action_Mean_Reversion_with_Volume_Confirmation
-Hypothesis: Mean reversion strategy using price action at key levels with volume confirmation.
-Buys when price rejects support with volume, sells when price rejects resistance with volume.
-Works in both bull (buying dips) and bear (selling rallies) markets by fading extremes.
-Uses 4h timeframe with 1d support/resistance levels and volume spike confirmation.
-Target: 20-40 trades/year to minimize fee drag while maintaining edge.
+#100811 - 6h_Donchian20_WeeklyPivot_Direction_Volume
+Hypothesis: Combine 6h Donchian breakout with weekly pivot direction and volume confirmation.
+In bull markets: breakouts above weekly pivot resistance with volume. In bear markets: breakouts below weekly pivot support with volume.
+Weekly pivot provides structural support/resistance that works across market cycles. Volume confirms institutional interest.
+Target: 15-30 trades/year to minimize fee drag while capturing significant moves.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,69 +21,109 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for support/resistance levels
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
+        return np.zeros(n)
+    
+    # Get 1d data for additional context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d high/low for support/resistance (using previous day to avoid look-ahead)
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Calculate weekly pivot levels from previous week
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate key levels: previous day high/low and midpoint
-    resistance = prev_high
-    support = prev_low
-    midpoint = (prev_high + prev_low) / 2
+    # Weekly pivot point and support/resistance
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_range = weekly_high - weekly_low
+    weekly_r1 = weekly_pivot + (weekly_range * 1.1) / 2  # R1
+    weekly_s1 = weekly_pivot - (weekly_range * 1.1) / 2  # S1
+    weekly_r2 = weekly_pivot + weekly_range  # R2
+    weekly_s2 = weekly_pivot - weekly_range  # S2
     
-    # Align to 4h timeframe
-    resistance_4h = align_htf_to_ltf(prices, df_1d, resistance)
-    support_4h = align_htf_to_ltf(prices, df_1d, support)
-    midpoint_4h = align_htf_to_ltf(prices, df_1d, midpoint)
+    # Align weekly levels to 6h timeframe (previous week's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
     
-    # Volume confirmation: volume > 1.8x 24-period average (6 hours)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    # Calculate 6h Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Price action signals: rejection of levels with volume
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    
+    # Volume filter: volume > 1.8x 30-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(30 - 1, n):
+        vol_ma[i] = np.mean(volume[i - 30 + 1:i + 1])
+    volume_filter = volume > (vol_ma * 1.8)
+    
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 30
+    # Start after warmup period
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(resistance_4h[i]) or np.isnan(support_4h[i]) or 
-            np.isnan(midpoint_4h[i]) or np.isnan(vol_ma[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-            
-        # Buy signal: price near support AND volume spike AND rejection (close > open)
-        near_support = close[i] <= support_4h[i] * 1.005  # Within 0.5% of support
-        rejection_up = close[i] > prices['open'].iloc[i]  # Bullish candle
         
-        if near_support and volume_spike[i] and rejection_up:
+        # Long conditions: breakout above resistance with volume
+        # Primary: break above weekly R2 (strong bullish)
+        # Secondary: break above weekly R1 with price above pivot
+        long_signal = False
+        if (high[i] > r2_aligned[i] and volume_filter[i]):
+            long_signal = True
+        elif (high[i] > r1_aligned[i] and close[i] > pivot_aligned[i] and volume_filter[i]):
+            long_signal = True
+            
+        # Short conditions: breakdown below support with volume
+        # Primary: break below weekly S2 (strong bearish)
+        # Secondary: break below weekly S1 with price below pivot
+        short_signal = False
+        if (low[i] < s2_aligned[i] and volume_filter[i]):
+            short_signal = True
+        elif (low[i] < s1_aligned[i] and close[i] < pivot_aligned[i] and volume_filter[i]):
+            short_signal = True
+        
+        # Entry logic
+        if long_signal and position <= 0:
             signals[i] = 0.25
-            
-        # Sell signal: price near resistance AND volume spike AND rejection (close < open)
-        elif close[i] >= resistance_4h[i] * 0.995:  # Within 0.5% of resistance
-            near_resistance = True
-            rejection_down = close[i] < prices['open'].iloc[i]  # Bearish candle
-            
-            if near_resistance and volume_spike[i] and rejection_down:
+            position = 1
+        elif short_signal and position >= 0:
+            signals[i] = -0.25
+            position = -1
+        # Exit logic: return to weekly pivot (mean reversion)
+        elif position == 1 and close[i] < pivot_aligned[i]:
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and close[i] > pivot_aligned[i]:
+            signals[i] = 0.0
+            position = 0
+        # Hold position
+        else:
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
                 signals[i] = -0.25
-                
-        # Exit when price reaches midpoint (mean reversion target)
-        elif i > start_idx:
-            if signals[i-1] > 0 and close[i] >= midpoint_4h[i]:
-                signals[i] = 0.0
-            elif signals[i-1] < 0 and close[i] <= midpoint_4h[i]:
-                signals[i] = 0.0
             else:
-                signals[i] = signals[i-1]  # Hold position
+                signals[i] = 0.0
     
     return signals
 
-name = "4h_Price_Action_Mean_Reversion_with_Volume_Confirmation"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPivot_Direction_Volume"
+timeframe = "6h"
 leverage = 1.0
