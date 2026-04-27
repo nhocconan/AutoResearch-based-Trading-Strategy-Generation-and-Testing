@@ -1,3 +1,4 @@
+# Solution code
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,37 +14,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and ATR
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on weekly close
-    ema_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
+    # Calculate daily pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
+    r4 = 3 * pivot - 2 * low_1d + (high_1d - low_1d)
+    s4 = 3 * pivot - 2 * high_1d - (high_1d - low_1d)
     
-    # Calculate 14-period ATR using Wilder's smoothing equivalent
-    tr = np.maximum(high_1w[1:] - low_1w[1:], 
-                    np.maximum(np.abs(high_1w[1:] - close_1w[:-1]), 
-                               np.abs(low_1w[1:] - close_1w[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr_1w = np.full(len(tr), np.nan)
-    for i in range(14, len(tr)):
-        if i == 14:
-            atr_1w[i] = np.mean(tr[1:15])
-        else:
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
+    # Align daily pivots to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Align weekly indicators to daily
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 24-period average (4 days of 6h bars)
     vol_ma = np.full(n, np.nan)
-    vol_period = 20
+    vol_period = 24
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -51,45 +59,46 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need EMA, ATR, and volume MA
-    start_idx = max(34, 14, vol_period) + 5
+    # Warmup: need pivots and volume MA
+    start_idx = max(vol_period, 1) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        atr = atr_1w_aligned[i]
         
         if position == 0:
-            # Long: Price above weekly EMA34 with volume confirmation
-            if (price > ema_1w_aligned[i] and 
-                vol_ratio > 1.5):
+            # Long: Break above R4 with volume confirmation
+            if (price > r4_aligned[i] and vol_ratio > 1.5):
                 signals[i] = size
                 position = 1
-            # Short: Price below weekly EMA34 with volume confirmation
-            elif (price < ema_1w_aligned[i] and 
-                  vol_ratio > 1.5):
+            # Short: Break below S4 with volume confirmation
+            elif (price < s4_aligned[i] and vol_ratio > 1.5):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below weekly EMA34 or ATR-based stop
-            if (price < ema_1w_aligned[i] or 
-                price < close[i-1] - 1.5 * atr):
+            # Long exit: Price closes below R1 or ATR-based stop (using daily range)
+            # Use daily range as volatility measure
+            daily_range = high_1d - low_1d
+            daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
+            if (price < r1_aligned[i] or 
+                price < close[i-1] - 0.5 * daily_range_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above weekly EMA34 or ATR-based stop
-            if (price > ema_1w_aligned[i] or 
-                price > close[i-1] + 1.5 * atr):
+            # Short exit: Price closes above S1 or ATR-based stop
+            daily_range = high_1d - low_1d
+            daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
+            if (price > s1_aligned[i] or 
+                price > close[i-1] + 0.5 * daily_range_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_WeeklyTrend_VolumeFilter"
-timeframe = "1d"
+name = "6h_Camarilla_R4_S4_Breakout_1dVolFilter"
+timeframe = "6h"
 leverage = 1.0
