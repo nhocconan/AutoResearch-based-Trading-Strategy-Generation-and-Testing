@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,88 +13,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for primary trend
+    # Get 4h data for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # 4h EMA50 for trend
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d volume MA20
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Get 1w data for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    # Calculate 1w ADX(14) for trend strength
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0  # first value
-    
-    # Directional Movement
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm14 / tr14
-    minus_di = 100 * minus_dm14 / tr14
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx, additional_delay_bars=0)
-    
-    # Get 12h data for entry timing
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12h Donchian(20) for entry
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    upper = np.full(len(high_12h), np.nan)
-    lower = np.full(len(high_12h), np.nan)
-    for i in range(20, len(high_12h)):
-        upper[i] = np.max(high_12h[i-20:i])
-        lower[i] = np.min(low_12h[i-20:i])
-    
-    donch_upper_12h = upper
-    donch_lower_12h = lower
-    donch_upper_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_upper_12h)
-    donch_lower_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_lower_12h)
+    # 1h Bollinger Bands (20, 2) for mean reversion entries
+    close_s = pd.Series(close)
+    sma_20 = close_s.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_s.rolling(window=20, min_periods=20).std().values
+    upper = sma_20 + 2 * std_20
+    lower = sma_20 - 2 * std_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need EMA and Donchian
-    start_idx = 34
+    # Warmup: need 4h EMA and 1d volume MA
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donch_upper_12h_aligned[i]) or 
-            np.isnan(donch_lower_12h_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -104,38 +62,43 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        ema = ema_34_1d_aligned[i]
-        upper = donch_upper_12h_aligned[i]
-        lower = donch_lower_12h_aligned[i]
-        adx_val = adx_aligned[i]
+        ema_4h = ema_50_4h_aligned[i]
+        vol_now = volume[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
+        upper_bb = upper[i]
+        lower_bb = lower[i]
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        if adx_val < 25:
-            signals[i] = 0.0
-            continue
+        # Volume filter: volume > 1.3x 1d MA (avoid low-volume noise)
+        vol_filter = vol_now > 1.3 * vol_ma
         
-        # Entry conditions: breakout with trend filter
+        # Trend filter: price above/below 4h EMA50
+        uptrend = close[i] > ema_4h
+        downtrend = close[i] < ema_4h
+        
+        # Entry conditions
         if position == 0:
-            # Long: break above upper band + price above EMA
-            if close[i] > upper and close[i] > ema:
+            # Long: pullback to lower BB in uptrend + volume
+            if uptrend and close[i] <= lower_bb and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: break below lower band + price below EMA
-            elif close[i] < lower and close[i] < ema:
+            # Short: pullback to upper BB in downtrend + volume
+            elif downtrend and close[i] >= upper_bb and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below EMA or below lower band
-            if close[i] < ema or close[i] < lower:
+            # Exit long: reversion to middle BB or trend change
+            middle_bb = sma_20[i]
+            if close[i] >= middle_bb or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above EMA or above upper band
-            if close[i] > ema or close[i] > upper:
+            # Exit short: reversion to middle BB or trend change
+            middle_bb = sma_20[i]
+            if close[i] <= middle_bb or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -143,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_Donchian20_TrendFilter_1wADX"
-timeframe = "12h"
+name = "1h_EMA50_4h_BB20_Pullback_Volume"
+timeframe = "1h"
 leverage = 1.0
