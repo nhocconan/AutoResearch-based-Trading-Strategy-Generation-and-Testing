@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Uses 1d Camarilla pivot levels (R1/S1) for breakout entries on 12h timeframe with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above R1 AND 1d close > EMA34 (uptrend) AND volume > 2.0 * 20-period average.
-Short when price breaks below S1 AND 1d close < EMA34 (downtrend) AND volume > 2.0 * 20-period average.
-Exit when price returns to the pivot level (R1 for longs, S1 for shorts) OR trend reverses.
-Designed for 12h timeframe to achieve 50-150 total trades over 4 years with low fee drag.
-Works in both bull and bear markets by following 1d trend while using Camarilla levels for precise breakout entries.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter
+Hypothesis: Uses 1d Camarilla pivot levels (R1/S1) for breakout entries on 4h timeframe with 1d EMA34 trend filter, volume confirmation, and choppiness regime filter.
+Long when price breaks above R1 AND 1d close > EMA34 (uptrend) AND volume > 2.0 * 20-period average AND choppiness > 61.8 (ranging market).
+Short when price breaks below S1 AND 1d close < EMA34 (downtrend) AND volume > 2.0 * 20-period average AND choppiness > 61.8 (ranging market).
+Exit when price returns to the pivot level (R1 for longs, S1 for shorts) OR trend reverses OR choppiness < 38.2 (trending market).
+Designed for 4h timeframe to achieve 75-200 total trades over 4 years with low fee drag.
+Works in both bull and bear markets by following 1d trend while using Camarilla levels for precise breakout entries in ranging regimes.
 """
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 12
     camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -47,17 +47,33 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
+    # Choppiness regime filter: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (trend follow)
+    # We want ranging markets for mean reversion at Camarilla levels
+    atr_period = 14
+    chop_period = 14
+    tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
+    tr[0] = high[0] - low[0]  # First TR
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Sum of absolute price changes over chop_period
+    abs_changes = np.abs(np.diff(close, prepend=close[0]))
+    sum_abs_changes = pd.Series(abs_changes).rolling(window=chop_period, min_periods=chop_period).sum().values
+    chop = 100 * np.log10(sum_abs_changes / (atr * chop_period) / np.log10(chop_period))
+    chop = np.where((atr * chop_period) == 0, 50, chop)  # Avoid division by zero
+    chop = np.where(np.isnan(chop), 50, chop)
+    chop_filter = chop > 61.8  # Only trade in ranging markets
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need 1d EMA34 (34), volume avg (20)
-    start_idx = max(34, 20)
+    # Warmup: need 1d EMA34 (34), volume avg (20), ATR (14), chop (14)
+    start_idx = max(34, 20, 14, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_confirm[i]) or 
+            np.isnan(chop_filter[i])):
             signals[i] = 0.0
             continue
         
@@ -68,13 +84,14 @@ def generate_signals(prices):
         r1_level = camarilla_r1_aligned[i]
         s1_level = camarilla_s1_aligned[i]
         vol_conf = volume_confirm[i]
+        chop_regime = chop_filter[i]
         
         if position == 0:
-            # Look for entry: breakout of Camarilla R1/S1 with 1d trend filter AND volume
-            # Long: price breaks above R1 (minor resistance) AND 1d uptrend AND volume
-            long_condition = (close_val > r1_level) and (close_val > ema_val) and vol_conf
-            # Short: price breaks below S1 (minor support) AND 1d downtrend AND volume
-            short_condition = (close_val < s1_level) and (close_val < ema_val) and vol_conf
+            # Look for entry: breakout of Camarilla R1/S1 with 1d trend filter AND volume AND chop regime
+            # Long: price breaks above R1 (minor resistance) AND 1d uptrend AND volume AND chop > 61.8
+            long_condition = (close_val > r1_level) and (close_val > ema_val) and vol_conf and chop_regime
+            # Short: price breaks below S1 (minor support) AND 1d downtrend AND volume AND chop > 61.8
+            short_condition = (close_val < s1_level) and (close_val < ema_val) and vol_conf and chop_regime
             
             if long_condition:
                 signals[i] = size
@@ -83,8 +100,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price returns to R1 level OR trend breaks
-            exit_condition = (close_val <= r1_level) or (close_val < ema_val)
+            # Exit long when price returns to R1 level OR trend breaks OR chop < 38.2 (trending)
+            exit_condition = (close_val <= r1_level) or (close_val < ema_val) or (chop < 38.2)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -92,8 +109,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price returns to S1 level OR trend breaks
-            exit_condition = (close_val >= s1_level) or (close_val > ema_val)
+            # Exit short when price returns to S1 level OR trend breaks OR chop < 38.2 (trending)
+            exit_condition = (close_val >= s1_level) or (close_val > ema_val) or (chop < 38.2)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -103,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_RegimeFilter"
+timeframe = "4h"
 leverage = 1.0
