@@ -3,54 +3,49 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R with 1w trend filter and volume spike
-# Williams %R identifies overbought/oversold conditions; reversals with volume
-# and weekly trend capture mean reversion in both bull and bear markets.
-# Target: 30-100 total trades over 4 years (~7-25/year) to avoid fee drag.
+# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; entries taken on reversals
+# from extreme levels with volume confirmation and higher timeframe trend alignment.
+# Works in bull/bear by only taking long in bullish 12h trend, short in bearish.
+# Target: 50-150 total trades over 4 years (~12-37/year) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for Williams %R calculation and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Williams %R (14-period) on 1d
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    williams_r = np.full(len(df_1d), np.nan)
-    for i in range(13, len(df_1d)):
-        highest_high = np.max(high_1d[i-13:i+1])
-        lowest_low = np.min(low_1d[i-13:i+1])
+    # Calculate Williams %R (14-period) on 12h data
+    williams_r = np.full(len(df_12h), np.nan)
+    for i in range(13, len(df_12h)):
+        highest_high = np.max(high_12h[i-13:i+1])
+        lowest_low = np.min(low_12h[i-13:i+1])
         if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
+            williams_r[i] = (highest_high - close_12h[i]) / (highest_high - lowest_low) * -100
         else:
             williams_r[i] = -50  # neutral if no range
     
-    # Align Williams %R to 1d timeframe (no extra delay needed as it's based on current bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align Williams %R to 6h timeframe (wait for 12h bar close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
     
-    # 1w EMA trend filter (34-period)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 12h EMA trend filter (50-period)
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume filter: volume > 2.0 x 24-period average (4 days of 1h bars)
+    # Volume filter: volume > 1.5 x 24-period average (4 days of 6h bars)
     vol_ma_24 = np.full(n, np.nan)
     for i in range(23, n):
         vol_ma_24[i] = np.mean(volume[i-23:i+1])
@@ -59,13 +54,17 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 1w data (1 bar), Williams %R (14), volume MA (24)
-    start_idx = max(1, 14, 24)
+    # Williams %R thresholds
+    oversold = -80
+    overbought = -20
+    
+    # Warmup: need 12h data (13 bars for Williams %R), EMA (50), volume MA (24)
+    start_idx = max(13, 50, 24)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
@@ -75,33 +74,35 @@ def generate_signals(prices):
         vol_avg = vol_ma_24[i]
         
         # Volume filter: significant volume spike
-        vol_filter = vol_now > 2.0 * vol_avg
+        vol_filter = vol_now > 1.5 * vol_avg
         
-        # Trend filter from 1w EMA
-        bullish_trend = price > ema_34_aligned[i]
-        bearish_trend = price < ema_34_aligned[i]
+        # Trend filter from 12h EMA
+        bullish_trend = price > ema_50_aligned[i]
+        bearish_trend = price < ema_50_aligned[i]
+        
+        wr = williams_r_aligned[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with volume and bullish trend
-            if williams_r_aligned[i] < -80 and vol_filter and bullish_trend:
+            # Long: Williams %R crosses above oversold with volume and bullish trend
+            if wr > oversold and williams_r_aligned[i-1] <= oversold and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: Williams %R overbought (> -20) with volume and bearish trend
-            elif williams_r_aligned[i] > -20 and vol_filter and bearish_trend:
+            # Short: Williams %R crosses below overbought with volume and bearish trend
+            elif wr < overbought and williams_r_aligned[i-1] >= overbought and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to -50 or trend turns bearish
-            if williams_r_aligned[i] >= -50 or not bullish_trend:
+            # Exit long: Williams %R reaches overbought or trend turns bearish
+            if wr >= overbought or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Williams %R returns to -50 or trend turns bullish
-            if williams_r_aligned[i] <= -50 or not bearish_trend:
+            # Exit short: Williams %R reaches oversold or trend turns bullish
+            if wr <= oversold or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR_14_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
