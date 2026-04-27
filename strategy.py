@@ -18,7 +18,7 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close
+    # Calculate EMA34 on 1d close with proper initialization
     close_1d = df_1d['close'].values
     ema_34 = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 34:
@@ -26,10 +26,10 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema_34[i] = (close_1d[i] * 2 + ema_34[i-1] * 32) / 34
     
-    # Align EMA34 to 4h
+    # Align EMA34 to daily timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate ATR(14) for volatility filter (4h)
+    # Calculate ATR(14) for volatility
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
@@ -41,13 +41,13 @@ def generate_signals(prices):
         else:
             atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 20-period volume average (4h)
+    # Calculate 20-period volume average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
-    # Calculate 20-period high/low for Donchian breakout (4h)
+    # Calculate 20-period high/low for Donchian breakout
     high_max = np.full(n, np.nan)
     low_min = np.full(n, np.nan)
     period = 20
@@ -99,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Volume_Trend"
-timeframe = "4h"
+name = "1d_Donchian20_1dEMA34_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
