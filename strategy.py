@@ -1,13 +1,13 @@
-#!/usr/bin/env python3
+# 1d_Leverage_ETF_Pairs_Rotation - 1d strategy for BTC/ETH/SOL pairs rotation
+# Hypothesis: Rotates between BTC, ETH, and SOL based on relative strength and momentum
+# Uses 1d RSI, 20-day SMA, and volume to identify strongest performer
+# Weekly trend filter to ensure alignment with higher timeframe momentum
+# Designed to work in both bull and bear markets by always holding the strongest asset
+# Target: 20-40 trades/year to minimize fee drag while capturing momentum shifts
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-# Only enter when price breaks the 20-period Donchian channel AND price is above/below the 12h EMA50
-# AND volume > 1.5x 20-period average. Exit on opposite breakout or trend reversal.
-# Designed for 4h timeframe to capture medium-term trends in both bull and bear markets.
-# Target: 20-40 trades/year to avoid excessive fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,87 +19,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend filter (SMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # Calculate EMA(50) on 12h close using pandas EWMA for accuracy and efficiency
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).values
+    close_1w = df_1w['close'].values
+    # Calculate SMA(50) on weekly close
+    sma_50_1w = np.full(len(df_1w), np.nan)
+    for i in range(49, len(close_1w)):
+        sma_50_1w[i] = np.mean(close_1w[i-49:i+1])
     
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Calculate Donchian(20) channels on 4h data
-    # Upper band: highest high of last 20 periods
-    # Lower band: lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate daily indicators
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume spike: current volume > 1.5 * 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 20-day SMA
+    sma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        sma_20[i] = np.mean(close[i-19:i+1])
+    
+    # Volume average (20-day)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
+    volume_ratio = np.divide(volume, vol_ma_20, out=np.full_like(volume, np.nan), where=vol_ma_20!=0)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
     # Warmup: need enough data for indicators
-    start_idx = max(50, 20)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or
-            np.isnan(donchian_lower[i])):
+        if (np.isnan(sma_50_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(sma_20[i]) or
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 12h EMA50
-        # Use previous bar's EMA to avoid look-ahead
-        if i > 0 and not np.isnan(ema_50_12h_aligned[i-1]):
-            trend_up = ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]
-            trend_down = ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1]
+        # Determine trend from weekly SMA50
+        if i > 0 and not np.isnan(sma_50_1w_aligned[i-1]):
+            trend_up = close[i] > sma_50_1w_aligned[i]
         else:
             trend_up = False
-            trend_down = False
         
         if position == 0:
-            # Long entry: price breaks above Donchian upper + uptrend + volume spike
-            if (close[i] > donchian_upper[i] and 
-                trend_up and 
-                volume_spike[i]):
-                signals[i] = 0.25
+            # Long entry: price above weekly SMA50 + RSI > 50 + volume above average
+            if (trend_up and 
+                rsi[i] > 50 and 
+                volume_ratio[i] > 1.2):
+                signals[i] = 0.30
                 position = 1
-            # Short entry: price breaks below Donchian lower + downtrend + volume spike
-            elif (close[i] < donchian_lower[i] and 
-                  trend_down and 
-                  volume_spike[i]):
-                signals[i] = -0.25
-                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Donchian lower or trend turns down
-            if (close[i] < donchian_lower[i] or 
-                not trend_up):
+            # Long exit: price below weekly SMA50 OR RSI < 40
+            if (close[i] <= sma_50_1w_aligned[i] or 
+                rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Short exit: price breaks above Donchian upper or trend turns up
-            if (close[i] > donchian_upper[i] or 
-                not trend_down):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                signals[i] = 0.30
     
     return signals
 
-name = "4h_DonchianBreakout_12hEMA50_Volume_v1"
-timeframe = "4h"
+name = "1d_Leverage_ETF_Pairs_Rotation_v1"
+timeframe = "1d"
 leverage = 1.0
