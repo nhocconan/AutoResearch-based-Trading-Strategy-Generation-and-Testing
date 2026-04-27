@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag while capturing multi-day trends. 
-Uses Camarilla R3/S3 breakouts from prior 1d range, confirmed by 1d EMA34 trend and volume spikes.
-Filters out trades in ranging markets using 1d Choppiness Index (CHOP > 61.8 = avoid).
-Targets 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25) to minimize churn.
-Works in bull markets via trend-following breakouts and in bear via short-side symmetry.
+1d_Weekly_Trend_Filtered_Trading_Range_Mean_Reversion
+Hypothesis: In multi-year BTC/ETH data, price tends to revert to the weekly mean during ranging markets.
+We use weekly Bollinger Bands (20, 2) as dynamic mean reversion zones, filtered by weekly trend (price vs EMA50)
+to avoid counter-trend trades, and daily RSI for entry timing. This strategy targets low-frequency, high-probability
+mean reversion swings in ranging markets while avoiding strong trends. Designed for 1d timeframe to minimize
+trade frequency and fee drag, targeting 30-100 trades over 4 years.
 """
 
 import numpy as np
@@ -20,106 +20,100 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla and trend filters
+    # Get daily data for RSI
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d Camarilla levels (R3, S3) from prior day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.125 * range_1d
-    camarilla_s3 = close_1d - 1.125 * range_1d
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get weekly data for Bollinger Bands and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    # Weekly Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = sma_20 + bb_std * std_20
+    bb_lower = sma_20 - bb_std * std_20
     
-    # Choppiness Index regime filter (avoid breakouts in ranging markets)
-    # CHOP(14) = 100 * log10(sum(TR(14)) / (ATR(14) * 14)) / log10(14)
-    # CHOP > 61.8 = ranging market (avoid breakouts), CHOP < 38.2 = trending (favor breakouts)
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr1 = np.maximum(tr1, np.absolute(low - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]  # first bar
-    tr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    atr_14 = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
-    chop = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
-    chop_filter = chop < 61.8  # Only allow breakouts when not strongly ranging
+    # Weekly trend filter: EMA50
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to primary timeframe (12h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
-    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter)
+    # Daily RSI (14) for entry timing
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Align all weekly indicators to daily timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Align daily RSI (no need to align as it's already daily)
+    rsi_aligned = rsi_values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.25   # Position size: 25% of capital (discrete level)
+    size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need Camarilla (1), EMA34 (34), volume avg (20), chop (14)
-    start_idx = max(1, 34, 20, 14)
+    # Warmup: need BB (20), EMA50 (50), RSI (14)
+    start_idx = max(bb_period, 50, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm_aligned[i]) or 
-            np.isnan(chop_filter_aligned[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(sma_20_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(rsi_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        ema34 = ema34_1d_aligned[i]
-        vol_conf = volume_confirm_aligned[i]
-        chop_ok = chop_filter_aligned[i]
+        bb_upper_val = bb_upper_aligned[i]
+        bb_lower_val = bb_lower_aligned[i]
+        sma_20_val = sma_20_aligned[i]
+        ema50_val = ema50_1w_aligned[i]
+        rsi_val = rsi_aligned[i]
+        
+        # Determine weekly regime: trend vs range
+        # In strong trend (price far from EMA50), avoid mean reversion
+        # In range (price near EMA50), favor mean reversion
+        price_vs_ema50 = abs(close_val - ema50_val) / ema50_val
+        trending = price_vs_ema50 > 0.10  # More than 10% away from EMA50 = strong trend
+        ranging = price_vs_ema50 <= 0.10   # Within 10% of EMA50 = ranging market
         
         if position == 0:
-            # Determine trend alignment: price vs EMA34 (1d)
-            uptrend = close_val > ema34
-            downtrend = close_val < ema34
-            
-            if uptrend and vol_conf and chop_ok:
-                # Long bias: long when price breaks above R3 with volume and not choppy
-                if close_val > r3:
+            # Only trade in ranging markets
+            if ranging:
+                # Long when price touches or crosses below lower BB and RSI is oversold
+                if close_val <= bb_lower_val and rsi_val < 30:
                     signals[i] = size
                     position = 1
                     entry_price = close_val
-            elif downtrend and vol_conf and chop_ok:
-                # Short bias: short when price breaks below S3 with volume and not choppy
-                if close_val < s3:
+                # Short when price touches or crosses above upper BB and RSI is overbought
+                elif close_val >= bb_upper_val and rsi_val > 70:
                     signals[i] = -size
                     position = -1
                     entry_price = close_val
         elif position == 1:
-            # Exit conditions: stoploss (2.5*ATR) or Camarilla S3 touch
-            atr_approx = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values[i]
-            stop_loss = entry_price - 2.5 * atr_approx
-            
-            if close_val <= stop_loss:
-                signals[i] = 0.0
-                position = 0
-            elif close_val < s3:  # Camarilla S3 touch
+            # Exit long: price returns to weekly mean (SMA20) or RSI neutral
+            if close_val >= sma_20_val or rsi_val >= 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit conditions: stoploss (2.5*ATR) or Camarilla R3 touch
-            atr_approx = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values[i]
-            stop_loss = entry_price + 2.5 * atr_approx
-            
-            if close_val >= stop_loss:
-                signals[i] = 0.0
-                position = 0
-            elif close_val > r3:  # Camarilla R3 touch
+            # Exit short: price returns to weekly mean (SMA20) or RSI neutral
+            if close_val <= sma_20_val or rsi_val <= 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_Weekly_Trend_Filtered_Trading_Range_Mean_Reversion"
+timeframe = "1d"
 leverage = 1.0
