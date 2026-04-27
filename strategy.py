@@ -1,142 +1,108 @@
-# 1d_WeeklyCandlestickPattern_SMTrend
-# Hypothesis: Daily timeframe uses weekly candlestick patterns (engulfing, hammer) for reversal signals,
-# filtered by weekly EMA20 trend direction to trade with higher timeframe momentum.
-# Works in bull/bear by only taking long patterns in uptrend, short patterns in downtrend.
-# Low frequency: expects 10-25 trades/year by requiring weekly pattern + trend alignment.
-# Uses engulfing/bullish/bearish patterns with body size > 50% of candle range for reliability.
-# Includes volatility-based stop via EMA distance exit.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Donchian channel breakout with 1d EMA trend filter and volume confirmation
+# Uses Donchian(20) breakouts in direction of 1d EMA(50) trend, with volume > 1.5x 20-period average.
+# Works in both bull and bear markets by only taking breakouts aligned with higher timeframe trend.
+# Target: 20-40 trades/year to minimize fee decay while capturing strong trending moves.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pattern and trend
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    wo = df_weekly['open'].values
-    wh = df_weekly['high'].values
-    wl = df_weekly['low'].values
-    wc = df_weekly['close'].values
-    n_weekly = len(wc)
+    # Calculate EMA(50) on 1d
+    close_1d = df_1d['close'].values
+    ema_period = 50
+    ema_1d = np.full_like(close_1d, np.nan)
     
-    # Weekly EMA20 for trend filter
-    ema20_weekly = np.full(n_weekly, np.nan)
-    if n_weekly >= 20:
-        ema20_weekly[19] = np.mean(wc[:20])
-        for i in range(20, n_weekly):
-            ema20_weekly[i] = (wc[i] * 2/21) + (ema20_weekly[i-1] * 19/21)
+    if len(close_1d) >= ema_period:
+        # Simple average for first value
+        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
+        # EMA for subsequent values
+        alpha = 2.0 / (ema_period + 1.0)
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
     
-    # Weekly candlestick pattern detection
-    body = np.abs(wc - wo)
-    rng = wh - wl
-    body_ratio = np.where(rng > 0, body / rng, 0)
+    # Donchian channel on 4h (20-period)
+    dc_period = 20
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
     
-    # Bullish engulfing: current green engulfs previous red
-    bull_engulf = np.zeros(n_weekly, dtype=bool)
-    for i in range(1, n_weekly):
-        if (wc[i] > wo[i] and  # current green
-            wc[i-1] < wo[i-1] and  # previous red
-            wc[i] >= wo[i-1] and  # current close >= prev open
-            wo[i] <= wc[i-1] and  # current open <= prev close
-            body_ratio[i] > 0.5):  # meaningful body
-            bull_engulf[i] = True
+    for i in range(dc_period, n):
+        upper_channel[i] = np.max(high[i-dc_period:i])
+        lower_channel[i] = np.min(low[i-dc_period:i])
     
-    # Bearish engulfing: current red engulfs previous green
-    bear_engulf = np.zeros(n_weekly, dtype=bool)
-    for i in range(1, n_weekly):
-        if (wc[i] < wo[i] and  # current red
-            wc[i-1] > wo[i-1] and  # previous green
-            wc[i] <= wo[i-1] and  # current close <= prev open
-            wo[i] >= wc[i-1] and  # current open >= prev close
-            body_ratio[i] > 0.5):  # meaningful body
-            bear_engulf[i] = True
+    # 20-period average volume for spike detection
+    vol_ma = np.full(n, np.nan)
+    vol_period = 20
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
     
-    # Hammer: small top body, long lower shadow
-    upper_shadow = wh - np.maximum(wc, wo)
-    lower_shadow = np.minimum(wc, wo) - wl
-    hammer = np.zeros(n_weekly, dtype=bool)
-    for i in range(n_weekly):
-        if (body[i] > 0 and  # has body
-            lower_shadow[i] > 2 * body[i] and  # long lower shadow
-            upper_shadow[i] < 0.5 * body[i] and  # small upper shadow
-            body_ratio[i] > 0.3):  # decent body
-            hammer[i] = True
-    
-    # Inverted hammer: small bottom body, long upper shadow
-    inv_hammer = np.zeros(n_weekly, dtype=bool)
-    for i in range(n_weekly):
-        if (body[i] > 0 and  # has body
-            upper_shadow[i] > 2 * body[i] and  # long upper shadow
-            lower_shadow[i] < 0.5 * body[i] and  # small lower shadow
-            body_ratio[i] > 0.3):  # decent body
-            inv_hammer[i] = True
-    
-    # Align weekly signals to daily
-    ema20_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
-    bull_engulf_aligned = align_htf_to_ltf(prices, df_weekly, bull_engulf.astype(float))
-    bear_engulf_aligned = align_htf_to_ltf(prices, df_weekly, bear_engulf.astype(float))
-    hammer_aligned = align_htf_to_ltf(prices, df_weekly, hammer.astype(float))
-    inv_hammer_aligned = align_htf_to_ltf(prices, df_weekly, inv_hammer.astype(float))
+    # Align HTF indicators to 4h
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0
-    size = 0.25  # 25% position
+    size = 0.25  # 25% position size
     
-    # Warmup: need weekly EMA20 + pattern lookback
-    start_idx = 20
+    # Warmup period
+    start_idx = max(dc_period, vol_period) + ema_period
     
     for i in range(start_idx, n):
-        if (np.isnan(ema20_aligned[i]) or 
-            np.isnan(bull_engulf_aligned[i]) or
-            np.isnan(bear_engulf_aligned[i]) or
-            np.isnan(hammer_aligned[i]) or
-            np.isnan(inv_hammer_aligned[i])):
+        if (np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema20 = ema20_aligned[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine weekly trend from aligned EMA
-        # Need previous weekly bar's EMA to determine trend direction
-        # Use current price vs EMA for simplicity
-        above_ema = price > ema20
-        below_ema = price < ema20
+        # Conditions:
+        # 1. EMA trend filter: price above EMA(50) for long, below for short
+        # 2. Volume confirmation: > 1.5x average volume
+        # 3. Donchian breakout: price breaks above upper channel (long) or below lower channel (short)
+        trend_long = price > ema_1d_aligned[i]
+        trend_short = price < ema_1d_aligned[i]
+        volume_confirmation = vol_ratio > 1.5
+        breakout_up = price > upper_channel[i]
+        breakout_down = price < lower_channel[i]
         
         if position == 0:
-            # Long signals: bullish patterns in uptrend (price > EMA20)
-            if above_ema and (bull_engulf_aligned[i] > 0.5 or hammer_aligned[i] > 0.5):
+            # Long: breakout above upper channel with uptrend and volume
+            if trend_long and volume_confirmation and breakout_up:
                 signals[i] = size
                 position = 1
-            # Short signals: bearish patterns in downtrend (price < EMA20)
-            elif below_ema and (bear_engulf_aligned[i] > 0.5 or inv_hammer_aligned[i] > 0.5):
+            # Short: breakout below lower channel with downtrend and volume
+            elif trend_short and volume_confirmation and breakout_down:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA20 or opposite pattern appears
-            if below_ema or (bear_engulf_aligned[i] > 0.5 or inv_hammer_aligned[i] > 0.5):
+            # Long exit: price returns to lower Donchian channel
+            if price < lower_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA20 or opposite pattern appears
-            if above_ema or (bull_engulf_aligned[i] > 0.5 or hammer_aligned[i] > 0.5):
+            # Short exit: price returns to upper Donchian channel
+            if price > upper_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -144,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyCandlestickPattern_SMTrend"
-timeframe = "1d"
+name = "4h_Donchian_EMATrend_Volume"
+timeframe = "4h"
 leverage = 1.0
