@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction + volume confirmation
-# Weekly pivot levels (based on Sunday close) act as strong weekly support/resistance.
-# Long when price breaks above Donchian(20) high AND above weekly pivot (support).
-# Short when price breaks below Donchian(20) low AND below weekly pivot (resistance).
-# Volume > 1.5x 20-period average confirms breakout strength.
-# Works in both bull and bear markets by requiring alignment with weekly pivot bias.
-# Target: 12-30 trades/year to minimize fee decay while capturing strong weekly trend moves.
+# Hypothesis: 4h Williams Alligator (Jaw/Teeth/Lips) crossover with 1d ADX trend filter and volume confirmation
+# Uses Bill Williams' Alligator indicator to detect trend emergence (lips crossing teeth/jaw).
+# Only takes signals in direction of 1d ADX > 25 (trending regime).
+# Volume > 1.5x 20-period average confirms momentum.
+# Works in bull/bear markets by following higher timeframe trend.
+# Target: 20-30 trades/year to minimize fee decay while capturing sustained trends.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,51 +20,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot calculation (need Sunday closes)
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot: (weekly high + weekly low + weekly close) / 3
-    # Using Sunday close as weekly reference (start of week)
-    weekly_high = np.full(len(df_1d), np.nan)
-    weekly_low = np.full(len(df_1d), np.nan)
-    weekly_close = np.full(len(df_1d), np.nan)
+    # Calculate ADX on 1d (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    n_1d = len(close_1d)
     
-    for i in range(len(df_1d)):
-        # Find Sunday of current week (weekday 6)
-        dt = pd.Timestamp(df_1d.index[i])
-        # Go back to Sunday of this week
-        days_to_sunday = (dt.weekday() + 1) % 7  # Monday=0, Sunday=6
-        sunday = dt - pd.Timedelta(days=days_to_sunday)
-        
-        # Find index of this Sunday
-        try:
-            sunday_idx = df_1d.index.get_loc(sunday)
-            # Get week from Sunday to Saturday
-            week_end = sunday + pd.Timedelta(days=6)
-            week_mask = (df_1d.index >= sunday) & (df_1d.index <= week_end)
-            week_data = df_1d[week_mask]
-            if len(week_data) > 0:
-                weekly_high[i] = week_data['high'].max()
-                weekly_low[i] = week_data['low'].min()
-                weekly_close[i] = week_data['close'].iloc[-1]
-        except KeyError:
-            pass  # Sunday not in data
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Weekly pivot point
-    weekly_pivot = np.full(len(df_1d), np.nan)
-    valid = ~(np.isnan(weekly_high) | np.isnan(weekly_low) | np.isnan(weekly_close))
-    weekly_pivot[valid] = (weekly_high[valid] + weekly_low[valid] + weekly_close[valid]) / 3.0
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Donchian channels (20-period)
-    donchian_period = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Wilder's smoothing function
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Rest is Wilder's smoothing
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]):
+                result[i] = np.nan
+            else:
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    for i in range(donchian_period, n):
-        donchian_high[i] = np.max(high[i-donchian_period:i])
-        donchian_low[i] = np.min(low[i-donchian_period:i])
+    period_adx = 14
+    tr_smooth = wilders_smooth(tr, period_adx)
+    dm_plus_smooth = wilders_smooth(dm_plus, period_adx)
+    dm_minus_smooth = wilders_smooth(dm_minus, period_adx)
+    
+    # DI+ and DI-
+    di_plus = np.full(n_1d, np.nan)
+    di_minus = np.full(n_1d, np.nan)
+    dx = np.full(n_1d, np.nan)
+    
+    for i in range(len(tr_smooth)):
+        if np.isnan(tr_smooth[i]) or tr_smooth[i] == 0:
+            di_plus[i] = 0
+            di_minus[i] = 0
+        else:
+            di_plus[i] = 100 * dm_plus_smooth[i] / tr_smooth[i]
+            di_minus[i] = 100 * dm_minus_smooth[i] / tr_smooth[i]
+    
+    for i in range(len(dx)):
+        if np.isnan(di_plus[i]) or np.isnan(di_minus[i]) or (di_plus[i] + di_minus[i]) == 0:
+            dx[i] = 0
+        else:
+            dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+    
+    # ADX = Wilder's smoothed DX
+    adx_1d = wilders_smooth(dx, period_adx)
+    
+    # Williams Alligator on 4h (13,8,5 smoothed medians)
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
+    
+    # Calculate smoothed medians (using Wilder's smoothing on median price)
+    median_price = (high + low) / 2
+    
+    def median_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Rest is Wilder's smoothing
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]):
+                result[i] = np.nan
+            else:
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    jaw = median_smooth(median_price, jaw_period)
+    teeth = median_smooth(median_price, teeth_period)
+    lips = median_smooth(median_price, lips_period)
     
     # 20-period average volume for spike detection
     vol_ma = np.full(n, np.nan)
@@ -73,21 +119,22 @@ def generate_signals(prices):
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
-    # Align weekly pivot to 6h
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Align HTF indicators to 4h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(donchian_period, vol_period) + 50  # extra for weekly calc
+    start_idx = max(jaw_period, teeth_period, lips_period, vol_period) + period_adx
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i]) or
-            np.isnan(weekly_pivot_aligned[i])):
+        if (np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(jaw[i]) or 
+            np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -95,36 +142,35 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         # Conditions:
-        # 1. Donchian breakout: price breaks above/below 20-period channel
-        # 2. Weekly pivot alignment: price must be on correct side of pivot
+        # 1. Alligator alignment: lips > teeth > jaw (bullish) or lips < teeth < jaw (bearish)
+        # 2. ADX > 25: trending regime on 1d
         # 3. Volume confirmation: > 1.5x average volume
-        breakout_up = price > donchian_high[i]
-        breakout_down = price < donchian_low[i]
-        above_pivot = price > weekly_pivot_aligned[i]
-        below_pivot = price < weekly_pivot_aligned[i]
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        trend_condition = adx_1d_aligned[i] > 25
         volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long: breakout above Donchian high AND above weekly pivot
-            if breakout_up and above_pivot and volume_confirmation:
+            # Long: bullish alignment with trend and volume
+            if bullish_alignment and trend_condition and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: breakout below Donchian low AND below weekly pivot
-            elif breakout_down and below_pivot and volume_confirmation:
+            # Short: bearish alignment with trend and volume
+            elif bearish_alignment and trend_condition and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to weekly pivot or breaks below Donchian low
-            if price < weekly_pivot_aligned[i] or price < donchian_low[i]:
+            # Long exit: alignment breaks (lips < teeth) or trend weakens
+            if lips[i] < teeth[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price returns to weekly pivot or breaks above Donchian high
-            if price > weekly_pivot_aligned[i] or price > donchian_high[i]:
+            # Short exit: alignment breaks (lips > teeth) or trend weakens
+            if lips[i] > teeth[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +178,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_ADXTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
