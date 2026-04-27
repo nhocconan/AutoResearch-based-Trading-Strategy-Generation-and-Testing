@@ -1,4 +1,12 @@
-#!/usr/bin/env python3
+# ==========================================================
+# Strategy: 6h_Donchian20_WeeklyPivot_Filter
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter.
+# - Uses weekly pivot points (from weekly OHLC) to determine trend direction.
+# - Long only when price is above weekly pivot; short only when below.
+# - Volume confirmation (2x average volume) to filter breakouts.
+# - Designed for 6h timeframe: expects ~15-30 trades/year per symbol.
+# - Works in bull/bear: pivot adapts to weekly structure; volume avoids false breaks.
+# ==========================================================
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,17 +21,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for higher timeframe trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get weekly data for pivot calculation
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 5:
         return np.zeros(n)
     
-    # Calculate 50-period SMA on weekly close for trend
-    close_1w = df_1w['close'].values
-    sma_50 = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma_50_aligned = align_htf_to_ltf(prices, df_1w, sma_50)
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
+    pivot_w = (high_w + low_w + close_w) / 3.0
     
-    # Calculate 14-period ATR for volatility and stop
+    # Align weekly pivot to 6h (no extra delay needed for pivot)
+    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
+    
+    # Calculate 14-period ATR for volatility filter
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
@@ -57,7 +69,7 @@ def generate_signals(prices):
     start_idx = max(14, vol_period, period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(sma_50_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(pivot_w_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
             signals[i] = 0.0
             continue
@@ -66,12 +78,12 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume and above weekly SMA50
-            if price > high_max[i] and vol_ratio > 2.0 and price > sma_50_aligned[i]:
+            # Long: Price breaks above Donchian high with volume AND above weekly pivot
+            if price > high_max[i] and vol_ratio > 2.0 and price > pivot_w_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume and below weekly SMA50
-            elif price < low_min[i] and vol_ratio > 2.0 and price < sma_50_aligned[i]:
+            # Short: Price breaks below Donchian low with volume AND below weekly pivot
+            elif price < low_min[i] and vol_ratio > 2.0 and price < pivot_w_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
@@ -93,6 +105,9 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_WeeklySMA50_Trend_Volume_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivot_Filter"
+timeframe = "6h"
 leverage = 1.0
+# ==========================================================
+# End of strategy
+# ==========================================================
