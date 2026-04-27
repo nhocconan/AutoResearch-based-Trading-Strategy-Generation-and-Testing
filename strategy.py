@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_Volume_Regime_CombinedFilter
-Hypothesis: Donchian(20) breakout with volume confirmation and regime filter (choppiness/ADX) to avoid whipsaw in ranging markets.
-Uses discrete position sizing (0.25) and exits on trend reversal (close crosses opposite Donchian band).
-Designed to work in both bull and bear markets by filtering breakouts with volume and regime conditions.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Regime_Revised
+Hypothesis: Camarilla R3/S3 breakout (stronger levels) with 1d EMA34 trend filter, volume spike, and choppiness regime filter to avoid whipsaw. Uses discrete sizing 0.25 and exits on EMA34 cross. Designed for fewer, higher-quality trades in both bull and bear markets.
 """
 
 import numpy as np
@@ -20,16 +18,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA34)
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA34 trend filter
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Donchian(20) channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels from previous completed 1d bar
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    rng = prev_high - prev_low
+    r3 = prev_close + (rng * 1.1 / 4)
+    s3 = prev_close - (rng * 1.1 / 4)
+    
+    # Align Camarilla levels to 4h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume spike: current > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,31 +59,31 @@ def generate_signals(prices):
     entry_price = 0.0
     size = 0.25  # Discrete size to reduce fee churn
     
-    # Warmup: need Donchian(20), EMA34, vol avg, chop
-    start_idx = max(34, 20, 20, 28)  # EMA34 + Donchian20 + vol20 + chop28
+    # Warmup: need 1d shift(1), EMA34, vol avg, chop
+    start_idx = max(35, 34, 20, 28)  # 1d shift(1)+34 for EMA, 20 for vol, 28 for chop
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or
             np.isnan(chop_regime[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper_band = highest_20[i]
-        lower_band = lowest_20[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         ema_val = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         is_ranging = chop_regime[i]
         
         if position == 0:
-            # Look for entry: Donchian breakout with EMA alignment, volume spike, and NOT in ranging market
-            long_condition = (close_val > upper_band and 
+            # Look for entry: Camarilla R3/S3 breakout with EMA alignment, volume spike, and NOT in ranging market
+            long_condition = (close_val > r3_val and 
                             close_val > ema_val and 
                             vol_spike and 
                             not is_ranging)
-            short_condition = (close_val < lower_band and 
+            short_condition = (close_val < s3_val and 
                              close_val < ema_val and 
                              vol_spike and 
                              not is_ranging)
@@ -91,16 +97,16 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Exit long: price crosses below lower Donchian band (trend reversal)
-            if close_val < lower_band:
+            # Exit long: price crosses below EMA34 (trend reversal)
+            if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above upper Donchian band (trend reversal)
-            if close_val > upper_band:
+            # Exit short: price crosses above EMA34 (trend reversal)
+            if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -109,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_Volume_Regime_CombinedFilter"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Regime_Revised"
 timeframe = "4h"
 leverage = 1.0
