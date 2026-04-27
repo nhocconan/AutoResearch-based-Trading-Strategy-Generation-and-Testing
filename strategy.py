@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_RSI_MeanReversion_WeeklyTrend
-Hypothesis: In the 1d timeframe, RSI extremes combined with weekly trend alignment provide high-probability mean-reversion entries.
-Weekly trend filter (price vs 1w EMA50) avoids counter-trend trades in strong trends, while RSI < 30/ > 70 captures overextended moves.
-Volume confirmation ensures institutional participation. Designed for low trade frequency (<25/year) to minimize fee drag.
-Works in both bull and bear markets by aligning with weekly trend direction.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: On 12h chart, buy when price breaks above daily R3 with volume confirmation and daily uptrend, sell when breaks below daily S3 with volume confirmation and daily downtrend. Uses daily trend filter to avoid counter-trend trades and volume spike to confirm breakout strength. Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull and bear markets via trend alignment.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,79 +18,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI calculation (using close prices)
+    # Get 1d data for daily timeframe indicators
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily Camarilla levels (R3, S3) from prior day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.125 * range_1d
+    camarilla_s3 = close_1d - 1.125 * range_1d
     
-    # Calculate RSI(14) on daily closes
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Get 1w data for weekly trend filter (price vs EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average (using 1d volume avg aligned)
-    vol_1d = df_1d['volume'].values
-    vol_avg = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = vol_1d > (1.5 * vol_avg)
-    
-    # Align all indicators to primary timeframe (1d)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align all indicators to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.25   # Position size: 25% of capital (discrete level)
+    size = 0.25   # Position size: 25% of capital (balanced for risk/return)
     
-    # Warmup: need RSI (14+14=28), EMA50 (50), volume avg (20)
-    start_idx = max(28, 50, 20)
+    # Warmup: need EMA34 (34), volume avg (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(volume_confirm_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        rsi_val = rsi_aligned[i]
-        ema50 = ema50_1w_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        ema34 = ema34_1d_aligned[i]
         vol_conf = volume_confirm_aligned[i]
         
         if position == 0:
-            # Determine weekly trend: price vs EMA50
-            uptrend = close_val > ema50
-            downtrend = close_val < ema50
+            # Determine trend: price vs daily EMA34
+            uptrend = close_val > ema34
+            downtrend = close_val < ema34
             
-            # Long setup: RSI oversold (<30) in weekly uptrend with volume
-            if uptrend and rsi_val < 30 and vol_conf:
-                signals[i] = size
-                position = 1
-                entry_price = close_val
-            # Short setup: RSI overbought (>70) in weekly downtrend with volume
-            elif downtrend and rsi_val > 70 and vol_conf:
-                signals[i] = -size
-                position = -1
-                entry_price = close_val
+            if uptrend and vol_conf:
+                # Long when price breaks above R3 with volume confirmation
+                if close_val > r3:
+                    signals[i] = size
+                    position = 1
+                    entry_price = close_val
+            elif downtrend and vol_conf:
+                # Short when price breaks below S3 with volume confirmation
+                if close_val < s3:
+                    signals[i] = -size
+                    position = -1
+                    entry_price = close_val
         elif position == 1:
-            # Exit: RSI returns to neutral (>50) or weekly trend breaks
-            if rsi_val > 50 or close_val < ema50:
+            # Exit when price breaks below S3 (contrarian signal) or reverse signal
+            if close_val < s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: RSI returns to neutral (<50) or weekly trend breaks
-            if rsi_val < 50 or close_val > ema50:
+            # Exit when price breaks above R3 (contrarian signal) or reverse signal
+            if close_val > r3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_MeanReversion_WeeklyTrend"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
