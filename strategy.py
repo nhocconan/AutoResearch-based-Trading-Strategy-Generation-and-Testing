@@ -5,15 +5,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     volume = prices['volume'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # Get 1d data for Donchian channels and ADX
+    # Get 1d data for ATR and volatility regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -22,16 +20,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period) using previous day's data
-    prev_high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
-    prev_low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Align Donchian levels to 4h timeframe
-    donch_high = align_htf_to_ltf(prices, df_1d, prev_high_max)
-    donch_low = align_htf_to_ltf(prices, df_1d, prev_low_min)
-    
-    # Calculate 1d ADX for trend strength (14-period)
-    # True Range
+    # Calculate 1d ATR (14-period) for volatility regime
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -39,57 +28,61 @@ def generate_signals(prices):
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=np.nan)
-    down_move = -np.diff(low_1d, prepend=np.nan)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate 1d ATR percentile rank (252-period) for volatility regime
+    atr_series = pd.Series(atr)
+    atr_rank = atr_series.rolling(window=252, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan,
+        raw=False
+    ).values
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    # Align ATR rank to 4h timeframe
+    atr_rank_aligned = align_htf_to_ltf(prices, df_1d, atr_rank)
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 4-period RSI on 4h close
+    delta = np.diff(close, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_rank_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above Donchian high, ADX > 25, volume spike
-        if (close[i] > donch_high[i] and 
-            adx_aligned[i] > 25 and 
-            volume_spike[i]):
+        # Long condition: low volatility regime (ATR rank < 30%), RSI < 30, volume filter
+        if (atr_rank_aligned[i] < 0.30 and 
+            rsi[i] < 30 and 
+            volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below Donchian low, ADX > 25, volume spike
-        elif (close[i] < donch_low[i] and 
-              adx_aligned[i] > 25 and 
-              volume_spike[i]):
+        # Short condition: low volatility regime (ATR rank < 30%), RSI > 70, volume filter
+        elif (atr_rank_aligned[i] < 0.30 and 
+              rsi[i] > 70 and 
+              volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to opposite Donchian level
-        elif position == 1 and close[i] < donch_low[i]:
+        # Exit conditions: RSI returns to neutral zone (40-60)
+        elif position == 1 and rsi[i] > 40:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > donch_high[i]:
+        elif position == -1 and rsi[i] < 60:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -103,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_ADX25_VolumeSpike_1d_v2"
+name = "4h_VolRegime_RSI_MeanReversion_VolFilter"
 timeframe = "4h"
 leverage = 1.0
