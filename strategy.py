@@ -1,8 +1,3 @@
-# Hypothesis: 12h strategy using 1-week EMA trend filter + daily volatility/volume regime + price action trigger. 
-# Targets trending moves in both bull and bear markets with strict entry filters to limit trades (12-37/year). 
-# Uses price closing above/below EMA with volatility expansion and volume confirmation to catch sustained moves.
-# Exit on trend reversal or volatility contraction. Designed for low trade frequency to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -10,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,14 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data for ATR and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get daily data for volatility and volume filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     # Calculate weekly EMA(34) for trend
@@ -47,7 +42,7 @@ def generate_signals(prices):
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 12h timeframe
+    # Align indicators to daily timeframe (primary)
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
@@ -119,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyTrend_VolumeVolatilityFilter_v2"
-timeframe = "12h"
+name = "1d_WeeklyTrend_VolumeVolatilityFilter"
+timeframe = "1d"
 leverage = 1.0
