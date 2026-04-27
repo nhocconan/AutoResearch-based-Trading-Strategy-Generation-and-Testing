@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_1dTrend_Volume
-Hypothesis: Combines 4h Donchian channel breakouts with 1d EMA trend filter and volume confirmation.
-This strategy captures strong momentum in trending markets while filtering out false breakouts.
-Designed to work in both bull and bear markets by following the daily trend direction.
-Target: 20-30 trades/year per symbol to minimize fee drag.
+1d_Weekly_SMA_Crossover_Bullish_Momentum
+Hypothesis: Uses weekly SMA crossover (SMA50 crosses SMA200) as primary trend filter,
+combined with daily price action for entry timing. Enters long when price pulls back
+to weekly SMA50 during bullish trend, exits when momentum weakens. Designed for
+low trade frequency (~10-20 trades/year) to minimize fee drag and capture major
+trends in both bull and bear markets by following the weekly trend.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,72 +22,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian channel (20-period) on 4h data
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get daily data for entry timing
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Daily EMA trend filter (34-period)
+    # Weekly SMAs for trend filter
+    close_1w = df_1w['close'].values
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_200_1w = pd.Series(close_1w).rolling(window=200, min_periods=200).mean().values
+    
+    # Align weekly SMAs to daily timeframe
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    sma_200_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_200_1w)
+    
+    # Daily SMA20 for entry timing
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
     
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for all indicators
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(sma_200_1w_aligned[i]) or 
+            np.isnan(sma_20_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper_channel = high_max[i]
-        lower_channel = low_min[i]
-        ema_trend = ema_34_aligned[i]
+        sma_50 = sma_50_1w_aligned[i]
+        sma_200 = sma_200_1w_aligned[i]
+        sma_20 = sma_20_1d_aligned[i]
         vol_conf = volume_confirm[i]
         
+        # Bullish trend: weekly SMA50 > SMA200
+        bullish_trend = sma_50 > sma_200
+        
         if position == 0:
-            # Long: price breaks above upper channel with uptrend and volume
-            if close_val > upper_channel and close_val > ema_trend and vol_conf:
+            # Enter long when: bullish trend + price above weekly SMA50 + 
+            # price pulls back to or near daily SMA20 + volume confirmation
+            if (bullish_trend and 
+                close_val > sma_50 and 
+                close_val <= sma_20 * 1.02 and  # Allow 2% above SMA20
+                vol_conf):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below lower channel with downtrend and volume
-            elif close_val < lower_channel and close_val < ema_trend and vol_conf:
-                signals[i] = -size
-                position = -1
         elif position == 1:
-            # Exit long: price closes below middle of channel
-            mid_channel = (upper_channel + lower_channel) / 2
-            if close_val < mid_channel:
+            # Exit when: trend turns bearish OR price breaks below weekly SMA50
+            if not bullish_trend or close_val < sma_50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
-        elif position == -1:
-            # Exit short: price closes above middle of channel
-            mid_channel = (upper_channel + lower_channel) / 2
-            if close_val > mid_channel:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -size
     
     return signals
 
-name = "4h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_SMA_Crossover_Bullish_Momentum"
+timeframe = "1d"
 leverage = 1.0
