@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -36,9 +36,10 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily volume MA(14) for volume filter
-    vol_ma_14_1d = pd.Series(volume_1d).rolling(window=14, min_periods=14).mean().values
-    vol_ma_14_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_14_1d)
+    # Calculate daily VWAP
+    vwap_1d = (close_1d * volume_1d).cumsum() / volume_1d.cumsum()
+    vwap_1d[0] = close_1d[0]  # avoid division by zero on first bar
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -48,13 +49,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(vol_ma_14_1d_aligned[i])):
+            np.isnan(vwap_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,14 +71,15 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely high volatility periods
         vol_filter = atr_14_1d_aligned[i] > 0 and atr_14_1d_aligned[i] < np.median(atr_14_1d_aligned[:i+1]) * 3
         
-        # Volume filter: above average volume
-        vol_spike = volume[i] > vol_ma_14_1d_aligned[i]
+        # VWAP filter: price above/below daily VWAP for mean reversion
+        price_above_vwap = close[i] > vwap_1d_aligned[i]
+        price_below_vwap = close[i] < vwap_1d_aligned[i]
         
-        # Long conditions: bullish trend + volatility filter + volume spike
-        long_condition = (price_above_ema and vol_filter and vol_spike)
+        # Long conditions: bullish trend + volatility filter + price above VWAP
+        long_condition = (price_above_ema and vol_filter and price_above_vwap)
         
-        # Short conditions: bearish trend + volatility filter + volume spike
-        short_condition = (price_below_ema and vol_filter and vol_spike)
+        # Short conditions: bearish trend + volatility filter + price below VWAP
+        short_condition = (price_below_ema and vol_filter and price_below_vwap)
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -85,11 +87,17 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal
+        # Exit conditions: trend reversal or VWAP mean reversion
         elif position == 1 and not price_above_ema:
             signals[i] = 0.0
             position = 0
         elif position == -1 and not price_below_ema:
+            signals[i] = 0.0
+            position = 0
+        elif position == 1 and price_below_vwap:  # mean reversion exit for long
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and price_above_vwap:  # mean reversion exit for short
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -103,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyEMA34_VolumeFilter_Session"
+name = "4h_DailyEMA34_VWAP_Filter_Session"
 timeframe = "4h"
 leverage = 1.0
