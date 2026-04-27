@@ -22,27 +22,26 @@ def generate_signals(prices):
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate previous day's high, low, close for pivot
+    # Calculate Camarilla pivot levels from previous day
     high_prev = df_1d['high'].shift(1).values
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla pivot levels from previous day
     pivot = (high_prev + low_prev + close_prev * 2) / 4
     range_ = high_prev - low_prev
     
-    # Focus on R3/S3 levels for mean reversion trades
+    # Focus on R3/S3 for fade entries
     r3 = pivot + range_ * 1.25
     s3 = pivot - range_ * 1.25
     
-    # Align levels to 4h timeframe
+    # Align levels to 12h timeframe
     ema34_aligned = ema34_1d_aligned
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Volume confirmation: volume > 2.5 * 20-period average (tighter filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,11 +57,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
+        ema_trend = ema34_aligned[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Mean reversion at R3/S3: price touches level and reverses
+            # Fade at R3/S3: price touches level and reverses
             # Long: touch S3, close above it, in uptrend, volume spike
             if (low[i] <= s3_aligned[i] and close[i] > s3_aligned[i] and 
                 close[i] > ema_trend and vol_spike_val):
@@ -92,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_MeanReversion_1dEMA34_VolumeSpike_v3"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Fade_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
