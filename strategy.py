@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,9 +26,9 @@ def generate_signals(prices):
     prev_high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
     prev_low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align Donchian levels to 1d timeframe (same as input)
-    donch_high = prev_high_max  # Already 1d data
-    donch_low = prev_low_min
+    # Align Donchian levels to 4h timeframe
+    donch_high = align_htf_to_ltf(prices, df_1d, prev_high_max)
+    donch_low = align_htf_to_ltf(prices, df_1d, prev_low_min)
     
     # Calculate 1d ADX for trend strength (14-period)
     # True Range
@@ -53,6 +53,9 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
@@ -66,21 +69,21 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Long condition: price breaks above Donchian high, ADX > 25, volume spike
         if (close[i] > donch_high[i] and 
-            adx[i] > 25 and 
+            adx_aligned[i] > 25 and 
             volume_spike[i]):
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         # Short condition: price breaks below Donchian low, ADX > 25, volume spike
         elif (close[i] < donch_low[i] and 
-              adx[i] > 25 and 
+              adx_aligned[i] > 25 and 
               volume_spike[i]):
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         # Exit conditions: price returns to opposite Donchian level
         elif position == 1 and close[i] < donch_low[i]:
@@ -92,14 +95,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_Donchian20_Breakout_ADX25_VolumeSpike_1d_v1"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_ADX25_VolumeSpike_1d_v2"
+timeframe = "4h"
 leverage = 1.0
