@@ -1,133 +1,125 @@
 #!/usr/bin/env python3
 """
-12h CAMARILLA PIVOT BREAKOUT + DAILY VOLUME SPIKE + WEEKLY CHOPPINESS FILTER
-Hypothesis: Price breaking above/below CAMARILLA R3/S3 levels on 12h with daily volume
-spike and weekly choppy market (range) conditions produces high-probability mean-reversion
-entries. Uses weekly chop to avoid trending markets where breakouts fail. Works in bull
-and bear markets by adapting to range conditions via chop filter. Target: 15-30 trades/year.
+Hypothesis: 4-hour Williams Alligator with daily volume confirmation and 12h trend filter.
+Enters long when price is above Alligator's teeth (green line) with volume above average and 12h uptrend.
+Enters short when price is below Alligator's teeth with volume above average and 12h downtrend.
+Alligator uses smoothed moving averages (SMMA) of median price (HL/2) with specific periods.
+Williams Alligator is designed to identify trends and filter out ranging markets, making it suitable
+for both bull and bear markets when combined with higher timeframe trend filter.
+Target: 20-40 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(source, length):
+    """Smoothed Moving Average (SMMA) - also called Wilder's smoothing"""
+    if length <= 0:
+        return np.full_like(source, np.nan)
+    result = np.full_like(source, np.nan, dtype=np.float64)
+    if len(source) < length:
+        return result
+    # First value is simple average
+    result[length-1] = np.mean(source[:length])
+    # Subsequent values: SMMA = (prev SMMA * (length-1) + current price) / length
+    for i in range(length, len(source)):
+        result[i] = (result[i-1] * (length-1) + source[i]) / length
+    return result
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for CAMARILLA pivot and volume
+    # Get daily data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get weekly data for chop filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate DAILY CAMARILLA pivot levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate median price (HL/2) for Alligator
+    median_price = (high + low) / 2
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    R3_1d = pivot_1d + range_1d * 1.1
-    S3_1d = pivot_1d - range_1d * 1.1
+    # Williams Alligator lines (all SMMA)
+    # Jaw (blue line): 13-period SMMA, shifted 8 bars forward
+    jaw = smma(median_price, 13)
+    # Teeth (red line): 8-period SMMA, shifted 5 bars forward  
+    teeth = smma(median_price, 8)
+    # Lips (green line): 5-period SMMA, shifted 3 bars forward
+    lips = smma(median_price, 5)
     
-    # Calculate DAILY volume spike filter (volume > 2x 20-day average)
+    # Calculate daily volume MA(20)
     vol_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_ma_20_1d)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate WEEKLY chop filter (Choppiness Index > 61.8 = ranging)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of TRUE RANGE over 14 periods
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log(sum_tr_14 / (hh_14 - ll_14)) / log(14)
-    range_14 = hh_14 - ll_14
-    chop = 100 * np.log(sum_tr_14 / range_14) / np.log(14)
-    chop = np.where(range_14 == 0, 100, chop)  # avoid div by zero
-    
-    # Choppiness > 61.8 indicates ranging market
-    chop_filter = chop > 61.8
-    
-    # Align HTF arrays to 12h timeframe
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
-    chop_filter_aligned = align_htf_to_ltf(prices, df_1w, chop_filter.astype(float))
+    # Calculate 12h close for trend filter
+    close_12h = df_12h['close'].values
+    # Use close price directly for trend (no need for MA to avoid lag)
+    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position
+    size = 0.25   # 25% position size
     
-    # Warmup: need daily pivot (5), volume MA (20), weekly chop (14)
-    start_idx = max(5, 20, 14)
+    # Warmup: need Alligator components (lips needs 5-period SMMA + 3 shift = 8 min)
+    # Jaw: 13+8=21, Teeth: 8+5=13, Lips: 5+3=8 -> max is 21
+    start_idx = max(21, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_filter_aligned[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(close_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Current 4h price and volume
         price_now = close[i]
-        vol_spike = bool(vol_spike_1d_aligned[i])
-        chop_filter_val = bool(chop_filter_aligned[i])
-        R3 = R3_1d_aligned[i]
-        S3 = S3_1d_aligned[i]
+        vol_now = volume[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
+        trend_12h = close_12h_aligned[i]
         
-        # Breakout conditions
-        breakout_up = price_now > R3
-        breakout_down = price_now < S3
+        # Current Alligator values
+        lips_now = lips[i]
+        teeth_now = teeth[i]
+        jaw_now = jaw[i]
         
-        # Entry conditions: breakout + volume spike + choppy (ranging) market
+        # Volume filter: volume > 1.3x daily average
+        vol_filter = vol_now > 1.3 * vol_ma
+        
+        # Entry conditions: price vs teeth (green line) with volume + 12h trend
         if position == 0:
-            if breakout_up and vol_spike and chop_filter_val:
-                # In ranging market, selling the breakout (fade)
-                signals[i] = -size
-                position = -1
-            elif breakout_down and vol_spike and chop_filter_val:
-                # In ranging market, buying the breakout (fade)
+            # Long: price above teeth with volume + 12h uptrend
+            if price_now > teeth_now and vol_filter and price_now > trend_12h:
                 signals[i] = size
                 position = 1
+            # Short: price below teeth with volume + 12h downtrend
+            elif price_now < teeth_now and vol_filter and price_now < trend_12h:
+                signals[i] = -size
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to pivot or volatility expands
-            if price_now < pivot_1d[-1] or not chop_filter_val:  # pivot from last available day
+            # Exit long: price crosses below teeth or 12h trend turns down
+            if price_now < teeth_now or price_now < trend_12h:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to pivot or volatility expands
-            if price_now > pivot_1d[-1] or not chop_filter_val:
+            # Exit short: price crosses above teeth or 12h trend turns up
+            if price_now > teeth_now or price_now > trend_12h:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_1wChop"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_1dVolume_12hTrend"
+timeframe = "4h"
 leverage = 1.0
