@@ -18,34 +18,55 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day Exponential Moving Average (34-period) for trend
+    # Calculate 1-day Williams %R (14-period) for oversold/overbought
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        multiplier = 2 / (34 + 1)
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * multiplier) + (ema_34_1d[i-1] * (1 - multiplier))
+    willr_14_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 14:
+        for i in range(13, len(close_1d)):
+            highest_high = np.max(high_1d[i-13:i+1])
+            lowest_low = np.min(low_1d[i-13:i+1])
+            if highest_high != lowest_low:
+                willr_14_1d[i] = -100 * (highest_high - close_1d[i]) / (highest_high - lowest_low)
+            else:
+                willr_14_1d[i] = -50
     
-    # Calculate 1-day Bollinger Bands (20, 2.0)
-    sma_20_1d = np.full(len(close_1d), np.nan)
-    std_20_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        for i in range(19, len(close_1d)):
-            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
-            std_20_1d[i] = np.std(close_1d[i-19:i+1])
+    # Calculate 1-day RSI (14-period) for momentum confirmation
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(len(close_1d), np.nan)
+    avg_loss = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_14_1d = 100 - (100 / (1 + rs))
     
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    # Calculate 1-day ATR (14-period) for volatility filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr_14_1d = np.full(len(tr), np.nan)
+    if len(tr) >= 14:
+        atr_14_1d[13] = np.mean(tr[1:15])
+        for i in range(14, len(tr)):
+            atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align 1d indicators to 6h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    # Align 1d indicators to 12h timeframe
+    willr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, willr_14_1d)
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 6-period volume average for spike detection
+    # Calculate 12-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 6
+    vol_period = 12
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -54,12 +75,12 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(34, vol_period) + 5
+    start_idx = max(14, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(upper_bb_1d_aligned[i]) or 
-            np.isnan(lower_bb_1d_aligned[i]) or 
+        if (np.isnan(willr_14_1d_aligned[i]) or 
+            np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -71,26 +92,26 @@ def generate_signals(prices):
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price above EMA34 and breaks above upper Bollinger Band with volume
-            if price > ema_34_1d_aligned[i] and price > upper_bb_1d_aligned[i] and vol_filter:
+            # Long: Williams %R oversold (< -80) AND RSI > 50 (bullish momentum) with volume
+            if willr_14_1d_aligned[i] < -80 and rsi_14_1d_aligned[i] > 50 and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price below EMA34 and breaks below lower Bollinger Band with volume
-            elif price < ema_34_1d_aligned[i] and price < lower_bb_1d_aligned[i] and vol_filter:
+            # Short: Williams %R overbought (> -20) AND RSI < 50 (bearish momentum) with volume
+            elif willr_14_1d_aligned[i] > -20 and rsi_14_1d_aligned[i] < 50 and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below EMA34 or volatility spike (potential reversal)
-            if price < ema_34_1d_aligned[i] or (vol_ratio > 2.5):
+            # Long exit: Williams %R returns to neutral (> -50) OR volatility spike
+            if willr_14_1d_aligned[i] > -50 or vol_ratio > 2.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses above EMA34 or volatility spike (potential reversal)
-            if price > ema_34_1d_aligned[i] or (vol_ratio > 2.5):
+            # Short exit: Williams %R returns to neutral (< -50) OR volatility spike
+            if willr_14_1d_aligned[i] < -50 or vol_ratio > 2.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_BB20_Volume"
-timeframe = "6h"
+name = "12h_Williams_RSI_Volume"
+timeframe = "12h"
 leverage = 1.0
