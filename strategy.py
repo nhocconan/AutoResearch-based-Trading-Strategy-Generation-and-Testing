@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,15 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and trend filter
+    # Get daily data for ATR and volatility regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR(14) for volatility regime
     tr1 = high_1d[1:] - low_1d[1:]
@@ -35,7 +34,7 @@ def generate_signals(prices):
     
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily ATR(7) for volatility expansion signal
+    # Calculate ATR ratio: current ATR(7) / ATR(14) - volatility expansion signal
     tr1_7 = high_1d[1:] - low_1d[1:]
     tr2_7 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3_7 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -47,7 +46,7 @@ def generate_signals(prices):
     
     atr_7_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_7_1d)
     
-    # ATR ratio: ATR(7)/ATR(14) > 1.2 indicates volatility expansion
+    # ATR ratio: ATR(7)/ATR(14) > 1.3 indicates volatility expansion
     atr_ratio = np.full(n, np.nan)
     valid_mask = (~np.isnan(atr_7_1d_aligned)) & (~np.isnan(atr_14_1d_aligned)) & (atr_14_1d_aligned > 0)
     atr_ratio[valid_mask] = atr_7_1d_aligned[valid_mask] / atr_14_1d_aligned[valid_mask]
@@ -92,22 +91,11 @@ def generate_signals(prices):
     rsi_4 = np.full(n, np.nan)
     rsi_4[valid_rsi] = 100 - (100 / (1 + rs[valid_rsi]))
     
-    # Volume spike detection: current volume > 1.5x 20-period average
-    vol_sma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_sma_20[i] = np.mean(volume[i-20:i])
-    vol_sma_20_aligned = vol_sma_20  # already LTF
-    
-    vol_spike = np.full(n, False)
-    for i in range(n):
-        if not np.isnan(vol_sma_20_aligned[i]) and vol_sma_20_aligned[i] > 0:
-            vol_spike[i] = volume[i] > (1.5 * vol_sma_20_aligned[i])
-    
     signals = np.zeros(n)
     position = 0
     
     # Warmup
-    start_idx = max(20, 14, 34, 4)
+    start_idx = max(14, 34, 4)
     
     for i in range(start_idx, n):
         if (np.isnan(atr_ratio[i]) or 
@@ -118,22 +106,20 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Volatility regime filter: ATR ratio > 1.2 = expansion (favor trend)
-        vol_expansion = atr_ratio[i] > 1.2
+        # Volatility regime filter: ATR ratio > 1.3 = expansion (favor trend)
+        vol_expansion = atr_ratio[i] > 1.3
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volatility expansion + weekly uptrend + volume spike
+            # Long: RSI < 30 (oversold) + volatility expansion + weekly uptrend
             if (rsi_4[i] < 30 and 
                 vol_expansion and 
-                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1] and
-                vol_spike[i]):
+                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + volatility expansion + weekly downtrend + volume spike
+            # Short: RSI > 70 (overbought) + volatility expansion + weekly downtrend
             elif (rsi_4[i] > 70 and 
                   vol_expansion and 
-                  ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1] and
-                  vol_spike[i]):
+                  ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
             else:
@@ -157,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolatilityExpansion_RSI4_WeeklyEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
+timeframe = "1d"
 leverage = 1.0
