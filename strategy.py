@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_WickReversal_Volume_Trend
-Hypothesis: Price rejection at key levels (long upper/lower wicks) with volume confirmation and trend filter captures reversals. Works in bull/bear markets by fading overextended moves. Uses 1w trend filter for major direction and 1d for swing structure. Targets 20-30 trades/year to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Price breaking through R1/S1 levels (core support/resistance) with daily trend and volume spike captures significant moves while minimizing false breakouts. Uses daily trend filter to align with higher timeframe momentum. Targets 15-25 trades/year on 12h to minimize fee drag while capturing strong directional moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,86 +18,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for major trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data for swing structure
+    # Get 1d data for Camarilla pivot calculation and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly trend: EMA50
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Daily swing high/low for Wick detection (using 5-period lookback)
+    # Calculate Camarilla pivot levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    roll_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    roll_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    close_1d = df_1d['close'].values
     
-    # Align daily swing levels to 6h
-    roll_high_aligned = align_htf_to_ltf(prices, df_1d, roll_high)
-    roll_low_aligned = align_htf_to_ltf(prices, df_1d, roll_low)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1_1d = close_1d + camarilla_range
+    s1_1d = close_1d - camarilla_range
     
-    # Volume confirmation: volume > 1.5 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Align R1/S1 to 12h timeframe (use previous day's levels)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Daily trend filter: EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup
-    start_idx = max(50, 30)
+    # Warmup: need enough data for EMA and volume MA
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(roll_high_aligned[i]) or 
-            np.isnan(roll_low_aligned[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Wick conditions: long upper wick (selling pressure) or long lower wick (buying pressure)
-        body_size = abs(close[i] - open_price) if 'open_price' in locals() else abs(close[i] - close[i-1]) if i > 0 else 0
-        upper_wick = high[i] - max(close[i], open_price if i > 0 else close[i])
-        lower_wick = min(close[i], open_price if i > 0 else close[i]) - low[i]
-        # Simplified: use high-low range and close position
-        true_range = high[i] - low[i]
-        if true_range == 0:
-            signals[i] = 0.0
-            continue
-        close_position = (close[i] - low[i]) / true_range  # 0 = low close, 1 = high close
-        
-        ema_trend = ema50_1w_aligned[i]
-        swing_high = roll_high_aligned[i]
-        swing_low = roll_low_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        ema_trend = ema34_1d_aligned[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: rejection at swing low (long lower wick) with volume and uptrend
-            if close_position < 0.3 and vol_spike_val and close[i] > ema_trend:
+            # Long: price breaks above R1 with uptrend and volume spike
+            if close[i] > r1 and vol_spike_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: rejection at swing high (long upper wick) with volume and downtrend
-            elif close_position > 0.7 and vol_spike_val and close[i] < ema_trend:
+            # Short: price breaks below S1 with downtrend and volume spike
+            elif close[i] < s1 and vol_spike_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: rejection at swing high or trend turns down
-            if close_position > 0.7 or close[i] < ema_trend:
+            # Exit long: price falls below S1 or trend turns down
+            if close[i] < s1 or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: rejection at swing low or trend turns up
-            if close_position < 0.3 or close[i] > ema_trend:
+            # Exit short: price rises above R1 or trend turns up
+            if close[i] > r1 or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WickReversal_Volume_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
