@@ -13,24 +13,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly EMA50 and ATR calculations
+    # Get daily data for 20-day EMA and ATR calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 from daily data (approximation: 5 days = 1 week)
-    # We'll use 5-day EMA on daily close as proxy for weekly EMA50
+    # Calculate 20-day EMA on daily close
     close_1d = df_1d['close'].values
-    ema_5_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 5:
-        ema_5_1d[4] = np.mean(close_1d[:5])
-        for i in range(5, len(close_1d)):
-            ema_5_1d[i] = (close_1d[i] * 2 + ema_5_1d[i-1] * 3) / 5  # 5-period EMA
+    ema_20_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        ema_20_1d[19] = np.mean(close_1d[:20])
+        for i in range(20, len(close_1d)):
+            ema_20_1d[i] = (close_1d[i] * 2 + ema_20_1d[i-1] * 19) / 20  # 20-period EMA
     
-    # Align 5-day EMA (proxy for weekly EMA50) to 12h timeframe
-    ema_5_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_5_1d)
+    # Align 20-day EMA to 12h timeframe
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate weekly ATR(14) from daily data (14 days = 2 weeks)
+    # Calculate 20-day ATR(14) from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_arr = df_1d['close'].values
@@ -64,10 +63,10 @@ def generate_signals(prices):
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
-    # Calculate 10-period high/low for Donchian breakout (shorter period for 12h)
+    # Calculate 20-period high/low for Donchian breakout
     high_max = np.full(n, np.nan)
     low_min = np.full(n, np.nan)
-    period = 10
+    period = 20
     for i in range(period, n):
         high_max[i] = np.max(high[i-period:i])
         low_min[i] = np.min(low[i-period:i])
@@ -80,7 +79,7 @@ def generate_signals(prices):
     start_idx = max(14, vol_period, period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_5_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
             signals[i] = 0.0
             continue
@@ -88,16 +87,16 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Only trade when daily volatility is not extremely high (avoid panic markets)
+        # Only trade when volatility is not extremely high (avoid panic markets)
         vol_filter = atr_1d_aligned[i] < np.mean(atr_1d_aligned[max(0, i-30):i]) if i >= 30 else True
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume AND above 5-day EMA
-            if price > high_max[i] and vol_ratio > 1.8 and price > ema_5_1d_aligned[i] and vol_filter:
+            # Long: Price breaks above Donchian high with volume AND above 20-day EMA
+            if price > high_max[i] and vol_ratio > 2.0 and price > ema_20_1d_aligned[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume AND below 5-day EMA
-            elif price < low_min[i] and vol_ratio > 1.8 and price < ema_5_1d_aligned[i] and vol_filter:
+            # Short: Price breaks below Donchian low with volume AND below 20-day EMA
+            elif price < low_min[i] and vol_ratio > 2.0 and price < ema_20_1d_aligned[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
@@ -119,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian10_5dEMA_VolumeTrend"
+name = "12h_Donchian20_20dEMA_VolumeTrend"
 timeframe = "12h"
 leverage = 1.0
