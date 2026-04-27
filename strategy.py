@@ -1,17 +1,11 @@
-# 4h EMA34 Volume Filter Optimized for BTC/ETH
-# Hypothesis: A 4h EMA34 trend filter with volume confirmation (1.5x average volume) 
-# and minimum 6-hour hold time reduces overtrading while maintaining trend capture 
-# in both bull and bear markets. The hold time prevents whipsaws and excessive 
-# trading during ranging periods, addressing the overtrading failures seen in 
-# recent experiments.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,24 +13,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Donchian channel and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on daily close for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    # Calculate 20-day Donchian channel
+    upper_20d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align daily EMA to 4h
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate 14-period ATR for volatility filter
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate ATR(14) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = np.full(len(tr), np.nan)
     for i in range(14, len(tr)):
         if i == 14:
@@ -50,16 +44,21 @@ def generate_signals(prices):
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
+    # Align daily Donchian levels and ATR to 12h
+    upper_20d_aligned = align_htf_to_ltf(prices, df_1d, upper_20d)
+    lower_20d_aligned = align_htf_to_ltf(prices, df_1d, lower_20d)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
     signals = np.zeros(n)
     position = 0
     size = 0.25
-    bars_since_entry = 0
     
     # Warmup period
-    start_idx = max(34, 14, vol_period) + 5
+    start_idx = max(20, 14, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_20d_aligned[i]) or np.isnan(lower_20d_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -67,38 +66,33 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            bars_since_entry = 0
-            # Long: Price above daily EMA34 with volume confirmation
-            if price > ema_1d_aligned[i] and vol_ratio > 1.5:
+            # Long: Price breaks above 20-day high with volume confirmation
+            if price > upper_20d_aligned[i] and vol_ratio > 2.0:
                 signals[i] = size
                 position = 1
-            # Short: Price below daily EMA34 with volume confirmation
-            elif price < ema_1d_aligned[i] and vol_ratio > 1.5:
+            # Short: Price breaks below 20-day low with volume confirmation
+            elif price < lower_20d_aligned[i] and vol_ratio > 2.0:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            bars_since_entry += 1
-            # Long exit: Price closes below daily EMA34 OR minimum 6 bars held
-            if price < ema_1d_aligned[i] or bars_since_entry >= 6:
+            # Long exit: Price closes below 20-day low
+            if price < lower_20d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = size
         elif position == -1:
-            bars_since_entry += 1
-            # Short exit: Price closes above daily EMA34 OR minimum 6 bars held
-            if price > ema_1d_aligned[i] or bars_since_entry >= 6:
+            # Short exit: Price closes above 20-day high
+            if price > upper_20d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "4h_EMA34_Volume_Filter_Optimized"
-timeframe = "4h"
+name = "12h_Donchian20_Volume_Breakout"
+timeframe = "12h"
 leverage = 1.0
