@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,62 +13,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA34) and volatility
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close with proper min_periods
+    # Calculate Camarilla pivot levels for each 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        # Use pandas EMA for accuracy and proper min_periods handling
-        ema_series = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean()
-        ema_34 = ema_series.values
     
-    # Align EMA34 to daily timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Camarilla levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
+    # R4 = Close + ((High - Low) * 1.5)
+    # R3 = Close + ((High - Low) * 1.125)
+    # R2 = Close + ((High - Low) * 0.75)
+    # R1 = Close + ((High - Low) * 0.5)
+    # PP = (High + Low + Close) / 3
+    # S1 = Close - ((High - Low) * 0.5)
+    # S2 = Close - ((High - Low) * 0.75)
+    # S3 = Close - ((High - Low) * 1.125)
+    # S4 = Close - ((High - Low) * 1.5)
     
-    # Calculate ATR(14) for volatility filter with proper min_periods
+    r4_1d = close_1d + (high_1d - low_1d) * 1.5
+    r3_1d = close_1d + (high_1d - low_1d) * 1.125
+    r2_1d = close_1d + (high_1d - low_1d) * 0.75
+    r1_1d = close_1d + (high_1d - low_1d) * 0.5
+    pp_1d = (high_1d + low_1d + close_1d) / 3
+    s1_1d = close_1d - (high_1d - low_1d) * 0.5
+    s2_1d = close_1d - (high_1d - low_1d) * 0.75
+    s3_1d = close_1d - (high_1d - low_1d) * 1.125
+    s4_1d = close_1d - (high_1d - low_1d) * 1.5
+    
+    # Align Camarilla levels to 12h timeframe
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2_1d)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    pp_12h = align_htf_to_ltf(prices, df_1d, pp_1d)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2_1d)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Calculate ATR(14) for volatility filter
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
     tr = np.concatenate([[np.nan], tr])
     atr = np.full(n, np.nan)
-    if n >= 15:
-        # Use pandas rolling for proper min_periods
-        tr_series = pd.Series(tr)
-        atr_series = tr_series.rolling(window=14, min_periods=14).mean()
-        atr = atr_series.values
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.mean(tr[1:15])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 20-period volume average with proper min_periods
+    # Calculate 20-period volume average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
-    if n >= vol_period:
-        volume_series = pd.Series(volume)
-        vol_ma_series = volume_series.rolling(window=vol_period, min_periods=vol_period).mean()
-        vol_ma = vol_ma_series.values
-    
-    # Calculate 20-period high/low for Donchian breakout with proper min_periods
-    high_max = np.full(n, np.nan)
-    low_min = np.full(n, np.nan)
-    period = 20
-    if n >= period:
-        high_series = pd.Series(high)
-        low_series = pd.Series(low)
-        high_max = high_series.rolling(window=period, min_periods=period).max().values
-        low_min = low_series.rolling(window=period, min_periods=period).min().values
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
-    # Warmup period - ensure all indicators are valid
-    start_idx = max(14, vol_period, period) + 5
+    # Warmup period
+    start_idx = max(14, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -76,26 +90,26 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume AND above 1d EMA34
-            if price > high_max[i] and vol_ratio > 2.0 and price > ema_34_aligned[i]:
+            # Long: Price touches S1 level with volume confirmation
+            if price <= s1_12h[i] * 1.005 and vol_ratio > 1.5:  # Allow small buffer for touching
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume AND below 1d EMA34
-            elif price < low_min[i] and vol_ratio > 2.0 and price < ema_34_aligned[i]:
+            # Short: Price touches R1 level with volume confirmation
+            elif price >= r1_12h[i] * 0.995 and vol_ratio > 1.5:  # Allow small buffer for touching
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below Donchian low or 2x ATR trailing stop
-            if price < low_min[i] or price < high_max[i] - 2 * atr[i]:
+            # Long exit: Price touches PP level or 2x ATR stop
+            if price >= pp_12h[i] * 0.995 or price < low[i] - 2 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above Donchian high or 2x ATR trailing stop
-            if price > high_max[i] or price > low_min[i] + 2 * atr[i]:
+            # Short exit: Price touches PP level or 2x ATR stop
+            if price <= pp_12h[i] * 1.005 or price > high[i] + 2 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1dEMA34_Volume_Trend"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Touch_Volume"
+timeframe = "12h"
 leverage = 1.0
