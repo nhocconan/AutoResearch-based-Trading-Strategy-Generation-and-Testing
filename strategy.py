@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Williams Alligator with volume confirmation.
+# Hypothesis: 12h strategy using 1-day Williams Alligator with volume confirmation.
 # Long when price > Alligator's Jaw (13-period SMMA) with volume > 1.3x average.
 # Short when price < Alligator's Jaw with volume > 1.3x average.
 # Exit when price crosses the Jaw in opposite direction.
 # Uses Alligator for trend (SMMA = Smoothed Moving Average), volume for confirmation.
-# Target: 20-40 trades/year to avoid fee drag. Works in bull/bear via trend-following.
+# Target: 12-37 trades/year to avoid fee drag. Works in bull/bear via trend-following.
 
 def generate_signals(prices):
     n = len(prices)
@@ -55,7 +55,7 @@ def generate_signals(prices):
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Align indicators to 4h timeframe
+    # Align indicators to 12h timeframe
     jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
     
     signals = np.zeros(n)
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_Jaw_Volume"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_Jaw_Volume"
+timeframe = "12h"
 leverage = 1.0
