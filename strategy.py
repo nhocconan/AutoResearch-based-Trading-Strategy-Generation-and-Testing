@@ -13,52 +13,48 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for Donchian channels and ADX
+    # Get 1d data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period) using previous day's data
-    prev_high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
-    prev_low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate Camarilla pivots from previous day's data
+    # P = (H + L + C) / 3
+    # Range = H - L
+    # Resistance levels: R1 = P + Range * 1.1/12, R2 = P + Range * 1.1/6, R3 = P + Range * 1.1/4, R4 = P + Range * 1.1/2
+    # Support levels: S1 = P - Range * 1.1/12, S2 = P - Range * 1.1/6, S3 = P - Range * 1.1/4, S4 = P - Range * 1.1/2
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Align Donchian levels to 4h timeframe
-    donch_high = align_htf_to_ltf(prices, df_1d, prev_high_max)
-    donch_low = align_htf_to_ltf(prices, df_1d, prev_low_min)
+    P = (prev_high + prev_low + prev_close) / 3
+    Range = prev_high - prev_low
     
-    # Calculate 1d ADX for trend strength (14-period)
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    R3 = P + Range * 1.1 / 4
+    S3 = P - Range * 1.1 / 4
+    R4 = P + Range * 1.1 / 2
+    S4 = P - Range * 1.1 / 2
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=np.nan)
-    down_move = -np.diff(low_1d, prepend=np.nan)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Align Camarilla levels to 6h timeframe
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,41 +64,51 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(R4_6h[i]) or np.isnan(S4_6h[i]) or 
+            np.isnan(ema34_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above Donchian high, ADX > 25, volume spike
-        if (close[i] > donch_high[i] and 
-            adx_aligned[i] > 25 and 
-            volume_spike[i]):
-            signals[i] = 0.30
+        # Long conditions:
+        # 1. Break above R4 with uptrend (close > EMA34) and volume spike -> continuation
+        # 2. Reject from S3 with uptrend and volume spike -> bounce
+        long_breakout = (close[i] > R4_6h[i] and close[i-1] <= R4_6h[i-1] and 
+                         close[i] > ema34_6h[i] and volume_spike[i])
+        long_bounce = (close[i] > S3_6h[i] and close[i-1] <= S3_6h[i-1] and 
+                       close[i] > ema34_6h[i] and volume_spike[i])
+        
+        # Short conditions:
+        # 1. Break below S4 with downtrend (close < EMA34) and volume spike -> continuation
+        # 2. Reject from R3 with downtrend and volume spike -> rejection
+        short_breakout = (close[i] < S4_6h[i] and close[i-1] >= S4_6h[i-1] and 
+                          close[i] < ema34_6h[i] and volume_spike[i])
+        short_reject = (close[i] < R3_6h[i] and close[i-1] >= R3_6h[i-1] and 
+                        close[i] < ema34_6h[i] and volume_spike[i])
+        
+        if long_breakout or long_bounce:
+            signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below Donchian low, ADX > 25, volume spike
-        elif (close[i] < donch_low[i] and 
-              adx_aligned[i] > 25 and 
-              volume_spike[i]):
-            signals[i] = -0.30
+        elif short_breakout or short_reject:
+            signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to opposite Donchian level
-        elif position == 1 and close[i] < donch_low[i]:
+        # Exit conditions: return to opposite S3/R3 level
+        elif position == 1 and close[i] < S3_6h[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > donch_high[i]:
+        elif position == -1 and close[i] > R3_6h[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_Breakout_ADX25_VolumeSpike_1d_v2"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_R4_S4_Breakout_Bounce_EMA34_Volume2x_1d"
+timeframe = "6h"
 leverage = 1.0
