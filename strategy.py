@@ -1,65 +1,16 @@
 #!/usr/bin/env python3
 """
-4h ADX + Bollinger Band Width Regime Filter with 1-day EMA Trend.
-Long when ADX > 25 (trending) + BBW < 50th percentile (low volatility) + price > 1-day EMA.
-Short when ADX > 25 (trending) + BBW < 50th percentile (low volatility) + price < 1-day EMA.
-Uses ADX for trend strength, BBW for volatility regime, and daily EMA for direction.
-Designed for low frequency (20-40 trades/year) to minimize fee drag.
+12h Camarilla Pivot S1/S4 Breakout with Weekly Trend and Volume Spike.
+Long when price breaks above S4 + weekly trend up + volume spike.
+Short when price breaks below S1 + weekly trend down + volume spike.
+Exit when price returns to pivot (central level) or trend changes.
+Designed for low frequency (12-37 trades/year) to minimize fee drag.
+Uses Camarilla pivot levels from daily timeframe and weekly trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_adx(high, low, close, length=14):
-    """Average Directional Index (ADX)"""
-    if len(high) < length + 1:
-        return np.full_like(high, np.nan, dtype=np.float64)
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smooth TR, DM+ and DM-
-    atr = np.zeros_like(tr, dtype=np.float64)
-    dm_plus_smooth = np.zeros_like(dm_plus, dtype=np.float64)
-    dm_minus_smooth = np.zeros_like(dm_minus, dtype=np.float64)
-    
-    # Initial values (simple average)
-    atr[length-1] = np.mean(tr[:length])
-    dm_plus_smooth[length-1] = np.mean(dm_plus[:length])
-    dm_minus_smooth[length-1] = np.mean(dm_minus[:length])
-    
-    # Wilder smoothing
-    for i in range(length, len(tr)):
-        atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
-        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (length-1) + dm_plus[i]) / length
-        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (length-1) + dm_minus[i]) / length
-    
-    # Directional Indicators
-    plus_di = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = np.zeros_like(dx, dtype=np.float64)
-    adx[2*length-2] = np.mean(dx[length-1:2*length-1])  # First ADX value
-    
-    for i in range(2*length-1, len(dx)):
-        adx[i] = (adx[i-1] * (length-1) + dx[i]) / length
-    
-    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -71,100 +22,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day EMA34 for trend direction
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full_like(close_1d, np.nan, dtype=np.float64)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])  # Simple average for first value
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 33) / 35  # EMA 34
+    # Calculate Camarilla pivot levels for each day
+    # Based on previous day's OHLC
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Align 1-day EMA to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    pivot = (high_prev + low_prev + close_prev) / 3
+    range_prev = high_prev - low_prev
     
-    # Calculate ADX on 4h data (trend strength)
-    adx = calculate_adx(high, low, close, 14)
+    # Camarilla levels
+    S1 = close_prev - (range_prev * 1.1 / 12)
+    S2 = close_prev - (range_prev * 1.1 / 6)
+    S3 = close_prev - (range_prev * 1.1 / 4)
+    S4 = close_prev - (range_prev * 1.1 / 2)
+    R4 = close_prev + (range_prev * 1.1 / 2)
+    R3 = close_prev + (range_prev * 1.1 / 4)
+    R2 = close_prev + (range_prev * 1.1 / 6)
+    R1 = close_prev + (range_prev * 1.1 / 12)
     
-    # Calculate Bollinger Band Width on 4h data (volatility regime)
-    bb_length = 20
-    bb_std = 2.0
-    sma = np.full_like(close, np.nan, dtype=np.float64)
-    bb_width = np.full_like(close, np.nan, dtype=np.float64)
+    # Align to 12h timeframe with proper delay (wait for daily close)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
     
-    if len(close) >= bb_length:
-        # Calculate SMA
-        for i in range(bb_length-1, len(close)):
-            sma[i] = np.mean(close[i-bb_length+1:i+1])
-        
-        # Calculate standard deviation
-        for i in range(bb_length-1, len(close)):
-            bb_std_dev = np.std(close[i-bb_length+1:i+1])
-            upper = sma[i] + bb_std * bb_std_dev
-            lower = sma[i] - bb_std * bb_std_dev
-            bb_width[i] = (upper - lower) / sma[i] * 100 if sma[i] != 0 else 0
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate percentile rank of BBW (20-period lookback)
-    bb_width_percentile = np.full_like(bb_width, np.nan, dtype=np.float64)
-    lookback = 20
-    for i in range(lookback, len(bb_width)):
-        if not np.isnan(bb_width[i]):
-            # Calculate percentile: percentage of values in lookback window that are <= current value
-            window = bb_width[i-lookback:i+1]
-            valid_window = window[~np.isnan(window)]
-            if len(valid_window) > 0:
-                percentile = (np.sum(valid_window <= bb_width[i]) / len(valid_window)) * 100
-                bb_width_percentile[i] = percentile
+    # Weekly EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume filter: volume > 2.0x average (to avoid false breakouts)
+    vol_ma_20 = np.empty_like(volume, dtype=np.float64)
+    vol_ma_20.fill(np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ADX (14*2=28), BBW (20+20=40), EMA (34)
-    start_idx = max(40, 34)
+    # Warmup: need pivots (1 day lag), weekly EMA (34), volume MA (20)
+    start_idx = max(34, 20) + 1  # +1 for daily lag
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx[i]) or np.isnan(bb_width_percentile[i]) or 
-            np.isnan(ema_34_aligned[i])):
+        if (np.isnan(S1_aligned[i]) or np.isnan(S4_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Current price and indicators
+        # Current price and volume
         price_now = close[i]
-        adx_now = adx[i]
-        bbw_percentile = bb_width_percentile[i]
-        ema_trend = ema_34_aligned[i]
+        vol_now = volume[i]
         
-        # Regime filters
-        trending = adx_now > 25              # Strong trend
-        low_volatility = bbw_percentile < 50 # Low volatility regime
+        # Current levels
+        s1 = S1_aligned[i]
+        s4 = S4_aligned[i]
+        pivot_level = pivot_aligned[i]
+        weekly_ema = ema_34_1w_aligned[i]
+        
+        # Volume filter: volume > 2.0x average
+        vol_filter = vol_now > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: trending + low volatility + price above daily EMA
-            if trending and low_volatility and price_now > ema_trend:
+            # Bull: price breaks above S4 + weekly trend up (price > EMA34) + volume spike
+            if price_now > s4 and price_now > weekly_ema and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: trending + low volatility + price below daily EMA
-            elif trending and low_volatility and price_now < ema_trend:
+            # Bear: price breaks below S1 + weekly trend down (price < EMA34) + volume spike
+            elif price_now < s1 and price_now < weekly_ema and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: trend weakens OR volatility increases OR price crosses below EMA
-            if (adx_now < 20) or (bbw_percentile > 70) or (price_now < ema_trend):
+            # Exit long: price returns to pivot or weekly trend turns down
+            if price_now < pivot_level or price_now < weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: trend weakens OR volatility increases OR price crosses above EMA
-            if (adx_now < 20) or (bbw_percentile > 70) or (price_now > ema_trend):
+            # Exit short: price returns to pivot or weekly trend turns up
+            if price_now > pivot_level or price_now > weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -172,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ADX_BBWRegime_DailyEMA_Trend"
-timeframe = "4h"
+name = "12h_Camarilla_S1S4_Breakout_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
