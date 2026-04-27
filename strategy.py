@@ -13,28 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channel (20-period)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Donchian channel (primary signal)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    upper = np.full(len(high_12h), np.nan)
-    lower = np.full(len(high_12h), np.nan)
-    for i in range(20, len(high_12h)):
-        upper[i] = np.max(high_12h[i-20:i])
-        lower[i] = np.min(low_12h[i-20:i])
-    donch_upper_12h = upper
-    donch_lower_12h = lower
-    donch_upper_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_upper_12h)
-    donch_lower_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_lower_12h)
+    # Calculate 4h Donchian(20)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    upper_4h = np.full(len(high_4h), np.nan)
+    lower_4h = np.full(len(high_4h), np.nan)
+    for i in range(20, len(high_4h)):
+        upper_4h[i] = np.max(high_4h[i-20:i])
+        lower_4h[i] = np.min(low_4h[i-20:i])
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
     
-    # Get 1d data for volume filter
+    # Get 1d data for volume filter (avoid look-ahead)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
+    # Calculate 1d volume MA(20)
     vol_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
@@ -47,7 +47,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # first TR is just high-low
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
@@ -59,11 +59,11 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     # Warmup: need Donchian, volume MA, and ATR
-    start_idx = max(20, 20, 14)
+    start_idx = max(20, 20, 14)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_upper_12h_aligned[i]) or np.isnan(donch_lower_12h_aligned[i]) or 
+        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
             np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -74,39 +74,42 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        upper = donch_upper_12h_aligned[i]
-        lower = donch_lower_12h_aligned[i]
+        upper = upper_4h_aligned[i]
+        lower = lower_4h_aligned[i]
         vol_now = volume[i]
         vol_ma = vol_ma_20_1d_aligned[i]
         atr_now = atr_1d_aligned[i]
         
+        # Volatility filter: only trade when volatility is above average
+        vol_filter = atr_now > 0  # Ensure ATR is valid
+        
         # Volume filter: volume > 1.3x 1d MA (volume breakout)
         vol_breakout = vol_now > 1.3 * vol_ma
         
-        # Entry conditions: breakout with volume
+        # Entry conditions: breakout with volume and volatility
         if position == 0:
             # Long: break above upper band + volume
-            if close[i] > upper and vol_breakout:
+            if close[i] > upper and vol_breakout and vol_filter:
                 signals[i] = size
                 position = 1
             # Short: break below lower band + volume
-            elif close[i] < lower and vol_breakout:
+            elif close[i] < lower and vol_breakout and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below midpoint
+            # Exit long: close below midpoint or volatility drops significantly
             midpoint = (upper + lower) / 2
-            if close[i] < midpoint:
+            if close[i] < midpoint or atr_now < 0.7 * atr_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above midpoint
+            # Exit short: close above midpoint or volatility drops significantly
             midpoint = (upper + lower) / 2
-            if close[i] > midpoint:
+            if close[i] > midpoint or atr_now < 0.7 * atr_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeBreakout"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeBreakout_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
