@@ -13,130 +13,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation (need previous week's data)
+    # Get 1d data for ATR and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly high/low/close for pivot points
-    # We'll use the previous week's data to avoid look-ahead
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Weekly pivot: use previous week's OHLC
-    # For each day, we need the week that ended on the previous Friday
-    weekly_high = np.full(len(close_1d), np.nan)
-    weekly_low = np.full(len(close_1d), np.nan)
-    weekly_close = np.full(len(close_1d), np.nan)
+    # Calculate 1d ATR(14)
+    atr_period = 14
+    tr = np.zeros(len(high_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - close_1d[i-1]),
+                   abs(low_1d[i] - close_1d[i-1]))
     
-    # Simple approach: use 5-day rolling window for weekly data
-    # This approximates weekly OHLC from daily data
-    for i in range(5, len(close_1d)):
-        # Previous 5 days (excluding current day) = previous week
-        weekly_high[i] = np.max(high_1d[i-5:i])
-        weekly_low[i] = np.min(low_1d[i-5:i])
-        weekly_close[i] = close_1d[i-1]  # Previous day's close as weekly close approximation
+    atr_1d = np.full(len(tr), np.nan)
+    if len(tr) >= atr_period:
+        atr_1d[atr_period - 1] = np.mean(tr[:atr_period])
+        for i in range(atr_period, len(tr)):
+            atr_1d[i] = (tr[i] + (atr_period - 1) * atr_1d[i-1]) / atr_period
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    weekly_pivot = np.full(len(close_1d), np.nan)
-    weekly_r1 = np.full(len(close_1d), np.nan)
-    weekly_s1 = np.full(len(close_1d), np.nan)
-    weekly_r2 = np.full(len(close_1d), np.nan)
-    weekly_s2 = np.full(len(close_1d), np.nan)
-    weekly_r3 = np.full(len(close_1d), np.nan)
-    weekly_s3 = np.full(len(close_1d), np.nan)
+    # Calculate 1d Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    bb_ma = np.full(len(close_1d), np.nan)
+    bb_stddev = np.full(len(close_1d), np.nan)
+    for i in range(bb_period, len(close_1d)):
+        bb_ma[i] = np.mean(close_1d[i-bb_period:i])
+        bb_stddev[i] = np.std(close_1d[i-bb_period:i])
     
-    for i in range(5, len(close_1d)):
-        if not (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or np.isnan(weekly_close[i])):
-            H = weekly_high[i]
-            L = weekly_low[i]
-            C = weekly_close[i]
-            P = (H + L + C) / 3
-            weekly_pivot[i] = P
-            weekly_r1[i] = 2 * P - L
-            weekly_s1[i] = 2 * P - H
-            weekly_r2[i] = P + (H - L)
-            weekly_s2[i] = P - (H - L)
-            weekly_r3[i] = H + 2 * (P - L)
-            weekly_s3[i] = L - 2 * (H - P)
+    bb_upper = bb_ma + bb_std * bb_stddev
+    bb_lower = bb_ma - bb_std * bb_stddev
     
-    # Get weekly data for trend filter (EMA20)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate weekly EMA20
-    ema_period = 20
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= ema_period:
-        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
-        for i in range(ema_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
-                         ema_1w[i-1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 4h EMA50
+    ema_period = 50
+    ema_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= ema_period:
+        ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
+        for i in range(ema_period, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * (2 / (ema_period + 1)) + 
+                         ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Align indicators to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Volume filter: current volume > 1.5x 50-period average (longer MA for 6h)
-    vol_ma = np.full(n, np.nan)
-    vol_period = 50
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    # Volatility filter: current ATR > 1.5x 10-period average
+    atr_ma = np.full(n, np.nan)
+    atr_ma_period = 10
+    for i in range(atr_ma_period, n):
+        if not np.isnan(atr_1d_aligned[i-atr_ma_period:i]).all():
+            atr_ma[i] = np.nanmean(atr_1d_aligned[i-atr_ma_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need weekly pivot, EMA, and volume MA
-    start_idx = max(5, ema_period, vol_period)
+    # Warmup: need ATR, BB, EMA
+    start_idx = max(atr_period, bb_period, ema_period, atr_ma_period)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r3_aligned[i]) or 
-            np.isnan(weekly_s3_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
+            np.isnan(bb_lower_aligned[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(atr_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        atr = atr_1d_aligned[i]
+        atr_ma_val = atr_ma[i]
         
         if position == 0:
-            # Long: Price crosses above weekly R3 + volume spike + above weekly EMA20
-            if (price > weekly_r3_aligned[i] and 
-                vol_ratio > 1.5 and 
-                price > ema_1w_aligned[i]):
+            # Long: Price touches lower Bollinger Band + volatility expansion + above 4h EMA50
+            if (price <= bb_lower_aligned[i] and 
+                atr > 1.5 * atr_ma_val and 
+                price > ema_4h_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: Price crosses below weekly S3 + volume spike + below weekly EMA20
-            elif (price < weekly_s3_aligned[i] and 
-                  vol_ratio > 1.5 and 
-                  price < ema_1w_aligned[i]):
+            # Short: Price touches upper Bollinger Band + volatility expansion + below 4h EMA50
+            elif (price >= bb_upper_aligned[i] and 
+                  atr > 1.5 * atr_ma_val and 
+                  price < ema_4h_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below weekly S3 OR loses weekly trend
-            if (price < weekly_s3_aligned[i] or 
-                price < ema_1w_aligned[i]):
+            # Long exit: Price crosses above Bollinger middle OR loses volatility
+            bb_middle = (bb_upper_aligned[i] + bb_lower_aligned[i]) / 2
+            if (price >= bb_middle or 
+                atr < 0.8 * atr_ma_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses above weekly R3 OR loses weekly trend
-            if (price > weekly_r3_aligned[i] or 
-                price > ema_1w_aligned[i]):
+            # Short exit: Price crosses below Bollinger middle OR loses volatility
+            bb_middle = (bb_upper_aligned[i] + bb_lower_aligned[i]) / 2
+            if (price <= bb_middle or 
+                atr < 0.8 * atr_ma_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -144,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_EMA20_Volume"
-timeframe = "6h"
+name = "4h_Bollinger_Band_Touch_Volatility_Expansion_4hEMA50"
+timeframe = "4h"
 leverage = 1.0
