@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-#100902 - 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+#100905 - 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
 Hypothesis: Breakout at Camarilla R1/S1 levels with volume confirmation and 1d EMA trend filter on 12h timeframe.
 Targets 12-37 trades/year (50-150 total) to minimize fee drag. Uses 12h primary timeframe with 1d EMA34 for trend
 and daily pivot for Camarilla levels. Works in bull (breakouts with trend) and bear (mean reversion to pivot).
