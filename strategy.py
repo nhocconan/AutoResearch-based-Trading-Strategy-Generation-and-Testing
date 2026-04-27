@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_Pivot_Squeeze_Breakout
-Hypothesis: Use weekly pivot point support/resistance levels with Bollinger Band squeeze breakout on daily timeframe. 
-Weekly pivots provide strong institutional levels. Bollinger Band squeeze indicates low volatility ready for breakout.
-Combines mean-reversion (BB) with breakout momentum in a single signal. Works in bull markets (breakouts up) and bear 
-markets (breakouts down) by trading direction of breakout from squeeze. Target 15-25 trades/year to minimize fee drag.
+12h_Camarilla_R4_S4_Breakout_1dTrend_Volume_Spike
+Hypothesis: Use price closing beyond stronger Camarilla R4/S4 levels (extreme breakout levels) combined with volume spike and daily EMA34 trend filter. R4/S4 breakouts indicate very strong momentum with minimal false signals. Target 15-30 trades/year to avoid fee drag. Works in both bull (breakouts continue) and bear (false breakdowns reversed quickly) by requiring strong momentum confirmation.
 """
 
 import numpy as np
@@ -21,111 +18,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla pivot and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
+    # Calculate Camarilla levels from previous day
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_ = df_1d['high'] - df_1d['low']
     
-    # Align weekly pivots to daily timeframe (use previous week's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Camarilla R4 and S4 (extreme breakout levels)
+    r4 = typical_price + (range_ * 1.1 / 2)
+    s4 = typical_price - (range_ * 1.1 / 2)
     
-    # Bollinger Bands on daily close (20-period, 2 std dev)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Align levels to 12h timeframe (use previous day's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
     
-    # Bollinger Band width (normalized) for squeeze detection
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    # Squeeze: BB width below 20-period average (low volatility)
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for BB calculations
-    start_idx = max(40, 20)  # BB(20) + MA(20) for width
+    # Warmup: need enough data for volume MA and EMA
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
-            np.isnan(squeeze[i])):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
             signals[i] = 0.0
             continue
         
-        pivot_level = pivot_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        r2_level = r2_aligned[i]
-        s2_level = s2_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
-        bb_up = bb_upper[i]
-        bb_low = bb_lower[i]
-        squeeze_val = squeeze[i]
+        ema_trend = ema34_1d_aligned[i]
+        r4_level = r4_aligned[i]
+        s4_level = s4_aligned[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Look for Bollinger Band breakout with squeeze release
-            # Long: price breaks above upper BB with volume and squeeze release
-            if close[i] > bb_up and vol_spike_val and squeeze_val:
-                # Additional filter: breakout should be above weekly pivot for validity
-                if close[i] > pivot_level:
-                    signals[i] = size
-                    position = 1
-                else:
-                    signals[i] = 0.0
-            # Short: price breaks below lower BB with volume and squeeze release
-            elif close[i] < bb_low and vol_spike_val and squeeze_val:
-                # Additional filter: breakout should be below weekly pivot for validity
-                if close[i] < pivot_level:
-                    signals[i] = -size
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long: price closes above R4 + volume spike + uptrend (price > EMA34)
+            if close[i] > r4_level and vol_spike_val and close[i] > ema_trend:
+                signals[i] = size
+                position = 1
+            # Short: price closes below S4 + volume spike + downtrend (price < EMA34)
+            elif close[i] < s4_level and vol_spike_val and close[i] < ema_trend:
+                signals[i] = -size
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle BB or breaks below support
-            if close[i] < bb_middle[i] or close[i] < s1_level:
+            # Exit long: price closes below S4 or trend turns down
+            if close[i] < s4_level or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to middle BB or breaks above resistance
-            if close[i] > bb_middle[i] or close[i] > r1_level:
+            # Exit short: price closes above R4 or trend turns up
+            if close[i] > r4_level or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Pivot_Pivot_Squeeze_Breakout"
-timeframe = "1d"
+name = "12h_Camarilla_R4_S4_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
