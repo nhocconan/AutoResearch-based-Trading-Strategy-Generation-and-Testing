@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -43,7 +43,7 @@ def generate_signals(prices):
         else:
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align daily indicators to 1h
+    # Align daily indicators to 12h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
@@ -55,7 +55,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
     # Warmup: need EMA, ATR, and volume MA
     start_idx = max(34, 14, vol_period) + 5
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMA34_Volume_Trend_Filter"
-timeframe = "1h"
+name = "12h_EMA34_Volume_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
