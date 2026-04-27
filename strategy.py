@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+4h_RangeBreakout_Volume_Trend_Filter
+Hypothesis: In ranging markets, price tends to break out of recent highs/lows with volume confirmation.
+Uses Donchian breakout (20-period) on 4h timeframe with volume spike (>2x 20-bar average) and 
+trend filter (4h EMA50) to avoid false breakouts. Works in both bull and bear markets by
+capturing momentum bursts. Target: 25-40 trades/year.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,72 +20,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Get 4h data for Donchian calculation (self-referential but using current timeframe)
+    # We'll calculate Donchian directly on 4h prices
     
-    # Calculate daily ATR for volatility filter (use previous day's ATR)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels (20-period) - using current high/low
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate daily ATR-based channels for mean reversion signals
-    atr_mult = 1.5
-    upper_channel = close_1d + atr_1d * atr_mult
-    lower_channel = close_1d - atr_1d * atr_mult
-    
-    # Align to 12h timeframe
-    upper_channel_12h = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_12h = align_htf_to_ltf(prices, df_1d, lower_channel)
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Volume spike detection (using 20-period average)
+    # Volume spike detection (20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (vol_ma * 1.8)
+    volume_spike = volume > (vol_ma * 2.0)
+    
+    # Trend filter: EMA50 on 4h
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup period - ensure we have enough data for all indicators
-    start_idx = max(34, 20) + 1
+    # Warmup period
+    start_idx = max(50, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_channel_12h[i]) or np.isnan(lower_channel_12h[i]) or 
-            np.isnan(atr_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Mean reversion long: price touches lower channel with volume spike
-            if (close[i] <= lower_channel_12h[i] and volume_spike[i]):
+            # Long: price breaks above Donchian high with volume spike and uptrend
+            if (close[i] > donchian_high[i] and volume_spike[i] and close[i] > ema50[i]):
                 signals[i] = 0.25
                 position = 1
-            # Mean reversion short: price touches upper channel with volume spike
-            elif (close[i] >= upper_channel_12h[i] and volume_spike[i]):
+            # Short: price breaks below Donchian low with volume spike and downtrend
+            elif (close[i] < donchian_low[i] and volume_spike[i] and close[i] < ema50[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to mean or volatility drops
-            if (close[i] >= (close[i-1]) or volume_spike[i] == False):
+            # Long exit: price returns to Donchian low or trend fails
+            if (close[i] <= donchian_low[i] or close[i] < ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to mean or volatility drops
-            if (close[i] <= (close[i-1]) or volume_spike[i] == False):
+            # Short exit: price returns to Donchian high or trend fails
+            if (close[i] >= donchian_high[i] or close[i] > ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ATR_MeanReversion_VolumeSpike"
-timeframe = "12h"
+name = "4h_RangeBreakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
