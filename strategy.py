@@ -5,46 +5,65 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
-    
-    # Precompute hour for session filter
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for higher timeframe context
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA 20 for trend direction
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # 1d EMA 50 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 1d ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate 1d ADX for trend strength (no look-ahead)
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                              np.abs(low_1d[1:] - close_1d[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    di_plus = 100 * dm_plus14 / tr14
+    di_minus = 100 * dm_minus14 / tr14
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx[np.isnan(dx)] = np.nan
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 1d RSI for momentum
+    delta_1d = pd.Series(close_1d).diff()
+    gain_1d = delta_1d.where(delta_1d > 0, 0)
+    loss_1d = -delta_1d.where(delta_1d < 0, 0)
+    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1d = avg_gain_1d / avg_loss_1d
+    rsi_1d = 100 - (100 / (1 + rs_1d))
+    rsi_1d = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate 1d ATR for volatility filter
     tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.abs(high_1d[1:] - close_1d[:-1]), 
-                       np.abs(low_1d[1:] - close_1d[:-1]))
+                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                                 np.abs(low_1d[1:] - close_1d[:-1])))
     tr_1d = np.concatenate([[np.nan], tr_1d])
     atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 1d volume moving average
-    volume_1d = df_1d['volume'].values
+    # Calculate 1d volume moving average
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
@@ -52,67 +71,72 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: trade only during 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Trend filter: strong trend (ADX > 25)
+        strong_trend = adx_aligned[i] > 25
         
-        # Trend filter: 4h EMA20 vs 1d EMA50 alignment
-        trend_up = ema_20_4h_aligned[i] > ema_50_1d_aligned[i]
-        trend_down = ema_20_4h_aligned[i] < ema_50_1d_aligned[i]
+        # Momentum filter: RSI in neutral zone (avoid extremes)
+        rsi_neutral = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
         
-        # Volatility filter: only trade when volatility is reasonable
+        # Volatility filter: reasonable volatility
         vol_filter = atr_1d_aligned[i] > 0
         
-        # Volume filter: current volume above 1d average
+        # Volume filter: current volume above average
         volume_filter = volume[i] > vol_ma_1d_aligned[i]
         
-        # Long conditions: 4h trend up + 1d trend up + volume + volatility + session
-        long_condition = (trend_up and 
-                         vol_filter and 
-                         volume_filter and 
-                         in_session)
+        # Long conditions: strong trend + RSI neutral + volume + volatility
+        long_condition = strong_trend and rsi_neutral and volume_filter and vol_filter
         
-        # Short conditions: 4h trend down + 1d trend down + volume + volatility + session
-        short_condition = (trend_down and 
-                          vol_filter and 
-                          volume_filter and 
-                          in_session)
+        # Short conditions: strong trend + RSI neutral + volume + volatility
+        short_condition = strong_trend and rsi_neutral and volume_filter and vol_filter
         
-        if long_condition and position <= 0:
-            signals[i] = 0.20
+        # Determine trend direction using price vs 20-period SMA on 1d
+        sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+        sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
+        
+        if not np.isnan(sma_20_1d_aligned[i]):
+            price_above_sma = close[i] > sma_20_1d_aligned[i]
+            price_below_sma = close[i] < sma_20_1d_aligned[i]
+        else:
+            price_above_sma = False
+            price_below_sma = False
+        
+        # Long: uptrend (price above SMA20)
+        if long_condition and price_above_sma and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif short_condition and position >= 0:
-            signals[i] = -0.20
+        # Short: downtrend (price below SMA20)
+        elif short_condition and price_below_sma and position >= 0:
+            signals[i] = -0.25
             position = -1
-        # Exit conditions: trend misalignment
-        elif position == 1 and not trend_up:
+        # Exit: trend weakening (ADX < 20) or RSI extreme
+        elif position == 1 and (adx_aligned[i] < 20 or rsi_1d_aligned[i] > 70):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not trend_down:
+        elif position == -1 and (adx_aligned[i] < 20 or rsi_1d_aligned[i] < 30):
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA20_4h_EMA50_1d_VolumeFilter_Session"
-timeframe = "1h"
+name = "12h_ADX25_RSI_VolumeFilter_1dTrend"
+timeframe = "12h"
 leverage = 1.0
