@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R4_S4_Breakout_1dTrend_Volume_Spike
-Hypothesis: Use price closing beyond stronger Camarilla R4/S4 levels (extreme breakout levels) combined with volume spike and daily EMA34 trend filter. R4/S4 breakouts indicate very strong momentum with minimal false signals. Target 15-30 trades/year to avoid fee drag. Works in both bull (breakouts continue) and bear (false breakdowns reversed quickly) by requiring strong momentum confirmation.
+12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike_v2
+Hypothesis: Use price closing beyond stronger Camarilla R3/S3 levels (most significant breakout levels) combined with volume spike and daily EMA34 trend filter. R3/S3 breakouts indicate very strong momentum with minimal false signals. Target 12-25 trades/year to avoid fee drag. Works in both bull (breakouts continue) and bear (false breakdowns reversed quickly) by requiring strong momentum confirmation.
 """
 
 import numpy as np
@@ -31,13 +31,13 @@ def generate_signals(prices):
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     range_ = df_1d['high'] - df_1d['low']
     
-    # Camarilla R4 and S4 (extreme breakout levels)
-    r4 = typical_price + (range_ * 1.1 / 2)
-    s4 = typical_price - (range_ * 1.1 / 2)
+    # Camarilla R3 and S3 (strongest breakout levels)
+    r3 = typical_price + (range_ * 1.1 / 4)
+    s3 = typical_price - (range_ * 1.1 / 4)
     
     # Align levels to 12h timeframe (use previous day's levels)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
     # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,36 +52,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_1d_aligned[i]
-        r4_level = r4_aligned[i]
-        s4_level = s4_aligned[i]
+        r3_level = r3_aligned[i]
+        s3_level = s3_aligned[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: price closes above R4 + volume spike + uptrend (price > EMA34)
-            if close[i] > r4_level and vol_spike_val and close[i] > ema_trend:
+            # Long: price closes above R3 + volume spike + uptrend (price > EMA34)
+            if close[i] > r3_level and vol_spike_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: price closes below S4 + volume spike + downtrend (price < EMA34)
-            elif close[i] < s4_level and vol_spike_val and close[i] < ema_trend:
+            # Short: price closes below S3 + volume spike + downtrend (price < EMA34)
+            elif close[i] < s3_level and vol_spike_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below S4 or trend turns down
-            if close[i] < s4_level or close[i] < ema_trend:
+            # Exit long: price closes below S3 or trend turns down
+            if close[i] < s3_level or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above R4 or trend turns up
-            if close[i] > r4_level or close[i] > ema_trend:
+            # Exit short: price closes above R3 or trend turns up
+            if close[i] > r3_level or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R4_S4_Breakout_1dTrend_Volume_Spike"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike"
 timeframe = "12h"
 leverage = 1.0
