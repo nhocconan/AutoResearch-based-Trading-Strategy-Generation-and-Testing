@@ -13,58 +13,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period ATR
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                               np.abs(low_1d[1:] - close_1d[:-1])))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate Camarilla pivot levels from previous day
+    # Camarilla: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
+    # We'll use H3 and L3 for tighter levels: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
+    for i in range(1, len(close_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        camarilla_h3[i] = prev_close + 1.1 * (prev_high - prev_low) / 4
+        camarilla_l3[i] = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    atr_14 = np.full(len(tr), np.nan)
-    for i in range(14, len(tr)):
-        atr_14[i] = np.nanmean(tr[i-13:i+1])
-    
-    # Get 1w data for weekly trend filter (EMA20)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly EMA20
-    ema_period = 20
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= ema_period:
-        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
-        for i in range(ema_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
-                         ema_1w[i-1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 12h EMA50
+    ema_period = 50
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= ema_period:
+        ema_12h[ema_period - 1] = np.mean(close_12h[:ema_period])
+        for i in range(ema_period, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * (2 / (ema_period + 1)) + 
+                         ema_12h[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Get 1d data for daily EMA20
-    close_1d = df_1d['close'].values
+    # Align indicators to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate daily EMA20
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
-                         ema_1d[i-1] * (1 - (2 / (ema_period + 1))))
-    
-    # Align indicators to primary timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume filter: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
@@ -74,47 +65,46 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ATR, EMAs, and volume MA
-    start_idx = max(14, ema_period, vol_period)
+    # Warmup: need Camarilla, EMA, and volume MA
+    start_idx = max(1, ema_period, vol_period)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_14_aligned[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price > daily EMA20 AND > weekly EMA20 AND volume spike
-            if (price > ema_1d_aligned[i] and 
-                price > ema_1w_aligned[i] and 
-                vol_ratio > 2.0):
+            # Long: Price crosses above Camarilla H3 + volume spike + above 12h EMA50
+            if (price > camarilla_h3_aligned[i] and 
+                vol_ratio > 1.3 and 
+                price > ema_12h_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: Price < daily EMA20 AND < weekly EMA20 AND volume spike
-            elif (price < ema_1d_aligned[i] and 
-                  price < ema_1w_aligned[i] and 
-                  vol_ratio > 2.0):
+            # Short: Price crosses below Camarilla L3 + volume spike + below 12h EMA50
+            elif (price < camarilla_l3_aligned[i] and 
+                  vol_ratio > 1.3 and 
+                  price < ema_12h_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price < daily EMA20 OR ATR-based stop
-            if (price < ema_1d_aligned[i] or 
-                price < ema_1d_aligned[i] - 2.0 * atr):
+            # Long exit: Price crosses below Camarilla L3 OR loses trend
+            if (price < camarilla_l3_aligned[i] or 
+                price < ema_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price > daily EMA20 OR ATR-based stop
-            if (price > ema_1d_aligned[i] or 
-                price > ema_1d_aligned[i] + 2.0 * atr):
+            # Short exit: Price crosses above Camarilla H3 OR loses trend
+            if (price > camarilla_h3_aligned[i] or 
+                price > ema_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_DualEMA_Volume_ATR_Trend"
-timeframe = "1d"
+name = "12h_Camarilla_H3L3_12hEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
