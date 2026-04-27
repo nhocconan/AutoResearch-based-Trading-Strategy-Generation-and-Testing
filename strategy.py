@@ -13,45 +13,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for calculations (called ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for calculations (called ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h RSI (14-period)
-    close_12h = df_12h['close'].values
-    delta = np.diff(close_12h)
-    delta = np.insert(delta, 0, 0)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1-day close prices
+    close_1d = df_1d['close'].values
     
-    avg_gain = np.full(len(close_12h), np.nan)
-    avg_loss = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 14:
-        avg_gain[13] = np.mean(gain[1:15])
-        avg_loss[13] = np.mean(loss[1:15])
-        for i in range(14, len(close_12h)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Calculate 1-day Donchian channel (20-period) - vectorized
+    upper = np.full(len(close_1d), np.nan)
+    lower = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        # Use pandas rolling for vectorized calculation
+        close_series = pd.Series(close_1d)
+        upper = close_series.rolling(window=20, min_periods=20).max().values
+        lower = close_series.rolling(window=20, min_periods=20).min().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_12h = 100 - (100 / (1 + rs))
+    # Calculate 1-day ATR (14-period) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]
     
-    # Calculate 12h EMA (50-period) for trend filter
-    ema_50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - close_1d_prev)
+    tr3 = np.abs(low_1d - close_1d_prev)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr_14_1d = np.full(len(tr), np.nan)
+    if len(tr) >= 14:
+        # Wilder's smoothing
+        atr_14_1d[13] = np.mean(tr[1:15])
+        for i in range(14, len(tr)):
+            atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
+    
+    # Calculate 1-day EMA (50-period) for trend filter
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
         alpha = 2 / (50 + 1)
-        ema_50_12h[0] = close_12h[0]
-        for i in range(1, len(close_12h)):
-            ema_50_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_50_12h[i-1]
+        ema_50_1d[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
+            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Align 12h indicators to 6h timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 1d indicators to 4h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 6-period volume average for spike detection
+    # Calculate 4-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 6
+    vol_period = 4
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -60,10 +73,11 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(14, vol_period) + 5
+    start_idx = max(20, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -75,26 +89,26 @@ def generate_signals(prices):
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: RSI oversold (<30), price above EMA50 (uptrend), volume spike
-            if rsi_12h_aligned[i] < 30 and price > ema_50_12h_aligned[i] and vol_filter:
+            # Long: Price breaks above upper Donchian with volume and above EMA50 trend
+            if price > upper_1d_aligned[i] and vol_filter and price > ema_50_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: RSI overbought (>70), price below EMA50 (downtrend), volume spike
-            elif rsi_12h_aligned[i] > 70 and price < ema_50_12h_aligned[i] and vol_filter:
+            # Short: Price breaks below lower Donchian with volume and below EMA50 trend
+            elif price < lower_1d_aligned[i] and vol_filter and price < ema_50_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI overbought (>70) or trend change (price below EMA50)
-            if rsi_12h_aligned[i] > 70 or price < ema_50_12h_aligned[i]:
+            # Long exit: Price closes below lower Donchian or volatility spike (potential reversal)
+            if price < lower_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: RSI oversold (<30) or trend change (price above EMA50)
-            if rsi_12h_aligned[i] < 30 or price > ema_50_12h_aligned[i]:
+            # Short exit: Price closes above upper Donchian or volatility spike (potential reversal)
+            if price > upper_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI12h_EMA50_Volume"
-timeframe = "6h"
+name = "4h_Donchian_20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
