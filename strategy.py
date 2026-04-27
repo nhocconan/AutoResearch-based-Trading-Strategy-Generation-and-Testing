@@ -13,33 +13,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and ATR
+    # Get weekly data for trend filter and ATR
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA34 on weekly close using pandas EWMA with min_periods
+    ema_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
+    
+    # Calculate 14-period ATR using Wilder's smoothing equivalent
+    tr = np.maximum(high_1w[1:] - low_1w[1:], 
+                    np.maximum(np.abs(high_1w[1:] - close_1w[:-1]), 
+                               np.abs(low_1w[1:] - close_1w[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr_1w = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr_1w[i] = np.mean(tr[1:15])
+        else:
+            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
+    
+    # Align weekly indicators to 6h
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    
+    # Get daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on daily close using pandas EWMA with min_periods
-    ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    # Calculate Donchian channels (20-period)
+    high_20 = np.full(len(high_1d), np.nan)
+    low_20 = np.full(len(low_1d), np.nan)
+    for i in range(20-1, len(high_1d)):
+        high_20[i] = np.max(high_1d[i-20+1:i+1])
+        low_20[i] = np.min(low_1d[i-20+1:i+1])
     
-    # Calculate 14-period ATR using Wilder's smoothing equivalent
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                               np.abs(low_1d[1:] - close_1d[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr_1d = np.full(len(tr), np.nan)
-    for i in range(14, len(tr)):
-        if i == 14:
-            atr_1d[i] = np.mean(tr[1:15])
-        else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    # Align daily indicators to 1h
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align Donchian channels to 6h
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
     # Volume filter: current volume > 1.5x 24-period average
     vol_ma = np.full(n, np.nan)
@@ -47,56 +66,51 @@ def generate_signals(prices):
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Warmup: need EMA, ATR, and volume MA
-    start_idx = max(34, 14, vol_period) + 5
+    # Warmup: need EMA, ATR, Donchian, and volume MA
+    start_idx = max(34, 14, 20, vol_period) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
+            np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
             np.isnan(vol_ma[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter
-        if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        atr = atr_1d_aligned[i]
+        atr = atr_1w_aligned[i]
         
         if position == 0:
-            # Long: Price above daily EMA34 with volume confirmation
-            if (price > ema_1d_aligned[i] and 
+            # Long: Price above weekly EMA34, breaks above Donchian high with volume confirmation
+            if (price > ema_1w_aligned[i] and 
+                price > high_20_aligned[i] and 
                 vol_ratio > 1.5):
                 signals[i] = size
                 position = 1
-            # Short: Price below daily EMA34 with volume confirmation
-            elif (price < ema_1d_aligned[i] and 
+            # Short: Price below weekly EMA34, breaks below Donchian low with volume confirmation
+            elif (price < ema_1w_aligned[i] and 
+                  price < low_20_aligned[i] and 
                   vol_ratio > 1.5):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below daily EMA34 or ATR-based stop
-            if (price < ema_1d_aligned[i] or 
+            # Long exit: Price closes below weekly EMA34 or ATR-based stop
+            if (price < ema_1w_aligned[i] or 
                 price < close[i-1] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above daily EMA34 or ATR-based stop
-            if (price > ema_1d_aligned[i] or 
+            # Short exit: Price closes above weekly EMA34 or ATR-based stop
+            if (price > ema_1w_aligned[i] or 
                 price > close[i-1] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
@@ -105,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMA34_Volume_Trend_Filter"
-timeframe = "1h"
+name = "6h_EMA34_Donchian_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
