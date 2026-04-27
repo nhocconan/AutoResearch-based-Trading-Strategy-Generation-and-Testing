@@ -1,13 +1,13 @@
-#!/usr/bin/env python3
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: 4h Camarilla pivot level breakouts (R1/S1) with 1d EMA34 trend filter and volume confirmation
+# Uses Camarilla pivot levels derived from 1d OHLC to identify key support/resistance levels.
+# Breakouts above R1 (with uptrend) go long, breakdowns below S1 (with downtrend) go short.
+# Volume confirmation ensures breakouts have conviction. Works in both bull and bear markets
+# by following the 1d trend direction. Target: 20-40 trades/year to minimize fee decay.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Bollinger Band width regime filter with 12h EMA trend and volume confirmation
-# Uses Bollinger Band width to detect low volatility (squeeze) conditions, then breaks out in the direction
-# of the 12h EMA trend with volume confirmation. Works in both bull and bear markets by adapting to
-# volatility regimes - squeezes often precede significant moves regardless of direction.
-# Target: 20-40 trades/year to minimize fee decay while capturing explosive moves after low volatility
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,118 +19,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Bollinger Bands (primary timeframe)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 30:
+    # Get 1d data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate Camarilla pivot levels from 1d OHLC
+    # R4 = Close + (High - Low) * 1.1/2
+    # R3 = Close + (High - Low) * 1.1/4
+    # R2 = Close + (High - Low) * 1.1/6
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    # S2 = Close - (High - Low) * 1.1/6
+    # S3 = Close - (High - Low) * 1.1/4
+    # S4 = Close - (High - Low) * 1.1/2
     
-    # Calculate 20-period Bollinger Bands on 6h
-    close_6h = df_6h['close'].values
-    bb_length = 20
-    bb_mult = 2.0
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate SMA and standard deviation
-    sma_6h = np.full(len(close_6h), np.nan)
-    std_dev_6h = np.full(len(close_6h), np.nan)
+    # Calculate Camarilla levels
+    camarilla_r1 = np.full(len(close_1d), np.nan)
+    camarilla_s1 = np.full(len(close_1d), np.nan)
     
-    for i in range(bb_length - 1, len(close_6h)):
-        sma_6h[i] = np.mean(close_6h[i-bb_length+1:i+1])
-        std_dev_6h[i] = np.std(close_6h[i-bb_length+1:i+1])
+    for i in range(len(close_1d)):
+        high_val = high_1d[i]
+        low_val = low_1d[i]
+        close_val = close_1d[i]
+        if not (np.isnan(high_val) or np.isnan(low_val) or np.isnan(close_val)):
+            camarilla_r1[i] = close_val + (high_val - low_val) * 1.1 / 12
+            camarilla_s1[i] = close_val - (high_val - low_val) * 1.1 / 12
     
-    # Calculate upper and lower bands
-    bb_upper_6h = sma_6h + (bb_mult * std_dev_6h)
-    bb_lower_6h = sma_6h - (bb_mult * std_dev_6h)
-    bb_width_6h = bb_upper_6h - bb_lower_6h
-    
-    # Calculate Bollinger Band width percentile (20-period lookback)
-    bb_width_percentile = np.full(len(bb_width_6h), np.nan)
-    lookback = 20
-    for i in range(lookback, len(bb_width_6h)):
-        if not np.isnan(bb_width_6h[i-lookback:i+1]).any():
-            current_width = bb_width_6h[i]
-            historical_widths = bb_width_6h[i-lookback:i+1]
-            # Calculate percentile rank of current width
-            bb_width_percentile[i] = (np.sum(historical_widths <= current_width) / len(historical_widths)) * 100
-    
-    # Calculate 12-period EMA on 12h for trend filter
-    close_12h = df_12h['close'].values
-    ema_len = 12
-    ema_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= ema_len:
+    # Calculate 34-period EMA on 1d for trend filter
+    ema_1d = np.full(len(close_1d), np.nan)
+    ema_len = 34
+    if len(close_1d) >= ema_len:
         multiplier = 2 / (ema_len + 1)
-        ema_12h[ema_len-1] = np.mean(close_12h[:ema_len])
-        for i in range(ema_len, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * multiplier) + (ema_12h[i-1] * (1 - multiplier))
+        ema_1d[ema_len-1] = np.mean(close_1d[:ema_len])
+        for i in range(ema_len, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Calculate average volume on 6h for spike detection
-    vol_6h = df_6h['volume'].values
-    vol_ma_6h = np.full(len(vol_6h), np.nan)
-    vol_period = 6
-    for i in range(vol_period, len(vol_6h)):
-        vol_ma_6h[i] = np.mean(vol_6h[i-vol_period:i])
+    # Calculate average volume on 1d for spike detection
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = np.full(len(vol_1d), np.nan)
+    vol_period = 20
+    for i in range(vol_period, len(vol_1d)):
+        vol_ma_1d[i] = np.mean(vol_1d[i-vol_period:i])
     
-    # Align all indicators to 6h timeframe
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_6h, bb_width_percentile)
-    bb_upper_6h_aligned = align_htf_to_ltf(prices, df_6h, bb_upper_6h)
-    bb_lower_6h_aligned = align_htf_to_ltf(prices, df_6h, bb_lower_6h)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
+    # Align all indicators to 4h timeframe (primary)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
     # Warmup period
-    start_idx = max(30, 50) + 10
+    start_idx = max(34, 20) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(bb_width_percentile_aligned[i]) or 
-            np.isnan(bb_upper_6h_aligned[i]) or 
-            np.isnan(bb_lower_6h_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or 
-            np.isnan(vol_ma_6h_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_6h_aligned[i] if vol_ma_6h_aligned[i] > 0 else 0
-        
-        # Volatility squeeze condition: BB width in lowest 20% of recent range
-        volatility_squeeze = bb_width_percentile_aligned[i] < 20
+        vol_ratio = volume[i] / vol_ma_1d_aligned[i] if vol_ma_1d_aligned[i] > 0 else 0
         
         # Volume confirmation: at least 1.5x average volume
         volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Bollinger band breakout above upper band with low volatility and uptrend
-            if price > bb_upper_6h_aligned[i] and volatility_squeeze and price > ema_12h_aligned[i] and volume_confirmation:
+            # Long: Breakout above R1 with uptrend and volume
+            if price > camarilla_r1_aligned[i] and price > ema_1d_aligned[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: Bollinger band breakout below lower band with low volatility and downtrend
-            elif price < bb_lower_6h_aligned[i] and volatility_squeeze and price < ema_12h_aligned[i] and volume_confirmation:
+            # Short: Breakdown below S1 with downtrend and volume
+            elif price < camarilla_s1_aligned[i] and price < ema_1d_aligned[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below Bollinger middle band or volatility expands significantly
-            bb_middle_6h_aligned = (bb_upper_6h_aligned[i] + bb_lower_6h_aligned[i]) / 2
-            volatility_expansion = bb_width_percentile_aligned[i] > 80
-            if price < bb_middle_6h_aligned or volatility_expansion:
+            # Long exit: Price closes below S1 or trend reverses
+            if price < camarilla_s1_aligned[i] or price < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above Bollinger middle band or volatility expands significantly
-            bb_middle_6h_aligned = (bb_upper_6h_aligned[i] + bb_lower_6h_aligned[i]) / 2
-            volatility_expansion = bb_width_percentile_aligned[i] > 80
-            if price > bb_middle_6h_aligned or volatility_expansion:
+            # Short exit: Price closes above R1 or trend reverses
+            if price > camarilla_r1_aligned[i] or price > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -138,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Bollinger_Width_Squeeze_12hEMA_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
