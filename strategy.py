@@ -1,13 +1,6 @@
-#!/usr/bin/env python3
-"""
-4h_PriceAction_12hTrend_VolumeFilter
-Hypothesis: Price action breakout from 4h support/resistance with 12h trend filter and volume confirmation.
-Long when price breaks above 4h resistance with volume > 1.5x average and 12h uptrend.
-Short when price breaks below 4h support with volume > 1.5x average and 12h downtrend.
-Exit when price returns to 4h midpoint or trend reverses.
-Designed to capture strong momentum moves while avoiding false breakouts in low volume.
-Target: 25-40 trades/year to minimize fee drag while capturing major moves.
-"""
+# 1d_WeeklyBreakout_Pullback_v2
+# Hypothesis: On 1d timeframe, take long positions when price breaks above weekly high with pullback to 20 EMA, and short positions when price breaks below weekly low with pullback to 20 EMA. Uses weekly trend filter (price above/below weekly 50 EMA) and volume confirmation (1.5x average). Designed to capture momentum with pullback entries for better risk-reward, working in both bull and bear markets by following the weekly trend.
+# Target: 15-25 trades/year to minimize fee drag while capturing significant moves.
 
 import numpy as np
 import pandas as pd
@@ -23,84 +16,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get weekly data for trend and breakout levels
+    df_weekly = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 2:
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA(34) for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h_period = 34
-    ema_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= ema_12h_period:
-        ema_12h[ema_12h_period - 1] = np.mean(close_12h[:ema_12h_period])
-        multiplier = 2 / (ema_12h_period + 1)
-        for i in range(ema_12h_period, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * multiplier) + (ema_12h[i-1] * (1 - multiplier))
+    # Calculate weekly 50 EMA for trend filter
+    close_weekly = df_weekly['close'].values
+    weekly_ema_period = 50
+    weekly_ema = np.full(len(close_weekly), np.nan)
+    if len(close_weekly) >= weekly_ema_period:
+        weekly_ema[weekly_ema_period - 1] = np.mean(close_weekly[:weekly_ema_period])
+        multiplier = 2 / (weekly_ema_period + 1)
+        for i in range(weekly_ema_period, len(close_weekly)):
+            weekly_ema[i] = (close_weekly[i] * multiplier) + (weekly_ema[i-1] * (1 - multiplier))
     
-    # Calculate 4h resistance/support (14-period high/low)
-    resistance_14 = np.full(n, np.nan)
-    support_14 = np.full(n, np.nan)
-    for i in range(14, n):
-        resistance_14[i] = np.max(high[i-14:i])
-        support_14[i] = np.min(low[i-14:i])
+    # Calculate weekly high and low for breakout levels
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     
-    # Calculate 4h volume average (14-period)
-    vol_ma_14 = np.full(n, np.nan)
-    for i in range(14, n):
-        vol_ma_14[i] = np.mean(volume[i-14:i])
+    # Calculate daily 20 EMA for pullback entries
+    ema_period = 20
+    ema = np.full(n, np.nan)
+    if n >= ema_period:
+        ema[ema_period - 1] = np.mean(close[:ema_period])
+        multiplier = 2 / (ema_period + 1)
+        for i in range(ema_period, n):
+            ema[i] = (close[i] * multiplier) + (ema[i-1] * (1 - multiplier))
     
-    # Align 12h EMA to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate daily volume average (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    
+    # Align weekly indicators to daily timeframe
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup: need all indicators
-    start_idx = max(14, 34)  # 4h range needs 14, EMA needs 34
+    start_idx = max(20, 50)  # daily EMA needs 20, weekly EMA needs 50
     
     for i in range(start_idx, n):
-        if (np.isnan(resistance_14[i]) or
-            np.isnan(support_14[i]) or
-            np.isnan(vol_ma_14[i]) or
-            np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(weekly_high_aligned[i]) or
+            np.isnan(weekly_low_aligned[i]) or
+            np.isnan(weekly_ema_aligned[i]) or
+            np.isnan(ema[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_14[i] if vol_ma_14[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend filter: 12h EMA34
-        uptrend = price > ema_12h_aligned[i]
-        downtrend = price < ema_12h_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = price > weekly_ema_aligned[i]
+        weekly_downtrend = price < weekly_ema_aligned[i]
         
         # Volume confirmation: > 1.5x average volume
         volume_confirmation = vol_ratio > 1.5
         
+        # Pullback to daily 20 EMA (within 1%)
+        pullback_to_ema = abs(price - ema[i]) / ema[i] < 0.01
+        
         if position == 0:
-            # Long: break above 4h resistance with volume and uptrend
-            if uptrend and volume_confirmation and price > resistance_14[i]:
+            # Long: break above weekly high with pullback to EMA, volume, and weekly uptrend
+            if weekly_uptrend and volume_confirmation and pullback_to_ema and price > weekly_high_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 4h support with volume and downtrend
-            elif downtrend and volume_confirmation and price < support_14[i]:
+            # Short: break below weekly low with pullback to EMA, volume, and weekly downtrend
+            elif weekly_downtrend and volume_confirmation and pullback_to_ema and price < weekly_low_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: return to 4h midpoint or trend reversal
-            midpoint = (resistance_14[i] + support_14[i]) / 2
-            if price < midpoint or price <= ema_12h_aligned[i]:
+            # Long exit: price breaks below weekly low or weekly trend turns down
+            if price < weekly_low_aligned[i] or price <= weekly_ema_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: return to 4h midpoint or trend reversal
-            midpoint = (resistance_14[i] + support_14[i]) / 2
-            if price > midpoint or price >= ema_12h_aligned[i]:
+            # Short exit: price breaks above weekly high or weekly trend turns up
+            if price > weekly_high_aligned[i] or price >= weekly_ema_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PriceAction_12hTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_WeeklyBreakout_Pullback_v2"
+timeframe = "1d"
 leverage = 1.0
