@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud (10,26,52) with weekly trend filter and volume confirmation.
-- Ichimoku Cloud (Tenkan/Kijun cross + price vs cloud) provides trend direction and support/resistance
-- Weekly EMA200 filter ensures alignment with long-term trend, reducing counter-trend trades
-- Volume spike (1.5x 20-period average) confirms institutional participation
-- Target: 20-40 trades/year to avoid fee drag
+Hypothesis: 4h Camarilla pivot level breakout with volume confirmation and 1-day EMA trend filter.
+- Camarilla levels (R1-S1) act as support/resistance; breakouts indicate momentum
+- Volume spike confirms institutional participation (volume > 1.5x 20-period avg)
+- 1-day EMA(50) filters for trend direction: only long above EMA, short below
+- Exit on opposite Camarilla level touch or volume dry-up
+- Target: 25-40 trades/year to avoid fee drag
 - Uses discrete position sizing (0.25) to minimize churn
-- Works in bull/bear: Cloud acts as dynamic support/resistance, weekly filter avoids counter-trend
 """
 
 import numpy as np
@@ -15,76 +15,60 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA200
-    ema_200_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 200:
-        ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False).values
+    # Calculate Camarilla levels (based on previous day)
+    camarilla_r1 = np.full(len(high_1d), np.nan)
+    camarilla_s1 = np.full(len(high_1d), np.nan)
+    camarilla_r2 = np.full(len(high_1d), np.nan)
+    camarilla_s2 = np.full(len(high_1d), np.nan)
+    camarilla_r3 = np.full(len(high_1d), np.nan)
+    camarilla_s3 = np.full(len(high_1d), np.nan)
     
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    for i in range(1, len(high_1d)):
+        # Previous day's range
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_ = prev_high - prev_low
+        
+        # Camarilla formulas
+        camarilla_r1[i] = prev_close + range_ * 1.1 / 12
+        camarilla_s1[i] = prev_close - range_ * 1.1 / 12
+        camarilla_r2[i] = prev_close + range_ * 1.1 / 6
+        camarilla_s2[i] = prev_close - range_ * 1.1 / 6
+        camarilla_r3[i] = prev_close + range_ * 1.1 / 4
+        camarilla_s3[i] = prev_close - range_ * 1.1 / 4
     
-    # Ichimoku components (9,26,52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = np.full(n, np.nan)
-    period9_low = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 8:
-            period9_high[i] = np.max(high[i-8:i+1])
-            period9_low[i] = np.min(low[i-8:i+1])
-        else:
-            period9_high[i] = np.max(high[:i+1]) if i >= 0 else np.nan
-            period9_low[i] = np.min(low[:i+1]) if i >= 0 else np.nan
-    tenkan = (period9_high + period9_low) / 2
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = np.full(n, np.nan)
-    period26_low = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 25:
-            period26_high[i] = np.max(high[i-25:i+1])
-            period26_low[i] = np.min(low[i-25:i+1])
-        else:
-            period26_high[i] = np.max(high[:i+1]) if i >= 0 else np.nan
-            period26_low[i] = np.min(low[:i+1]) if i >= 0 else np.nan
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = np.full(n, np.nan)
-    period52_low = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 51:
-            period52_high[i] = np.max(high[i-51:i+1])
-            period52_low[i] = np.min(low[i-51:i+1])
-        else:
-            period52_high[i] = np.max(high[:i+1]) if i >= 0 else np.nan
-            period52_low[i] = np.min(low[:i+1]) if i >= 0 else np.nan
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Current Ichimoku cloud (Senkou Span A/B from 26 periods ago)
-    senkou_a_lag = np.roll(senkou_a, 26)
-    senkou_b_lag = np.roll(senkou_b, 26)
-    senkou_a_lag[:26] = np.nan
-    senkou_b_lag[:26] = np.nan
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_lag, senkou_b_lag)
-    cloud_bottom = np.minimum(senkou_a_lag, senkou_b_lag)
+    # Calculate 1-day EMA(50)
+    ema_50 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50[i] = close_1d[i] * 0.0377 + ema_50[i-1] * (1 - 0.0377)  # alpha = 2/(50+1)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Volume spike: current volume > 1.5 * 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -96,44 +80,44 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup: need enough data for all indicators
-    start_idx = max(52, 100)
+    start_idx = max(30, 50)
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price above cloud + Tenkan > Kijun + weekly uptrend + volume spike
-            if (close[i] > cloud_top[i] and 
-                tenkan[i] > kijun[i] and 
-                close[i] > ema_200_1w_aligned[i] and 
-                volume_spike[i]):
+            # Long entry: price breaks above R1 + volume spike + price above EMA50
+            if (close[i] > camarilla_r1_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below cloud + Tenkan < Kijun + weekly downtrend + volume spike
-            elif (close[i] < cloud_bottom[i] and 
-                  tenkan[i] < kijun[i] and 
-                  close[i] < ema_200_1w_aligned[i] and 
-                  volume_spike[i]):
+            # Short entry: price breaks below S1 + volume spike + price below EMA50
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price below cloud OR Tenkan < Kijun (trend weakening)
-            if (close[i] < cloud_bottom[i] or 
-                tenkan[i] < kijun[i]):
+            # Long exit: price touches S1 OR volume dry-up (volume < 0.5 * MA20)
+            volume_dry = volume[i] < (0.5 * vol_ma_20[i]) if not np.isnan(vol_ma_20[i]) else False
+            if (close[i] <= camarilla_s1_aligned[i] or 
+                volume_dry):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price above cloud OR Tenkan > Kijun (trend weakening)
-            if (close[i] > cloud_top[i] or 
-                tenkan[i] > kijun[i]):
+            # Short exit: price touches R1 OR volume dry-up
+            volume_dry = volume[i] < (0.5 * vol_ma_20[i]) if not np.isnan(vol_ma_20[i]) else False
+            if (close[i] >= camarilla_r1_aligned[i] or 
+                volume_dry):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IchimokuCloud_WeeklyEMA200_Volume_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_VolumeSpike_EMA50_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
