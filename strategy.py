@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour strategy using Donchian breakout with volume confirmation and ADX trend filter.
-# Donchian channels provide clear breakout signals; volume surge confirms institutional participation.
-# ADX > 25 ensures we only trade in trending markets, avoiding choppy conditions.
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
-# Works in bull markets (upward breakouts) and bear markets (downward breakouts).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1-day EMA34 trend filter and volume confirmation.
+# Bull Power = High - EMA13 (buying strength), Bear Power = EMA13 - Low (selling strength).
+# In bull markets: Buy when Bull Power > 0 and rising, price > EMA34, volume spike.
+# In bear markets: Sell when Bear Power > 0 and rising, price < EMA34, volume spike.
+# Elder Ray captures institutional buying/selling pressure; EMA34 filter avoids counter-trend trades.
+# Volume spike (>1.5x 20-period average) confirms conviction.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,25 +21,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1d data for Elder Ray calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # ADX for trend filter (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA13 for Elder Ray (13-period EMA of close)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power_1d = high_1d - ema13_1d  # Buying strength
+    bear_power_1d = ema13_1d - low_1d   # Selling strength
+    
+    # Align Elder Ray components to 6h timeframe (wait for 1d bar to close)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
+    
+    # Rising momentum: current value > previous value
+    bull_power_rising = bull_power_aligned > np.roll(bull_power_aligned, 1)
+    bear_power_rising = bear_power_aligned > np.roll(bear_power_aligned, 1)
+    # Handle first bar
+    bull_power_rising[0] = False
+    bear_power_rising[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,28 +64,30 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price breaks above Donchian high with strong trend and volume
-        if (close[i] > donchian_high[i] and 
-            adx[i] > 25 and 
+        # Long entry: Bull Power > 0 and rising, price > EMA34, volume spike
+        if (bull_power_aligned[i] > 0 and 
+            bull_power_rising[i] and 
+            close[i] > ema34_1d_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short breakdown: price breaks below Donchian low with strong trend and volume
-        elif (close[i] < donchian_low[i] and 
-              adx[i] > 25 and 
+        # Short entry: Bear Power > 0 and rising, price < EMA34, volume spike
+        elif (bear_power_aligned[i] > 0 and 
+              bear_power_rising[i] and 
+              close[i] < ema34_1d_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend weakening or opposite breakout
-        elif position == 1 and (adx[i] < 20 or close[i] < donchian_low[i]):
+        # Exit conditions: reverse signal or loss of momentum
+        elif position == 1 and (bull_power_aligned[i] <= 0 or not bull_power_rising[i]):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (adx[i] < 20 or close[i] > donchian_high[i]):
+        elif position == -1 and (bear_power_aligned[i] <= 0 or not bear_power_rising[i]):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -82,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_ADX25_VolumeFilter"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA34_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
