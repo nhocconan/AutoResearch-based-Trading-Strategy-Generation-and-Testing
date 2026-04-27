@@ -3,122 +3,127 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h 1-week Donchian breakout with 1-day volume confirmation and ADX trend filter.
-# Long when price breaks above 1-week Donchian upper with ADX > 20 and volume > 1.5x average.
-# Short when price breaks below 1-week Donchian lower with ADX > 20 and volume > 1.5x average.
-# Exit when price crosses the 1-week Donchian midpoint (reduces whipsaw).
-# Uses 1-week trend for direction and 1-day volume for confirmation to capture sustained moves.
-# Target: 12-37 trades/year to minimize fee decay while capturing strong trends.
+# Hypothesis: 4h KAMA (Adaptive Moving Average) with RSI and chop filter.
+# Uses KAMA trend direction (above/below) + RSI(14) for momentum + Choppiness Index for regime.
+# Long when KAMA rising, RSI > 50, and CHOP < 40 (trending market).
+# Short when KAMA falling, RSI < 50, and CHOP < 40.
+# Exit when CHOP > 60 (choppy market) or RSI crosses 50 opposite.
+# Aims for 20-40 trades/year by requiring trend + momentum + low chop.
+# KAMA adapts to market noise, reducing false signals in chop.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1-week data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # KAMA parameters
+    er_length = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=1))
+    change = np.insert(change, 0, 0)  # align length
+    abs_change = np.abs(np.diff(close, n=1))
+    abs_change = np.insert(abs_change, 0, 0)
     
-    # 1-week Donchian channels (20-period)
-    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_mid_1w = (donchian_high_1w + donchian_low_1w) / 2
+    # ER = |net change| / sum(abs changes) over er_length period
+    net_change = np.zeros(n)
+    total_change = np.zeros(n)
+    for i in range(er_length, n):
+        net_change[i] = np.abs(close[i] - close[i-er_length])
+        total_change[i] = np.sum(abs_change[i-er_length+1:i+1])
     
-    # Align 1-week Donchian levels to 12h timeframe
-    donchian_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
-    donchian_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
-    donchian_mid_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid_1w)
+    # Avoid division by zero
+    er = np.zeros(n)
+    er[total_change != 0] = net_change[total_change != 0] / total_change[total_change != 0]
     
-    # Get 1-day data for volume and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
+    # Smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # 1-day volume average (20-period)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # RSI(14)
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # 1-day ADX (14-period)
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    rs = np.zeros(n)
+    rs[avg_loss != 0] = avg_gain[avg_loss != 0] / avg_loss[avg_loss != 0]
+    rsi = 100 - (100 / (1 + rs))
+    rsi[avg_loss == 0] = 100  # when no loss, RSI=100
     
-    # Smooth TR, +DM, -DM (14-period)
-    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Choppiness Index (14-period)
+    atr = np.zeros(n)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0]-low[0], np.abs(high[0]-close[0]), np.abs(low[0]-close[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-13:i+1])
     
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
+    # Highest high and lowest low over 14 periods
+    hh = np.zeros(n)
+    ll = np.zeros(n)
+    for i in range(14, n):
+        hh[i] = np.max(high[i-13:i+1])
+        ll[i] = np.min(low[i-13:i+1])
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Chop = 100 * log10(sum(ATR14) / (HH - LL)) / log10(14)
+    chop = np.zeros(n)
+    for i in range(14, n):
+        if hh[i] > ll[i]:
+            sum_atr = np.sum(atr[i-13:i+1])
+            chop[i] = 100 * np.log10(sum_atr / (hh[i] - ll[i])) / np.log10(14)
+        else:
+            chop[i] = 50  # default when range is zero
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
+    # Signals
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 50
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(donchian_high_1w_aligned[i]) or np.isnan(donchian_low_1w_aligned[i]) or 
-            np.isnan(donchian_mid_1w_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        # Skip if any data is NaN
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: volume > 1.5x average
-        volume_filter = volume[i] > (vol_ma_1d_aligned[i] * 1.5)
-        
-        # Long condition: price breaks above Donchian high, ADX > 20, volume spike
-        if (close[i] > donchian_high_1w_aligned[i] and 
-            adx_aligned[i] > 20 and 
-            volume_filter):
+        # Long: KAMA up, RSI > 50, low chop (trending)
+        if kama[i] > kama[i-1] and rsi[i] > 50 and chop[i] < 40:
             signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below Donchian low, ADX > 20, volume spike
-        elif (close[i] < donchian_low_1w_aligned[i] and 
-              adx_aligned[i] > 20 and 
-              volume_filter):
+        # Short: KAMA down, RSI < 50, low chop (trending)
+        elif kama[i] < kama[i-1] and rsi[i] < 50 and chop[i] < 40:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price crosses Donchian midpoint
-        elif position == 1 and close[i] < donchian_mid_1w_aligned[i]:
+        # Exit: choppy market or RSI crosses 50 opposite
+        elif position == 1 and (chop[i] > 60 or rsi[i] < 50):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > donchian_mid_1w_aligned[i]:
+        elif position == -1 and (chop[i] > 60 or rsi[i] > 50):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -132,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1wDonchian20_1dADX20_VolumeFilter"
-timeframe = "12h"
+name = "4h_KAMA_RSI_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
