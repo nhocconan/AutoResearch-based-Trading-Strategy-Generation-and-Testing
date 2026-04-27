@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ADX_WilliamsAlligator_Trend_Strategy
-Hypothesis: Combines ADX trend strength with Williams Alligator (smoothed medians) to capture strong 6h trends while avoiding chop. Uses 1d ADX > 25 for trend regime, and Alligator (Jaw/Teeth/Lips) alignment for entry/exit. Works in bull/bear by following trend direction. Discrete sizing (0.25) minimizes fee drag. Target: 50-150 total trades over 4 years.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts on 12h with 1d EMA34 trend filter and volume spike confirmation. Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year). Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear markets by following 1d trend direction while using Camarilla R3/S3 levels for breakout confirmation. Volume spike filter reduces false breakouts. ATR-based trailing stop manages risk without look-ahead.
 """
 
 import numpy as np
@@ -16,120 +16,106 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for EMA trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ADX(14) for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA34 for trend filter
+    close_1d_series = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first value
+    # Calculate 1d OHLC for Camarilla levels
+    o_1d = df_1d['open'].values
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Camarilla levels: R3/S3 from 1d OHLC (wider than R1/S1 for stronger breakout signals)
+    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    camarilla_r3 = c_1d + (h_1d - l_1d) * 1.1 / 4
+    camarilla_s3 = c_1d - (h_1d - l_1d) * 1.1 / 4
     
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Align 1d indicators to 12h timeframe (completed bars only)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    period = 14
-    atr = wilders_smoothing(tr, period)
-    plus_dm_smooth = wilders_smoothing(plus_dm, period)
-    minus_dm_smooth = wilders_smoothing(minus_dm, period)
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = wilders_smoothing(dx, period)
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Williams Alligator on 6h data (smoothed medians)
-    # Jaw: 13-period SMMA, shifted 8 bars
-    # Teeth: 8-period SMMA, shifted 5 bars
-    # Lips: 5-period SMMA, shifted 3 bars
-    median_price = (high + low) / 2
-    
-    def smma(data, period):
-        result = np.zeros_like(data)
-        result[0] = data[0]
-        for i in range(1, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    jaw = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
-    
-    # Shift as per Alligator definition
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    # Fill shifted values with NaN for validity check
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.25   # Position size: 25% of capital (discrete level)
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Warmup: need ADX (14+14=28) and Alligator (max shift 8)
-    start_idx = max(28, 8)
+    # Warmup: need 1d EMA34 (34) + volume avg (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(jaw_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        adx_val = adx_aligned[i]
-        jaw_val = jaw_shifted[i]
-        teeth_val = teeth_shifted[i]
-        lips_val = lips_shifted[i]
         close_val = close[i]
+        ema_val = ema_34_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: ADX > 25 (strong trend) + Alligator alignment
-            # Long: ADX > 25 AND Lips > Teeth > Jaw (bullish alignment)
-            # Short: ADX > 25 AND Lips < Teeth < Jaw (bearish alignment)
-            if adx_val > 25:
-                if lips_val > teeth_val > jaw_val:
-                    signals[i] = size
-                    position = 1
-                elif lips_val < teeth_val < jaw_val:
-                    signals[i] = -size
-                    position = -1
+            # Look for entry: Camarilla R3/S3 breakout with 1d EMA34 trend filter AND volume spike
+            # Long: price closes above R3 AND above EMA34 (1d uptrend) AND volume spike
+            long_condition = (close_val > r3_val) and (close_val > ema_val) and vol_conf
+            # Short: price closes below S3 AND below EMA34 (1d downtrend) AND volume spike
+            short_condition = (close_val < s3_val) and (close_val < ema_val) and vol_conf
+            
+            if long_condition:
+                signals[i] = size
+                position = 1
+                entry_price = close_val
+                highest_since_entry = close_val
+            elif short_condition:
+                signals[i] = -size
+                position = -1
+                entry_price = close_val
+                lowest_since_entry = close_val
         elif position == 1:
-            # Exit: Alligator loses bullish alignment OR ADX weakens (< 20)
-            if not (lips_val > teeth_val > jaw_val) or adx_val < 20:
+            # Update highest price since entry
+            highest_since_entry = max(highest_since_entry, close_val)
+            
+            # Exit conditions:
+            # 1. Price touches S3 (opposite Camarilla level)
+            # 2. 1d EMA34 turns bearish (price below EMA)
+            # 3. ATR-based trailing stop: price drops 2.5 * ATR from highest since entry
+            tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+            atr_val = pd.Series(tr).rolling(window=14, min_periods=14).mean().values[i]
+            exit_condition = (close_val < s3_val) or (close_val < ema_val) or (close_val < highest_since_entry - 2.5 * atr_val)
+            
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: Alligator loses bearish alignment OR ADX weakens (< 20)
-            if not (lips_val < teeth_val < jaw_val) or adx_val < 20:
+            # Update lowest price since entry
+            lowest_since_entry = min(lowest_since_entry, close_val)
+            
+            # Exit conditions:
+            # 1. Price touches R3 (opposite Camarilla level)
+            # 2. 1d EMA34 turns bullish (price above EMA)
+            # 3. ATR-based trailing stop: price rises 2.5 * ATR from lowest since entry
+            tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+            atr_val = pd.Series(tr).rolling(window=14, min_periods=14).mean().values[i]
+            exit_condition = (close_val > r3_val) or (close_val > ema_val) or (close_val > lowest_since_entry + 2.5 * atr_val)
+            
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_WilliamsAlligator_Trend_Strategy"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
