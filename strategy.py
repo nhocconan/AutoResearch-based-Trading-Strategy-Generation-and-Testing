@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian upper band with 1d EMA50 uptrend and volume > 1.5x average.
-# Short when price breaks below 20-period Donchian lower band with 1d EMA50 downtrend and volume > 1.5x average.
-# Exit when price crosses the 10-period Donchian midpoint (mean reversion).
-# Uses Donchian channels for clear breakout signals, targeting 12-37 trades per year.
+# Hypothesis: 4h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high and 1d EMA50 is rising (current > previous).
+# Short when price breaks below Donchian(20) low and 1d EMA50 is falling (current < previous).
+# Exit when price crosses back through the Donchian midpoint.
+# Uses volatility-based breakout with trend filter to avoid whipsaws in both bull and bear markets.
+# Target: 20-50 trades per year on 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,46 +36,42 @@ def generate_signals(prices):
             ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
                          ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate Donchian channels (20-period for entry, 10-period for exit)
-    donch_period_entry = 20
-    donch_period_exit = 10
+    # Calculate Donchian channel (20-period)
+    donch_period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
     
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
-    upper_band_exit = np.full(n, np.nan)
-    lower_band_exit = np.full(n, np.nan)
+    for i in range(donch_period - 1, n):
+        upper[i] = np.max(high[i - donch_period + 1:i + 1])
+        lower[i] = np.min(low[i - donch_period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2.0
     
-    for i in range(donch_period_entry - 1, n):
-        upper_band[i] = np.max(high[i - donch_period_entry + 1:i + 1])
-        lower_band[i] = np.min(low[i - donch_period_entry + 1:i + 1])
-    
-    for i in range(donch_period_exit - 1, n):
-        upper_band_exit[i] = np.max(high[i - donch_period_exit + 1:i + 1])
-        lower_band_exit[i] = np.min(low[i - donch_period_exit + 1:i + 1])
-    
-    # Exit midpoint (average of upper and lower bands for 10-period)
-    midpoint_exit = (upper_band_exit + lower_band_exit) / 2.0
-    
-    # Align 1d EMA to 12h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate previous values for crossover detection
+    upper_prev = np.full(n, np.nan)
+    lower_prev = np.full(n, np.nan)
+    upper_prev[1:] = upper[:-1]
+    lower_prev[1:] = lower[:-1]
     
     # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
     
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian channels, EMA50, and volume MA20
-    start_idx = max(donch_period_entry, ema_period - 1, 19)
+    # Warmup: need Donchian, EMA50, and volume MA20
+    start_idx = max(donch_period, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(midpoint_exit[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -86,28 +83,28 @@ def generate_signals(prices):
         vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price breaks above 20-period upper band with 1d EMA50 uptrend and volume filter
-            if (price > upper_band[i] and 
-                price > ema_1d_aligned[i] and vol_filter):
+            # Long: price breaks above Donchian upper with 1d EMA50 rising and volume filter
+            if (price > upper[i] and 
+                ema_1d_aligned[i] > ema_1d_aligned[i-1] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below 20-period lower band with 1d EMA50 downtrend and volume filter
-            elif (price < lower_band[i] and 
-                  price < ema_1d_aligned[i] and vol_filter):
+            # Short: price breaks below Donchian lower with 1d EMA50 falling and volume filter
+            elif (price < lower[i] and 
+                  ema_1d_aligned[i] < ema_1d_aligned[i-1] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 10-period midpoint
-            if price < midpoint_exit[i]:
+            # Exit long: price crosses below Donchian middle
+            if price < middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 10-period midpoint
-            if price > midpoint_exit[i]:
+            # Exit short: price crosses above Donchian middle
+            if price > middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
