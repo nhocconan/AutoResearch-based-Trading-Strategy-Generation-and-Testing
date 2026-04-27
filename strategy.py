@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 12h Camarilla pivot levels for breakout entries with 4h RSI filter.
-Camarilla levels provide institutional support/resistance; breakouts from these levels capture
-institutional flow. RSI filter avoids overextended entries. Works in bull/bear by capturing
-breakouts in trending phases. Target: 20-40 trades/year.
+Hypothesis: 1h strategy using 4h Donchian breakout (20-period) with 1d EMA50 trend filter and volume confirmation.
+Breakouts occur when price moves beyond 4h Donchian channels (20-period high/low), filtered by daily EMA50 trend.
+Volume > 1.5x average confirms breakout strength. Uses discrete position size (±0.20) to minimize fee churn.
+Target: 15-37 trades/year (60-150 over 4 years). Uses 4h/1d for signal direction, 1h only for entry timing.
+Includes session filter (08-20 UTC) to reduce noise trades.
 """
 
 import numpy as np
@@ -12,128 +13,111 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 12h bar using previous bar's OHLC
-    # Camarilla formula: 
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # H3 = Close + 1.125 * (High - Low)
-    # L3 = Close - 1.125 * (High - Low)
-    # H2 = Close + 0.75 * (High - Low)
-    # L2 = Close - 0.75 * (High - Low)
-    # H1 = Close + 0.5 * (High - Low)
-    # L1 = Close - 0.5 * (High - Low)
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
+        return np.zeros(n)
     
-    h4 = np.full(len(df_12h), np.nan)
-    l4 = np.full(len(df_12h), np.nan)
-    h3 = np.full(len(df_12h), np.nan)
-    l3 = np.full(len(df_12h), np.nan)
-    h2 = np.full(len(df_12h), np.nan)
-    l2 = np.full(len(df_12h), np.nan)
-    h1 = np.full(len(df_12h), np.nan)
-    l1 = np.full(len(df_12h), np.nan)
+    # Calculate Donchian channels on 4h data (20-period high/low)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    for i in range(1, len(df_12h)):
-        high_prev = df_12h['high'].iloc[i-1]
-        low_prev = df_12h['low'].iloc[i-1]
-        close_prev = df_12h['close'].iloc[i-1]
-        diff = high_prev - low_prev
-        
-        h4[i] = close_prev + 1.5 * diff
-        l4[i] = close_prev - 1.5 * diff
-        h3[i] = close_prev + 1.125 * diff
-        l3[i] = close_prev - 1.125 * diff
-        h2[i] = close_prev + 0.75 * diff
-        l2[i] = close_prev - 0.75 * diff
-        h1[i] = close_prev + 0.5 * diff
-        l1[i] = close_prev - 0.5 * diff
+    donchian_high = np.full(len(high_4h), np.nan)
+    donchian_low = np.full(len(low_4h), np.nan)
     
-    # Align Camarilla levels to 4h timeframe (wait for 12h bar close)
-    h4_aligned = align_htf_to_ltf(prices, df_12h, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_12h, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
-    h2_aligned = align_htf_to_ltf(prices, df_12h, h2)
-    l2_aligned = align_htf_to_ltf(prices, df_12h, l2)
-    h1_aligned = align_htf_to_ltf(prices, df_12h, h1)
-    l1_aligned = align_htf_to_ltf(prices, df_12h, l1)
+    period = 20
+    for i in range(period-1, len(high_4h)):
+        donchian_high[i] = np.max(high_4h[i-period+1:i+1])
+        donchian_low[i] = np.min(low_4h[i-period+1:i+1])
     
-    # Calculate 4h RSI(14) for momentum filter
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align Donchian channels to 1h timeframe (waits for 4h bar close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Wilder smoothing for RSI
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
+    # Calculate EMA50 on 1d data for trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = np.full(len(close_1d), np.nan)
     
-    if n >= rsi_period:
-        avg_gain[rsi_period-1] = np.mean(gain[1:rsi_period+1])
-        avg_loss[rsi_period-1] = np.mean(loss[1:rsi_period+1])
-        
-        for i in range(rsi_period, n):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
+    if len(close_1d) >= 50:
+        multiplier = 2 / (50 + 1)
+        ema_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50[i] = (close_1d[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
     
-    rs = np.full(n, np.nan)
-    rsi = np.full(n, 50.0)  # Default to neutral
+    # Align EMA50 to 1h timeframe (waits for 1d bar close)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    for i in range(rsi_period-1, n):
-        if avg_loss[i] > 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
+    # Volume confirmation on 1h data
+    vol_ma_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period:i])
     
     signals = np.zeros(n)
     position = 0
-    size = 0.25  # 25% position size
+    size = 0.20  # 20% position size
     
-    # Warmup: need Camarilla (1 bar) and RSI (14)
-    start_idx = max(1, rsi_period-1)
+    # Warmup: need Donchian (20), EMA50 (50), volume MA (20)
+    start_idx = max(period-1, 49, vol_ma_period) + 1  # +1 for alignment delay
     
     for i in range(start_idx, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h2_aligned[i]) or np.isnan(l2_aligned[i]) or
-            np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        
+        # Trend filter: price above/below EMA50
+        uptrend = price > ema_50_aligned[i]
+        downtrend = price < ema_50_aligned[i]
+        
+        # Volume confirmation: > 1.5x average volume
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long entry: price breaks above H3 with RSI not overbought
-            if price > h3_aligned[i] and rsi[i] < 70:
+            # Long entry: price breaks above 4h Donchian high in uptrend with volume
+            if uptrend and price > donchian_high_aligned[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short entry: price breaks below L3 with RSI not oversold
-            elif price < l3_aligned[i] and rsi[i] > 30:
+            # Short entry: price breaks below 4h Donchian low in downtrend with volume
+            elif downtrend and price < donchian_low_aligned[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below H1 or RSI overbought
-            if price < h1_aligned[i] or rsi[i] > 70:
+            # Long exit: price breaks below 4h Donchian low or trend changes
+            if price < donchian_low_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price crosses above L1 or RSI oversold
-            if price > l1_aligned[i] or rsi[i] < 30:
+            # Short exit: price breaks above 4h Donchian high or trend changes
+            if price > donchian_high_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_RSI14"
-timeframe = "4h"
+name = "1h_Donchian20_4hBreakout_1dEMA50_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
