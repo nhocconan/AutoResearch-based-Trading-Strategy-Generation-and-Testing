@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
 """
-4h Camarilla R3/S3 Breakout with 1d Trend Filter and Volume Spike.
-Long when price breaks above R3 + 1d trend up + volume spike.
-Short when price breaks below S3 + 1d trend down + volume spike.
-Exit when price returns to Pivot or trend changes.
-Designed for low frequency (20-50 trades/year) to minimize fee drag.
+1d Williams Alligator with 1-week Trend Filter and Volume Confirmation.
+Long when price > Alligator teeth + weekly trend up + volume spike.
+Short when price < Alligator teeth + weekly trend down + volume spike.
+Exit when price crosses Alligator teeth or weekly trend changes.
+Williams Alligator uses smoothed moving averages (SMMA) of median price.
+Designed for low frequency (7-25 trades/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(data, period):
+    """Smoothed Moving Average (SMMA)"""
+    n = len(data)
+    result = np.empty(n, dtype=np.float64)
+    result.fill(np.nan)
+    if n < period:
+        return result
+    # First value is SMA
+    result[period-1] = np.mean(data[:period])
+    # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+    for i in range(period, n):
+        result[i] = (result[i-1] * (period-1) + data[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,55 +36,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Median price for Alligator
+    median_price = (high + low) / 2
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (based on previous day)
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Calculate weekly EMA50 for trend
+    weekly_close = df_1w['close'].values
+    ema_50_1w = np.empty_like(weekly_close, dtype=np.float64)
+    ema_50_1w.fill(np.nan)
+    if len(weekly_close) >= 50:
+        alpha = 2.0 / (50 + 1)
+        ema_50_1w[49] = np.mean(weekly_close[:50])
+        for i in range(50, len(weekly_close)):
+            ema_50_1w[i] = alpha * weekly_close[i] + (1 - alpha) * ema_50_1w[i-1]
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(d_high, 1)
-    prev_low = np.roll(d_low, 1)
-    prev_close = np.roll(d_close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Williams Alligator: three SMMA lines of median price
+    # Jaw (blue): 13-period SMMA, shifted 8 bars forward
+    # Teeth (red): 8-period SMMA, shifted 5 bars forward  
+    # Lips (green): 5-period SMMA, shifted 3 bars forward
+    jaw_raw = smma(median_price, 13)
+    teeth_raw = smma(median_price, 8)
+    lips_raw = smma(median_price, 5)
     
-    # Camarilla levels: R3, S3, Pivot
-    camarilla_r3 = np.empty_like(d_close, dtype=np.float64)
-    camarilla_s3 = np.empty_like(d_close, dtype=np.float64)
-    camarilla_p = np.empty_like(d_close, dtype=np.float64)
-    camarilla_r3.fill(np.nan)
-    camarilla_s3.fill(np.nan)
-    camarilla_p.fill(np.nan)
+    # Apply forward shift (to avoid look-ahead)
+    jaw = np.full_like(jaw_raw, np.nan)
+    teeth = np.full_like(teeth_raw, np.nan)
+    lips = np.full_like(lips_raw, np.nan)
     
-    for i in range(1, len(d_close)):
-        # Camarilla formulas
-        camarilla_p[i] = (prev_high[i] + prev_low[i] + prev_close[i]) / 3
-        camarilla_r3[i] = camarilla_p[i] + (prev_high[i] - prev_low[i]) * 1.1 / 4
-        camarilla_s3[i] = camarilla_p[i] - (prev_high[i] - prev_low[i]) * 1.1 / 4
+    for i in range(8, len(jaw)):
+        jaw[i] = jaw_raw[i-8]  # shifted 8 bars forward
+    for i in range(5, len(teeth)):
+        teeth[i] = teeth_raw[i-5]  # shifted 5 bars forward
+    for i in range(3, len(lips)):
+        lips[i] = lips_raw[i-3]  # shifted 3 bars forward
     
-    # Align to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
+    # Align weekly trend to lower timeframe
+    # (already aligned in the EMA calculation above)
     
-    # Daily EMA34 for trend filter
-    daily_close = df_1d['close'].values
-    ema_34_1d = np.empty_like(daily_close, dtype=np.float64)
-    ema_34_1d.fill(np.nan)
-    if len(daily_close) >= 34:
-        alpha = 2.0 / (34 + 1)
-        ema_34_1d[33] = np.mean(daily_close[:34])
-        for i in range(34, len(daily_close)):
-            ema_34_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema_34_1d[i-1]
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: volume > 2.0x average (calculated from 4h volume MA20)
+    # Volume filter: volume > 1.5x average (calculated from 1d volume MA20)
     vol_ma_20 = np.empty_like(volume, dtype=np.float64)
     vol_ma_20.fill(np.nan)
     for i in range(19, n):
@@ -79,13 +88,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Camarilla (1 day) and daily EMA (34 periods)
-    start_idx = 34  # Need at least 34 days of data
+    # Warmup: need Alligator (13+8=21 periods) and weekly EMA (50 periods)
+    start_idx = max(21, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_p_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(teeth[i]) or np.isnan(ema_50_1w_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -94,40 +102,34 @@ def generate_signals(prices):
         price_now = close[i]
         vol_now = volume[i]
         
-        # Current levels
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        pivot = camarilla_p_aligned[i]
-        daily_trend = ema_34_1d_aligned[i]
+        # Current indicators
+        teeth_val = teeth[i]
+        weekly_trend = ema_50_1w_aligned[i]
         
-        # Volume filter: volume > 2.0x average
-        vol_filter = vol_now > 2.0 * vol_ma_20[i]
-        
-        # Breakout conditions
-        breakout_up = price_now > r3
-        breakout_down = price_now < s3
+        # Volume filter: volume > 1.5x average
+        vol_filter = vol_now > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Bull: breakout above R3 + daily trend up + volume spike
-            if breakout_up and price_now > daily_trend and vol_filter:
+            # Bull: price above teeth + weekly trend up + volume
+            if price_now > teeth_val and price_now > weekly_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Bear: breakout below S3 + daily trend down + volume spike
-            elif breakout_down and price_now < daily_trend and vol_filter:
+            # Bear: price below teeth + weekly trend down + volume
+            elif price_now < teeth_val and price_now < weekly_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Pivot or daily trend turns down
-            if price_now < pivot or price_now < daily_trend:
+            # Exit long: price crosses below teeth or weekly trend turns down
+            if price_now < teeth_val or price_now < weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to Pivot or daily trend turns up
-            if price_now > pivot or price_now > daily_trend:
+            # Exit short: price crosses above teeth or weekly trend turns up
+            if price_now > teeth_val or price_now > weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
