@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and volatility regime
+    # Get daily data for volatility regime filter (ATR ratio)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14) for volatility regime
+    # Calculate daily ATR(14)
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -34,7 +34,7 @@ def generate_signals(prices):
     
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate ATR ratio: current ATR(7) / ATR(14) - volatility expansion signal
+    # Calculate ATR ratio: ATR(7)/ATR(14) > 1.3 indicates volatility expansion
     tr1_7 = high_1d[1:] - low_1d[1:]
     tr2_7 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3_7 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -46,7 +46,6 @@ def generate_signals(prices):
     
     atr_7_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_7_1d)
     
-    # ATR ratio: ATR(7)/ATR(14) > 1.3 indicates volatility expansion
     atr_ratio = np.full(n, np.nan)
     valid_mask = (~np.isnan(atr_7_1d_aligned)) & (~np.isnan(atr_14_1d_aligned)) & (atr_14_1d_aligned > 0)
     atr_ratio[valid_mask] = atr_7_1d_aligned[valid_mask] / atr_14_1d_aligned[valid_mask]
