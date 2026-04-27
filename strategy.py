@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-6h_CamarillaR3S3_Breakout_1dTrend_VolumeSpike
+12h_CamarillaR3S3_Breakout_1dTrend_VolumeSpike
 Hypothesis: Combine 1d-derived Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (>2x 20-period average). Only take long when price > EMA34 and short when price < EMA34. This reduces false breakouts in counter-trend moves. Target 12-37 trades/year to minimize fee drag. Designed to work in bull (breakouts with trend) and bear (mean reversion at extremes with trend filter).
 """
 
@@ -32,7 +32,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe (wait for previous day's close)
+    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -89,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_CamarillaR3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_CamarillaR3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
