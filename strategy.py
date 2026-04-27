@@ -18,13 +18,15 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter (vectorized)
+    # Calculate daily EMA34 for trend filter (vectorized with proper calculation)
     close_1d = df_1d['close'].values
     ema_34_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34  # EMA34
+        # Calculate EMA properly
+        alpha = 2 / (34 + 1)
+        ema_34_1d[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
+            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
     
     # Calculate previous day's OHLC for Camarilla (avoid look-ahead)
     prev_close = np.roll(close_1d, 1)
@@ -40,21 +42,21 @@ def generate_signals(prices):
     r3 = prev_close + camarilla_factor
     s3 = prev_close - camarilla_factor
     
-    # Align daily indicators to 6h timeframe
+    # Align daily indicators to 1h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate 6h ATR(14) for volatility filter
+    # Calculate 1h ATR(14) for volatility filter
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
     tr = np.concatenate([[np.nan], tr])
     atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
-        else:
+    if len(tr) >= 15:
+        # Calculate ATR with proper smoothing
+        atr[14] = np.nanmean(tr[1:15])  # Average of first 14 TR values
+        for i in range(15, n):
             atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
     # Calculate 20-period volume average
@@ -110,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
-timeframe = "6h"
+name = "1d_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
