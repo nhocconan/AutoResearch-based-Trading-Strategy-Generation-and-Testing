@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for trend, volatility, and price channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d < 30):
         return np.zeros(n)
     
     # Daily EMA(34) for trend filter
