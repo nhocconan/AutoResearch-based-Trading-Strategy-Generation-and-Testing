@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -39,7 +39,7 @@ def generate_signals(prices):
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # 12h EMA(20) for entry/exit signal
+    # 4h EMA(20) for entry/exit signal
     ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Volume confirmation: volume > 1.5 * 20-period average
@@ -92,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA20_RSI_Volume_Momentum_v1"
-timeframe = "12h"
+name = "6h_EMA20_RSI_Volume_Momentum_v1"
+timeframe = "6h"
 leverage = 1.0
