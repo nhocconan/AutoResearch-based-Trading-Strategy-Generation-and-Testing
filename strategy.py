@@ -1,13 +1,38 @@
-# 4h_TripleMovingAverage_Crossover_Momentum with 12h Trend Filter and Volume Confirmation
-# Hypothesis: On 4-hour timeframe, use a fast EMA (12) and slow EMA (26) crossover for momentum,
-# confirmed by a 12-hour EMA (50) trend filter. Enter long when fast EMA crosses above slow EMA
-# and price is above 12h EMA50; enter short when fast EMA crosses below slow EMA and price is below 12h EMA50.
-# Volume confirmation: current volume > 1.5x 20-period average volume. Exit on opposite crossover.
-# Designed to capture trends while avoiding whipsaws in sideways markets. Target: 20-40 trades/year.
+#!/usr/bin/env python3
+"""
+Hypothesis: 1-hour momentum with 4-hour trend filter and volume confirmation.
+In bull market (price > 4-hour EMA50): long when RSI crosses above 50 and volume > 1.5x average.
+In bear market (price < 4-hour EMA50): short when RSI crosses below 50 and volume > 1.5x average.
+Uses 4-hour trend for direction and 1-hour RSI for timing to avoid false signals.
+Target: 15-30 trades/year per symbol.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index"""
+    if len(close) < period + 1:
+        return np.full_like(close, np.nan, dtype=np.float64)
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    for i in range(period + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
@@ -15,102 +40,84 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12-hour data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4-hour data for trend filter and volume average
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12-hour EMA50 for trend
-    close_12h = df_12h['close'].values
-    ema_50_12h = np.empty_like(close_12h, dtype=np.float64)
-    ema_50_12h.fill(np.nan)
-    if len(close_12h) >= 50:
+    # Calculate 4-hour EMA50 for trend
+    close_4h = df_4h['close'].values
+    ema_50_4h = np.empty_like(close_4h, dtype=np.float64)
+    ema_50_4h.fill(np.nan)
+    if len(close_4h) >= 50:
         alpha = 2.0 / (50 + 1)
-        ema_50_12h[49] = np.mean(close_12h[:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_50_12h[i-1]
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+        ema_50_4h[49] = np.mean(close_4h[:50])
+        for i in range(50, len(close_4h)):
+            ema_50_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema_50_4h[i-1]
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate 12-hour average volume for confirmation
-    volume_12h = df_12h['volume'].values
-    vol_avg_20_12h = np.empty_like(volume_12h, dtype=np.float64)
-    vol_avg_20_12h.fill(np.nan)
-    for i in range(19, len(volume_12h)):
-        vol_avg_20_12h[i] = np.mean(volume_12h[i-19:i+1])
-    vol_avg_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20_12h)
+    # Calculate 4-hour volume moving average (20-period)
+    volume_4h = df_4h['volume'].values
+    vol_ma_20_4h = np.empty_like(volume_4h, dtype=np.float64)
+    vol_ma_20_4h.fill(np.nan)
+    for i in range(19, len(volume_4h)):
+        vol_ma_20_4h[i] = np.mean(volume_4h[i-19:i+1])
+    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
     
-    # Calculate 4-hour EMAs for crossover
-    ema_fast = np.empty_like(close, dtype=np.float64)
-    ema_slow = np.empty_like(close, dtype=np.float64)
-    ema_fast.fill(np.nan)
-    ema_slow.fill(np.nan)
-    
-    if len(close) >= 26:
-        alpha_fast = 2.0 / (12 + 1)
-        alpha_slow = 2.0 / (26 + 1)
-        ema_fast[11] = np.mean(close[:12])
-        ema_slow[25] = np.mean(close[:26])
-        for i in range(12, len(close)):
-            ema_fast[i] = alpha_fast * close[i] + (1 - alpha_fast) * ema_fast[i-1]
-        for i in range(26, len(close)):
-            ema_slow[i] = alpha_slow * close[i] + (1 - alpha_slow) * ema_slow[i-1]
+    # Calculate 1-hour RSI
+    rsi = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
-    # Warmup: need 4h EMAs (26), 12h EMA50 (50), 12h volume avg (20)
-    start_idx = max(26, 50, 20)
+    # Warmup: need RSI (14+1=15), EMA50 (50), volume MA (20)
+    start_idx = max(15, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20_12h_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current price and volume
+        # Current values
         price_now = close[i]
-        vol_now = volume[i]
-        vol_avg = vol_avg_20_12h_aligned[i]
+        volume_now = volume[i]
+        rsi_now = rsi[i]
+        rsi_prev = rsi[i-1]
+        ema_trend = ema_50_4h_aligned[i]
+        vol_ma = vol_ma_20_4h_aligned[i]
         
-        # Current indicators
-        fast_val = ema_fast[i]
-        slow_val = ema_slow[i]
-        trend_val = ema_50_12h_aligned[i]
+        # Volume filter: volume > 1.5x 4-hour average
+        vol_filter = volume_now > 1.5 * vol_ma
         
-        # Volume filter: volume > 1.5x average
-        vol_filter = vol_now > 1.5 * vol_avg
-        
-        # EMA crossover signals
-        bullish_crossover = fast_val > slow_val and ema_fast[i-1] <= ema_slow[i-1]
-        bearish_crossover = fast_val < slow_val and ema_fast[i-1] >= ema_slow[i-1]
+        # RSI crossing conditions
+        rsi_cross_up = rsi_prev < 50 and rsi_now >= 50
+        rsi_cross_down = rsi_prev > 50 and rsi_now <= 50
         
         if position == 0:
-            # Look for long: bullish crossover + above trend + volume
-            if bullish_crossover and price_now > trend_val and vol_filter:
+            # Bull market (price > 4-hour EMA50): look for long
+            if price_now > ema_trend and rsi_cross_up and vol_filter:
                 signals[i] = size
                 position = 1
-            # Look for short: bearish crossover + below trend + volume
-            elif bearish_crossover and price_now < trend_val and vol_filter:
+            # Bear market (price < 4-hour EMA50): look for short
+            elif price_now < ema_trend and rsi_cross_down and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bearish crossover
-            if bearish_crossover:
+            # Exit long: RSI crosses below 50 or trend change to bear
+            if rsi_cross_down or price_now < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: bullish crossover
-            if bullish_crossover:
+            # Exit short: RSI crosses above 50 or trend change to bull
+            if rsi_cross_up or price_now > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TripleMovingAverage_Crossover_Momentum"
-timeframe = "4h"
+name = "1h_RSI_4hTrend_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
