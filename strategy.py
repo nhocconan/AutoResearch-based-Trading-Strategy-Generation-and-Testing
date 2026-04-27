@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Chaikin_Money_Flow_4hTrend_Signal
-Hypothesis: Uses 4h Chaikin Money Flow (CMF) as a trend filter (long when CMF>0, short when CMF<0) and enters on 1h pullbacks to the 21-period EMA with volume confirmation. Targets 15-35 trades/year by combining trend alignment with precise entry timing, reducing false signals in ranging markets. Designed to work in both bull (trend-following pullsbacks) and bear (shorting bounces) regimes.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses daily Camarilla R3/S3 levels on 12h timeframe with 1d EMA34 trend filter and volume spike confirmation. Targets 15-25 trades/year on 12h to minimize fee decay while capturing strong institutional breakouts in both bull and bear markets. Designed to work in BTC/ETH by avoiding false breakouts in chop via ADX > 25 filter.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,78 +18,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (CMF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Get 1d data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Chaikin Money Flow (21-period)
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    # CMF = SUM(Money Flow Volume, 21) / SUM(Volume, 21)
-    hl_range = high_4h - low_4h
-    # Avoid division by zero
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    mfm = ((close_4h - low_4h) - (high_4h - close_4h)) / hl_range
-    mfv = mfm * volume_4h
+    # Calculate ADX on 1d for regime filter (trending vs ranging)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Sum over 21 periods
-    mfv_sum = pd.Series(mfv).rolling(window=21, min_periods=21).sum().values
-    vol_sum = pd.Series(volume_4h).rolling(window=21, min_periods=21).sum().values
-    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d_arr[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d_arr[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align CMF to 1h timeframe
-    cmf_aligned = align_htf_to_ltf(prices, df_4h, cmf)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # 1h EMA21 for pullback entries
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[1:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # 1h volume confirmation: volume > 1.5 * 20-period average
+    tr_smooth = smooth_wilder(tr, 14)
+    dm_plus_smooth = smooth_wilder(dm_plus, 14)
+    dm_minus_smooth = smooth_wilder(dm_minus, 14)
+    
+    # DI and DX
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smooth_wilder(dx, 14)
+    
+    # Align ADX to 12h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values
+    
+    # Camarilla formulas: range = (H - L), multiplier = 1.12
+    # R3 = C + (H-L)*1.12/4, S3 = C - (H-L)*1.12/4
+    rng = (high_1d - low_1d)
+    r3 = close_1d_prev + rng * 1.12 / 4
+    s3 = close_1d_prev - rng * 1.12 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: volume > 2.0 * 20-period average (strong institutional interest)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # Position size: 20% of capital
+    size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for CMF, EMA21, volume MA
-    start_idx = max(21, 21, 20)
+    # Warmup: need enough data for EMA, ADX, volume MA, and Camarilla
+    start_idx = max(34, 20, 34)  # EMA34, ADX(14+14), VolMA20
     
     for i in range(start_idx, n):
-        # Skip if CMF not ready
-        if np.isnan(cmf_aligned[i]):
+        # Skip if any data not ready
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
             signals[i] = 0.0
             continue
         
-        trend = cmf_aligned[i]
-        vol_confirm = volume[i] > vol_threshold[i]
+        ema_trend = ema34_1d_aligned[i]
+        adx_val = adx_aligned[i]
+        r3_level = r3_aligned[i]
+        s3_level = s3_aligned[i]
+        vol_spike_val = vol_spike[i]
+        
+        # Only trade in trending markets (ADX > 25)
+        if adx_val < 25:
+            # In ranging markets, stay flat
+            signals[i] = 0.0
+            position = 0
+            continue
         
         if position == 0:
-            # Long: CMF positive (bullish 4h trend) + pullback to EMA21 + volume
-            if trend > 0 and close[i] <= ema21[i] * 1.005 and vol_confirm:
+            # Long: break above R3 with uptrend and volume spike
+            if close[i] > r3_level and vol_spike_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: CMF negative (bearish 4h trend) + bounce to EMA21 + volume
-            elif trend < 0 and close[i] >= ema21[i] * 0.995 and vol_confirm:
+            # Short: break below S3 with downtrend and volume spike
+            elif close[i] < s3_level and vol_spike_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: CMF turns negative or price moves above EMA21 (momentum fade)
-            if trend <= 0 or close[i] > ema21[i] * 1.01:
+            # Exit long: break below S3 or trend turns down
+            if close[i] < s3_level or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: CMF turns positive or price moves below EMA21 (momentum fade)
-            if trend >= 0 or close[i] < ema21[i] * 0.99:
+            # Exit short: break above R3 or trend turns up
+            if close[i] > r3_level or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Chaikin_Money_Flow_4hTrend_Signal"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
