@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike
-Hypothesis: Uses 12h Camarilla R1/S1 levels for mean reversion entries in ranging markets, 
-filtered by 12h EMA50 trend direction and volume spikes. In trending markets (price > EMA50),
-buy at S1 support; in ranging markets, trade R1/S1 reversals. Designed for 4h timeframe 
-to achieve 75-200 total trades over 4 years (19-50/year). Volume spike filter reduces 
-false signals. Discrete position sizing (0.25) minimizes fee drag. Works in both bull 
-and bear markets by adapting to 12h trend regime.
+1h_Camarilla_R3_S3_Breakout_4hTrend_VolumeSpike
+Hypothesis: Uses 4h Camarilla R3/S3 levels for breakout entries with 1h volume confirmation and 4h EMA50 trend filter.
+Long when price breaks above R3 with volume spike AND 4h close > EMA50 (uptrend).
+Short when price breaks below S3 with volume spike AND 4h close < EMA50 (downtrend).
+Exit on opposite Camarilla level (R1/S1) or trend reversal.
+Designed for 1h timeframe to achieve 60-150 total trades over 4 years (15-37/year) by using 4h for direction and 1h for timing.
+Works in both bull and bear markets by following 4h trend while using Camarilla levels for precise entries.
+Volume spike filter reduces false signals. Discrete position sizing (0.20) minimizes fee drag.
 """
 
 import numpy as np
@@ -23,27 +24,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla levels and trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for Camarilla levels and trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h_series = pd.Series(df_12h['close'].values)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50 for trend filter
+    close_4h_series = pd.Series(df_4h['close'].values)
+    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla levels: based on previous 4h bar's high, low, close
+    # R4 = close + (high - low) * 1.5/2
+    # R3 = close + (high - low) * 1.25/2
+    # R2 = close + (high - low) * 1.1/2
+    # R1 = close + (high - low) * 0.5/2
+    # PP = (high + low + close) / 3
+    # S1 = close - (high - low) * 0.5/2
+    # S2 = close - (high - low) * 1.1/2
+    # S3 = close - (high - low) * 1.25/2
+    # S4 = close - (high - low) * 1.5/2
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    r1 = pivot + (range_12h * 1.0 / 12)
-    s1 = pivot - (range_12h * 1.0 / 12)
+    # Calculate levels for each 4h bar (using previous bar's values)
+    rng = high_4h - low_4h
+    r3 = close_4h + rng * 1.25 / 2.0
+    s3 = close_4h - rng * 1.25 / 2.0
+    r1 = close_4h + rng * 0.5 / 2.0
+    s1 = close_4h - rng * 0.5 / 2.0
     
-    # Align 12h indicators to 4h timeframe (completed bars only)
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    # Align 4h indicators to 1h timeframe (completed bars only)
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,49 +65,43 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital (discrete level)
+    size = 0.20   # Position size: 20% of capital (discrete level)
     
-    # Warmup: need 12h EMA50 (50)
-    start_idx = 50
+    # Warmup: need 4h EMA50 (50) and volume avg (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(r1_aligned[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         ema_val = ema_50_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Determine market regime: trending if price > EMA50, ranging otherwise
-            is_trending = close_val > ema_val
+            # Look for entry: Camarilla breakout with 4h EMA50 trend filter AND volume spike
+            # Long: price breaks above R3 AND 4h close > EMA50 (uptrend) AND volume spike
+            long_condition = (close_val > r3_val) and (close_val > ema_val) and vol_conf
+            # Short: price breaks below S3 AND 4h close < EMA50 (downtrend) AND volume spike
+            short_condition = (close_val < s3_val) and (close_val < ema_val) and vol_conf
             
-            if is_trending:
-                # In uptrend: buy at S1 support with volume confirmation
-                long_condition = (close_val <= s1_val) and vol_conf
-                if long_condition:
-                    signals[i] = size
-                    position = 1
-            else:
-                # In ranging market: mean reversion at R1/S1 levels
-                long_condition = (close_val <= s1_val) and vol_conf
-                short_condition = (close_val >= r1_val) and vol_conf
-                
-                if long_condition:
-                    signals[i] = size
-                    position = 1
-                elif short_condition:
-                    signals[i] = -size
-                    position = -1
+            if long_condition:
+                signals[i] = size
+                position = 1
+            elif short_condition:
+                signals[i] = -size
+                position = -1
         elif position == 1:
-            # Exit long when price reaches midpoint (pivot) or trend breaks
-            pivot_aligned = (r1_aligned[i] + s1_aligned[i]) / 2  # Approximate pivot
-            exit_condition = (close_val >= pivot_aligned) or (close_val < ema_val)
+            # Exit long when price breaks below R1 (take profit) OR trend breaks
+            exit_condition = (close_val < r1_val) or (close_val < ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -101,9 +109,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price reaches midpoint (pivot) or trend breaks
-            pivot_aligned = (r1_aligned[i] + s1_aligned[i]) / 2  # Approximate pivot
-            exit_condition = (close_val <= pivot_aligned) or (close_val > ema_val)
+            # Exit short when price breaks above S1 (take profit) OR trend breaks
+            exit_condition = (close_val > s1_val) or (close_val > ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -113,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_4hTrend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
