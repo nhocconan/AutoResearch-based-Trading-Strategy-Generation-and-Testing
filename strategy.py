@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kumo_Twist_Trend_Continuation
-Hypothesis: Uses Ichimoku cloud twist (Senkou Span A/B cross) from daily timeframe as trend filter,
-combined with 6h Tenkan-Kijun cross for entry timing. In bull regime (price above cloud, Senkou A > Senkou B),
-enter long on Tenkan/Kijun bullish cross. In bear regime (price below cloud, Senkou A < Senkou B),
-enter short on Tenkan/Kijun bearish cross. Exit when price re-enters cloud or twist reverses.
-Ichimoku twist confirms higher-timeframe trend structure, reducing false breaks in ranging markets.
-Designed for 6h timeframe with 50-150 total trades over 4 years (12-37/year) at 0.25 position size.
-Works in both bull/bear via cloud/twist regime filter + momentum cross entries.
+12h_TRIX_ZeroCross_1dTrend_VolumeSpike
+Hypothesis: Uses TRIX (15-period) zero-cross for momentum signals on 12h timeframe, filtered by daily EMA34 trend and volume spike (>2.0x 20-period avg). Enters long when TRIX crosses above zero AND daily trend is up AND volume spike; enters short when TRIX crosses below zero AND daily trend is down AND volume spike. Exits when TRIX reverses back across zero. TRIX filters noise better than MACD in choppy markets, and the 1d trend filter ensures alignment with higher timeframe structure. Volume confirmation avoids weak breakouts. Designed for low trade frequency (target: 50-150 total trades over 4 years) with 0.25 position size to manage drawdown in bear markets.
 """
 
 import numpy as np
@@ -22,93 +16,68 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    displacement = 26  # Senkou spans plotted 26 periods ahead
+    # 1d EMA34 for trend filter
+    close_1d_series = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate TRIX on primary timeframe (12h close)
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - then percent change
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3.pct_change())  # Percent change of triple EMA
+    trix_values = trix.values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max().values +
-                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min().values) / 2
+    # Calculate prior TRIX for zero-cross detection
+    prior_trix = np.roll(trix_values, 1)
+    prior_trix[0] = np.nan  # First value invalid
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max().values +
-                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min().values) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
-    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max().values +
-                     pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min().values) / 2
-    
-    # Chikou Span (Lagging Span): Close plotted 26 periods behind (not needed for this strategy)
-    
-    # Align Ichimoku components to 6h timeframe (no additional delay needed for Senkou spans as they are already leading)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Calculate Kumo (cloud) twist: Senkou Span A/B cross
-    # Kumo twist bullish: Senkou A > Senkou B
-    # Kumo twist bearish: Senkou A < Senkou B
-    kumo_twist_bullish = senkou_span_a_aligned > senkou_span_b_aligned
-    kumo_twist_bearish = senkou_span_a_aligned < senkou_span_b_aligned
-    
-    # Price above/below cloud
-    price_above_cloud = (close > np.maximum(senkou_span_a_aligned, senkou_span_b_aligned))
-    price_below_cloud = (close < np.minimum(senkou_span_a_aligned, senkou_span_b_aligned))
-    
-    # Tenkan/Kijun cross for entry signals
-    # Bullish cross: Tenkan crosses above Kijun
-    tenkan_kijun_cross_up = (tenkan_aligned > kijun_aligned) & (np.roll(tenkan_aligned, 1) <= np.roll(kijun_aligned, 1))
-    # Bearish cross: Tenkan crosses below Kijun
-    tenkan_kijun_cross_down = (tenkan_aligned < kijun_aligned) & (np.roll(tenkan_aligned, 1) >= np.roll(kijun_aligned, 1))
-    
-    # Handle first value for cross signals
-    tenkan_kijun_cross_up[0] = False
-    tenkan_kijun_cross_down[0] = False
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need Ichimoku calculations (52 periods for Senkou B)
-    start_idx = senkou_span_b_period + displacement  # 52 + 26 = 78
+    # Warmup: need TRIX (15*3=45 for stability), 1d EMA34 (34), volume avg (20)
+    start_idx = max(45, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(prior_trix[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filters
-        bullish_regime = kumo_twist_bullish[i] and price_above_cloud[i]
-        bearish_regime = kumo_twist_bearish[i] and price_below_cloud[i]
+        trix_val = trix_values[i]
+        prior_trix_val = prior_trix[i]
+        ema_val = ema_34_1d_aligned[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Enter long in bullish regime on Tenkan/Kijun bullish cross
-            if bullish_regime and tenkan_kijun_cross_up[i]:
+            # Look for entry: TRIX zero-cross with 1d trend filter AND volume
+            # Long: TRIX crosses above zero AND 1d uptrend AND volume
+            long_condition = (prior_trix_val <= 0) and (trix_val > 0) and (close[i] > ema_val) and vol_conf
+            # Short: TRIX crosses below zero AND 1d downtrend AND volume
+            short_condition = (prior_trix_val >= 0) and (trix_val < 0) and (close[i] < ema_val) and vol_conf
+            
+            if long_condition:
                 signals[i] = size
                 position = 1
-            # Enter short in bearish regime on Tenkan/Kijun bearish cross
-            elif bearish_regime and tenkan_kijun_cross_down[i]:
+            elif short_condition:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price re-enters cloud or regime turns bearish
-            exit_condition = (not price_above_cloud[i]) or (not kumo_twist_bullish[i])
+            # Exit long when TRIX crosses back below zero
+            exit_condition = (prior_trix_val >= 0) and (trix_val <= 0)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -116,8 +85,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price re-enters cloud or regime turns bullish
-            exit_condition = (not price_below_cloud[i]) or (not kumo_twist_bearish[i])
+            # Exit short when TRIX crosses back above zero
+            exit_condition = (prior_trix_val <= 0) and (trix_val >= 0)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -127,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Twist_Trend_Continuation"
-timeframe = "6h"
+name = "12h_TRIX_ZeroCross_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
