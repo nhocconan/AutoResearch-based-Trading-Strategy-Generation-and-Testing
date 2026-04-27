@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Bollinger Band squeeze with 1-day trend filter and volume confirmation.
-In bull market (price > 1-day EMA34): long when BB width < 20th percentile and price > SMA20.
-In bear market (price < 1-day EMA34): short when BB width < 20th percentile and price < SMA20.
-BB squeeze identifies low volatility breakout conditions, daily trend filters direction,
-volume confirms institutional participation. Target: 20-40 trades/year per symbol.
+12h Camarilla Pivot R3/S3 Breakout with 1d Volume Spike and ADX Trend Filter
+Long: Close breaks above R3 with volume > 1.5x daily average and ADX > 25
+Short: Close breaks below S3 with volume > 1.5x daily average and ADX > 25
+Exit: Close crosses below/above daily VWAP or ADX drops below 20
+Position size: 0.25
+Target: 15-25 trades/year per symbol
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,110 +22,132 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for pivots, volume, VWAP, and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend
-    daily_close = df_1d['close'].values
-    ema_34_1d = np.empty_like(daily_close, dtype=np.float64)
-    ema_34_1d.fill(np.nan)
-    if len(daily_close) >= 34:
-        alpha = 2.0 / (34 + 1)
-        ema_34_1d[33] = np.mean(daily_close[:34])
-        for i in range(34, len(daily_close)):
-            ema_34_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema_34_1d[i-1]
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily VWAP
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap_num = (typical_price * df_1d['volume']).cumsum()
+    vwap_den = df_1d['volume'].cumsum()
+    vwap = vwap_num / vwap_den
+    vwap_array = vwap.values
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_array)
     
-    # Calculate Bollinger Bands (20, 2) on 4h data
-    bb_period = 20
-    bb_std = 2.0
-    sma_20 = np.empty_like(close, dtype=np.float64)
-    sma_20.fill(np.nan)
-    for i in range(bb_period - 1, n):
-        sma_20[i] = np.mean(close[i-bb_period+1:i+1])
+    # Calculate daily average volume (20-period)
+    vol_20 = df_1d['volume'].rolling(20, min_periods=20).mean().values
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_20)
     
-    bb_std_dev = np.empty_like(close, dtype=np.float64)
-    bb_std_dev.fill(np.nan)
-    for i in range(bb_period - 1, n):
-        bb_std_dev[i] = np.std(close[i-bb_period+1:i+1])
+    # Calculate Camarilla pivots from previous day
+    # R3 = Close + 1.1*(High - Low)
+    # S3 = Close - 1.1*(High - Low)
+    # We use previous day's values (shifted by 1)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    bb_upper = sma_20 + bb_std * bb_std_dev
-    bb_lower = sma_20 - bb_std * bb_std_dev
-    bb_width = bb_upper - bb_lower
+    r3 = prev_close + 1.1 * (prev_high - prev_low)
+    s3 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # Calculate 20th percentile of BB width for squeeze detection
-    bb_width_pct_20 = np.empty_like(bb_width, dtype=np.float64)
-    bb_width_pct_20.fill(np.nan)
-    for i in range(bb_period - 1, n):
-        if i >= 50:  # Need sufficient history for percentile
-            window = bb_width[i-49:i+1]
-            bb_width_pct_20[i] = np.percentile(window, 20)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate ADX (14-period) on daily data
+    # ADX requires +DI, -DI, and DX
+    high_diff = df_1d['high'].diff()
+    low_diff = -df_1d['low'].diff()
+    
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
+    
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(arr[:period])
+        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+        alpha = 1.0 / period
+        for i in range(period, len(arr)):
+            if not np.isnan(arr[i]) and not np.isnan(result[i-1]):
+                result[i] = result[i-1] * (1 - alpha) + arr[i] * alpha
+            else:
+                result[i] = np.nan
+        return result
+    
+    tr_smooth = wilder_smooth(tr.values, 14)
+    plus_di_smooth = wilder_smooth(plus_dm, 14)
+    minus_di_smooth = wilder_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    dx = np.full_like(tr_smooth, np.nan)
+    mask = tr_smooth != 0
+    dx[mask] = 100 * np.abs(plus_di_smooth[mask] - minus_di_smooth[mask]) / tr_smooth[mask]
+    
+    adx = wilder_smooth(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.25   # 25% position
     
-    # Warmup: need BB (20), BB width percentile (50)
-    start_idx = max(bb_period - 1, 50)
+    # Start after we have enough data for all indicators
+    start_idx = 50  # Need 20 for vol, 14+14 for ADX, plus buffer
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(sma_20[i]) or np.isnan(bb_width[i]) or 
-            np.isnan(bb_width_pct_20[i]) or np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(vol_avg_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current price and volume
         price_now = close[i]
         vol_now = volume[i]
+        vwap_val = vwap_aligned[i]
+        vol_avg_val = vol_avg_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        adx_val = adx_aligned[i]
         
-        # Current indicators
-        sma_val = sma_20[i]
-        bb_width_val = bb_width[i]
-        bb_width_pct = bb_width_pct_20[i]
-        ema_trend = ema_34_1d_aligned[i]
+        # Volume filter: current volume > 1.5x daily average volume
+        vol_filter = vol_now > 1.5 * vol_avg_val if vol_avg_val > 0 else False
         
-        # Daily close price for trend comparison
-        daily_close_price = df_1d['close'].values
-        daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_price)
-        if np.isnan(daily_close_aligned[i]):
-            signals[i] = 0.0
-            continue
-        daily_close_val = daily_close_aligned[i]
+        # ADX trend filter: ADX > 25 for strong trend
+        strong_trend = adx_val > 25
         
-        # Volume filter: volume > 1.1x average (calculated from 4h volume MA20)
-        vol_ma_20 = np.empty_like(volume, dtype=np.float64)
-        vol_ma_20.fill(np.nan)
-        for j in range(19, n):
-            vol_ma_20[j] = np.mean(volume[j-19:j+1])
-        vol_filter = vol_now > 1.1 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
-        
-        # Squeeze condition: BB width < 20th percentile of recent width
-        squeeze = bb_width_val < bb_width_pct
+        # ADX exit filter: ADX < 20 for weak trend
+        weak_trend = adx_val < 20
         
         if position == 0:
-            # Bull market (price > daily EMA34): look for long when squeeze + price > SMA20
-            if daily_close_val > ema_trend and squeeze and price_now > sma_val and vol_filter:
+            # Look for long: price breaks above R3 with volume and trend
+            if price_now > r3_val and vol_filter and strong_trend:
                 signals[i] = size
                 position = 1
-            # Bear market (price < daily EMA34): look for short when squeeze + price < SMA20
-            elif daily_close_val < ema_trend and squeeze and price_now < sma_val and vol_filter:
+            # Look for short: price breaks below S3 with volume and trend
+            elif price_now < s3_val and vol_filter and strong_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price < SMA20 or trend changes to bear
-            if price_now < sma_val or daily_close_val < ema_trend:
+            # Exit long: price crosses below VWAP or trend weakens
+            if price_now < vwap_val or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price > SMA20 or trend changes to bull
-            if price_now > sma_val or daily_close_val > ema_trend:
+            # Exit short: price crosses above VWAP or trend weakens
+            if price_now > vwap_val or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BBSqueeze_DailyTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
