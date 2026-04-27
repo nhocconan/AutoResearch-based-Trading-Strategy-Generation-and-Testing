@@ -13,110 +13,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators
+    # Get daily data for pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR(14)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate daily pivot points (previous day)
+    pivot_1d = np.full(len(df_1d), np.nan)
+    r1_1d = np.full(len(df_1d), np.nan)
+    s1_1d = np.full(len(df_1d), np.nan)
+    r2_1d = np.full(len(df_1d), np.nan)
+    s2_1d = np.full(len(df_1d), np.nan)
+    r3_1d = np.full(len(df_1d), np.nan)
+    s3_1d = np.full(len(df_1d), np.nan)
+    r4_1d = np.full(len(df_1d), np.nan)
+    s4_1d = np.full(len(df_1d), np.nan)
     
-    atr_14_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(tr_1d)):
-        atr_14_1d[i] = np.mean(tr_1d[i-14:i])
+    for i in range(1, len(df_1d)):
+        pp = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
+        pivot_1d[i] = pp
+        r1_1d[i] = 2 * pp - low_1d[i-1]
+        s1_1d[i] = 2 * pp - high_1d[i-1]
+        r2_1d[i] = pp + (high_1d[i-1] - low_1d[i-1])
+        s2_1d[i] = pp - (high_1d[i-1] - low_1d[i-1])
+        r3_1d[i] = high_1d[i-1] + 2 * (pp - low_1d[i-1])
+        s3_1d[i] = low_1d[i-1] - 2 * (high_1d[i-1] - pp)
+        r4_1d[i] = pp + 3 * (high_1d[i-1] - low_1d[i-1])
+        s4_1d[i] = pp - 3 * (high_1d[i-1] - low_1d[i-1])
     
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Align pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Calculate daily RSI(14)
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.maximum(delta_1d, 0)
-    loss_1d = np.maximum(-delta_1d, 0)
-    
-    avg_gain_1d = np.full(len(df_1d), np.nan)
-    avg_loss_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(close_1d)):
-        if i == 14:
-            avg_gain_1d[i] = np.mean(gain_1d[1:15])
-            avg_loss_1d[i] = np.mean(loss_1d[1:15])
+    # Calculate daily EMA(34) for trend filter
+    ema_34_1d = np.full(len(df_1d), np.nan)
+    alpha = 2 / (34 + 1)
+    for i in range(len(close_1d)):
+        if i < 33:
+            ema_34_1d[i] = np.mean(close_1d[:i+1]) if i > 0 else close_1d[i]
         else:
-            avg_gain_1d[i] = (avg_gain_1d[i-1] * 13 + gain_1d[i]) / 14
-            avg_loss_1d[i] = (avg_loss_1d[i-1] * 13 + loss_1d[i]) / 14
+            if np.isnan(ema_34_1d[i-1]):
+                ema_34_1d[i] = np.mean(close_1d[i-33:i+1])
+            else:
+                ema_34_1d[i] = close_1d[i] * alpha + ema_34_1d[i-1] * (1 - alpha)
     
-    rs_1d = np.full(len(df_1d), np.nan)
-    valid_rsi_1d = (~np.isnan(avg_gain_1d)) & (~np.isnan(avg_loss_1d)) & (avg_loss_1d > 0)
-    rs_1d[valid_rsi_1d] = avg_gain_1d[valid_rsi_1d] / avg_loss_1d[valid_rsi_1d]
-    rsi_14_1d = np.full(len(df_1d), np.nan)
-    rsi_14_1d[valid_rsi_1d] = 100 - (100 / (1 + rs_1d[valid_rsi_1d]))
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Calculate volume spike detector (volume > 2x 20-period average)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
-    # Calculate daily volume ratio: current volume / 20-day average volume
-    vol_ma_20_1d = np.full(len(df_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_20_1d[i] = np.mean(volume_1d[i-20:i])
-    
-    vol_ratio_1d = np.full(len(df_1d), np.nan)
-    valid_vol = (~np.isnan(volume_1d)) & (~np.isnan(vol_ma_20_1d)) & (vol_ma_20_1d > 0)
-    vol_ratio_1d[valid_vol] = volume_1d[valid_vol] / vol_ma_20_1d[valid_vol]
-    
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    volume_spike = np.full(n, np.nan)
+    volume_spike[20:] = volume[20:] > (2 * vol_ma_20[20:])
     
     signals = np.zeros(n)
     position = 0
     
     # Warmup
-    start_idx = max(34, 14, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i]) or
-            np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # Volatility filter: ATR > 0.02 * price (avoid low volatility chop)
-        vol_filter = atr_14_1d_aligned[i] > 0.02 * price
-        
-        # Volume filter: volume ratio > 1.5 (above average volume)
-        vol_spike = vol_ratio_1d_aligned[i] > 1.5
-        
         if position == 0:
-            # Long: RSI < 40 (oversold) + volatility + volume spike
-            if (rsi_14_1d_aligned[i] < 40 and 
-                vol_filter and 
-                vol_spike):
+            # Long setup: price breaks above R4 with volume spike + daily uptrend
+            if (price > r4_1d_aligned[i] and 
+                volume_spike[i] and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 60 (overbought) + volatility + volume spike
-            elif (rsi_14_1d_aligned[i] > 60 and 
-                  vol_filter and 
-                  vol_spike):
+            # Short setup: price breaks below S4 with volume spike + daily downtrend
+            elif (price < s4_1d_aligned[i] and 
+                  volume_spike[i] and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI > 60 or volatility drops
-            if (rsi_14_1d_aligned[i] > 60 or 
-                not vol_filter):
+            # Long exit: price returns below R3 or trend turns down
+            if (price < r3_1d_aligned[i] or 
+                ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 40 or volatility drops
-            if (rsi_14_1d_aligned[i] < 40 or 
-                not vol_filter):
+            # Short exit: price returns above S3 or trend turns up
+            if (price > s3_1d_aligned[i] or 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolumeSpike_RSI14_VolatilityFilter_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R4_S4_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
