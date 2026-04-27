@@ -13,22 +13,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and trend
+    # Get daily data for ATR and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate daily ATR(14) for volatility filter
+    tr1_d = df_1d['high'].values - df_1d['low'].values
+    tr2_d = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
+    tr3_d = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
+    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    tr_d[0] = tr1_d[0]
+    atr_1d_raw = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
     
-    # Calculate 6-hour ATR(14) for volatility filter
+    # Calculate 6-hour ATR(14) for volatility
     tr1_h = high - low
     tr2_h = np.abs(high - np.roll(close, 1))
     tr3_h = np.abs(low - np.roll(close, 1))
     tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
     tr_h[0] = tr1_h[0]
     atr_6h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 6-hour EMA(34) for trend
+    ema34_6h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate 6-hour RSI(14)
     delta = np.diff(close, prepend=close[0])
@@ -43,34 +51,23 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup
+    # Warmup: need 34 for EMA, 14 for ATR/RSI
     start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_6h[i]) or np.isnan(rsi[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(atr_6h[i]) or 
+            np.isnan(ema34_6h[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
         atr_6h_val = atr_6h[i]
+        ema_trend = ema34_6h[i]
         rsi_val = rsi[i]
         
-        # Volatility filter: 6h ATR > daily ATR (higher volatility regime)
-        vol_filter = atr_6h_val > (atr_6h_val * 0.5)  # Always True - will adjust
-        
-        # Actually, let's use a proper volatility regime filter
-        # Calculate daily ATR for comparison
-        tr1_d = df_1d['high'].values - df_1d['low'].values
-        tr2_d = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-        tr3_d = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
-        tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
-        tr_d[0] = tr1_d[0]
-        atr_1d_raw = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
-        # Align daily ATR
-        atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
-        vol_filter = (i < len(atr_1d_aligned) and not np.isnan(atr_1d_aligned[i]) and 
-                     atr_6h_val > (atr_1d_aligned[i] * 0.5))
+        # Volatility filter: 6h ATR > 0.5 * daily ATR (higher volatility regime)
+        vol_filter = atr_6h_val > (atr_1d_val * 0.5)
         
         # RSI filter: avoid extreme overbought/oversold
         rsi_filter = (rsi_val > 20) and (rsi_val < 80)
