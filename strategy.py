@@ -13,17 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Get 1d data for pivot points
+    # Get 1d data for high/low range
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -32,69 +22,79 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and Camarilla levels (R1, S1)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate daily range and midpoint
+    daily_range = high_1d - low_1d
+    daily_mid = (high_1d + low_1d) / 2.0
     
-    # Align daily levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 4h
+    daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
+    daily_mid_aligned = align_htf_to_ltf(prices, df_1d, daily_mid)
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    # 50-period EMA on weekly
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume filter: volume > 1.5x 24-period average (6 hours worth of 4h bars)
+    vol_ma_24 = np.full(n, np.nan, dtype=np.float64)
+    for i in range(23, n):
+        vol_ma_24[i] = np.mean(volume[i-23:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 12h EMA (50 periods), daily data, volume MA (20 periods)
-    start_idx = max(50, 20)
+    # Warmup: need 1d data and volume MA (24 periods)
+    start_idx = max(24, 1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(daily_range_aligned[i]) or np.isnan(daily_mid_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
-        ema_trend = ema_50_12h_aligned[i]
-        pivot_level = pivot_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
+        daily_range_val = daily_range_aligned[i]
+        daily_mid_val = daily_mid_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        vol_avg = vol_ma_24[i]
+        
+        # Calculate bands: midpoint ± 0.4 * daily range
+        upper_band = daily_mid_val + 0.4 * daily_range_val
+        lower_band = daily_mid_val - 0.4 * daily_range_val
         
         # Volume filter: volume > 1.5x average
         vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price breaks above R1 + bullish trend + volume spike
-            if price > r1_level and price > ema_trend and vol_filter:
+            # Long: price breaks above upper band + bullish weekly trend + volume spike
+            if price > upper_band and price > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S1 + bearish trend + volume spike
-            elif price < s1_level and price < ema_trend and vol_filter:
+            # Short: price breaks below lower band + bearish weekly trend + volume spike
+            elif price < lower_band and price < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to pivot (mean reversion) or trend turns bearish
-            if price <= pivot_level or price < ema_trend:
+            # Exit long: price returns to midpoint (mean reversion) or trend turns bearish
+            if price <= daily_mid_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to pivot (mean reversion) or trend turns bullish
-            if price >= pivot_level or price > ema_trend:
+            # Exit short: price returns to midpoint (mean reversion) or trend turns bullish
+            if price >= daily_mid_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
-timeframe = "12h"
+name = "4h_DailyMidBand_Breakout_1wEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
