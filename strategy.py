@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,21 +15,21 @@ def generate_signals(prices):
     
     # Get 1d data for calculations (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day CLOSE (for Donchian channel)
+    # Calculate 1-day closing prices
     close_1d = df_1d['close'].values
     
     # Calculate 1-day Donchian channel (20-period)
     upper = np.full(len(close_1d), np.nan)
     lower = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 20:
-        for i in range(20-1, len(close_1d)):
-            upper[i] = np.max(close_1d[i-20+1:i+1])
-            lower[i] = np.min(close_1d[i-20+1:i+1])
+        for i in range(19, len(close_1d)):
+            upper[i] = np.max(close_1d[i-19:i+1])
+            lower[i] = np.min(close_1d[i-19:i+1])
     
-    # Calculate 1-day ATR (14-period) for volatility filter
+    # Calculate 1-day ATR (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_prev = np.roll(close_1d, 1)
@@ -54,15 +54,15 @@ def generate_signals(prices):
         for i in range(1, len(close_1d)):
             ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper)
     lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 3-period volume average for spike detection
+    # Calculate 4-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 3
+    vol_period = 4
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_20_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
