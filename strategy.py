@@ -1,86 +1,121 @@
 #!/usr/bin/env python3
+"""
+12h_4h_SqueezeBreakout_SqueezeExit
+Hypothesis: Combine Bollinger Band squeeze (low volatility) with 4h Donchian breakout for directional entry, 
+exit on Bollinger Band expansion (volatility increase). Uses 12h for Bollinger Band squeeze detection 
+and 4h for Donchian breakout direction. Designed to capture explosive moves after low volatility periods 
+in both bull and bear markets. Target: 20-40 trades/year.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for Bollinger Band squeeze detection
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-day high/low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donch_high = np.full(len(high_1d), np.nan)
-    donch_low = np.full(len(low_1d), np.nan)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    for i in range(19, len(high_1d)):
-        donch_high[i] = np.max(high_1d[i-19:i+1])
-        donch_low[i] = np.min(low_1d[i-19:i+1])
+    # Calculate Bollinger Bands (20, 2) on 12h
+    bb_length = 20
+    bb_mult = 2.0
     
-    # Align Donchian levels to 6h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    # Basis (SMA)
+    basis_12h = np.full(len(close_12h), np.nan)
+    for i in range(bb_length - 1, len(close_12h)):
+        basis_12h[i] = np.mean(close_12h[i - bb_length + 1:i + 1])
     
-    # Calculate daily average volume (20-day)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = np.full(len(vol_1d), np.nan)
-    for i in range(19, len(vol_1d)):
-        vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Standard deviation
+    dev_12h = np.full(len(close_12h), np.nan)
+    for i in range(bb_length - 1, len(close_12h)):
+        dev_12h[i] = np.std(close_12h[i - bb_length + 1:i + 1])
+    
+    # Upper and lower bands
+    upper_12h = basis_12h + bb_mult * dev_12h
+    lower_12h = basis_12h - bb_mult * dev_12h
+    bb_width_12h = (upper_12h - lower_12h) / basis_12h  # Normalized width
+    
+    # Bollinger Band squeeze: low volatility condition
+    # Squeeze when BB width is below 20-period average
+    bb_width_ma_20 = np.full(len(bb_width_12h), np.nan)
+    for i in range(19, len(bb_width_12h)):
+        bb_width_ma_20[i] = np.mean(bb_width_12h[i - 19:i + 1])
+    
+    squeeze_condition = bb_width_12h < bb_width_ma_20
+    
+    # Get 4h data for Donchian breakout direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Calculate Donchian Channel (20) on 4h
+    donchian_length = 20
+    upper_4h = np.full(len(high_4h), np.nan)
+    lower_4h = np.full(len(low_4h), np.nan)
+    
+    for i in range(donchian_length - 1, len(high_4h)):
+        upper_4h[i] = np.max(high_4h[i - donchian_length + 1:i + 1])
+        lower_4h[i] = np.min(low_4h[i - donchian_length + 1:i + 1])
+    
+    # Align indicators to lower timeframe (assuming 1h primary for signal generation)
+    # But we'll use 4h as primary timeframe according to instructions
+    squeeze_aligned = align_htf_to_ltf(prices, df_12h, squeeze_condition.astype(float))
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Start after Donchian and volume MA are ready
-    start_idx = 20
+    # Warmup period
+    start_idx = max(bb_length + 19, donchian_length + 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(squeeze_aligned[i]) or 
+            np.isnan(upper_4h_aligned[i]) or 
+            np.isnan(lower_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_now = volume[i]
-        vol_avg = vol_ma_aligned[i]
-        
-        # Volume filter: require volume above daily average
-        vol_filter = vol_now > vol_avg
         
         if position == 0:
-            # Long: price breaks above daily Donchian high with volume confirmation
-            if price > donch_high_aligned[i] and vol_filter:
+            # Enter long: squeeze condition + price breaks above upper Donchian
+            if squeeze_aligned[i] > 0.5 and price > upper_4h_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below daily Donchian low with volume confirmation
-            elif price < donch_low_aligned[i] and vol_filter:
+            # Enter short: squeeze condition + price breaks below lower Donchian
+            elif squeeze_aligned[i] > 0.5 and price < lower_4h_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns below daily Donchian low
-            if price < donch_low_aligned[i]:
+            # Exit long: squeeze condition ends (volatility expansion) OR price breaks below lower Donchian
+            if squeeze_aligned[i] <= 0.5 or price < lower_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns above daily Donchian high
-            if price > donch_high_aligned[i]:
+            # Exit short: squeeze condition ends OR price breaks above upper Donchian
+            if squeeze_aligned[i] <= 0.5 or price > upper_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dBreakout_Volume"
-timeframe = "6h"
+name = "12h_4h_SqueezeBreakout_SqueezeExit"
+timeframe = "4h"
 leverage = 1.0
