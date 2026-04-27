@@ -13,23 +13,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA34) and volatility
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close
-    close_1d = df_1d['close'].values
-    ema_34 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34[i] = (close_1d[i] * 2 + ema_34[i-1] * 32) / 34
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50 = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50[i] = (close_1w[i] * 2 + ema_50[i-1] * 48) / 50
     
-    # Align EMA34 to 1h
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align weekly EMA50 to 6h
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Calculate ATR(14) for volatility filter
+    # Calculate 6h ATR(14) for volatility filter
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
@@ -41,13 +41,13 @@ def generate_signals(prices):
         else:
             atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 20-period volume average
+    # Calculate 6h 20-period volume average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
-    # Calculate 20-period high/low for Donchian breakout
+    # Calculate 6h 20-period high/low for Donchian breakout
     high_max = np.full(n, np.nan)
     low_min = np.full(n, np.nan)
     period = 20
@@ -55,21 +55,16 @@ def generate_signals(prices):
         high_max[i] = np.max(high[i-period:i])
         low_min[i] = np.min(low[i-period:i])
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0
-    size = 0.20
+    size = 0.25
     
     # Warmup period
     start_idx = max(14, vol_period, period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or
-            not in_session[i]):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
             signals[i] = 0.0
             continue
         
@@ -77,12 +72,12 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume AND above 1d EMA34
-            if price > high_max[i] and vol_ratio > 2.0 and price > ema_34_aligned[i]:
+            # Long: Price breaks above Donchian high with volume AND above weekly EMA50
+            if price > high_max[i] and vol_ratio > 2.0 and price > ema_50_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume AND below 1d EMA34
-            elif price < low_min[i] and vol_ratio > 2.0 and price < ema_34_aligned[i]:
+            # Short: Price breaks below Donchian low with volume AND below weekly EMA50
+            elif price < low_min[i] and vol_ratio > 2.0 and price < ema_50_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
@@ -104,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Donchian20_1dEMA34_Volume_Session"
-timeframe = "1h"
+name = "6h_Donchian20_1wEMA50_Volume_Trend"
+timeframe = "6h"
 leverage = 1.0
