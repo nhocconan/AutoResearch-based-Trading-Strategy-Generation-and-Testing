@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,22 +13,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 12h data for indicators
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Daily ATR (14-period) for volatility filter
-    tr1 = pd.Series(df_1d['high'] - df_1d['low'])
-    tr2 = pd.Series(np.abs(df_1d['high'] - df_1d['close'].shift(1)))
-    tr3 = pd.Series(np.abs(df_1d['low'] - df_1d['close'].shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr.iloc[0] = 0
-    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # 12h Donchian channel (20-period)
+    high_20 = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_20
+    donchian_low = low_20
     
-    # 6-period EMA for entry/exit signal
-    ema6 = pd.Series(close).ewm(span=6, adjust=False, min_periods=6).mean().values
+    # Align Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -38,40 +40,41 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA6, volume MA, and ATR14
-    start_idx = max(20, 6)
+    # Warmup: need enough data for Donchian, volume MA, and EMA50
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(atr_14_aligned[i]) or np.isnan(ema6[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(ema50_12h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        ema_val = ema6[i]
+        donch_high = donchian_high_aligned[i]
+        donch_low = donchian_low_aligned[i]
+        ema_trend = ema50_12h_aligned[i]
         vol_spike_val = vol_spike[i]
-        atr_val = atr_14_aligned[i]
         
         if position == 0:
-            # Long: price crosses above EMA6 + volume spike + volatility filter (ATR > 0)
-            if close[i] > ema_val and close[i-1] <= ema_val and vol_spike_val and atr_val > 0:
+            # Long: price breaks above Donchian high + volume spike + uptrend (price > EMA50)
+            if close[i] > donch_high and vol_spike_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: price crosses below EMA6 + volume spike + volatility filter (ATR > 0)
-            elif close[i] < ema_val and close[i-1] >= ema_val and vol_spike_val and atr_val > 0:
+            # Short: price breaks below Donchian low + volume spike + downtrend (price < EMA50)
+            elif close[i] < donch_low and vol_spike_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA6
-            if close[i] < ema_val:
+            # Exit long: price closes below Donchian low or trend turns down
+            if close[i] < donch_low or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA6
-            if close[i] > ema_val:
+            # Exit short: price closes above Donchian high or trend turns up
+            if close[i] > donch_high or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -79,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA6_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
