@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Donchian Breakout with 1d Volume Spike and 1w Trend Filter.
-Long when: 1) Price breaks above Donchian(20) high, 2) 1d volume > 2x average, 3) Price > 1w EMA100.
-Short when: 1) Price breaks below Donchian(20) low, 2) 1d volume > 2x average, 3) Price < 1w EMA100.
-Exit when: 1) Price crosses Donchian midpoint (mean reversion) OR 2) 1w EMA100 trend reverses.
-Designed for 6h timeframe: targets 50-150 total trades over 4 years (12-37/year).
-Works in bull (breakouts) and bear (mean reversion on trend reversal).
+4h Camarilla Pivot R1/S1 Breakout with 12h EMA50 Trend Filter and Volume Spike.
+Long when: 1) Price breaks above R1 (resistance), 2) Price > 12h EMA50 (bullish trend), 3) Volume > 2x 20-period average.
+Short when: 1) Price breaks below S1 (support), 2) Price < 12h EMA50 (bearish trend), 3) Volume > 2x 20-period average.
+Exit when price returns to pivot point (mean reversion) or trend reverses.
+Designed for 4h timeframe: targets 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -22,82 +21,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(19, n):
-        donch_high[i] = np.max(high[i-19:i+1])
-        donch_low[i] = np.min(low[i-19:i+1])
-    donch_mid = (donch_high + donch_low) / 2
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # 1d volume for spike filter
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate pivot points and Camarilla levels from previous day
+    # We need daily high, low, close to calculate today's Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(vol_1d), np.nan)
-    for i in range(19, len(vol_1d)):  # 20-day MA
-        vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # 1w EMA100 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_100_1w = np.full(len(close_1w), np.nan)
-    for i in range(99, len(close_1w)):
-        ema_100_1w[i] = np.mean(close_1w[i-99:i+1])  # Simple MA for speed, min_periods=100
-    ema_100_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_100_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate pivot and Camarilla levels (R1, S1)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align daily levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume filter: volume > 2x 20-period average
+    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian(20), 1d vol MA, 1w EMA
-    start_idx = max(19, 19, 99)  # Donchian(20), 1d vol MA(20), 1w EMA(100)
+    # Warmup: need 12h EMA (50 periods), daily data, volume MA (20 periods)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema_100_1w_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
-        vol_1d_ma = vol_ma_1d_aligned[i]
-        vol_1d_now = volume[i]  # Current 6h volume, compare to 1d average
-        ema_trend = ema_100_1w_aligned[i]
-        upper = donch_high[i]
-        lower = donch_low[i]
-        mid = donch_mid[i]
+        ema_trend = ema_50_12h_aligned[i]
+        pivot_level = pivot_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        vol_now = volume[i]
+        vol_avg = vol_ma_20[i]
         
-        # Volume filter: current 6h volume > 2x 1d average volume
-        # Note: This approximates volume spike; 1d vol is daily total, 6h is 1/4 of day
-        vol_filter = vol_1d_now > 0.5 * vol_1d_ma  # Adjusted for timeframe difference
+        # Volume filter: volume > 2x average
+        vol_filter = vol_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: breakout above Donchian high + volume spike + above 1w EMA100
-            if price > upper and vol_filter and price > ema_trend:
+            # Long: price breaks above R1 + bullish trend + volume spike
+            if price > r1_level and price > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: breakdown below Donchian low + volume spike + below 1w EMA100
-            elif price < lower and vol_filter and price < ema_trend:
+            # Short: price breaks below S1 + bearish trend + volume spike
+            elif price < s1_level and price < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses Donchian midpoint OR trend turns bearish
-            if price < mid or price < ema_trend:
+            # Exit long: price returns to pivot (mean reversion) or trend turns bearish
+            if price <= pivot_level or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses Donchian midpoint OR trend turns bullish
-            if price > mid or price > ema_trend:
+            # Exit short: price returns to pivot (mean reversion) or trend turns bullish
+            if price >= pivot_level or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_Breakout_1dVolumeSpike_1wEMA100"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
