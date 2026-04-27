@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_Volume_Spike
-Hypothesis: Use price closing beyond stronger weekly R3/S3 levels (more significant than daily) combined with volume spike and weekly EMA34 trend filter. R3/S3 breakouts indicate stronger momentum and fewer false signals. Target 15-25 trades/year to avoid fee drag. Works in both bull (breakouts continue) and bear (false breakdowns reversed quickly).
+4h_RSI20_Pullback_12hTrend_VolumeFilter
+Hypothesis: Use RSI(20) pullback to 30/70 levels with 12h EMA50 trend filter and volume confirmation. RSI20 is more responsive than RSI14 for catching short-term reversals in 4h charts. Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend). Target 20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,70 +18,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend filter
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate Camarilla levels from previous week
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    range_ = df_1w['high'] - df_1w['low']
+    # RSI(20) on 4h closes
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/20, adjust=False, min_periods=20).mean()
+    avg_loss = loss.ewm(alpha=1/20, adjust=False, min_periods=20).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Camarilla R3 and S3 (stronger breakout levels)
-    r3 = typical_price + (range_ * 1.1 / 4)
-    s3 = typical_price - (range_ * 1.1 / 4)
-    
-    # Align levels to 12h timeframe (use previous week's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3.values)
-    
-    # Volume confirmation: volume > 2.5 * 20-period average
+    # Volume confirmation: volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.5)
+    vol_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for volume MA and EMA
-    start_idx = max(34, 20)
+    # Warmup: need enough data for RSI and EMA
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(rsi_values[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1w_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
-        vol_spike_val = vol_spike[i]
+        ema_trend = ema50_12h_aligned[i]
+        rsi_val = rsi_values[i]
+        vol_ok = vol_filter[i]
         
         if position == 0:
-            # Long: price closes above R3 + volume spike + uptrend (price > EMA34)
-            if close[i] > r3_level and vol_spike_val and close[i] > ema_trend:
+            # Long: RSI pulls back to 30 in uptrend with volume
+            if rsi_val <= 30 and ema_trend > 0 and vol_ok:
                 signals[i] = size
                 position = 1
-            # Short: price closes below S3 + volume spike + downtrend (price < EMA34)
-            elif close[i] < s3_level and vol_spike_val and close[i] < ema_trend:
+            # Short: RSI rallies to 70 in downtrend with volume
+            elif rsi_val >= 70 and ema_trend < 0 and vol_ok:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below S3 or trend turns down
-            if close[i] < s3_level or close[i] < ema_trend:
+            # Exit long: RSI reaches 70 or trend turns down
+            if rsi_val >= 70 or ema_trend <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above R3 or trend turns up
-            if close[i] > r3_level or close[i] > ema_trend:
+            # Exit short: RSI reaches 30 or trend turns up
+            if rsi_val <= 30 or ema_trend >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume_Spike"
-timeframe = "12h"
+name = "4h_RSI20_Pullback_12hTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
