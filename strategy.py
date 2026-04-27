@@ -13,109 +13,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA calculation
+    # Get 1d data for ATR and price range
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:  # Minimum for KAMA
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # KAMA parameters (Erickson 1998)
-    er_len = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio
-    change = np.abs(df_1d['close'].diff(er_len))
-    volatility = np.abs(df_1d['close'].diff()).rolling(window=er_len, min_periods=1).sum()
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Calculate Smoothing Constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(df_1d['close'])
-    kama[0] = df_1d['close'].iloc[0]
-    for i in range(1, len(df_1d)):
-        kama[i] = kama[i-1] + sc[i] * (df_1d['close'].iloc[i] - kama[i-1])
-    
-    # Align KAMA to lower timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Get 1d RSI
-    rsi_period = 14
-    delta = df_1d['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=rsi_period, min_periods=rsi_period).mean()
-    avg_loss = loss.rolling(window=rsi_period, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align RSI to lower timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi.values)
-    
-    # Get 1d Choppiness Index (using ATR)
-    chop_period = 14
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift())
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift())
+    # Calculate True Range components for ATR(14)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = tr.rolling(window=chop_period, min_periods=chop_period).mean()
-    highest_high = df_1d['high'].rolling(window=chop_period, min_periods=chop_period).max()
-    lowest_low = df_1d['low'].rolling(window=chop_period, min_periods=chop_period).min()
-    chop = 100 * np.log10(atr.sum() / (highest_high - lowest_low)) / np.log10(chop_period)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop.values)
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # ATR(14) with Wilder smoothing (same as RMA)
+    atr_14 = np.full(len(tr), np.nan, dtype=np.float64)
+    if len(tr) >= 14:
+        atr_14[13] = np.mean(tr[0:14])
+        for i in range(14, len(tr)):
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    
+    # Daily range (high - low)
+    daily_range = high_1d - low_1d
+    
+    # Align ATR and daily range to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
+    
+    # Get 4h data for Bollinger Bands
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    
+    # Bollinger Bands (20, 2)
+    sma_20 = np.full(len(close_4h), np.nan, dtype=np.float64)
+    std_20 = np.full(len(close_4h), np.nan, dtype=np.float64)
+    for i in range(19, len(close_4h)):
+        sma_20[i] = np.mean(close_4h[i-19:i+1])
+        std_20[i] = np.std(close_4h[i-19:i+1])
+    
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    
+    # Align Bollinger Bands to 4h timeframe (already aligned, but ensuring)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_4h, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_4h, lower_bb)
+    sma_20_aligned = align_htf_to_ltf(prices, df_4h, sma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need KAMA, RSI, Chop, volume MA
-    start_idx = max(14, 20)  # RSI and chop need 14 periods
+    # Warmup: need ATR (14), BB (20)
+    start_idx = max(14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(daily_range_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = chop_aligned[i]
-        vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        atr = atr_14_aligned[i]
+        daily_range_val = daily_range_aligned[i]
+        upper_bb_val = upper_bb_aligned[i]
+        lower_bb_val = lower_bb_aligned[i]
+        sma_20_val = sma_20_aligned[i]
         
-        # Volume filter: volume > 1.5x average
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Volatility filter: daily range > 1.5 * ATR (expansion phase)
+        vol_filter = daily_range_val > 1.5 * atr
+        
+        # Bollinger Band position: distance from middle band
+        bb_position = (price - sma_20_val) / (upper_bb_val - sma_20_val) if (upper_bb_val - sma_20_val) != 0 else 0
         
         if position == 0:
-            # Long: price above KAMA (uptrend), RSI < 40 (oversold), chop > 61.8 (range)
-            if price > kama_val and rsi_val < 40 and chop_val > 61.8 and vol_filter:
+            # Long: price touches lower BB + volatility expansion + mean reversion setup
+            if price <= lower_bb_val and vol_filter and bb_position < -0.3:
                 signals[i] = size
                 position = 1
-            # Short: price below KAMA (downtrend), RSI > 60 (overbought), chop > 61.8 (range)
-            elif price < kama_val and rsi_val > 60 and chop_val > 61.8 and vol_filter:
+            # Short: price touches upper BB + volatility expansion + mean reversion setup
+            elif price >= upper_bb_val and vol_filter and bb_position > 0.3:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below KAMA or RSI > 70
-            if price <= kama_val or rsi_val > 70:
+            # Exit long: price returns to middle BB or volatility contracts
+            if price >= sma_20_val or daily_range_val < atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above KAMA or RSI < 30
-            if price >= kama_val or rsi_val < 30:
+            # Exit short: price returns to middle BB or volatility contracts
+            if price <= sma_20_val or daily_range_val < atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_Chop_Filter"
-timeframe = "1d"
+name = "4h_Bollinger_Touch_VolatilityExpansion_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
