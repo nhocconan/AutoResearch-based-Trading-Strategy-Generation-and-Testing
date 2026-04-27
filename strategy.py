@@ -13,17 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Weekly EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # Get daily data for pivot points
+    # Get 1d data for pivot points (Camarilla R1/S1)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -32,17 +22,26 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and Camarilla levels (R1, S1)
+    # Calculate Camarilla pivot and levels (R1, S1)
     pivot = (high_1d + low_1d + close_1d) / 3.0
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Volume filter: volume > 1.8x 20-period average (4h)
     vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -51,12 +50,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need weekly EMA (200 periods), daily data, volume MA (20 periods)
-    start_idx = max(200, 20)
+    # Warmup: need 4h EMA (50 periods), daily data, volume MA (20 periods)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
             np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
@@ -64,15 +63,15 @@ def generate_signals(prices):
         
         # Current values
         price = close[i]
-        ema_trend = ema_200_1w_aligned[i]
+        ema_trend = ema_50_4h_aligned[i]
         pivot_level = pivot_aligned[i]
         r1_level = r1_aligned[i]
         s1_level = s1_aligned[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
-        # Volume filter: volume > 1.5x average
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Volume filter: volume > 1.8x average
+        vol_filter = vol_now > 1.8 * vol_avg
         
         if position == 0:
             # Long: price breaks above R1 + bullish trend + volume spike
@@ -102,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wEMA200_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_4hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
