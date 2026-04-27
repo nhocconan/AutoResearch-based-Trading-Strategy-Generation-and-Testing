@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context
+    # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate 1d ATR(14) for volatility filter
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -33,11 +33,11 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily EMA(34) for trend direction
+    # Calculate 1d EMA(34) for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily RSI(14) for overbought/oversold
+    # Calculate 1d RSI(14) for overbought/oversold
     delta_1d = pd.Series(close_1d).diff()
     gain_1d = delta_1d.where(delta_1d > 0, 0)
     loss_1d = -delta_1d.where(delta_1d < 0, 0)
@@ -48,18 +48,9 @@ def generate_signals(prices):
     rsi_1d = rsi_1d.values
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate daily volume moving average
+    # Calculate 1d volume moving average
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Calculate 6-hour ATR(14) for entry/exit conditions
-    tr1_6h = high - low
-    tr2_6h = np.abs(high - np.roll(close, 1))
-    tr3_6h = np.abs(low - np.roll(close, 1))
-    tr2_6h[0] = tr1_6h[0]
-    tr3_6h[0] = tr1_6h[0]
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    atr_14_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,8 +63,7 @@ def generate_signals(prices):
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or
-            np.isnan(atr_14_6h[i])):
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -128,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_ATR_VolumeFilter_1dTrend"
-timeframe = "6h"
+name = "12h_EMA34_ATR_VolumeFilter_1dTrend"
+timeframe = "12h"
 leverage = 1.0
