@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_v1
-Hypothesis: Combines Camarilla pivot levels (R3/S3) from daily data with 1d trend filter and volume spike.
-This strategy targets institutional levels with trend alignment and volume confirmation to capture
-strong directional moves while minimizing false breakouts. Designed for low trade frequency (12-37/year) 
-to reduce fee drag in both bull and bear markets. Uses 12h primary timeframe for optimal balance.
+1d_Keltner_Breakout_1wTrend_Volume_v1
+Hypothesis: Uses 1-day Keltner Channel breakout with 1-week trend filter and volume confirmation.
+Keltner Channels (ATR-based) capture volatility breakouts, while weekly trend ensures alignment with higher timeframe momentum.
+Volume confirmation filters out weak breakouts. Designed for low trade frequency (10-25 trades/year) to minimize fee drag.
+Works in both bull and bear markets by following the weekly trend direction.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,33 +21,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily pivot points and Camarilla levels
-    # Use 1d data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1-week ATR for Keltner Channels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate pivot point and Camarilla levels for each day
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # True Range and ATR(20) for 1-week
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Camarilla levels
-    r3_1d = close_1d + (range_1d * 1.1 / 2.0)  # R3 = C + (H-L)*1.1/2
-    s3_1d = close_1d - (range_1d * 1.1 / 2.0)  # S3 = C - (H-L)*1.1/2
+    # Keltner Channels: 20-period EMA ± 2.0 * ATR
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema20_1w + 2.0 * atr_1w
+    lower_keltner = ema20_1w - 2.0 * atr_1w
     
-    # 1d trend filter: EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1-week trend: EMA50
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-day average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
     
-    # Align all 1d indicators to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
+    # Align all 1w indicators to 1d timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1w, volume_confirm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,48 +61,48 @@ def generate_signals(prices):
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for calculations
-    start_idx = 34  # EMA34 needs 34 periods
+    start_idx = 50  # EMA50 needs 50 periods
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        ema34 = ema34_1d_aligned[i]
+        upper = upper_keltner_aligned[i]
+        lower = lower_keltner_aligned[i]
+        ema50 = ema50_1w_aligned[i]
         vol_conf = volume_confirm_aligned[i]
         
         if position == 0:
-            # Determine trend: price vs EMA34 (1d)
-            uptrend = close_val > ema34
-            downtrend = close_val < ema34
+            # Determine trend: price vs EMA50 (1w)
+            uptrend = close_val > ema50
+            downtrend = close_val < ema50
             
             if uptrend and vol_conf:
-                # Long: break above R3 with volume
-                if close_val > r3:
+                # Long: break above upper Keltner with volume
+                if close_val > upper:
                     signals[i] = size
                     position = 1
                     entry_price = close_val
             elif downtrend and vol_conf:
-                # Short: break below S3 with volume
-                if close_val < s3:
+                # Short: break below lower Keltner with volume
+                if close_val < lower:
                     signals[i] = -size
                     position = -1
                     entry_price = close_val
         elif position == 1:
-            # Exit: price re-enters below R3 or trend reversal
-            if close_val < r3:  # Re-enter below R3
+            # Exit: price re-enters below upper Keltner or trend reversal
+            if close_val < upper:  # Re-enter below upper Keltner
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: price re-enters above S3 or trend reversal
-            if close_val > s3:  # Re-enter above S3
+            # Exit: price re-enters above lower Keltner or trend reversal
+            if close_val > lower:  # Re-enter above lower Keltner
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_v1"
-timeframe = "12h"
+name = "1d_Keltner_Breakout_1wTrend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
