@@ -13,36 +13,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and entry triggers
+    # Get daily data for ATR and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate daily RSI(14) for mean reversion signals
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate daily ATR(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
     tr[0] = high_1d[0] - low_1d[0]
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily volume average for volume confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily EMA(50) for trend
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Get weekly data for regime filter (choppiness)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    # Calculate weekly Choppiness Index (14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    tr_1w = np.maximum(high_1w - low_1w, np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), np.abs(low_1w - np.roll(close_1w, 1))))
+    tr_1w[0] = high_1w[0] - low_1w[0]
+    
+    atr_14_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    sum_tr_14 = pd.Series(atr_14_1w).rolling(window=14, min_periods=14).sum().values
+    
+    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    range_14 = hh_14 - ll_14
+    
+    chop_14 = 100 * np.log10(sum_tr_14 / (range_14 + 1e-10)) / np.log10(14)
+    chop_14_aligned = align_htf_to_ltf(prices, df_1w, chop_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,13 +61,13 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need daily indicators
-    start_idx = max(34, 14, 20)
+    # Warmup: need daily indicators and weekly chop
+    start_idx = max(50, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(chop_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -67,43 +77,35 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        trend = ema_34_1d_aligned[i]
-        rsi_val = rsi_14_1d_aligned[i]
+        trend = ema_50_1d_aligned[i]
         atr_val = atr_14_1d_aligned[i]
-        vol_avg = vol_ma_20[i]
+        chop_val = chop_14_aligned[i]
         
-        # Volatility filter: ATR > 20-period median (high volatility regime)
-        if i >= 20:
-            atr_ma = pd.Series(atr_14_1d_aligned[:i+1]).rolling(window=20, min_periods=20).median().iloc[-1]
-        else:
-            atr_ma = atr_val
-        vol_filter = atr_val > atr_ma
+        # Regime filter: only trade in trending markets (Chop < 38.2)
+        trending_regime = chop_val < 38.2
         
-        # Volume confirmation: volume > 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_avg
-        
-        # Entry conditions: trade against short-term extreme with trend filter
+        # Entry conditions: only trade with trend + volatility
         if position == 0:
-            # Long: uptrend + RSI oversold + volatility + volume
-            if close[i] > trend and rsi_val < 30 and vol_filter and vol_confirm:
+            # Long: uptrend + volatility
+            if close[i] > trend and trending_regime:
                 signals[i] = size
                 position = 1
-            # Short: downtrend + RSI overbought + volatility + volume
-            elif close[i] < trend and rsi_val > 70 and vol_filter and vol_confirm:
+            # Short: downtrend + volatility
+            elif close[i] < trend and trending_regime:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: trend reversal or RSI overbought
-            if close[i] < trend or rsi_val > 70:
+            # Exit long: trend reversal or chop increases (range market)
+            if close[i] < trend or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: trend reversal or RSI oversold
-            if close[i] > trend or rsi_val < 30:
+            # Exit short: trend reversal or chop increases (range market)
+            if close[i] > trend or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyEMA34_RSI14_VolVolatilityFilter"
+name = "4h_DailyEMA50_WeeklyChopTrend"
 timeframe = "4h"
 leverage = 1.0
