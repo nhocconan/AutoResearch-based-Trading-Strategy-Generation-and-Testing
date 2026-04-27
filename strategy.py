@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Direction_1dRSI_ChopFilter
-Hypothesis: Uses KAMA (adaptive trend) on 12h for trend direction, combined with 1d RSI extremes and 1d Choppiness Index regime filter.
-- Long: KAMA upward (close > KAMA) AND 1d RSI < 30 (oversold) AND 1d Choppiness > 61.8 (ranging market -> mean reversion)
-- Short: KAMA downward (close < KAMA) AND 1d RSI > 70 (overbought) AND 1d Choppiness > 61.8 (ranging market -> mean reversion)
-- Exit: Opposite KAMA cross OR RSI returns to neutral (40-60) OR chop regime ends (Choppiness < 38.2 -> trending)
-Works in both bull and bear markets by using adaptive trend (KAMA) and fading extremes in ranging regimes.
-Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
-Volume is not used as primary filter to avoid overtrading; instead relies on regime and extreme conditions.
+4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike
+Hypothesis: Uses 12h Camarilla R1/S1 levels for mean reversion entries in ranging markets, 
+filtered by 12h EMA50 trend direction and volume spikes. In trending markets (price > EMA50),
+buy at S1 support; in ranging markets, trade R1/S1 reversals. Designed for 4h timeframe 
+to achieve 75-200 total trades over 4 years (19-50/year). Volume spike filter reduces 
+false signals. Discrete position sizing (0.25) minimizes fee drag. Works in both bull 
+and bear markets by adapting to 12h trend regime.
 """
 
 import numpy as np
@@ -19,93 +18,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for RSI and Choppiness Index
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for Camarilla levels and trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h KAMA (adaptive trend)
-    # Efficiency Ratio: |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    close_series = pd.Series(close)
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series - close_series.shift(1)).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants: fastest EMA=2 (ER=1), slowest EMA=30 (ER=0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Handle NaN/inf
-    sc = sc.fillna(0.001)  # default to slow EMA when ER is NaN
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    # Calculate 12h EMA50 for trend filter
+    close_12h_series = pd.Series(df_12h['close'].values)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d RSI(14)
-    close_1d = pd.Series(df_1d['close'].values)
-    delta = close_1d.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.fillna(50)  # neutral when undefined
+    # Calculate Camarilla pivot levels (R1, S1) from previous 12h bar
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Choppiness Index(14)
-    # CHOP = 100 * log10(sum(ATR(1), 14) / (log10(highest_high - lowest_low) * log10(14)))
-    tr1 = np.maximum(df_1d['high'].values - df_1d['low'].values,
-                     np.maximum(abs(df_1d['high'].values - close_1d.shift(1)),
-                                abs(df_1d['low'].values - close_1d.shift(1))))
-    atr1 = pd.Series(tr1).rolling(window=1, min_periods=1).sum()  # ATR(1) = TR
-    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min()
-    chop_denom = np.log10(highest_high - lowest_low) * np.log10(14)
-    chop_denom = chop_denom.replace(0, np.nan)  # avoid division by zero
-    chop_1d = 100 * np.log10(sum_atr1 / chop_denom)
-    chop_1d = chop_1d.fillna(50)  # neutral when undefined
+    pivot = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    r1 = pivot + (range_12h * 1.0 / 12)
+    s1 = pivot - (range_12h * 1.0 / 12)
     
-    # Align 1d indicators to 12h timeframe (completed bars only)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama.values)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d.values)
+    # Align 12h indicators to 4h timeframe (completed bars only)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need KAMA (10), RSI (14), Chop (14)
-    start_idx = max(14, 10)
+    # Warmup: need 12h EMA50 (50)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
-        chop_val = chop_1d_aligned[i]
+        ema_val = ema_50_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: KAMA direction + RSI extreme + Chop regime (ranging)
-            # Long: KAMA up (close > KAMA) AND RSI < 30 (oversold) AND Chop > 61.8 (ranging -> mean reversion)
-            long_condition = (close_val > kama_val) and (rsi_val < 30) and (chop_val > 61.8)
-            # Short: KAMA down (close < KAMA) AND RSI > 70 (overbought) AND Chop > 61.8 (ranging -> mean reversion)
-            short_condition = (close_val < kama_val) and (rsi_val > 70) and (chop_val > 61.8)
+            # Determine market regime: trending if price > EMA50, ranging otherwise
+            is_trending = close_val > ema_val
             
-            if long_condition:
-                signals[i] = size
-                position = 1
-            elif short_condition:
-                signals[i] = -size
-                position = -1
+            if is_trending:
+                # In uptrend: buy at S1 support with volume confirmation
+                long_condition = (close_val <= s1_val) and vol_conf
+                if long_condition:
+                    signals[i] = size
+                    position = 1
+            else:
+                # In ranging market: mean reversion at R1/S1 levels
+                long_condition = (close_val <= s1_val) and vol_conf
+                short_condition = (close_val >= r1_val) and vol_conf
+                
+                if long_condition:
+                    signals[i] = size
+                    position = 1
+                elif short_condition:
+                    signals[i] = -size
+                    position = -1
         elif position == 1:
-            # Exit long when KAMA turns down OR RSI returns to neutral OR chop regime ends (trending)
-            exit_condition = (close_val < kama_val) or (rsi_val >= 40) or (chop_val < 38.2)
+            # Exit long when price reaches midpoint (pivot) or trend breaks
+            pivot_aligned = (r1_aligned[i] + s1_aligned[i]) / 2  # Approximate pivot
+            exit_condition = (close_val >= pivot_aligned) or (close_val < ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -113,8 +101,9 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when KAMA turns up OR RSI returns to neutral OR chop regime ends (trending)
-            exit_condition = (close_val > kama_val) or (rsi_val <= 60) or (chop_val < 38.2)
+            # Exit short when price reaches midpoint (pivot) or trend breaks
+            pivot_aligned = (r1_aligned[i] + s1_aligned[i]) / 2  # Approximate pivot
+            exit_condition = (close_val <= pivot_aligned) or (close_val > ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -124,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Direction_1dRSI_ChopFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
