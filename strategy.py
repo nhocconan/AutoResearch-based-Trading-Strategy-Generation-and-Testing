@@ -1,108 +1,75 @@
 #!/usr/bin/env python3
 """
-4h Candlestick Engulfing Pattern with Volume and ADX Trend Filter.
-Long when bullish engulfing + ADX > 25 (strong trend) + volume > 1.5x average.
-Short when bearish engulfing + ADX > 25 + volume > 1.5x average.
-Exit when opposite engulfing pattern forms or ADX drops below 20.
-Designed to generate 20-50 trades/year per symbol with high-probability entries.
+6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation.
+Long when price breaks above Donchian high(20) and weekly pivot shows bullish bias (price > weekly pivot).
+Short when price breaks below Donchian low(20) and weekly pivot shows bearish bias (price < weekly pivot).
+Exit when price crosses back below Donchian median (long) or above Donchian median (short).
+Weekly pivot calculated from weekly high/low/close: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H.
+Volume filter: current volume > 1.5x 20-period average to avoid false breakouts.
+Designed to generate 15-30 trades/year per symbol with strong breakout edge in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index (ADX)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+def donchian_channels(high, low, period):
+    """Calculate Donchian channels: upper, lower, middle"""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2.0
     
-    # Smooth TR, DM+ and DM- using Wilder's smoothing (EMA with alpha=1/period)
-    def wilders_smoothing(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
-        alpha = 1.0 / period
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] * (1 - alpha) + arr[i] * alpha
-        return result
-    
-    atr = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = wilders_smoothing(dx, period)
-    
-    return adx
+    return upper, lower, middle
 
-def engulfing_pattern(open_price, high, low, close):
-    """Detect bullish and bearish engulfing patterns"""
-    n = len(close)
-    bullish = np.zeros(n, dtype=bool)
-    bearish = np.zeros(n, dtype=bool)
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot points: P, R1, S1"""
+    n = len(high)
+    pivot = np.full(n, np.nan)
+    r1 = np.full(n, np.nan)
+    s1 = np.full(n, np.nan)
     
-    for i in range(1, n):
-        # Bullish engulfing: current green candle engulfs previous red candle
-        if (close[i] > open_price[i] and  # Current candle bullish
-            open_price[i-1] > close[i-1] and  # Previous candle bearish
-            open_price[i] <= close[i-1] and  # Current open <= previous close
-            close[i] >= open_price[i-1]):  # Current close >= previous open
-            bullish[i] = True
-            
-        # Bearish engulfing: current red candle engulfs previous green candle
-        elif (close[i] < open_price[i] and  # Current candle bearish
-              open_price[i-1] < close[i-1] and  # Previous candle bullish
-              open_price[i] >= close[i-1] and  # Current open >= previous close
-              close[i] <= open_price[i-1]):  # Current close <= previous open
-            bearish[i] = True
+    for i in range(n):
+        pivot[i] = (high[i] + low[i] + close[i]) / 3.0
+        r1[i] = 2 * pivot[i] - low[i]
+        s1[i] = 2 * pivot[i] - high[i]
     
-    return bullish, bearish
+    return pivot, r1, s1
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    # Calculate ADX on daily timeframe
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate Donchian channels (20-period) on 6h data
+    donchian_high, donchian_low, donchian_middle = donchian_channels(high, low, 20)
     
-    # Engulfing patterns on 4h timeframe
-    bullish_engulf, bearish_engulf = engulfing_pattern(open_price, high, low, close)
+    # Calculate weekly pivot points
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    weekly_pivot, weekly_r1, weekly_s1 = calculate_weekly_pivot(weekly_high, weekly_low, weekly_close)
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma_20 = np.full_like(volume, np.nan, dtype=np.float64)
+    # Align weekly pivot data to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    
+    # Volume filter: volume > 1.5x average (to avoid false signals)
+    vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
@@ -110,52 +77,51 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ADX (14+14) + volume MA (20) + engulfing (1)
-    start_idx = max(28, 19, 1)
+    # Warmup: need Donchian (20) + volume MA (20)
+    start_idx = max(20, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_middle[i]) or np.isnan(weekly_pivot_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Current values
-        adx_val = adx_1d_aligned[i]
+        # Current price and volume
+        price_now = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
-        is_bullish_engulf = bullish_engulf[i]
-        is_bearish_engulf = bearish_engulf[i]
         
-        # Volume filter
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Current values
+        d_high = donchian_high[i]
+        d_low = donchian_low[i]
+        d_mid = donchian_middle[i]
+        wp = weekly_pivot_aligned[i]
         
-        # ADX trend filter: >25 for strong trend, <20 for weak trend (exit)
-        strong_trend = adx_val > 25
-        weak_trend = adx_val < 20
+        # Volume filter: volume > 1.5x average
+        vol_filter = vol_now > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Look for new entries only in strong trend with volume
-            if strong_trend and vol_filter:
-                if is_bullish_engulf:
-                    signals[i] = size
-                    position = 1
-                elif is_bearish_engulf:
-                    signals[i] = -size
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long: price breaks above Donchian high AND price > weekly pivot + volume filter
+            if price_now > d_high and price_now > wp and vol_filter:
+                signals[i] = size
+                position = 1
+            # Short: price breaks below Donchian low AND price < weekly pivot + volume filter
+            elif price_now < d_low and price_now < wp and vol_filter:
+                signals[i] = -size
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bearish engulfing OR weak trend
-            if is_bearish_engulf or weak_trend:
+            # Exit long: price crosses back below Donchian middle
+            if price_now < d_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: bullish engulfing OR weak trend
-            if is_bullish_engulf or weak_trend:
+            # Exit short: price crosses back above Donchian middle
+            if price_now > d_mid:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -163,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Engulfing_ADX_Volume_Filter"
-timeframe = "4h"
+name = "6h_Donchian_20_WeeklyPivot_Direction_Volume"
+timeframe = "6h"
 leverage = 1.0
