@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolFilter_v1
-Hypothesis: On 1h timeframe, use 4h Camarilla R3/S3 breakouts with 4h EMA50 trend filter and 1d volume spike confirmation.
-Only trade during 08-20 UTC session to avoid low-liquidity hours. Discrete sizing (0.20) to control fee drag.
-Target: 60-120 total trades over 4 years (15-30/year) for 1h timeframe.
+6h_ElderRay_ZeroLag_MA_Crossover_v1
+Hypothesis: Elder Ray (Bull/Bear Power) combined with Zero-Lag Moving Average crossover on 6h timeframe, filtered by 1-week trend. 
+Elder Ray identifies institutional buying/selling pressure. Zero-Lag MA reduces lag for timely entries. 
+Weekly trend filter ensures we trade with higher timeframe momentum. 
+This combination should work in both bull and bear markets by capturing momentum shifts with institutional confirmation.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -18,91 +20,85 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour  # open_time is datetime64[ms], index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    # Get 1w data for weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Get 4h data for Camarilla and trend
-    df_4h = get_htf_data(prices, '4h')
+    # Calculate Zero-Lag Moving Average (ZLMA) on 6h data
+    # ZLMA = 2*EMA - EMA(EMA) to reduce lag
+    ema1 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema2 = pd.Series(ema1).ewm(span=21, adjust=False, min_periods=21).mean().values
+    zlma = 2 * ema1 - ema2
     
-    # Calculate 4h Camarilla levels (R3, S3) from prior 4h bar
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    range_4h = high_4h - low_4h
-    camarilla_r3 = close_4h + 1.125 * range_4h
-    camarilla_s3 = close_4h - 1.125 * range_4h
+    # Calculate EMA13 for crossover signal
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 4h EMA50 for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Elder Ray (Bull Power and Bear Power) using 13-period EMA
+    ema13_close = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13_close  # Bull Power = High - EMA13
+    bear_power = low - ema13_close   # Bear Power = Low - EMA13
     
-    # Get 1d data for volume confirmation (volume > 2.0 * 20-period average)
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = volume_1d > (2.0 * vol_avg_1d)
+    # Weekly trend filter: price vs 50-period EMA on weekly
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Align all indicators to primary timeframe (1h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d)
+    # Align all 6h indicators (they're already LTF, but ensure proper indexing)
+    # For Elder Ray and ZLMA, we need to align to ensure no look-ahead
+    # Since these are calculated from close prices, we'll use them directly but ensure warmup
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.20   # Position size: 20% of capital (discrete level)
+    size = 0.25   # Position size: 25% of capital (discrete level to reduce fee churn)
     
-    # Warmup: need Camarilla (1), EMA50 (50), volume avg (20)
-    start_idx = max(1, 50, 20)
+    # Warmup: need EMA21 (21), EMA13 (13), weekly EMA50 (50)
+    start_idx = max(21, 13, 50)
     
     for i in range(start_idx, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
-        # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
+        # Skip if weekly trend data not ready
+        if np.isnan(ema50_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        ema50 = ema50_4h_aligned[i]
-        vol_conf = volume_confirm_aligned[i]
+        zlma_val = zlma[i]
+        ema13_val = ema13[i]
+        bull_power_val = bull_power[i]
+        bear_power_val = bear_power[i]
+        weekly_ema50 = ema50_1w_aligned[i]
+        
+        # Determine weekly trend
+        weekly_uptrend = close_val > weekly_ema50
+        weekly_downtrend = close_val < weekly_ema50
         
         if position == 0:
-            # Determine trend: price vs 4h EMA50
-            uptrend = close_val > ema50
-            downtrend = close_val < ema50
-            
-            if uptrend and vol_conf:
-                # Long bias: long when price breaks above R3 with volume confirmation
-                if close_val > r3:
-                    signals[i] = size
-                    position = 1
-                    entry_price = close_val
-            elif downtrend and vol_conf:
-                # Short bias: short when price breaks below S3 with volume confirmation
-                if close_val < s3:
-                    signals[i] = -size
-                    position = -1
-                    entry_price = close_val
+            # Long entry: Bull Power > 0 (buying pressure) + ZLMA crosses above EMA13 + weekly uptrend
+            if (bull_power_val > 0 and 
+                zlma_val > ema13_val and 
+                zlma[i-1] <= ema13[i-1] and  # crossover confirmation
+                weekly_uptrend):
+                signals[i] = size
+                position = 1
+                entry_price = close_val
+            # Short entry: Bear Power < 0 (selling pressure) + ZLMA crosses below EMA13 + weekly downtrend
+            elif (bear_power_val < 0 and 
+                  zlma_val < ema13_val and 
+                  zlma[i-1] >= ema13[i-1] and  # crossover confirmation
+                  weekly_downtrend):
+                signals[i] = -size
+                position = -1
+                entry_price = close_val
         elif position == 1:
-            # Exit: price touches S3 (Camarilla support) or reverse signal
-            if close_val < s3:
+            # Exit long: ZLMA crosses below EMA13 OR Bear Power turns negative (selling pressure)
+            if (zlma_val < ema13_val and zlma[i-1] >= ema13[i-1]) or bear_power_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: price touches R3 (Camarilla resistance) or reverse signal
-            if close_val > r3:
+            # Exit short: ZLMA crosses above EMA13 OR Bull Power turns positive (buying pressure)
+            if (zlma_val > ema13_val and zlma[i-1] <= ema13[i-1]) or bull_power_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolFilter_v1"
-timeframe = "1h"
+name = "6h_ElderRay_ZeroLag_MA_Crossover_v1"
+timeframe = "6h"
 leverage = 1.0
