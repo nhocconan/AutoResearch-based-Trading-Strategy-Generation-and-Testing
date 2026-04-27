@@ -18,21 +18,9 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day Donchian Channel (20-period) for breakout signals
+    # Calculate 1-day ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    donchian_high_1d = np.full(len(high_1d), np.nan)
-    donchian_low_1d = np.full(len(low_1d), np.nan)
-    
-    if len(high_1d) >= 20:
-        for i in range(19, len(high_1d)):
-            donchian_high_1d[i] = np.max(high_1d[i-19:i+1])
-            donchian_low_1d[i] = np.min(low_1d[i-19:i+1])
-    
-    # Calculate 1-day ATR (14-period) for volatility filter
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
     close_1d = df_1d['close'].values
     close_1d_prev = np.roll(close_1d, 1)
     close_1d_prev[0] = close_1d[0]
@@ -48,14 +36,25 @@ def generate_signals(prices):
         for i in range(14, len(tr)):
             atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align 1d indicators to 4h timeframe
-    donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 1-day Bollinger Bands (20, 2.0)
+    sma_20_1d = np.full(len(close_1d), np.nan)
+    std_20_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        for i in range(19, len(close_1d)):
+            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
+            std_20_1d[i] = np.std(close_1d[i-19:i+1])
     
-    # Calculate 4-period volume average for spike detection
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    
+    # Align 1d indicators to 6h timeframe
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    
+    # Calculate 6-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 4
+    vol_period = 6
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -64,11 +63,13 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(20, vol_period) + 5
+    start_idx = max(14, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(upper_bb_1d_aligned[i]) or 
+            np.isnan(lower_bb_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -79,26 +80,26 @@ def generate_signals(prices):
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume
-            if price > donchian_high_1d_aligned[i] and vol_filter:
+            # Long: Price breaks above upper Bollinger Band with volume
+            if price > upper_bb_1d_aligned[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume
-            elif price < donchian_low_1d_aligned[i] and vol_filter:
+            # Short: Price breaks below lower Bollinger Band with volume
+            elif price < lower_bb_1d_aligned[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below Donchian low or volatility spike (potential reversal)
-            if price < donchian_low_1d_aligned[i] or (vol_ratio > 2.5):
+            # Long exit: Price closes below lower Bollinger Band or volatility spike (potential reversal)
+            if price < lower_bb_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above Donchian high or volatility spike (potential reversal)
-            if price > donchian_high_1d_aligned[i] or (vol_ratio > 2.5):
+            # Short exit: Price closes above upper Bollinger Band or volatility spike (potential reversal)
+            if price > upper_bb_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_1d_ATR_Volume"
-timeframe = "4h"
+name = "6h_Bollinger_20_1dATR_Volume"
+timeframe = "6h"
 leverage = 1.0
