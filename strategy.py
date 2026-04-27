@@ -13,9 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get daily data for indicators
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     # Calculate weekly EMA(34) for trend
@@ -23,9 +28,6 @@ def generate_signals(prices):
     ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate daily ATR(14) for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -40,7 +42,7 @@ def generate_signals(prices):
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to daily timeframe (prices is already daily)
+    # Align indicators to 6h timeframe
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
@@ -53,7 +55,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     # Warmup: need all indicators
-    start_idx = max(34, 14, 20)
+    start_idx = max(34, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -112,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_VolumeVolatilityFilter"
-timeframe = "1d"
+name = "6h_WeeklyTrend_VolumeVolatilityFilter"
+timeframe = "6h"
 leverage = 1.0
