@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-#100768 - 12h_Donchian20_1wEMA50_Trend_VolumeS
-Hypothesis: 12h Donchian(20) breakout with 1-week EMA50 trend filter and volume spike. Designed to work in bull markets (trend-following breakouts) and bear markets (short breakdowns with trend filter). Uses weekly EMA50 to capture major trend direction, avoiding whipsaws. Targets 15-30 trades/year to minimize fee drag on 12h timeframe.
+#100770 - 1d_WeeklyDonchian20_1wEMA50_Trend_VolumeFilter
+Hypothesis: Daily Donchian breakout with weekly EMA50 trend filter and volume confirmation.
+This strategy targets 20-40 trades/year on 1d timeframe to minimize fee drag while capturing
+medium-term trends. The weekly EMA50 filter ensures we only trade in the direction of
+the higher timeframe trend, and volume confirmation adds conviction to breakouts.
+Works in bull markets (breakouts with trend) and bear markets (trend-following shorts).
+Uses 1d primary timeframe with 1w HTF for trend filter.
 """
 
 import numpy as np
@@ -10,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,45 +34,44 @@ def generate_signals(prices):
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Donchian channels (20-period) on 12h timeframe
-    # Use rolling window on high/low
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above 20-period high, above 1w EMA50, volume spike
-        if (close[i] > high_max[i] and 
+        # Long condition: price breaks above 20-day high, above 1w EMA50, volume spike
+        if (close[i] > high_20[i] and 
             close[i] > ema50_1w_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below 20-period low, below 1w EMA50, volume spike
-        elif (close[i] < low_min[i] and 
+        # Short condition: price breaks below 20-day low, below 1w EMA50, volume spike
+        elif (close[i] < low_20[i] and 
               close[i] < ema50_1w_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
         # Exit conditions: price returns to opposite Donchian level (trailing exit)
-        elif position == 1 and close[i] < low_min[i]:
+        elif position == 1 and close[i] < low_20[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > high_max[i]:
+        elif position == -1 and close[i] > high_20[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -81,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1wEMA50_Trend_VolumeS"
-timeframe = "12h"
+name = "1d_WeeklyDonchian20_1wEMA50_Trend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
