@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_RSI4060_MeanReversion_4hTrendFilter
-Hypothesis: Mean reversion on 1h with RSI 40-60 bands, filtered by 4h trend (EMA50) and volume confirmation.
-Trades only during London/NY session (08-20 UTC) to avoid Asian session noise.
-Targets 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-Uses RSI mean reversion in ranging markets and trend alignment for directional bias.
-Works in bull via long bias in uptrend, bear via short bias in downtrend, range via mean reversion.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_v2
+Hypothesis: Trade 12h timeframe with daily CAMARILLA R1/S1 breakouts filtered by 1d EMA34 trend and volume spikes.
+Targets 12-30 trades/year to minimize fee drag. Uses price channel structure with volume confirmation.
+Works in bull markets via breakouts and bear via mean reversion at S1/R1 levels.
+Improved: Added 5-bar minimum holding period to reduce churn and increased volume threshold to 2.5x.
 """
 
 import numpy as np
@@ -22,70 +21,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14) for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate CAMARILLA levels from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Previous day's OHLC for CAMARILLA calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    # CAMARILLA R1 and S1 levels (core reversal levels)
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Session filter: 08-20 UTC (London + NY overlap)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align CAMARILLA levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # 1d EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume confirmation: current volume > 2.5 * 24-period average (increased from 2.0x)
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > (2.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # Position size: 20% of capital
+    bars_since_entry = 0
+    size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for RSI and EMA
-    start_idx = max(14, 50)
+    # Warmup: need enough data for volume average and EMA
+    start_idx = max(24, 34)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(volume_confirm[i]) or not session_filter[i]):
+        bars_since_entry += 1
+        
+        # Skip if any data not ready
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        rsi_val = rsi[i]
-        ema_50_val = ema_50_4h_aligned[i]
+        camarilla_r1_val = camarilla_r1_aligned[i]
+        camarilla_s1_val = camarilla_s1_aligned[i]
+        ema_34_val = ema_34_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: RSI < 40 (oversold) in uptrend (price > EMA50) with volume
-            if rsi_val < 40 and close[i] > ema_50_val and vol_conf:
-                signals[i] = size
-                position = 1
-            # Short: RSI > 60 (overbought) in downtrend (price < EMA50) with volume
-            elif rsi_val > 60 and close[i] < ema_50_val and vol_conf:
-                signals[i] = -size
-                position = -1
+            # Require minimum 5 bars since last exit to reduce churn (increased from 3)
+            if bars_since_entry >= 5:
+                # Long: price breaks above R1 with volume confirmation AND above 1d EMA34 (uptrend)
+                if close[i] > camarilla_r1_val and vol_conf and close[i] > ema_34_val:
+                    signals[i] = size
+                    position = 1
+                    bars_since_entry = 0
+                # Short: price breaks below S1 with volume confirmation AND below 1d EMA34 (downtrend)
+                elif close[i] < camarilla_s1_val and vol_conf and close[i] < ema_34_val:
+                    signals[i] = -size
+                    position = -1
+                    bars_since_entry = 0
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion complete) or trend change
-            if rsi_val > 50 or close[i] < ema_50_val:
+            # Exit long: price breaks below S1 (opposite level)
+            if close[i] < camarilla_s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion complete) or trend change
-            if rsi_val < 50 or close[i] > ema_50_val:
+            # Exit short: price breaks above R1 (opposite level)
+            if close[i] > camarilla_r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI4060_MeanReversion_4hTrendFilter"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
