@@ -1,9 +1,3 @@
-# 1d_WeeklyPivot_DonchianBreakout_1wTrend
-# Hypothesis: On 1d chart, use 1w pivot as trend filter, 20-day Donchian breakouts for entries,
-# and volume confirmation to filter false breakouts. Weekly pivot provides strong trend bias
-# that works in both bull (buy pullbacks to pivot) and bear (sell rallies to pivot) markets.
-# Weekly timeframe reduces noise, daily provides timely signals. Target: 15-25 trades/year.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,21 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data for weekly pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate weekly pivot from daily data (last 5 days)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    # Align weekly pivot to daily timeframe (already weekly aligned, just need to forward-fill)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # Calculate weekly pivot using last 5 daily bars
+    weekly_pivot = np.full(len(high_1d), np.nan)
+    for i in range(4, len(high_1d)):  # Need at least 5 days
+        week_high = np.max(high_1d[i-4:i+1])
+        week_low = np.min(low_1d[i-4:i+1])
+        week_close = close_1d[i]
+        weekly_pivot[i] = (week_high + week_low + week_close) / 3
     
-    # Calculate 20-day Donchian channels
+    # Align weekly pivot to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    
+    # Calculate 20-period Donchian channels directly on 6h data
     lookback = 20
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
@@ -42,7 +43,7 @@ def generate_signals(prices):
         highest_high[i] = np.max(high[i-lookback:i])
         lowest_low[i] = np.min(low[i-lookback:i])
     
-    # 20-day average volume for spike detection
+    # 20-period average volume for spike detection
     vol_period = 20
     vol_ma = np.full(n, np.nan)
     for i in range(vol_period, n):
@@ -52,13 +53,13 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup period
-    start_idx = max(lookback, vol_period)
+    # Warmup period: need at least 20 for Donchian, 20 for volume, 5 for weekly pivot
+    start_idx = max(lookback, vol_period, 5)
     
     for i in range(start_idx, n):
         if (np.isnan(highest_high[i]) or
             np.isnan(lowest_low[i]) or
-            np.isnan(pivot_1w_aligned[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,11 +68,11 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         # Determine trend from weekly pivot
-        bullish = price > pivot_1w_aligned[i]
-        bearish = price < pivot_1w_aligned[i]
+        bullish = price > weekly_pivot_aligned[i]
+        bearish = price < weekly_pivot_aligned[i]
         
-        # Volume confirmation: spike > 1.8x average (slightly lower for daily)
-        volume_confirmation = vol_ratio > 1.8
+        # Volume confirmation: spike > 2.0x average
+        volume_confirmation = vol_ratio > 2.0
         
         if position == 0:
             # Long breakout: price breaks above Donchian high in bullish trend with volume
@@ -101,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_DonchianBreakout_1wTrend"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivot_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
