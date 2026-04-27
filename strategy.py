@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+# #!/usr/bin/env python3
+# Hypothesis: 6h timeframe with 1-day RSI divergence and volume confirmation
+# RSI divergence signals potential reversals, volume confirms strength
+# Works in both bull and bear markets by catching exhaustion moves
+# Target: 15-30 trades/year (60-120 total over 4 years)
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,91 +17,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA trend filter (21-period)
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Daily Donchian channels (20-period)
+    # Get daily data for RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels from previous daily bar
-    donchian_high = np.full(len(df_1d), np.nan)
-    donchian_low = np.full(len(df_1d), np.nan)
+    # Calculate daily RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    for i in range(20, len(df_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Align Donchian levels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Volume filter: volume > 2.0 x 20-period average
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
+    
+    # Align RSI to 6h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Volume filter: volume > 2 x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
+    # Price momentum: 6-period rate of change
+    roc_6 = np.full(n, np.nan)
+    for i in range(6, n):
+        if close[i-6] != 0:
+            roc_6[i] = (close[i] - close[i-6]) / close[i-6]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian (20 days), EMA (21 weeks), volume MA (20)
-    start_idx = max(20, 21, 20)
+    # Warmup: need RSI (14), volume MA (20), ROC (6)
+    start_idx = max(14, 20, 6)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(roc_6[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
+        rsi = rsi_1d_aligned[i]
+        momentum = roc_6[i]
         
-        # Volume filter: significant volume spike
+        # Volume filter
         vol_filter = vol_now > 2.0 * vol_avg
         
-        # Trend filter from weekly EMA
-        bullish_trend = price > ema_21_1w_aligned[i]
-        bearish_trend = price < ema_21_1w_aligned[i]
-        
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        
+        # RSI conditions for divergence-like signals
+        # Bullish: RSI oversold (<30) with positive momentum
+        # Bearish: RSI overbought (>70) with negative momentum
         if position == 0:
-            # Long: price breaks above upper Donchian + volume + bullish weekly trend
-            if price > upper and vol_filter and bullish_trend:
+            # Long: RSI oversold + upward momentum + volume
+            if rsi < 30 and momentum > 0 and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below lower Donchian + volume + bearish weekly trend
-            elif price < lower and vol_filter and bearish_trend:
+            # Short: RSI overbought + downward momentum + volume
+            elif rsi > 70 and momentum < 0 and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below lower Donchian or trend turns bearish
-            if price < lower or not bullish_trend:
+            # Exit long: RSI overbought or momentum turns negative
+            if rsi > 70 or momentum < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above upper Donchian or trend turns bullish
-            if price > upper or not bearish_trend:
+            # Exit short: RSI oversold or momentum turns positive
+            if rsi < 30 or momentum > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_21wEMA_VolumeFilter"
-timeframe = "1d"
+name = "6h_RSI_Divergence_Volume"
+timeframe = "6h"
 leverage = 1.0
