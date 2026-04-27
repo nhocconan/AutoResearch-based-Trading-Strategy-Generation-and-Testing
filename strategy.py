@@ -13,23 +13,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (EMA34)
+    # Get 12h data for trend filter (EMA50) and structure
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
     close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Get 1d data for daily trend (EMA89)
+    # Get 1d data for daily trend (EMA200) - longer term bias
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 89:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    ema_89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Get 6h data for price structure (Donchian channel breakout)
     df_6h = get_htf_data(prices, '6h')
@@ -49,7 +49,7 @@ def generate_signals(prices):
     donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
     
-    # Volume filter: volume > 1.5x 24-period average (6h)
+    # Volume filter: volume > 2.0x 24-period average (6h)
     vol_ma_24 = np.full(n, np.nan, dtype=np.float64)
     for i in range(23, n):
         vol_ma_24[i] = np.mean(volume[i-23:i+1])
@@ -58,12 +58,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 12h EMA (34), 1d EMA (89), 6h Donchian (20), volume MA (24)
-    start_idx = max(34, 89, 20, 24)
+    # Warmup: need 12h EMA (50), 1d EMA (200), 6h Donchian (20), volume MA (24)
+    start_idx = max(50, 200, 20, 24)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(ema_89_1d_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
             np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
@@ -71,15 +71,15 @@ def generate_signals(prices):
         
         # Current values
         price = close[i]
-        ema_trend_12h = ema_34_12h_aligned[i]
-        ema_trend_1d = ema_89_1d_aligned[i]
+        ema_trend_12h = ema_50_12h_aligned[i]
+        ema_trend_1d = ema_200_1d_aligned[i]
         donch_high = donchian_high_aligned[i]
         donch_low = donchian_low_aligned[i]
         vol_now = volume[i]
         vol_avg = vol_ma_24[i]
         
-        # Volume filter: volume > 1.5x average
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Volume filter: volume > 2.0x average
+        vol_filter = vol_now > 2.0 * vol_avg
         
         # Trend alignment: both 12h and 1d EMAs must agree
         bullish_trend = price > ema_trend_12h and price > ema_trend_1d
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_12hEMA34_1dEMA89_Trend_Volume"
-timeframe = "12h"
+name = "6h_Donchian_Breakout_12hEMA50_1dEMA200_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
