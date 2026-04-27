@@ -1,9 +1,3 @@
-# Hypothesis: Using 12h timeframe with 1-week high/low breakout and volume confirmation
-# This strategy aims to capture major trend changes with infrequent entries to minimize fee drag.
-# 1-week high/low acts as strong support/resistance, and breakouts with volume confirm institutional interest.
-# Works in both bull and bear markets by following the dominant trend direction.
-# Target: 12-37 trades per year to stay within fee-efficient range.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -11,34 +5,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     volume = prices['volume'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # Get 1w data for weekly high/low (key levels)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for KAMA trend and RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly high and low from previous week
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
+    # Calculate 1d KAMA for trend filter
+    # KAMA requires efficiency ratio and smoothing constants
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        direction = np.abs(close_1d[i] - close_1d[i-10])
+        volatility_sum = np.sum(volatility[i-9:i+1])
+        if volatility_sum > 0:
+            er[i] = direction / volatility_sum
+        else:
+            er[i] = 0
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Align weekly levels to 12h timeframe
-    weekly_high = align_htf_to_ltf(prices, df_1w, prev_high_1w)
-    weekly_low = align_htf_to_ltf(prices, df_1w, prev_low_1w)
+    # Calculate 1d RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume filter: volume > 1.5x 30-period average (on 12h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Align to 4h timeframe
+    kama_4h = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
@@ -49,45 +61,48 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama_4h[i]) or np.isnan(rsi_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long signal: break above weekly high with volume spike
-        long_signal = (close[i] > weekly_high[i] and 
-                       close[i-1] <= weekly_high[i-1] and 
-                       volume_spike[i])
+        # Long conditions:
+        # 1. Price above KAMA (uptrend) and RSI < 30 (oversold) and volume spike
+        # 2. Price crosses above KAMA with RSI < 50 and volume spike
+        long_condition = ((close[i] > kama_4h[i] and rsi_4h[i] < 30 and volume_spike[i]) or
+                         (close[i] > kama_4h[i] and close[i-1] <= kama_4h[i-1] and 
+                          rsi_4h[i] < 50 and volume_spike[i]))
         
-        # Short signal: break below weekly low with volume spike
-        short_signal = (close[i] < weekly_low[i] and 
-                        close[i-1] >= weekly_low[i-1] and 
-                        volume_spike[i])
+        # Short conditions:
+        # 1. Price below KAMA (downtrend) and RSI > 70 (overbought) and volume spike
+        # 2. Price crosses below KAMA with RSI > 50 and volume spike
+        short_condition = ((close[i] < kama_4h[i] and rsi_4h[i] > 70 and volume_spike[i]) or
+                          (close[i] < kama_4h[i] and close[i-1] >= kama_4h[i-1] and 
+                           rsi_4h[i] > 50 and volume_spike[i]))
         
-        if long_signal and position != 1:
-            signals[i] = 0.30
+        if long_condition:
+            signals[i] = 0.25
             position = 1
-        elif short_signal and position != -1:
-            signals[i] = -0.30
+        elif short_condition:
+            signals[i] = -0.25
             position = -1
-        # Exit when price returns to the opposite weekly level (mean reversion within the weekly range)
-        elif position == 1 and close[i] < weekly_low[i]:
+        # Exit conditions: reverse signal or RSI crosses 50
+        elif position == 1 and (rsi_4h[i] > 50 or close[i] < kama_4h[i]):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > weekly_high[i]:
+        elif position == -1 and (rsi_4h[i] < 50 or close[i] > kama_4h[i]):
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_WeeklyHighLow_Breakout_Volume1.5x"
-timeframe = "12h"
+name = "4h_KAMA_RSI_VolumeSpike_Trend"
+timeframe = "4h"
 leverage = 1.0
