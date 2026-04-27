@@ -34,15 +34,15 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 4-hour ATR(14) for volatility filter
+    # Calculate 6-hour ATR(14) for volatility filter
     tr1_h = high - low
     tr2_h = np.abs(high - np.roll(close, 1))
     tr3_h = np.abs(low - np.roll(close, 1))
     tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
     tr_h[0] = tr1_h[0]
-    atr_4h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
+    atr_6h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4-hour RSI(14)
+    # Calculate 6-hour RSI(14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -61,17 +61,17 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_4h[i]) or np.isnan(rsi[i])):
+            np.isnan(atr_6h[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_1d_aligned[i]
         atr_1d_val = atr_1d_aligned[i]
-        atr_4h_val = atr_4h[i]
+        atr_6h_val = atr_6h[i]
         rsi_val = rsi[i]
         
-        # Volatility filter: 4h ATR > daily ATR (higher volatility regime)
-        vol_filter = atr_4h_val > (atr_1d_val * 0.5)
+        # Volatility filter: 6h ATR > daily ATR (higher volatility regime)
+        vol_filter = atr_6h_val > (atr_1d_val * 0.5)
         
         # RSI filter: avoid extreme overbought/oversold
         rsi_filter = (rsi_val > 20) and (rsi_val < 80)
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_Trend_VolumeRSIFilter_v1"
-timeframe = "4h"
+name = "6h_EMA34_Trend_VolumeRSIFilter_v1"
+timeframe = "6h"
 leverage = 1.0
