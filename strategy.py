@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
+12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_HTF_v2
+Hypothesis: Camarilla R3/S3 breakout on 12h with 1d EMA34 trend filter and volume confirmation.
 Breakouts above/below Camarilla R3/S3 levels capture strong momentum moves. Trend filter ensures
 we only trade in direction of 1d trend to avoid counter-trend whipsaws. Volume spike confirms
-breakout authenticity. Designed for 4h timeframe with target 75-200 trades over 4 years.
+breakout authenticity. Designed for 12h timeframe with target 50-150 trades over 4 years.
 Uses discrete position sizing (0.25) to balance return and drawdown. Works in both bull
 and bear markets by aligning with intermediate-term 1d trend.
 """
@@ -30,7 +30,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Camarilla levels from previous 4h bar's OHLC
+    # Calculate Camarilla levels from previous 12h bar's OHLC
     prev_close = np.concatenate([[close[0]], close[:-1]])
     prev_high = np.concatenate([[high[0]], high[:-1]])
     prev_low = np.concatenate([[low[0]], low[:-1]])
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF"
+timeframe = "12h"
 leverage = 1.0
