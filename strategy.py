@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Camarilla_R3_S3_Breakout
-Hypothesis: Uses weekly Camarilla pivot levels (R3/S3) from 1w timeframe for breakout entries, confirmed by daily EMA50 trend and volume spike (>1.5x 20-period average). Designed for long-term breakouts with low trade frequency (~10-20 trades/year) to minimize fee flood. Works in bull markets via breakouts and bear markets via mean-reversion at extreme levels.
+6h_SuperTrend_Adaptive_ATR_RSI_Exit
+Hypothesis: Uses SuperTrend (ATR=10, multiplier=3) on 6h as primary trend filter, with RSI(14) exit on 6h to avoid whipsaws. Designed for medium-term trend following with controlled trade frequency (~15-25 trades/year) to minimize fee drag. Works in bull markets by riding trends and in bear markets by avoiding false breaks during consolidation via RSI exhaustion filters.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,69 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from 1w timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate ATR(10)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Previous week's OHLC for Camarilla calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # SuperTrend calculation
+    upper_band = (high + low) / 2 + 3 * atr
+    lower_band = (high + low) / 2 - 3 * atr
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    supertrend = np.full(n, np.nan)
+    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
     
-    # Align Camarilla levels to 1d timeframe (wait for previous week's close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    for i in range(10, n):
+        if close[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
     
-    # Daily EMA50 for trend confirmation
-    ema50_1d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    # RSI(14) for exit signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and volume
-    start_idx = 50
+    # Warmup
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema50_1d[i]) or np.isnan(volume_confirm[i])):
+        if np.isnan(supertrend[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        ema50_val = ema50_1d[i]
-        vol_conf = volume_confirm[i]
-        
         if position == 0:
-            # Long: price breaks above R3, above EMA50 trend, volume confirmation
-            if close[i] > camarilla_r3_val and close[i] > ema50_val and vol_conf:
+            # Long: price above SuperTrend (uptrend)
+            if close[i] > supertrend[i]:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3, below EMA50 trend, volume confirmation
-            elif close[i] < camarilla_s3_val and close[i] < ema50_val and vol_conf:
+            # Short: price below SuperTrend (downtrend)
+            elif close[i] < supertrend[i]:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA50
-            if close[i] < ema50_val:
+            # Exit long: RSI > 70 (overbought) or price crosses below SuperTrend
+            if rsi[i] > 70 or close[i] < supertrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA50
-            if close[i] > ema50_val:
+            # Exit short: RSI < 30 (oversold) or price crosses above SuperTrend
+            if rsi[i] < 30 or close[i] > supertrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Camarilla_R3_S3_Breakout"
-timeframe = "1d"
+name = "6h_SuperTrend_Adaptive_ATR_RSI_Exit"
+timeframe = "6h"
 leverage = 1.0
