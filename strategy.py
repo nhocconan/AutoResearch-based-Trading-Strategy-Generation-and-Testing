@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_MultiTimeframeBreakout_1dTrend_Volume
-Hypothesis: Breakouts from 12h price channels (Donchian) filtered by 1d EMA trend and volume spike, targeting 15-35 trades/year per symbol. Works in bull markets via breakout continuation and in bear via mean-reversion off extremes. Target: 60-140 total trades over 4 years to avoid fee drag.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn
+Hypothesis: Dynamic position sizing based on ATR-normalized distance from Camarilla levels.
+In bull markets: long at R1 breakout, size increases with momentum.
+In bear markets: short at S1 breakdown, size increases with momentum.
+Uses 1d EMA34 trend filter and volume > 2x average for confirmation.
+Target: 20-50 total trades over 4 years (~5-12/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -10,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,26 +22,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channel calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Camarilla pivot calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian(20) on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_high = np.full(len(high_12h), np.nan)
-    donchian_low = np.full(len(low_12h), np.nan)
+    # Calculate Camarilla levels for each 4h bar
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    for i in range(20, len(high_12h)):
-        donchian_high[i] = np.max(high_12h[i-20:i])
-        donchian_low[i] = np.min(low_12h[i-20:i])
+    camarilla_r1 = np.zeros(len(close_4h))
+    camarilla_s1 = np.zeros(len(close_4h))
+    for i in range(len(close_4h)):
+        if high_4h[i] == low_4h[i]:
+            camarilla_r1[i] = close_4h[i]
+            camarilla_s1[i] = close_4h[i]
+        else:
+            camarilla_r1[i] = close_4h[i] + (high_4h[i] - low_4h[i]) * 1.1 / 12
+            camarilla_s1[i] = close_4h[i] - (high_4h[i] - low_4h[i]) * 1.1 / 12
     
-    # Align Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -52,8 +61,16 @@ def generate_signals(prices):
         for i in range(ema_period, len(close_1d)):
             ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Align 1d EMA to 12h timeframe
+    # Align 1d EMA to 4h timeframe
     ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # ATR for volatility measurement and position sizing
+    atr_period = 14
+    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = np.full(n, np.nan)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
     
     # Volume confirmation
     vol_ma_period = 20
@@ -63,15 +80,13 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    size = 0.25  # 25% position size
     
-    # Warmup: need Donchian (20), EMA (34), volume MA (20)
-    start_idx = max(vol_ma_period, 20)
+    # Warmup: need all indicators
+    start_idx = max(atr_period, vol_ma_period, 1)
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_aligned[i]) or
+        if (np.isnan(ema_aligned[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -79,41 +94,46 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend filter: price above/below 1d EMA(34)
+        # Trend filter: price above/below 1d EMA34
         uptrend = price > ema_aligned[i]
         downtrend = price < ema_aligned[i]
         
-        # Volume confirmation: > 1.5x average volume
-        volume_confirmation = vol_ratio > 1.5
+        # Volume confirmation: > 2x average volume
+        volume_confirmation = vol_ratio > 2.0
         
         if position == 0:
-            # Long entry: price breaks above Donchian high in uptrend with volume
-            if price > donchian_high_aligned[i] and uptrend and volume_confirmation:
+            # Dynamic position sizing based on ATR-normalized distance from level
+            if uptrend and volume_confirmation and price > r1_aligned[i]:
+                # Long: size increases with momentum (price above R1)
+                distance = (price - r1_aligned[i]) / atr[i]
+                size = min(0.30, 0.10 + 0.05 * distance)  # Base 10% + up to 20% more
                 signals[i] = size
                 position = 1
-            # Short entry: price breaks below Donchian low in downtrend with volume
-            elif price < donchian_low_aligned[i] and downtrend and volume_confirmation:
+            elif downtrend and volume_confirmation and price < s1_aligned[i]:
+                # Short: size increases with momentum (price below S1)
+                distance = (s1_aligned[i] - price) / atr[i]
+                size = min(0.30, 0.10 + 0.05 * distance)  # Base 10% + up to 20% more
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns below Donchian low or trend reverses
-            if price < donchian_low_aligned[i] or not uptrend:
+            # Long exit: price returns below S1 or trend reverses
+            if price < s1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = size
+                signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price returns above Donchian high or trend reverses
-            if price > donchian_high_aligned[i] or not downtrend:
+            # Short exit: price returns above R1 or trend reverses
+            if price > r1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -size
+                signals[i] = -0.25  # Maintain position
     
     return signals
 
-name = "12h_MultiTimeframeBreakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
