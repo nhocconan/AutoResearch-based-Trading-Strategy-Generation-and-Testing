@@ -25,20 +25,13 @@ def generate_signals(prices):
     # Calculate daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    tr = np.maximum(high_1d - low_1d, 
-                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
     tr[0] = high_1d[0] - low_1d[0]  # first value
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily average volume for volume filter
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 6h timeframe
+    # Align indicators to 4h timeframe
     ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,12 +41,11 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     # Warmup: need all indicators
-    start_idx = max(21, 14, 20)
+    start_idx = max(21, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -65,8 +57,6 @@ def generate_signals(prices):
         
         ema_trend = ema_21_1d_aligned[i]
         atr_val = atr_14_1d_aligned[i]
-        vol_avg = vol_avg_1d_aligned[i]
-        vol_current = volume[i]
         
         # Volatility filter: ATR > 20-period median (high volatility regime)
         if i >= 20:
@@ -75,17 +65,14 @@ def generate_signals(prices):
             atr_ma = atr_val
         vol_filter = atr_val > atr_ma
         
-        # Volume filter: current volume > 1.5x daily average
-        volume_filter = vol_current > (vol_avg * 1.5)
-        
         # Entry conditions: long only in bullish trend, short only in bearish trend
         if position == 0:
-            # Long: daily trend up + volatility + volume
-            if close[i] > ema_trend and vol_filter and volume_filter:
+            # Long: daily trend up + volatility
+            if close[i] > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: daily trend down + volatility + volume
-            elif close[i] < ema_trend and vol_filter and volume_filter:
+            # Short: daily trend down + volatility
+            elif close[i] < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
@@ -107,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyEMA21_VolumeVolatilityFilter"
-timeframe = "6h"
+name = "4h_DailyEMA21_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
