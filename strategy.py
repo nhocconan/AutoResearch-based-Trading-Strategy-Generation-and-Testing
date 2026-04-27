@@ -18,16 +18,25 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day EMA (34-period) for trend filter
+    # Calculate 1-day RSI (14-period)
     close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        alpha = 2 / (34 + 1)
-        ema_34_1d[0] = close_1d[0]
-        for i in range(1, len(close_1d)):
-            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 1-day ATR (14-period) for volatility filter
+    avg_gain = np.full(len(close_1d), np.nan)
+    avg_loss = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 14:
+        avg_gain[13] = np.mean(gain[1:15])
+        avg_loss[13] = np.mean(loss[1:15])
+        for i in range(14, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    
+    # Calculate 1-day ATR (14-period) for volatility
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_prev = np.roll(close_1d, 1)
@@ -44,26 +53,13 @@ def generate_signals(prices):
         for i in range(14, len(tr)):
             atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 1-day Bollinger Bands (20, 2.0)
-    sma_20_1d = np.full(len(close_1d), np.nan)
-    std_20_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        for i in range(19, len(close_1d)):
-            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
-            std_20_1d[i] = np.std(close_1d[i-19:i+1])
-    
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
-    
-    # Align 1d indicators to 6h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d indicators to 12h timeframe
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # Calculate 6-period volume average for spike detection
+    # Calculate 12-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 6
+    vol_period = 12
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -72,11 +68,10 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(34, vol_period) + 5
+    start_idx = max(14, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(upper_bb_1d_aligned[i]) or np.isnan(lower_bb_1d_aligned[i]) or 
+        if (np.isnan(rsi_14_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -84,30 +79,30 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.5x average volume
-        vol_filter = vol_ratio > 1.5
+        # Volume spike filter: at least 1.8x average volume
+        vol_filter = vol_ratio > 1.8
         
         if position == 0:
-            # Long: Price breaks above upper Bollinger Band with volume and above EMA34 trend
-            if price > upper_bb_1d_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
+            # Long: RSI oversold (<30) with volume spike and price above prior close
+            if rsi_14_1d_aligned[i] < 30 and vol_filter and price > close[i-1]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below lower Bollinger Band with volume and below EMA34 trend
-            elif price < lower_bb_1d_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
+            # Short: RSI overbought (>70) with volume spike and price below prior close
+            elif rsi_14_1d_aligned[i] > 70 and vol_filter and price < close[i-1]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below lower Bollinger Band or volatility spike (potential reversal)
-            if price < lower_bb_1d_aligned[i] or (vol_ratio > 2.5):
+            # Long exit: RSI overbought (>70) or volatility spike (potential reversal)
+            if rsi_14_1d_aligned[i] > 70 or vol_ratio > 2.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above upper Bollinger Band or volatility spike (potential reversal)
-            if price > upper_bb_1d_aligned[i] or (vol_ratio > 2.5):
+            # Short exit: RSI oversold (<30) or volatility spike (potential reversal)
+            if rsi_14_1d_aligned[i] < 30 or vol_ratio > 2.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Bollinger_20_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_RSI14_1d_Volume"
+timeframe = "12h"
 leverage = 1.0
