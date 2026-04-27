@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_v2
-Hypothesis: Trade 12h timeframe with daily CAMARILLA R1/S1 breakouts filtered by 1d EMA34 trend and volume spikes.
-Targets 12-30 trades/year to minimize fee drag. Uses price channel structure with volume confirmation.
-Works in bull markets via breakouts and bear via mean reversion at S1/R1 levels.
-Improved: Added 5-bar minimum holding period to reduce churn and increased volume threshold to 2.5x.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
+Hypothesis: Trade 4h timeframe with daily CAMARILLA R1/S1 breakouts filtered by 1d EMA34 trend and volume spikes.
+Targets 15-35 trades/year to minimize fee drag. Works in bull markets via breakouts and bear via mean reversion at S1/R1 levels.
 """
 
 import numpy as np
@@ -35,7 +33,7 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align CAMARILLA levels to 12h timeframe
+    # Align CAMARILLA levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -43,20 +41,20 @@ def generate_signals(prices):
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume confirmation: current volume > 2.5 * 24-period average (increased from 2.0x)
+    # Volume confirmation: current volume > 2.0 * 24-period average (on 4h data, ~4 days)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (2.5 * vol_avg)
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
+    bars_since_exit = 0
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for volume average and EMA
     start_idx = max(24, 34)
     
     for i in range(start_idx, n):
-        bars_since_entry += 1
+        bars_since_exit += 1
         
         # Skip if any data not ready
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
@@ -70,18 +68,18 @@ def generate_signals(prices):
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Require minimum 5 bars since last exit to reduce churn (increased from 3)
-            if bars_since_entry >= 5:
+            # Require minimum 6 bars since last exit to avoid churn (~1 day on 4h)
+            if bars_since_exit >= 6:
                 # Long: price breaks above R1 with volume confirmation AND above 1d EMA34 (uptrend)
                 if close[i] > camarilla_r1_val and vol_conf and close[i] > ema_34_val:
                     signals[i] = size
                     position = 1
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 # Short: price breaks below S1 with volume confirmation AND below 1d EMA34 (downtrend)
                 elif close[i] < camarilla_s1_val and vol_conf and close[i] < ema_34_val:
                     signals[i] = -size
                     position = -1
-                    bars_since_entry = 0
+                    bars_since_exit = 0
         elif position == 1:
             # Exit long: price breaks below S1 (opposite level)
             if close[i] < camarilla_s1_val:
@@ -99,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
