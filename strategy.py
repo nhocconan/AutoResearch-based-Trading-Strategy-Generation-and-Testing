@@ -3,11 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume spike
-# Elder Ray measures bull/bear power relative to EMA13. Works in bull/bear:
-# - Bull market: Buy when Bull Power > 0 and rising + price > EMA13
-# - Bear market: Sell when Bear Power < 0 and falling + price < EMA13
-# Volume spike filters weak moves. Target: 20-30 trades/year per symbol.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Donchian breakouts capture momentum bursts; 1d EMA50 filters direction; volume confirms strength.
+# Works in bull (breakouts above) and bear (breakdowns below). Target: 25-40 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,28 +17,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA13 for Elder Ray calculation
-    close_1d = pd.Series(df_1d['close'].values)
-    ema13_1d = close_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    
     # 1d EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
     ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13_1d_aligned
-    # Bear Power = Low - EMA13 (negative value indicates bear strength)
-    bear_power = low - ema13_1d_aligned
+    # Donchian channels (20-period) on 4h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,31 +43,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: Bull Power positive AND rising AND price above EMA50 (uptrend) + volume
-        if (bull_power[i] > 0 and 
-            bull_power[i] > bull_power[i-1] and  # Rising bull power
-            close[i] > ema50_1d_aligned[i] and   # Uptrend filter
+        # Long: price breaks above upper Donchian + uptrend + volume
+        if (close[i] > high_20[i-1] and  # Breakout above prior 20-period high
+            close[i] > ema50_1d_aligned[i] and  # Uptrend filter
             volume_filter[i]):
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
-        # Short conditions: Bear Power negative AND falling AND price below EMA50 (downtrend) + volume
-        elif (bear_power[i] < 0 and 
-              bear_power[i] < bear_power[i-1] and  # Falling bear power (more negative)
-              close[i] < ema50_1d_aligned[i] and   # Downtrend filter
+        # Short: price breaks below lower Donchian + downtrend + volume
+        elif (close[i] < low_20[i-1] and  # Breakdown below prior 20-period low
+              close[i] < ema50_1d_aligned[i] and  # Downtrend filter
               volume_filter[i]):
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
