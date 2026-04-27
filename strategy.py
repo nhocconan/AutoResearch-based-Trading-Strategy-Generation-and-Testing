@@ -1,117 +1,173 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI with 4h RSI trend filter and 1d volume confirmation.
-In 2025's bear/range market, mean reversion on oversold/overbought RSI works when aligned with higher timeframe momentum.
-Uses 4h RSI > 50 for long bias, < 50 for short bias to avoid counter-trend trades.
-1d volume filter ensures trades occur during active market participation.
-Target: 20-30 trades/year per symbol to minimize fee drag in challenging 1h timeframe.
+Hypothesis: 6-hour Choppiness Index regime filter with weekly pivot support/resistance and volume confirmation.
+In choppy markets (CHOP > 61.8): mean-revert at weekly pivot S1/R1 levels.
+In trending markets (CHOP < 38.2): breakout continuation at weekly pivot S2/R2 levels.
+Weekly pivots provide institutional reference levels that work in both bull and bear markets.
+Volume filter ensures participation. Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def rsi(close, length):
-    """Relative Strength Index"""
-    if length <= 0:
-        return np.full_like(close, np.nan)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+def calculate_chop(high, low, close, length=14):
+    """Choppiness Index: measures whether market is choppy (high values) or trending (low values)"""
+    if len(high) < length:
+        return np.full_like(high, np.nan, dtype=np.float64)
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
+    atr = np.zeros_like(high)
+    for i in range(len(high)):
+        if i == 0:
+            atr[i] = high[i] - low[i]
+        else:
+            atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Wilder's smoothing
-    avg_gain[length-1] = np.mean(gain[:length])
-    avg_loss[length-1] = np.mean(loss[:length])
+    # Sum of ATR over period
+    atr_sum = np.zeros_like(high)
+    for i in range(length-1, len(high)):
+        atr_sum[i] = np.sum(atr[i-length+1:i+1])
     
-    for i in range(length, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
-        avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
+    # Highest high and lowest low over period
+    highest_high = np.zeros_like(high)
+    lowest_low = np.zeros_like(high)
+    for i in range(length-1, len(high)):
+        highest_high[i] = np.max(high[i-length+1:i+1])
+        lowest_low[i] = np.min(low[i-length+1:i+1])
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_val = 100 - (100 / (1 + rs))
-    return rsi_val
+    # Chop calculation
+    chop = np.full_like(high, np.nan, dtype=np.float64)
+    for i in range(length-1, len(high)):
+        if highest_high[i] != lowest_low[i]:
+            log_val = np.log10(atr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(length)
+            chop[i] = 100 * log_val
+        else:
+            chop[i] = 50.0  # neutral when no range
+    
+    return chop
+
+def calculate_pivot_points(high, low, close):
+    """Calculate standard pivot points: P, R1, S1, R2, S2, R3, S3"""
+    pivot = (high + low + close) / 3
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, s1, r2, s2, r3, s3
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for RSI trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot points and chop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Get 1d data for volume filter
+    # Calculate weekly chop
+    chop = calculate_chop(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    
+    # Calculate weekly pivot points
+    wk_high = df_1w['high'].values
+    wk_low = df_1w['low'].values
+    wk_close = df_1w['close'].values
+    pivot, r1, s1, r2, s2, r3, s3 = calculate_pivot_points(wk_high, wk_low, wk_close)
+    
+    # Align pivot levels
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    
+    # Get daily volume for confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1h RSI(14)
-    rsi_1h = rsi(close, 14)
-    
-    # Calculate 4h RSI(14) for trend filter
-    close_4h = df_4h['close'].values
-    rsi_4h = rsi(close_4h, 14)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    
-    # Calculate 1d volume MA(20) for participation filter
     vol_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Warmup: need RSI values
-    start_idx = 14
+    # Warmup: need chop (14) + volume MA (20)
+    start_idx = max(14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi_1h[i]) or 
-            np.isnan(rsi_4h_aligned[i]) or 
+        if (np.isnan(chop_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
             np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current values
-        rsi_now = rsi_1h[i]
-        rsi_4h_now = rsi_4h_aligned[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
+        # Current 6h price and volume
+        price_now = close[i]
         vol_now = volume[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
+        
+        # Current levels
+        chop_val = chop_aligned[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         
         # Volume filter: volume > 1.2x daily average
         vol_filter = vol_now > 1.2 * vol_ma
         
         if position == 0:
-            # Long: RSI oversold (<30) with 4h bullish bias (>50) and volume
-            if rsi_now < 30 and rsi_4h_now > 50 and vol_filter:
-                signals[i] = size
-                position = 1
-            # Short: RSI overbought (>70) with 4h bearish bias (<50) and volume
-            elif rsi_now > 70 and rsi_4h_now < 50 and vol_filter:
-                signals[i] = -size
-                position = -1
+            # Choppy market (CHOP > 61.8): mean revert at S1/R1
+            if chop_val > 61.8:
+                if price_now <= s1_val and vol_filter:
+                    signals[i] = size
+                    position = 1
+                elif price_now >= r1_val and vol_filter:
+                    signals[i] = -size
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            # Trending market (CHOP < 38.2): breakout at S2/R2
+            elif chop_val < 38.2:
+                if price_now >= r2_val and vol_filter:
+                    signals[i] = size
+                    position = 1
+                elif price_now <= s2_val and vol_filter:
+                    signals[i] = -size
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            # Transition zone (38.2 <= CHOP <= 61.8): no trade
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral (50) or 4h momentum fails
-            if rsi_now >= 50 or rsi_4h_now < 50:
+            # Exit long: chop becomes too high (choppy) or price reaches opposite level
+            if chop_val > 61.8 or price_now <= s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI returns to neutral (50) or 4h momentum fails
-            if rsi_now <= 50 or rsi_4h_now > 50:
+            # Exit short: chop becomes too high (choppy) or price reaches opposite level
+            if chop_val > 61.8 or price_now >= r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +175,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI14_4hRSITrend_1dVolumeFilter"
-timeframe = "1h"
+name = "6h_ChopRegime_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
