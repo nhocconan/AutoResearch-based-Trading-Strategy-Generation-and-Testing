@@ -35,12 +35,12 @@ def generate_signals(prices):
     atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Volume filter: volume > 2.0x 20-period average (stricter to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: volume > 2.0x 24-period average (stricter to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_filter = volume > (vol_ma * 2.0)
     
-    # Volatility filter: ATR below its 30-period median (low volatility regime)
-    atr_median = pd.Series(atr14_1d_aligned).rolling(window=30, min_periods=15).median().values
+    # Volatility filter: ATR below its 50-period median (low volatility regime)
+    atr_median = pd.Series(atr14_1d_aligned).rolling(window=50, min_periods=20).median().values
     vol_filter = atr14_1d_aligned < atr_median
     
     signals = np.zeros(n)
