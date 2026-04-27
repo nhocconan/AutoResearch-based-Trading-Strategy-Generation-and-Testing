@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ADX_DMI_VolumeSpike_1dTrend
-Hypothesis: ADX > 25 with +DI > -DI for long, -DI > +DI for short on 6h, combined with 1d EMA50 trend filter and volume confirmation. 
-ADX measures trend strength, DMI shows direction. Volume spike confirms conviction. Works in both bull/bear by only taking strong directional moves with confirmation.
-Target: 12-30 trades/year on 6h to minimize fee drag.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 levels from 1d act as strong support/resistance. Price breaking these levels with 1d EMA34 trend alignment and volume spike indicates institutional participation. Designed for 20-50 trades/year on 4h to minimize fee drag while capturing strong moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -20,31 +18,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ADX and DMI (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR
-    
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
+    range_1d = h_1d - l_1d
+    r3_1d = c_1d + 1.1 * range_1d
+    s3_1d = c_1d - 1.1 * range_1d
+    
+    # Align to 4h: use previous day's levels (available after 1d bar closes)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(c_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,24 +47,28 @@ def generate_signals(prices):
     entry_price = 0.0
     size = 0.25  # 25% position size
     
-    # Warmup: need enough for ADX/DMI, EMA50, volume average
-    start_idx = max(50, 20, 14)
+    # Warmup: need enough for 1d EMA34 and volume average
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_spike = volume_spike[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
         
         if position == 0:
-            # Flat - look for entry: ADX > 25 (strong trend), DMI shows direction, aligned with 1d trend, volume spike
-            long_condition = adx[i] > 25 and plus_di[i] > minus_di[i] and close_val > ema_trend and vol_spike
-            short_condition = adx[i] > 25 and minus_di[i] > plus_di[i] and close_val < ema_trend and vol_spike
+            # Flat - look for breakout of Camarilla R3/S3 with trend alignment and volume spike
+            # Long: price breaks above R3 AND 1d trend up (close > EMA34) AND volume spike
+            # Short: price breaks below S3 AND 1d trend down (close < EMA34) AND volume spike
+            long_condition = close_val > r3 and close_val > ema_trend and vol_spike
+            short_condition = close_val < s3 and close_val < ema_trend and vol_spike
             
             if long_condition:
                 signals[i] = size
@@ -83,16 +79,16 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Long - exit when trend weakens (ADX < 20) or DMI crosses or 1d trend turns down
-            if adx[i] < 20 or minus_di[i] > plus_di[i] or close_val < ema_trend:
+            # Long - exit when price breaks below S3 (reversal) OR 1d trend turns down
+            if close_val < s3 or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when trend weakens (ADX < 20) or DMI crosses or 1d trend turns up
-            if adx[i] < 20 or plus_di[i] > minus_di[i] or close_val > ema_trend:
+            # Short - exit when price breaks above R3 (reversal) OR 1d trend turns up
+            if close_val > r3 or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -101,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_DMI_VolumeSpike_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
