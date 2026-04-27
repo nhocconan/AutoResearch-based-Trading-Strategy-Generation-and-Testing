@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and volatility
+    # Get daily data for trend, volatility, and price channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,31 +31,22 @@ def generate_signals(prices):
     atr_1d_raw = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
     
-    # 1d RSI(14) for momentum confirmation
-    delta = np.diff(df_1d['close'].values, prepend=df_1d['close'].values[0])
+    # 4h ATR(14) for volatility filter
+    tr1_h = high - low
+    tr2_h = np.abs(high - np.roll(close, 1))
+    tr3_h = np.abs(low - np.roll(close, 1))
+    tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
+    tr_h[0] = tr1_h[0]
+    atr_4h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
+    
+    # 4h RSI(14) for momentum confirmation
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # 1d ADX(14) for trend strength
-    plus_dm = np.where((df_1d['high'].values - np.roll(df_1d['high'].values, 1)) > 
-                       (np.roll(df_1d['low'].values, 1) - df_1d['low'].values), 
-                       np.maximum(df_1d['high'].values - np.roll(df_1d['high'].values, 1), 0), 0)
-    minus_dm = np.where((np.roll(df_1d['low'].values, 1) - df_1d['low'].values) > 
-                        (df_1d['high'].values - np.roll(df_1d['high'].values, 1)), 
-                        np.maximum(np.roll(df_1d['low'].values, 1) - df_1d['low'].values, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    tr14 = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (tr14 + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (tr14 + 1e-10)
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)) * 100
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,47 +57,44 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_4h[i]) or 
+            i >= len(atr_1d_aligned) or np.isnan(atr_1d_aligned[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_1d_aligned[i]
+        atr_4h_val = atr_4h[i]
         atr_1d_val = atr_1d_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
-        adx_val = adx_aligned[i]
+        rsi_val = rsi[i]
         
-        # Volatility filter: ATR > 0.5 * ATR mean (higher volatility regime)
-        atr_mean = np.nanmean(atr_1d_aligned[max(0, i-50):i+1])
-        vol_filter = atr_1d_val > (atr_mean * 0.5)
+        # Volatility filter: 4h ATR > 0.5 * daily ATR (higher volatility regime)
+        vol_filter = atr_4h_val > (atr_1d_val * 0.5)
         
-        # Trend filter: ADX > 25 (trending market)
-        trend_filter = adx_val > 25
-        
-        # RSI filter: avoid extremes
+        # RSI filter: avoid overbought/oversold extremes
         rsi_filter = (rsi_val > 30) & (rsi_val < 70)
         
         if position == 0:
-            # Long: price above EMA with all filters
-            if close[i] > ema_trend and vol_filter and trend_filter and rsi_filter:
+            # Long: price above EMA with volatility and RSI filter
+            if close[i] > ema_trend and vol_filter and rsi_filter:
                 signals[i] = size
                 position = 1
-            # Short: price below EMA with all filters
-            elif close[i] < ema_trend and vol_filter and trend_filter and rsi_filter:
+            # Short: price below EMA with volatility and RSI filter
+            elif close[i] < ema_trend and vol_filter and rsi_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA or RSI overbought
-            if close[i] < ema_trend or rsi_val >= 70:
+            # Exit long: price crosses below EMA
+            if close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA or RSI oversold
-            if close[i] > ema_trend or rsi_val <= 30:
+            # Exit short: price crosses above EMA
+            if close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_Trend_ADXRSIFilter_v1"
-timeframe = "1d"
+name = "4h_EMA34_Trend_VolumeRSIFilter_v1"
+timeframe = "4h"
 leverage = 1.0
