@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with 12h trend filter and volume confirmation.
-# Long when price breaks above 20-bar high with 12h EMA50 uptrend and volume > 1.5x average.
-# Short when price breaks below 20-bar low with 12h EMA50 downtrend and volume > 1.5x average.
-# Exit when price crosses back through the 20-bar midpoint.
-# Uses Donchian for clear breakout signals, targeting 50-150 trades over 4 years.
+# Hypothesis: 4h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) upper band with 1d EMA50 uptrend and volume > 1.5x average.
+# Short when price breaks below Donchian(20) lower band with 1d EMA50 downtrend and volume > 1.5x average.
+# Exit when price crosses back through Donchian midpoint.
+# Uses Donchian for trend-following breakouts, targeting 20-50 trades per year on 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,35 +19,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA50 for trend filter
+    # Calculate 1d EMA50 for trend filter
     ema_period = 50
-    ema_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= ema_period:
-        ema_12h[ema_period - 1] = np.mean(close_12h[:ema_period])
-        for i in range(ema_period, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * (2 / (ema_period + 1)) + 
-                         ema_12h[i - 1] * (1 - (2 / (ema_period + 1))))
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate Donchian channels (20-period)
-    donch_len = 20
-    upper_channel = np.full(n, np.nan)
-    lower_channel = np.full(n, np.nan)
-    mid_channel = np.full(n, np.nan)
+    # Calculate Donchian channel (20-period)
+    donch_period = 20
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    mid_point = np.full(n, np.nan)
     
-    for i in range(donch_len - 1, n):
-        upper_channel[i] = np.max(high[i - donch_len + 1:i + 1])
-        lower_channel[i] = np.min(low[i - donch_len + 1:i + 1])
-        mid_channel[i] = (upper_channel[i] + lower_channel[i]) / 2
+    for i in range(donch_period - 1, n):
+        upper_band[i] = np.max(high[i - donch_period + 1:i + 1])
+        lower_band[i] = np.min(low[i - donch_period + 1:i + 1])
+        mid_point[i] = (upper_band[i] + lower_band[i]) / 2
     
-    # Align 12h EMA to 6h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -59,12 +59,12 @@ def generate_signals(prices):
     size = 0.25   # 25% position size
     
     # Warmup: need Donchian, EMA50, and volume MA20
-    start_idx = max(donch_len - 1, ema_period - 1, 19)
+    start_idx = max(donch_period, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(mid_channel[i]) or np.isnan(ema_12h_aligned[i]) or 
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(mid_point[i]) or np.isnan(ema_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -77,28 +77,26 @@ def generate_signals(prices):
         vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: break above upper channel with 12h EMA50 uptrend and volume filter
-            if (price > upper_channel[i] and 
-                price > ema_12h_aligned[i] and vol_filter):
+            # Long: price breaks above Donchian upper band with 1d EMA50 uptrend and volume filter
+            if (price > upper_band[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: break below lower channel with 12h EMA50 downtrend and volume filter
-            elif (price < lower_channel[i] and 
-                  price < ema_12h_aligned[i] and vol_filter):
+            # Short: price breaks below Donchian lower band with 1d EMA50 downtrend and volume filter
+            elif (price < lower_band[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below midpoint
-            if price < mid_channel[i]:
+            # Exit long: price crosses below Donchian midpoint
+            if price < mid_point[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above midpoint
-            if price > mid_channel[i]:
+            # Exit short: price crosses above Donchian midpoint
+            if price > mid_point[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_12hEMA50_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
