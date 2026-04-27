@@ -1,135 +1,141 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day RSI with weekly trend filter and volume confirmation.
-In oversold conditions (RSI < 30) with weekly uptrend: long.
-In overbought conditions (RSI > 70) with weekly downtrend: short.
-RSI identifies reversal points, weekly trend filters for direction,
-volume confirms participation. Target: 10-25 trades/year per symbol.
+6h Camarilla Pivot R3/S3 Reversal with 1d Trend Filter
+- Long at S3 bounce when 1d EMA34 is bullish
+- Short at R3 rejection when 1d EMA34 is bearish
+- Uses volume confirmation to avoid false breaks
+- Target: 15-30 trades/year per symbol
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    if len(close) < period + 1:
-        return np.full_like(close, np.nan, dtype=np.float64)
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_gain = np.full_like(close, np.nan, dtype=np.float64)
-    avg_loss = np.full_like(close, np.nan, dtype=np.float64)
-    
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    
-    rs = np.full_like(close, np.nan, dtype=np.float64)
-    rs[period:] = avg_gain[period:] / np.where(avg_loss[period:] == 0, 1e-10, avg_loss[period:])
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
+def calculate_ema(values, period):
+    """Calculate EMA with proper handling of NaN"""
+    ema = np.full_like(values, np.nan, dtype=np.float64)
+    if len(values) < period:
+        return ema
+    alpha = 2.0 / (period + 1)
+    ema[period-1] = np.mean(values[:period])
+    for i in range(period, len(values)):
+        ema[i] = alpha * values[i] + (1 - alpha) * ema[i-1]
+    return ema
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for the period"""
+    range_val = high - low
+    if range_val == 0:
+        return close, close, close, close
+    c = close
+    h = high
+    l = low
+    r4 = c + (range_val * 1.500)
+    r3 = c + (range_val * 1.250)
+    r2 = c + (range_val * 1.166)
+    r1 = c + (range_val * 1.083)
+    s1 = c - (range_val * 1.083)
+    s2 = c - (range_val * 1.166)
+    s3 = c - (range_val * 1.250)
+    s4 = c - (range_val * 1.500)
+    return r3, r2, r1, c, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA34 for trend
-    wk_close = df_1w['close'].values
-    ema_34_1w = np.empty_like(wk_close, dtype=np.float64)
-    ema_34_1w.fill(np.nan)
-    if len(wk_close) >= 34:
-        alpha = 2.0 / (34 + 1)
-        ema_34_1w[33] = np.mean(wk_close[:34])
-        for i in range(34, len(wk_close)):
-            ema_34_1w[i] = alpha * wk_close[i] + (1 - alpha) * ema_34_1w[i-1]
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get daily data for volume confirmation
+    # Get daily data for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = np.empty_like(vol_1d, dtype=np.float64)
-    vol_ma_20_1d.fill(np.nan)
-    for i in range(19, len(vol_1d)):
-        vol_ma_20_1d[i] = np.mean(vol_1d[i-19:i+1])
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate daily EMA34 for trend filter
+    daily_close = df_1d['close'].values
+    ema_34_1d = calculate_ema(daily_close, 34)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily RSI
-    rsi = calculate_rsi(close, 14)
+    # Calculate daily Camarilla levels from previous day
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close_prev = df_1d['close'].values
+    
+    # Initialize Camarilla arrays
+    r3 = np.full_like(daily_close, np.nan)
+    s3 = np.full_like(daily_close, np.nan)
+    
+    # Calculate Camarilla for each day (using previous day's data)
+    for i in range(1, len(daily_close)):
+        r3_i, _, _, _, _, _, s3_i, _ = calculate_camarilla(
+            daily_high[i-1], daily_low[i-1], daily_close_prev[i-1]
+        )
+        r3[i] = r3_i
+        s3[i] = s3_i
+    
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate daily volume average for confirmation
+    daily_volume = df_1d['volume'].values
+    vol_ma_20 = np.full_like(daily_volume, np.nan, dtype=np.float64)
+    for i in range(19, len(daily_volume)):
+        vol_ma_20[i] = np.mean(daily_volume[i-19:i+1])
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need RSI (14) + weekly EMA (34) + daily volume MA (20)
-    start_idx = max(14, 34, 20)
+    # Warmup: need Camarilla (1d), EMA34 (1d), volume MA (1d)
+    start_idx = 1  # Need previous day for Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price and volume
         price_now = close[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
+        vol_ma = vol_ma_20_aligned[i]
         
-        # Current indicators
-        rsi_val = rsi[i]
-        ema_trend = ema_34_1w_aligned[i]
+        # Current levels
+        r3_level = r3_aligned[i]
+        s3_level = s3_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         
-        # Weekly close price for trend comparison
-        wk_close_price = df_1w['close'].values
-        wk_close_aligned = align_htf_to_ltf(prices, df_1w, wk_close_price)
-        if np.isnan(wk_close_aligned[i]):
-            signals[i] = 0.0
-            continue
-        weekly_close = wk_close_aligned[i]
-        
-        # Volume filter: volume > 1.3x daily average
-        vol_filter = vol_now > 1.3 * vol_ma
+        # Volume filter: volume > 1.2x daily average
+        vol_filter = vol_now > 1.2 * vol_ma
         
         if position == 0:
-            # Oversold with weekly uptrend: long
-            if rsi_val < 30 and weekly_close > ema_trend and vol_filter:
+            # Long setup: price at S3 with bullish trend and volume
+            if abs(price_now - s3_level) < 0.001 * s3_level and ema_trend > s3_level and vol_filter:
                 signals[i] = size
                 position = 1
-            # Overbought with weekly downtrend: short
-            elif rsi_val > 70 and weekly_close < ema_trend and vol_filter:
+            # Short setup: price at R3 with bearish trend and volume
+            elif abs(price_now - r3_level) < 0.001 * r3_level and ema_trend < r3_level and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: overbought or trend change
-            if rsi_val > 70 or weekly_close < ema_trend:
+            # Exit long: price reaches R3 or trend turns bearish
+            if price_now >= r3_level or ema_trend < r3_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: oversold or trend change
-            if rsi_val < 30 or weekly_close > ema_trend:
+            # Exit short: price reaches S3 or trend turns bullish
+            if price_now <= s3_level or ema_trend > s3_level:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Reversal_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
