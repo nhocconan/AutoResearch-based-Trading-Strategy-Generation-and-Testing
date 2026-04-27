@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeConfirm_TrendFilter_v1
-Hypothesis: Uses Donchian channel breakouts (20-period) for trend capture, confirmed by volume spikes and 50-period EMA trend filter.
-Designed to capture strong momentum moves while avoiding false breakouts in choppy markets. Targets 20-40 trades per year to minimize fee drag.
-Works in both bull and bear markets by using trend filter to only take longs in uptrends and shorts in downtrends.
+6h_ThreeSigma_Trend_With_1d_Volume_Spike
+Hypothesis: Combines 6h price action relative to 20-period mean with 1d volume spikes and trend filters.
+The strategy enters long when price is below mean - 2*std AND volume > 2*20-period average AND price > 6h EMA20.
+Enters short when price is above mean + 2*std AND volume > 2*20-period average AND price < 6h EMA20.
+This targets mean reversion during high-volume spikes, which often precede reversals in both bull and bear markets.
+Uses 6h timeframe with 1d volume confirmation to reduce noise and increase edge.
+Target: 15-35 trades per year per symbol, focusing on high-conviction setups.
 """
 
 import numpy as np
@@ -20,56 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 6h EMA20 for trend filter
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 50-period EMA for trend filter
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # 6h Bollinger Bands (20, 2) for mean reversion signals
+    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std20 = close_series.rolling(window=20, min_periods=20).std().values
+    lower_band = sma20 - 2 * std20
+    upper_band = sma20 + 2 * std20
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    # 1d volume confirmation - get once before loop
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_1d > (2.0 * vol_avg_20)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Donchian and EMA
-    start_idx = 50
+    # Warmup: need enough data for indicators
+    start_idx = 40  # Need 20 for BB + 20 for vol
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema50[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(ema20[i]) or np.isnan(sma20[i]) or np.isnan(std20[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        high_20_val = high_20[i]
-        low_20_val = low_20[i]
-        ema50_val = ema50[i]
-        vol_conf = volume_confirm[i]
+        ema20_val = ema20[i]
+        lower_val = lower_band[i]
+        upper_val = upper_band[i]
+        vol_spike_now = vol_spike_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high, above EMA50 (uptrend), volume confirmation
-            if close_val > high_20_val and close_val > ema50_val and vol_conf:
+            # Long: price at/below lower band, volume spike, above EMA20 (uptrend filter)
+            if close_val <= lower_val and vol_spike_now and close_val > ema20_val:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian low, below EMA50 (downtrend), volume confirmation
-            elif close_val < low_20_val and close_val < ema50_val and vol_conf:
+            # Short: price at/above upper band, volume spike, below EMA20 (downtrend filter)
+            elif close_val >= upper_val and vol_spike_now and close_val < ema20_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price falls below Donchian low or below EMA50
-            if close_val < low_20_val or close_val < ema50_val:
+            # Exit long: price crosses above EMA20 or reaches middle band
+            if close_val >= ema20_val or close_val >= sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price rises above Donchian high or above EMA50
-            if close_val > high_20_val or close_val > ema50_val:
+            # Exit short: price crosses below EMA20 or reaches middle band
+            if close_val <= ema20_val or close_val <= sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -77,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeConfirm_TrendFilter_v1"
-timeframe = "4h"
+name = "6h_ThreeSigma_Trend_With_1d_Volume_Spike"
+timeframe = "6h"
 leverage = 1.0
