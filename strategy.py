@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d Trend Filter and Volume Confirmation
-# Uses Williams %R (14) to identify overbought/oversold conditions.
-# Long when %R < -80 (oversold) with 1d ADX > 25 (uptrend) and volume > 1.5x average.
-# Short when %R > -20 (overbought) with 1d ADX > 25 (downtrend) and volume > 1.5x average.
-# Exit when %R returns to -50 (mean reversion) or volatility expands.
-# Works in both bull and bear markets by only taking counter-trend entries in the direction of the 1d trend.
-# Target: 20-40 trades/year to minimize fee decay while capturing mean reversion moves in trending markets.
-# Focus on BTC/ETH as primary assets.
+# Hypothesis: 1h RSI mean reversion with 4h trend filter and session filter
+# Uses RSI(14) on 1h for overbought/oversold signals, 4h EMA(50) for trend direction,
+# and restricts trading to 08:00-20:00 UTC to avoid low-volume periods.
+# In uptrend (price > 4h EMA50), look for RSI < 30 for long entries.
+# In downtrend (price < 4h EMA50), look for RSI > 70 for short entries.
+# Exits when RSI returns to neutral (40-60 range) or opposite extreme.
+# Designed for 1h timeframe with low trade frequency (15-30/year) to minimize fee drag.
+# Works in both bull and bear markets by following the 4h trend.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,145 +20,94 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate ADX on 1d (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    n_1d = len(close_1d)
+    # Calculate EMA(50) on 4h close
+    close_4h = df_4h['close'].values
+    ema_4h = np.full_like(close_4h, np.nan)
+    if len(close_4h) >= 50:
+        multiplier = 2 / (50 + 1)
+        ema_4h[0] = close_4h[0]
+        for i in range(1, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * multiplier) + (ema_4h[i-1] * (1 - multiplier))
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align 4h EMA to 1h
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate RSI(14) on 1h
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Rest is Wilder's smoothing
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Wilder's smoothing for RSI
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
     
-    period_adx = 14
-    tr_smooth = wilders_smooth(tr, period_adx)
-    dm_plus_smooth = wilders_smooth(dm_plus, period_adx)
-    dm_minus_smooth = wilders_smooth(dm_minus, period_adx)
+    if len(gain) >= rsi_period:
+        avg_gain[rsi_period-1] = np.mean(gain[1:rsi_period])
+        avg_loss[rsi_period-1] = np.mean(loss[1:rsi_period])
+        for i in range(rsi_period, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
     
-    # DI+ and DI-
-    di_plus = np.full(n_1d, np.nan)
-    di_minus = np.full(n_1d, np.nan)
-    dx = np.full(n_1d, np.nan)
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    for i in range(len(tr_smooth)):
-        if np.isnan(tr_smooth[i]) or tr_smooth[i] == 0:
-            di_plus[i] = 0
-            di_minus[i] = 0
-        else:
-            di_plus[i] = 100 * dm_plus_smooth[i] / tr_smooth[i]
-            di_minus[i] = 100 * dm_minus_smooth[i] / tr_smooth[i]
-    
-    for i in range(len(dx)):
-        if np.isnan(di_plus[i]) or np.isnan(di_minus[i]) or (di_plus[i] + di_minus[i]) == 0:
-            dx[i] = 0
-        else:
-            dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
-    
-    # ADX = Wilder's smoothed DX
-    adx_1d = wilders_smooth(dx, period_adx)
-    
-    # Williams %R on 4h (14-period)
-    williams_period = 14
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    williams_r = np.full(n, np.nan)
-    
-    for i in range(williams_period, n):
-        highest_high[i] = np.max(high[i-williams_period:i])
-        lowest_low[i] = np.min(low[i-williams_period:i])
-        if highest_high[i] - lowest_low[i] != 0:
-            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-    
-    # 20-period average volume for spike detection
-    vol_ma = np.full(n, np.nan)
-    vol_period = 20
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
-    
-    # Align HTF indicators to 4h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    position = 0
-    size = 0.25  # 25% position size
+    position = 0  # 0: flat, 1: long, -1: short
+    size = 0.20   # 20% position size
     
-    # Warmup period
-    start_idx = max(williams_period, vol_period) + period_adx
+    # Start after warmup period
+    start_idx = max(50, rsi_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if not in_session[i]:
             signals[i] = 0.0
             continue
-        
+            
+        if np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]):
+            signals[i] = 0.0
+            continue
+            
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        
-        # Conditions:
-        # 1. Williams %R: < -80 oversold (long), > -20 overbought (short)
-        # 2. ADX > 25: trending regime on 1d
-        # 3. Volume confirmation: > 1.5x average volume
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        trend_up = adx_1d_aligned[i] > 25
-        trend_down = adx_1d_aligned[i] > 25  # ADX > 25 indicates trend, direction from price
-        volume_confirmation = vol_ratio > 1.5
-        mean_reversion = -50 <= williams_r[i] <= -50  # exit at midpoint
+        rsi_val = rsi[i]
+        ema_val = ema_4h_aligned[i]
         
         if position == 0:
-            # Long: oversold during uptrend with volume
-            if oversold and trend_up and volume_confirmation:
+            # Look for entry: RSI extreme in direction of 4h trend
+            if price > ema_val and rsi_val < 30:  # Uptrend + oversold -> long
                 signals[i] = size
                 position = 1
-            # Short: overbought during downtrend with volume
-            elif overbought and trend_down and volume_confirmation:
+            elif price < ema_val and rsi_val > 70:  # Downtrend + overbought -> short
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: %R returns to -50 (mean reversion) or volatility expands
-            if williams_r[i] >= -50:  # exited at midpoint
+            # Long exit: RSI returns to neutral or becomes overbought
+            if rsi_val >= 40 and rsi_val <= 60:  # Return to neutral
+                signals[i] = 0.0
+                position = 0
+            elif rsi_val > 70:  # Overbought - take profit
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: %R returns to -50 (mean reversion) or volatility expands
-            if williams_r[i] <= -50:  # exited at midpoint
+            # Short exit: RSI returns to neutral or becomes oversold
+            if rsi_val >= 40 and rsi_val <= 60:  # Return to neutral
+                signals[i] = 0.0
+                position = 0
+            elif rsi_val < 30:  # Oversold - take profit
                 signals[i] = 0.0
                 position = 0
             else:
@@ -166,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_TrendFilter_Volume"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hEMATrend_Session"
+timeframe = "1h"
 leverage = 1.0
