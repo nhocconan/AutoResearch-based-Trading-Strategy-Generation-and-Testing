@@ -23,30 +23,22 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for each day using previous day's HLC
-    # R4 = C + ((H-L)*1.1/2)
     # R3 = C + ((H-L)*1.1/4)
     # S3 = C - ((H-L)*1.1/4)
-    # S4 = C - ((H-L)*1.1/2)
-    camarilla_r4 = np.zeros(len(df_1d))
     camarilla_r3 = np.zeros(len(df_1d))
     camarilla_s3 = np.zeros(len(df_1d))
-    camarilla_s4 = np.zeros(len(df_1d))
     
     for i in range(1, len(df_1d)):
         h = high_1d[i-1]
         l = low_1d[i-1]
         c = close_1d[i-1]
         range_hl = h - l
-        camarilla_r4[i] = c + (range_hl * 1.1 / 2)
         camarilla_r3[i] = c + (range_hl * 1.1 / 4)
         camarilla_s3[i] = c - (range_hl * 1.1 / 4)
-        camarilla_s4[i] = c - (range_hl * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Get weekly trend filter: EMA(34) on weekly close
     df_1w = get_htf_data(prices, '1w')
@@ -67,18 +59,18 @@ def generate_signals(prices):
     
     ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
-    # Calculate 12h ATR(14) for stop loss
+    # Calculate 4h ATR(14) for stop loss (14 periods)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    atr_12h = np.zeros(n)
+    atr_4h = np.zeros(n)
     for i in range(n):
         if i < 13:
-            atr_12h[i] = np.mean(tr[:i+1]) if i > 0 else tr[i]
+            atr_4h[i] = np.mean(tr[:i+1]) if i > 0 else tr[i]
         else:
-            atr_12h[i] = (atr_12h[i-1] * 13 + tr[i]) / 14
+            atr_4h[i] = (atr_4h[i-1] * 13 + tr[i]) / 14
     
     # Calculate volume average (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -141,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_S3R3_WeeklyEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_S3R3_WeeklyEMA34_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
