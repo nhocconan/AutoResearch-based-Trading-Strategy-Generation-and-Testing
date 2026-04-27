@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter (EMA50) and volume confirmation
-# Uses 1d EMA50 for trend direction, 4h Donchian channel breakouts for entry signals,
-# and volume spikes (2x 20-period average) to confirm breakouts. Works in both bull and bear
-# markets by following the 1d trend while entering on Donchian breakouts. Target: 15-25 trades/year
-# to minimize fee decay while capturing trend continuation moves. Focus on BTC/ETH.
+# Hypothesis: 6h Aroon oscillator with 1d volume-weighted average price (VWAP) trend filter and volume confirmation
+# Uses Aroon oscillator (25-period) to detect trend strength and direction on 6h timeframe.
+# Trend filter: 1d VWAP - price above VWAP indicates uptrend, below indicates downtrend.
+# Entry: Aroon oscillator crossing above +50 for long, below -50 for short with volume confirmation (1.5x 20-period average volume).
+# Exit: Aroon oscillator crossing back through zero or trend reversal.
+# Works in both bull and bear markets by combining momentum (Aroon) with trend (VWAP) and volume confirmation.
+# Target: 20-30 trades/year to minimize fee decay while capturing sustained moves.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,59 +21,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for VWAP trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 50-period EMA on 1d for trend
-    close_1d = df_1d['close'].values
-    ema_len = 50
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_len:
-        multiplier = 2 / (ema_len + 1)
-        ema_1d[ema_len-1] = np.mean(close_1d[:ema_len])
-        for i in range(ema_len, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
+    # Calculate Aroon oscillator (25-period) on 6h
+    aroon_period = 25
+    aroon_up = np.full(n, np.nan)
+    aroon_down = np.full(n, np.nan)
+    aroon_osc = np.full(n, np.nan)
     
-    # Calculate 4h Donchian channel (20-period high/low)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    for i in range(aroon_period, n):
+        # Find periods since highest high and lowest low
+        highest_high_idx = i - np.argmax(high[i-aroon_period:i+1])
+        lowest_low_idx = i - np.argmin(low[i-aroon_period:i+1])
+        
+        aroon_up[i] = ((aroon_period - (i - highest_high_idx)) / aroon_period) * 100
+        aroon_down[i] = ((aroon_period - (i - lowest_low_idx)) / aroon_period) * 100
+        aroon_osc[i] = aroon_up[i] - aroon_down[i]
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    n_4h = len(high_4h)
+    # Calculate 1d VWAP
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
+    vwap_num = np.cumsum(typical_price_1d * df_1d['volume'].values)
+    vwap_den = np.cumsum(df_1d['volume'].values)
+    vwap_1d = vwap_num / vwap_den
     
-    donchian_high = np.full(n_4h, np.nan)
-    donchian_low = np.full(n_4h, np.nan)
-    
-    for i in range(20, n_4h):
-        donchian_high[i] = np.max(high_4h[i-20:i])
-        donchian_low[i] = np.min(low_4h[i-20:i])
-    
-    # Align HTF data to LTF
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Calculate 20-period average volume on 4h for spike detection
+    # Calculate 20-period average volume on 6h for spike detection
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
+    
+    # Align 1d indicators to 6h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
     # Warmup period
-    start_idx = max(50, 20) + 20  # EMA50 needs 50, Donchian needs 20, vol needs 20
+    start_idx = max(aroon_period, vol_period) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(aroon_osc[i]) or 
+            np.isnan(vwap_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -79,30 +73,30 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume confirmation: at least 2x average volume
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation: at least 1.5x average volume
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Donchian breakout with uptrend and volume
-            if price > donchian_high_aligned[i] and price > ema_1d_aligned[i] and volume_confirmation:
+            # Long: Aroon oscillator crosses above +50 with uptrend and volume
+            if aroon_osc[i] > 50 and aroon_osc[i-1] <= 50 and price > vwap_1d_aligned[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: Donchian breakdown with downtrend and volume
-            elif price < donchian_low_aligned[i] and price < ema_1d_aligned[i] and volume_confirmation:
+            # Short: Aroon oscillator crosses below -50 with downtrend and volume
+            elif aroon_osc[i] < -50 and aroon_osc[i-1] >= -50 and price < vwap_1d_aligned[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below Donchian low or trend reversal
-            if price < donchian_low_aligned[i] or price < ema_1d_aligned[i]:
+            # Long exit: Aroon oscillator crosses below zero or trend reversal
+            if aroon_osc[i] < 0 or price < vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above Donchian high or trend reversal
-            if price > donchian_high_aligned[i] or price > ema_1d_aligned[i]:
+            # Short exit: Aroon oscillator crosses above zero or trend reversal
+            if aroon_osc[i] > 0 or price > vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_1dEMA50_Volume"
-timeframe = "4h"
+name = "6h_AroonOscillator_1dVWAP_Volume"
+timeframe = "6h"
 leverage = 1.0
