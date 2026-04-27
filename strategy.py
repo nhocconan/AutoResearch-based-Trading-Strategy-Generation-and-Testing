@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly SuperTrend with daily volatility breakout
-# Uses weekly SuperTrend (ATR=10, multiplier=3) for trend direction
-# and daily ATR breakout for entry timing. Volume > 2x 20-day average confirms.
-# Weekly SuperTrend filters noise and aligns with major trend, reducing whipsaws.
-# Daily ATR breakout captures momentum after volatility contraction.
-# Designed for low trade frequency (<20/year) to minimize fee drag in bear markets.
-# Works in both bull (trend following) and bear (avoids counter-trend trades).
+# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions for mean reversion entries.
+# Long when Williams %R < -80 (oversold) and price above 1d EMA34 (uptrend).
+# Short when Williams %R > -20 (overbought) and price below 1d EMA34 (downtrend).
+# Volume > 1.5x 20-period average confirms momentum.
+# Exit when Williams %R returns to -50 (neutral) or trend reverses.
+# Target: 15-25 trades/year to minimize fee decay while capturing high-probability reversals.
+# Focus on BTC/ETH as primary assets with proven mean-reversion edge in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,71 +22,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for SuperTrend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Williams %R and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly SuperTrend
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # ATR calculation
-    atr_period = 10
-    tr_1w = np.maximum(
-        high_1w[1:] - low_1w[1:],
-        np.maximum(
-            np.abs(high_1w[1:] - close_1w[:-1]),
-            np.abs(low_1w[1:] - close_1w[:-1])
-        )
-    )
-    tr_1w = np.concatenate([[np.nan], tr_1w])
-    atr_1w = np.full(len(close_1w), np.nan)
-    for i in range(atr_period, len(close_1w)):
-        atr_1w[i] = np.nanmean(tr_1w[i-atr_period+1:i+1])
-    
-    # SuperTrend calculation
-    factor = 3.0
-    basic_ub = (high_1w + low_1w) / 2 + factor * atr_1w
-    basic_lb = (high_1w + low_1w) / 2 - factor * atr_1w
-    final_ub = np.full_like(basic_ub, np.nan)
-    final_lb = np.full_like(basic_lb, np.nan)
-    supertrend = np.full_like(close_1w, np.nan)
-    
-    for i in range(atr_period, len(close_1w)):
-        if i == atr_period:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
+    # Calculate Williams %R (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    williams_r = np.full(len(close_1d), np.nan)
+    williams_period = 14
+    for i in range(williams_period, len(close_1d)):
+        highest_high = np.max(high_1d[i-williams_period:i+1])
+        lowest_low = np.min(low_1d[i-williams_period:i+1])
+        if highest_high - lowest_low != 0:
+            williams_r[i] = -100 * (highest_high - close_1d[i]) / (highest_high - lowest_low)
         else:
-            final_ub[i] = basic_ub[i] if (basic_ub[i] < final_ub[i-1] or close_1w[i-1] > final_ub[i-1]) else final_ub[i-1]
-            final_lb[i] = basic_lb[i] if (basic_lb[i] > final_lb[i-1] or close_1w[i-1] < final_lb[i-1]) else final_lb[i-1]
-        
-        if i == atr_period:
-            supertrend[i] = final_ub[i]
-        else:
-            supertrend[i] = final_ub[i] if (supertrend[i-1] == final_ub[i-1] and close_1w[i] > final_ub[i]) else \
-                           final_lb[i] if (supertrend[i-1] == final_lb[i-1] and close_1w[i] < final_lb[i]) else \
-                           supertrend[i-1]
+            williams_r[i] = -50  # neutral when no range
     
-    # Align SuperTrend to daily
-    st_1w_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Daily ATR for breakout
-    atr_period_d = 14
-    tr = np.maximum(
-        high[1:] - low[1:],
-        np.maximum(
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-    )
-    tr = np.concatenate([[np.nan], tr])
-    atr = np.full(n, np.nan)
-    for i in range(atr_period_d, n):
-        atr[i] = np.nanmean(tr[i-atr_period_d+1:i+1])
+    # Align Williams %R and EMA34 to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 20-day average volume
+    # 20-period average volume for spike detection
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
@@ -93,53 +56,55 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    size = 0.25  # 25% position
+    size = 0.25  # 25% position size
     
-    start_idx = max(atr_period_d, vol_period, 1)
+    # Warmup period
+    start_idx = max(williams_period, vol_period, 1)
     
     for i in range(start_idx, n):
-        if (np.isnan(st_1w_aligned[i]) or
-            np.isnan(atr[i]) or
+        if (np.isnan(williams_r_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        williams_r_val = williams_r_aligned[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from weekly SuperTrend
-        # SuperTrend value indicates stop level; trend is based on price vs SuperTrend
-        uptrend = price > st_1w_aligned[i]
-        downtrend = price < st_1w_aligned[i]
+        # Determine trend from 1d EMA34
+        uptrend = price > ema_34_1d_aligned[i]
+        downtrend = price < ema_34_1d_aligned[i]
         
-        # Breakout conditions: price moves beyond ATR bands
-        upper_break = price > close[i-1] + 2.0 * atr[i]
-        lower_break = price < close[i-1] - 2.0 * atr[i]
+        # Williams %R conditions
+        oversold = williams_r_val < -80
+        overbought = williams_r_val > -20
+        neutral = -50 <= williams_r_val <= -50  # exit at -50
         
-        # Volume confirmation: spike > 2x average
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation: spike > 1.5x average
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long: bullish breakout above ATR band with uptrend and volume
-            if uptrend and upper_break and volume_confirmation:
+            # Long: oversold with uptrend and volume
+            if oversold and uptrend and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: bearish breakdown below ATR band with downtrend and volume
-            elif downtrend and lower_break and volume_confirmation:
+            # Short: overbought with downtrend and volume
+            elif overbought and downtrend and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price closes below SuperTrend (trailing stop)
-            if price < st_1w_aligned[i]:
+            # Long exit: returns to neutral or trend breaks down
+            if williams_r_val >= -50 or price < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price closes above SuperTrend (trailing stop)
-            if price > st_1w_aligned[i]:
+            # Short exit: returns to neutral or trend breaks up
+            if williams_r_val <= -50 or price > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -147,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklySuperTrend_ATRBreakout_Volume"
-timeframe = "1d"
+name = "12h_WilliamsR_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
