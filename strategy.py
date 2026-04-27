@@ -75,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_Bias_Volume_Session"
-timeframe = "6h"
+name = "12h_EMA34_Bias_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
