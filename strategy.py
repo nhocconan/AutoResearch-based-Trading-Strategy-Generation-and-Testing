@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_RSI2_CloseReversal_1dTrend_HTF
-Hypothesis: Extreme short-term RSI(2) reversals on 6h timeframe, filtered by 1d EMA50 trend direction. 
-In bull markets (price > EMA50), look for RSI(2) < 10 for long entries. 
-In bear markets (price < EMA50), look for RSI(2) > 90 for short entries. 
-Exit on RSI(2) crossing back to neutral (40 for longs, 60 for shorts) or opposite extreme.
-Designed for low trade frequency (12-37/year) with discrete sizing to minimize fee drag.
-Works in both bull and bear markets by only trading with the 1d trend.
+4h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakout on 4h with 4h EMA50 trend filter and volume confirmation.
+R1/S1 levels are the strongest intraday support/resistance, reducing false breakouts.
+Trading in direction of 4h trend avoids counter-trend whipsaws. Volume spike confirms breakout authenticity.
+Designed for 4h timeframe with target 75-200 trades over 4 years (19-50/year).
+Uses discrete position sizing (0.30) to balance exposure and fee minimization.
 """
 
 import numpy as np
@@ -15,75 +14,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate RSI(2) - very short term for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # Calculate ATR for Camarilla levels (20-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi2 = 100 - (100 / (1 + rs))
+    # Calculate Camarilla levels from previous 4h bar's OHLC
+    prev_close = np.concatenate([[close[0]], close[:-1]])
+    prev_high = np.concatenate([[high[0]], high[:-1]])
+    prev_low = np.concatenate([[low[0]], low[:-1]])
     
-    # Get 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 4h EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    entry_price = 0.0
     
-    # Warmup: need enough for RSI calculation and EMA
-    start_idx = max(10, 50)
+    # Warmup: need enough for ATR, EMA50, volume average
+    start_idx = max(100, 50, 20, 20)
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(rsi2[i]) or np.isnan(ema_50_aligned[i]):
+        # Skip if any data not ready
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
+            np.isnan(ema_50[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        rsi_val = rsi2[i]
-        ema_trend = ema_50_aligned[i]
         close_val = close[i]
+        ema_trend = ema_50[i]
+        vol_spike = volume_spike[i]
+        atr_val = atr[i]
+        size = 0.30  # 30% position size
         
         if position == 0:
-            # Flat - look for entry
-            # Long: RSI(2) < 10 (extremely oversold) AND price above 1d EMA50 (bullish regime)
-            # Short: RSI(2) > 90 (extremely overbought) AND price below 1d EMA50 (bearish regime)
-            if rsi_val < 10 and close_val > ema_trend:
+            # Flat - look for entry: breakout in direction of 4h trend with volume spike
+            # Long: price breaks above Camarilla R1 AND 4h trend is up (close > EMA50) AND volume spike
+            # Short: price breaks below Camarilla S1 AND 4h trend is down (close < EMA50) AND volume spike
+            long_breakout = close_val > camarilla_r1[i]
+            short_breakout = close_val < camarilla_s1[i]
+            trend_up = close_val > ema_trend
+            trend_down = close_val < ema_trend
+            
+            if long_breakout and trend_up and vol_spike:
                 signals[i] = size
                 position = 1
-            elif rsi_val > 90 and close_val < ema_trend:
+                entry_price = close_val
+            elif short_breakout and trend_down and vol_spike:
                 signals[i] = -size
                 position = -1
+                entry_price = close_val
         elif position == 1:
-            # Long - exit when RSI(2) crosses back above 40 (recovery) or goes extremely overbought
-            if rsi_val > 40 or rsi_val > 90:
+            # Long - exit when price breaks below Camarilla S1 (failed breakout) or ATR stoploss hit
+            if close_val < camarilla_s1[i] or close_val < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when RSI(2) crosses back below 60 (recovery) or goes extremely oversold
-            if rsi_val < 60 or rsi_val < 10:
+            # Short - exit when price breaks above Camarilla R1 (failed breakout) or ATR stoploss hit
+            if close_val > camarilla_r1[i] or close_val > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "6h_RSI2_CloseReversal_1dTrend_HTF"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
