@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Volume-Weighted VWAP Deviation with 12h Trend Filter and Volume Spike.
-Long when price > VWAP(20) AND price > 12h EMA50 AND volume > 2x average.
-Short when price < VWAP(20) AND price < 12h EMA50 AND volume > 2x average.
-Exit when price crosses back across VWAP.
-Designed to capture institutional flow with volume confirmation in both bull and bear markets.
+4h Camarilla Pivot Point Breakout with Volume Spike and Daily Trend Filter.
+Long when price breaks above R3 level AND price > daily EMA34 AND volume > 2x average.
+Short when price breaks below S3 level AND price < daily EMA34 AND volume > 2x average.
+Exit when price crosses back through R1/S1 levels or opposite pivot level is breached.
+Uses daily Camarilla pivots calculated from prior day's OHLC for zero look-ahead.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,31 +21,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    # Get daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate daily Camarilla pivot levels (using prior day's data)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # VWAP(20) calculation
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.zeros(n, dtype=np.float64)
-    vwap_denominator = np.zeros(n, dtype=np.float64)
-    vwap = np.full(n, np.nan, dtype=np.float64)
+    # Daily range
+    daily_range = high_1d - low_1d
     
-    for i in range(n):
-        vwap_numerator[i] = typical_price[i] * volume[i]
-        vwap_denominator[i] = volume[i]
-        
-        if i >= 19:
-            num_sum = np.sum(vwap_numerator[i-19:i+1])
-            den_sum = np.sum(vwap_denominator[i-19:i+1])
-            if den_sum > 0:
-                vwap[i] = num_sum / den_sum
+    # Camarilla levels (based on previous day)
+    # R4 = close + 1.5 * range, R3 = close + 1.1 * range, R2 = close + 0.6 * range, R1 = close + 0.318 * range
+    # S1 = close - 0.318 * range, S2 = close - 0.6 * range, S3 = close - 1.1 * range, S4 = close - 1.5 * range
+    r4 = close_1d + 1.5 * daily_range
+    r3 = close_1d + 1.1 * daily_range
+    r2 = close_1d + 0.6 * daily_range
+    r1 = close_1d + 0.318 * daily_range
+    s1 = close_1d - 0.318 * daily_range
+    s2 = close_1d - 0.6 * daily_range
+    s3 = close_1d - 1.1 * daily_range
+    s4 = close_1d - 1.5 * daily_range
+    
+    # Align daily levels to 4h timeframe (use previous day's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume filter: volume > 2x 20-period average
     vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
@@ -56,20 +69,23 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need VWAP(20) + EMA50_12h + volume MA
-    start_idx = max(19, 50)
+    # Warmup: need daily data (1 day) + volume MA
+    start_idx = max(19, 34)  # Need EMA34 and vol MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(vwap[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price_now = close[i]
-        vwap_val = vwap[i]
-        ema_trend = ema_50_12h_aligned[i]
+        r3_level = r3_aligned[i]
+        s3_level = s3_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
@@ -77,26 +93,26 @@ def generate_signals(prices):
         vol_filter = vol_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: price > VWAP AND price > 12h EMA50 AND volume spike
-            if price_now > vwap_val and price_now > ema_trend and vol_filter:
+            # Long: price breaks above R3 AND price > daily EMA34 AND volume spike
+            if price_now > r3_level and price_now > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price < VWAP AND price < 12h EMA50 AND volume spike
-            elif price_now < vwap_val and price_now < ema_trend and vol_filter:
+            # Short: price breaks below S3 AND price < daily EMA34 AND volume spike
+            elif price_now < s3_level and price_now < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below VWAP
-            if price_now < vwap_val:
+            # Exit long: price crosses below R1 OR breaks below S3 (strong reversal)
+            if price_now < r1_level or price_now < s3_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above VWAP
-            if price_now > vwap_val:
+            # Exit short: price crosses above S1 OR breaks above R3 (strong reversal)
+            if price_now > s1_level or price_now > r3_level:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Volume_Weighted_VWAP_Deviation_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_Pivot_Breakout_VolumeSpike_DailyTrend"
+timeframe = "4h"
 leverage = 1.0
