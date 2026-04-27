@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,7 +27,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d RSI for overbought/oversold conditions
+    # Calculate 1d RSI for momentum
     delta_1d = pd.Series(close_1d).diff()
     gain_1d = delta_1d.where(delta_1d > 0, 0)
     loss_1d = -delta_1d.where(delta_1d < 0, 0)
@@ -54,7 +54,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -69,9 +69,8 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # RSI filter: avoid extreme overbought/oversold conditions
-        rsi_not_overbought = rsi_1d_aligned[i] < 70
-        rsi_not_oversold = rsi_1d_aligned[i] > 30
+        # Momentum filter: RSI in neutral zone (avoid extremes)
+        rsi_neutral = (rsi_1d_aligned[i] > 40) & (rsi_1d_aligned[i] < 60)
         
         # Volatility filter: only trade when volatility is reasonable
         vol_filter = atr_1d_aligned[i] > 0
@@ -79,15 +78,15 @@ def generate_signals(prices):
         # Volume filter: current volume above 1d average
         volume_filter = volume[i] > vol_ma_1d_aligned[i]
         
-        # Long conditions: price above EMA34 + RSI not overbought + volume + volatility
+        # Long conditions: price above EMA34 + RSI neutral + volume + volatility
         long_condition = (price_above_ema and 
-                         rsi_not_overbought and 
+                         rsi_neutral and 
                          volume_filter and 
                          vol_filter)
         
-        # Short conditions: price below EMA34 + RSI not oversold + volume + volatility
+        # Short conditions: price below EMA34 + RSI neutral + volume + volatility
         short_condition = (price_below_ema and 
-                          rsi_not_oversold and 
+                          rsi_neutral and 
                           volume_filter and 
                           vol_filter)
         
@@ -115,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_RSI14_VolumeFilter_1dTrend"
-timeframe = "4h"
+name = "12h_EMA34_RSI14_VolumeFilter_1dTrend"
+timeframe = "12h"
 leverage = 1.0
