@@ -13,39 +13,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context
+    # Get daily data for higher timeframe context (1d)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily EMA(34) for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 4h data for entry timing
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate weekly Donchian channels (10-period) for breakout signals
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high_10 = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
+    donchian_low_10 = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_10)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_10)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    vol_4h = df_4h['volume'].values
-    
-    # Calculate 4-period RSI on 4h close for momentum
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(np.isnan(rsi), 50, rsi)
-    
-    # Calculate 4h volume moving average
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly volume moving average for confirmation
+    vol_ma_1w = pd.Series(df_1w['volume'].values).rolling(window=10, min_periods=10).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -60,8 +55,9 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or
-            np.isnan(vol_ma_4h[i])):
+            np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,21 +70,22 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Momentum filter: RSI in trending zone (not extreme)
-        rsi_momentum = (rsi[i] > 40) and (rsi[i] < 60)
+        # Volume filter: current weekly volume above average
+        volume_filter = vol_ma_1w_aligned[i] > 0 and volume[i] > vol_ma_1w_aligned[i] * 1.5
         
-        # Volume filter: current volume above average
-        volume_filter = vol_ma_4h[i] > 0 and volume[i] > vol_ma_4h[i] * 0.7
+        # Breakout signals: price breaks weekly Donchian channels
+        breakout_up = close[i] > donchian_high_aligned[i]
+        breakout_down = close[i] < donchian_low_aligned[i]
         
-        # Long conditions: bullish trend + momentum + volume
+        # Long conditions: bullish trend + volume + upward breakout
         long_condition = (price_above_ema and 
-                         rsi_momentum and 
-                         volume_filter)
+                         volume_filter and 
+                         breakout_up)
         
-        # Short conditions: bearish trend + momentum + volume
+        # Short conditions: bearish trend + volume + downward breakout
         short_condition = (price_below_ema and 
-                          rsi_momentum and 
-                          volume_filter)
+                          volume_filter and 
+                          breakout_down)
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -96,11 +93,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal or momentum exhaustion
-        elif position == 1 and (not price_above_ema or rsi[i] >= 65):
+        # Exit conditions: trend reversal
+        elif position == 1 and not price_above_ema:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (not price_below_ema or rsi[i] <= 35):
+        elif position == -1 and not price_below_ema:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -114,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_Trend_RSI_Momentum_Volume"
-timeframe = "4h"
+name = "1d_EMA34_1wDonchianBreakout_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
