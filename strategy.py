@@ -21,18 +21,23 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 1d EMA 34 for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6h Donchian channels (20-period for structure)
+    # Calculate 1d volume MA for volume filter
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # 12h Donchian channels (20-period for structure)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.8x 30-period average (strong filter to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    # Volume filter: volume > 1.5x 10-period average (moderate filter)
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -43,7 +48,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
@@ -52,10 +58,13 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
+        # Volume filter: current volume > 1.5x 10-period MA AND 1d volume > 1.5x 10-period MA
+        volume_ok = volume_filter[i] and volume_1d[i] > vol_ma_1d_aligned[i] * 1.5
+        
         # Long conditions: price breaks above upper Donchian + above 1d EMA + volume
-        long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_filter[i])
+        long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_ok)
         # Short conditions: price breaks below lower Donchian + below 1d EMA + volume
-        short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_filter[i])
+        short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_ok)
         
         if long_breakout:
             signals[i] = 0.25
@@ -81,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dEMA34_VolumeFilter"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
