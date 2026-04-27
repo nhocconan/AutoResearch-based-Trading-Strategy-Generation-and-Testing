@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,36 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and Donchian
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 4h high/low for Donchian(20)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    upper_4h = np.full(len(high_4h), np.nan)
-    lower_4h = np.full(len(high_4h), np.nan)
-    for i in range(20, len(high_4h)):
-        upper_4h[i] = np.max(high_4h[i-20:i])
-        lower_4h[i] = np.min(low_4h[i-20:i])
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    
-    # Calculate 4h EMA(34) for trend
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Get 1d data for volume filter
+    # Get 1d data for daily Donchian channel
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d volume MA(20)
+    # Calculate 1d Donchian(20) - high/low of past 20 daily closes
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    upper = np.full(len(high_1d), np.nan)
+    lower = np.full(len(high_1d), np.nan)
+    for i in range(20, len(high_1d)):
+        upper[i] = np.max(high_1d[i-20:i])
+        lower[i] = np.min(low_1d[i-20:i])
+    donch_upper_1d = upper
+    donch_lower_1d = lower
+    donch_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_upper_1d)
+    donch_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_lower_1d)
+    
+    # Get 1d data for volume MA(20)
     vol_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Get 1d data for ATR(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR is just high-low
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,13 +55,13 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need Donchian, EMA, volume MA
-    start_idx = max(20, 34, 20)
+    # Warmup: need Donchian, volume MA, and ATR
+    start_idx = max(20, 20, 14)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(donch_upper_1d_aligned[i]) or np.isnan(donch_lower_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -67,37 +71,39 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        upper = upper_4h_aligned[i]
-        lower = lower_4h_aligned[i]
-        ema_trend = ema_34_4h_aligned[i]
+        upper = donch_upper_1d_aligned[i]
+        lower = donch_lower_1d_aligned[i]
         vol_now = volume[i]
         vol_ma = vol_ma_20_1d_aligned[i]
+        atr_now = atr_1d_aligned[i]
         
-        # Volume filter: volume > 1.5x 1d MA (volume breakout)
-        vol_breakout = vol_now > 1.5 * vol_ma
+        # Volume filter: volume > 1.3x 1d MA (volume breakout)
+        vol_breakout = vol_now > 1.3 * vol_ma
         
-        # Entry conditions: breakout with volume and trend filter
+        # Entry conditions: breakout with volume
         if position == 0:
-            # Long: break above upper band + volume + above EMA trend
-            if close[i] > upper and vol_breakout and close[i] > ema_trend:
+            # Long: break above upper band + volume
+            if close[i] > upper and vol_breakout:
                 signals[i] = size
                 position = 1
-            # Short: break below lower band + volume + below EMA trend
-            elif close[i] < lower and vol_breakout and close[i] < ema_trend:
+            # Short: break below lower band + volume
+            elif close[i] < lower and vol_breakout:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below EMA or below lower band
-            if close[i] < ema_trend or close[i] < lower:
+            # Exit long: close below midpoint
+            midpoint = (upper + lower) / 2
+            if close[i] < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above EMA or above upper band
-            if close[i] > ema_trend or close[i] > upper:
+            # Exit short: close above midpoint
+            midpoint = (upper + lower) / 2
+            if close[i] > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA34_Trend_VolumeBreakout"
+name = "1d_Donchian20_VolumeBreakout"
 timeframe = "4h"
 leverage = 1.0
