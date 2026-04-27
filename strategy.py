@@ -1,9 +1,3 @@
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Target: Breakout of daily Camarilla R1/S1 levels with 1d EMA trend filter and volume confirmation.
-# Designed to work in both bull and bear markets by using 1d trend for direction and volume to confirm breakout strength.
-# Expected trade count: ~25-40 per year per symbol (100-160 over 4 years) to avoid fee drag.
-# Uses discrete position sizing (0.25) to minimize churn.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for pivot points
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -28,19 +22,19 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate daily pivot and Camarilla levels (R1, S1)
+    # Calculate pivot and Camarilla levels (R1, S1)
     pivot = (high_1d + low_1d + close_1d) / 3.0
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily levels to 4h timeframe
+    # Align daily levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Get 1d EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
@@ -51,20 +45,20 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 1d EMA (34 periods), daily data, volume MA (20 periods)
-    start_idx = max(34, 20)
+    # Warmup: need daily data (200 periods), volume MA (20 periods)
+    start_idx = max(200, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_200_1d_aligned[i]
         pivot_level = pivot_aligned[i]
         r1_level = r1_aligned[i]
         s1_level = s1_aligned[i]
@@ -102,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA200_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
