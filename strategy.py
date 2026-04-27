@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike
-Hypothesis: Uses daily timeframe with Camarilla R1/S1 breakouts filtered by 1-week EMA50 trend, volume confirmation, and ATR-based dynamic position sizing. Designed for BTC/ETH to work in both bull and bear markets by only taking breakouts in the direction of the 1w trend. Target ~15-25 trades/year to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter
+Hypothesis: Uses 12h timeframe with Camarilla R1/S1 breakouts filtered by 1d trend (price > SMA50 for long, price < SMA50 for short), volume confirmation (>2x 20-period average), and choppiness regime (CHOP > 50 for mean-reversion filter). Designed for BTC/ETH to work in both bull and bear markets by taking breakouts in trending regimes and mean-reversion in choppy markets. Target ~15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,15 +18,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # 1w EMA50 trend filter
-    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    
-    # Get 1d data for Camarilla levels (from previous completed 1d bar)
+    # Get 1d data for HTF filters
     df_1d = get_htf_data(prices, '1d')
+    
+    # 1d SMA50 trend filter
+    sma_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)
+    
+    # 1d data for Camarilla levels (from previous completed 1d bar)
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -34,84 +33,101 @@ def generate_signals(prices):
     r1 = prev_close + (rng * 1.1 / 12)
     s1 = prev_close - (rng * 1.1 / 12)
     
-    # Align Camarilla levels to 1d
+    # Align Camarilla levels to 12h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_avg)
+    volume_confirm = volume > (2.0 * vol_avg)
     
-    # ATR for dynamic position sizing (based on 14-period ATR)
+    # Choppiness Index regime filter (using 12h data)
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum) / np.log10(14) / np.log10((hh - ll) + 1e-10)
+    chop_regime = chop > 50  # choppy market (>50) = mean reversion, trending (<50) = trend follow
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
+    size = 0.25   # fixed size to minimize churn
     
-    # Warmup: need 1w EMA50 (50), 1d shift(1) for Camarilla, vol avg (20), ATR (14)
+    # Warmup: need 1d SMA50 (50), 1d shift(1) for Camarilla, vol avg (20), ATR for CHOP (14)
     start_idx = max(50 + 1, 1 + 1, 20, 14)  # ~51 bars
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i]) or
-            np.isnan(atr[i])):
+            np.isnan(sma_50_aligned[i]) or np.isnan(volume_confirm[i]) or
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema_val = ema_50_aligned[i]
+        sma_val = sma_50_aligned[i]
         vol_conf = volume_confirm[i]
-        atr_val = atr[i]
+        chop_val = chop[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with 1w EMA50 alignment and volume confirmation
-            long_condition = (close_val > r1_val and 
-                            close_val > ema_val and 
-                            vol_conf)
-            short_condition = (close_val < s1_val and 
-                             close_val < ema_val and 
-                             vol_conf)
+            # In choppy market (CHOP > 50): mean reversion at Camarilla levels
+            # In trending market (CHOP <= 50): breakout with trend filter
+            if chop_val > 50:  # choppy/mean reversion regime
+                long_condition = (close_val < s1_val and  # price below S1 = oversold
+                                vol_conf)
+                short_condition = (close_val > r1_val and  # price above R1 = overbought
+                                 vol_conf)
+            else:  # trending regime
+                long_condition = (close_val > r1_val and   # breakout above R1
+                                close_val > sma_val and    # price above 1d SMA50 = uptrend
+                                vol_conf)
+                short_condition = (close_val < s1_val and  # breakdown below S1
+                                 close_val < sma_val and   # price below 1d SMA50 = downtrend
+                                 vol_conf)
             
             if long_condition:
-                # Dynamic size based on ATR (normalized to 0.25-0.35 range)
-                atr_norm = min(max(atr_val / close_val, 0.01), 0.05)  # cap between 1%-5%
-                size = 0.25 + (atr_norm - 0.01) * (0.10 / 0.04)  # scale 0.01-0.05 to 0.25-0.35
                 signals[i] = size
                 position = 1
-                entry_price = close_val
             elif short_condition:
-                atr_norm = min(max(atr_val / close_val, 0.01), 0.05)
-                size = 0.25 + (atr_norm - 0.01) * (0.10 / 0.04)
                 signals[i] = -size
                 position = -1
-                entry_price = close_val
         elif position == 1:
-            # Exit long: price crosses below 1w EMA50 (trend reversal)
-            if close_val < ema_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = size
+            # Exit long: price crosses below S1 (mean reversion) or below SMA50 (trend fail)
+            if chop_val > 50:  # choppy: exit at mean reversion target
+                if close_val > s1_val:  # price back above S1 = exit long
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = size
+            else:  # trending: exit if trend fails
+                if close_val < sma_val:  # price below SMA50 = trend failure
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 1w EMA50 (trend reversal)
-            if close_val > ema_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = -size
+            # Exit short: price crosses above R1 (mean reversion) or above SMA50 (trend fail)
+            if chop_val > 50:  # choppy: exit at mean reversion target
+                if close_val < r1_val:  # price back below R1 = exit short
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -size
+            else:  # trending: exit if trend fails
+                if close_val > sma_val:  # price above SMA50 = trend failure
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -size
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
