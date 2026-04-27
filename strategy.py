@@ -13,87 +13,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and trend filter
+    # Get 1d data for Donchian channel and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-day ATR
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = np.concatenate([[np.nan], pd.Series(tr).rolling(window=14, min_periods=14).mean().values])
+    # 1d Donchian channel (20-period)
+    # Upper = max(high_1d over last 20 days)
+    # Lower = min(low_1d over last 20 days)
+    donchian_upper = np.full(len(high_1d), np.nan)
+    donchian_lower = np.full(len(low_1d), np.nan)
+    for i in range(19, len(high_1d)):
+        donchian_upper[i] = np.max(high_1d[i-19:i+1])
+        donchian_lower[i] = np.min(low_1d[i-19:i+1])
     
-    # ATR trailing stop multiplier
-    atr_mult = 3.0
+    # Align Donchian levels to 6h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # 1d EMA trend filter (50-period)
+    # 1d EMA (50-period) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align indicators to 4h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: volume > 1.5 x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Volume filter: volume > 1.5 x 48-period average (6h bars = 2 per day, so 48 = ~24 days)
+    vol_ma_48 = np.full(n, np.nan)
+    for i in range(47, n):
+        vol_ma_48[i] = np.mean(volume[i-47:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ATR (14), EMA (50), volume MA (20)
-    start_idx = max(14, 50, 20)
+    # Warmup: need Donchian (20 days), EMA (50), volume MA (48)
+    start_idx = max(20, 50, 48)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        vol_avg = vol_ma_48[i]
         
-        # Volume filter
+        # Volume filter: significant volume spike
         vol_filter = vol_now > 1.5 * vol_avg
         
         # Trend filter from 1d EMA
         bullish_trend = price > ema_50_aligned[i]
         bearish_trend = price < ema_50_aligned[i]
         
-        atr_val = atr_14_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
         
         if position == 0:
-            # Long: price above EMA50 + volume + no recent stop level
-            if bullish_trend and vol_filter:
+            # Long: price breaks above Donchian upper + volume + bullish 1d trend
+            if price > upper and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: price below EMA50 + volume + no recent stop level
-            elif bearish_trend and vol_filter:
+            # Short: price breaks below Donchian lower + volume + bearish 1d trend
+            elif price < lower and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Trail stop: exit if price drops below highest high since entry minus ATR*mult
-            # Simplified: exit if price < EMA50 or volume dries up
-            if not bullish_trend or not vol_filter:
+            # Exit long: price breaks below Donchian lower or trend turns bearish
+            if price < lower or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Trail stop: exit if price rises above lowest low since entry plus ATR*mult
-            # Simplified: exit if price > EMA50 or volume dries up
-            if not bearish_trend or not vol_filter:
+            # Exit short: price breaks above Donchian upper or trend turns bullish
+            if price > upper or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATR_Trail_EMA50_Volume"
-timeframe = "4h"
+name = "6h_Donchian_20_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
