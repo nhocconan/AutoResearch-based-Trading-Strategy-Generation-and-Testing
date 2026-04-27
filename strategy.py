@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_1d_ADX_Filter
-Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) on 4h for trend direction, filtered by 1d ADX for trend strength. Only trade when ADX > 25 (strong trend). Enter long when price > KAMA and ADX rising, short when price < KAMA and ADX rising. Exit when price crosses KAMA or ADX falls below 20. Uses 4h timeframe for entries, 1d for trend filter. Aims for 20-40 trades/year to minimize fee drag. Works in trending markets (both bull and bear) by capturing sustained moves.
+1h_RSI4060_MeanReversion_4hTrendFilter
+Hypothesis: Mean reversion on 1h with RSI 40-60 bands, filtered by 4h trend (EMA50) and volume confirmation.
+Trades only during London/NY session (08-20 UTC) to avoid Asian session noise.
+Targets 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
+Uses RSI mean reversion in ranging markets and trend alignment for directional bias.
+Works in bull via long bias in uptrend, bear via short bias in downtrend, range via mean reversion.
 """
 
 import numpy as np
@@ -16,85 +20,72 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate KAMA on 4h
-    def kama(close, period=10, fast=2, slow=30):
-        # Efficiency ratio
-        change = np.abs(np.diff(close, n=period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        # Smoothing constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # Initialize KAMA
-        kama = np.full_like(close, np.nan)
-        kama[period] = close[period]
-        for i in range(period+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate RSI(14) for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    kama_val = kama(close, period=10, fast=2, slow=30)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate ADX on 1d
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_avg)
     
-    # Smoothed values
-    def smooth(x, period):
-        return pd.Series(x).ewm(alpha=1/period, adjust=False).mean().values
-    
-    atr = smooth(tr, 14)
-    plus_di = 100 * smooth(plus_dm, 14) / atr
-    minus_di = 100 * smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth(dx, 14)
-    
-    # Align ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Session filter: 08-20 UTC (London + NY overlap)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need enough data for KAMA and ADX
-    start_idx = max(30, 30)
+    # Warmup: need enough data for RSI and EMA
+    start_idx = max(14, 50)
     
     for i in range(start_idx, n):
-        if np.isnan(kama_val[i]) or np.isnan(adx_aligned[i]):
+        # Skip if any data not ready or outside session
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(volume_confirm[i]) or not session_filter[i]):
             signals[i] = 0.0
             continue
         
+        rsi_val = rsi[i]
+        ema_50_val = ema_50_4h_aligned[i]
+        vol_conf = volume_confirm[i]
+        
         if position == 0:
-            # Long: price > KAMA and ADX > 25 and rising
-            if close[i] > kama_val[i] and adx_aligned[i] > 25 and adx_aligned[i] > adx_aligned[i-1]:
+            # Long: RSI < 40 (oversold) in uptrend (price > EMA50) with volume
+            if rsi_val < 40 and close[i] > ema_50_val and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short: price < KAMA and ADX > 25 and rising
-            elif close[i] < kama_val[i] and adx_aligned[i] > 25 and adx_aligned[i] > adx_aligned[i-1]:
+            # Short: RSI > 60 (overbought) in downtrend (price < EMA50) with volume
+            elif rsi_val > 60 and close[i] < ema_50_val and vol_conf:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price < KAMA or ADX < 20
-            if close[i] < kama_val[i] or adx_aligned[i] < 20:
+            # Exit long: RSI > 50 (mean reversion complete) or trend change
+            if rsi_val > 50 or close[i] < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price > KAMA or ADX < 20
-            if close[i] > kama_val[i] or adx_aligned[i] < 20:
+            # Exit short: RSI < 50 (mean reversion complete) or trend change
+            if rsi_val < 50 or close[i] > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_With_1d_ADX_Filter"
-timeframe = "4h"
+name = "1h_RSI4060_MeanReversion_4hTrendFilter"
+timeframe = "1h"
 leverage = 1.0
