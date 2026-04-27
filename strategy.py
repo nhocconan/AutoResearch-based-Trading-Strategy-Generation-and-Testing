@@ -44,7 +44,7 @@ def generate_signals(prices):
     r4 = pivot + range_ * 1.5
     s4 = pivot - range_ * 1.5
     
-    # Align levels to 1d timeframe (already aligned via function)
+    # Align levels to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R3S3_R4S4_FadeBreakout_1d1wEMA34_Trend_VolumeSpike_v3"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_R4S4_FadeBreakout_1d1wEMA34_Trend_VolumeSpike_v4"
+timeframe = "6h"
 leverage = 1.0
