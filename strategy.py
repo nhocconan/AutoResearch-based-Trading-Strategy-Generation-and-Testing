@@ -1,10 +1,3 @@
-# 101120
-# 4h_Donchian20_Breakout_VolumeSpike_TrendFilter_1d
-# Hypothesis: Donchian(20) breakout on 4h with 1d EMA50 trend filter and volume spike (2x 20-period average) captures
-# strong momentum moves while avoiding false breakouts. Works in bull (breakouts up) and bear (breakouts down) regimes.
-# Volume confirmation ensures breakouts have conviction. Trend filter avoids counter-trend trades.
-# Target: 20-40 trades/year (80-160 total over 4 years) to stay under 400 total trade limit.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -47,7 +40,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50[i]) or np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(ema50[i]) or np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
