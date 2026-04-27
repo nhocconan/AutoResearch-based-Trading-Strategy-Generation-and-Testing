@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe filtered by 1d EMA34 trend and volume spikes. Designed for low-frequency, high-conviction trades (12-37/year) with discrete sizing to minimize fee drag. Works in bull markets via breakouts above R3 in uptrend, and in bear markets via breakdowns below S3 in downtrend.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume spike confirmation. Designed for high-conviction momentum trades in both bull and bear markets. Uses discrete sizing (0.25) and exits on EMA trend reversal. Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,7 +18,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter and Camarilla levels (R3/S3)
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA34 trend filter
@@ -33,12 +33,12 @@ def generate_signals(prices):
     r3 = prev_close + (rng * 1.1 / 4)
     s3 = prev_close - (rng * 1.1 / 4)
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: current volume > 2.0 * 24-period average (strict threshold to avoid overtrading)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: current volume > 2.0 * 20-period average (high threshold to reduce trades)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
@@ -46,8 +46,8 @@ def generate_signals(prices):
     entry_price = 0.0
     size = 0.25  # Discrete size to minimize fee churn
     
-    # Warmup: need 1d EMA34 (34), 1d shift(1), vol avg (24)
-    start_idx = max(34 + 1*12, 24)  # ~34*12 + 24 = 432 bars for safety
+    # Warmup: need 1d EMA34 (34), 1d shift(1), vol avg (20)
+    start_idx = max(34 + 1*4, 20)  # ~156 bars for 1d EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
