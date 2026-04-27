@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Dyn
-Hypothesis: Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume spike capture institutional breakouts in both bull and bear markets. 
-Volume spike filters false breakouts, EMA34 ensures trend alignment, and Camarilla levels provide institutional support/resistance. 
-Targets 25-35 trades/year on 4h to minimize fee drag while capturing significant moves.
+1d_WeeklyDonchian20_VolumeSpike_KAMATrend
+Hypothesis: Weekly Donchian channel breakout (20-period) with daily volume confirmation and KAMA trend filter captures institutional moves across bull and bear markets. Weekly timeframe reduces noise, daily volume confirms institutional participation, and KAMA adapts to trend changes. Targets 10-25 trades/year on 1d to minimize fee decay while capturing significant trends.
 """
 
 import numpy as np
@@ -12,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,32 +18,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for Donchian channels
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly Donchian channels (20-period)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    # Donchian upper = max(high, lookback), lower = min(low, lookback)
+    donchian_high = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla formulas: range = (H - L), multiplier = 1.12
-    # R3 = C + (H-L)*1.12/4, S3 = C - (H-L)*1.12/4
-    rng = (high_1d - low_1d)
-    r3 = close_1d_prev + rng * 1.12 / 4
-    s3 = close_1d_prev - rng * 1.12 / 4
+    # Align to daily timeframe (only use after weekly bar closes)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Daily KAMA for trend filter (adaptive to market conditions)
+    # KAMA parameters: ER period=10, fast=2, slow=30
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = pd.Series(change).rolling(window=10, min_periods=1).sum().values
+    price_change = np.abs(np.diff(close, prepend=close[0]))
+    er = np.where(volatility > 0, price_change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume confirmation: volume > 2.0 * 20-period average (strong institutional interest)
+    # Daily volume confirmation: volume > 2.0 * 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 2.0)
     
@@ -53,39 +55,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA, volume MA, and Camarilla
-    start_idx = max(34, 20)
+    # Warmup: need enough data for Donchian, KAMA, and volume MA
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(kama[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        kama_val = kama[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: break above R3 with uptrend and volume spike
-            if close[i] > r3_level and vol_spike_val and close[i] > ema_trend:
+            # Long: break above weekly Donchian high with volume spike and above KAMA
+            if close[i] > upper and vol_spike_val and close[i] > kama_val:
                 signals[i] = size
                 position = 1
-            # Short: break below S3 with downtrend and volume spike
-            elif close[i] < s3_level and vol_spike_val and close[i] < ema_trend:
+            # Short: break below weekly Donchian low with volume spike and below KAMA
+            elif close[i] < lower and vol_spike_val and close[i] < kama_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: break below S3 or trend turns down
-            if close[i] < s3_level or close[i] < ema_trend:
+            # Exit long: break below weekly Donchian low or price crosses below KAMA
+            if close[i] < lower or close[i] < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: break above R3 or trend turns up
-            if close[i] > r3_level or close[i] > ema_trend:
+            # Exit short: break above weekly Donchian high or price crosses above KAMA
+            if close[i] > upper or close[i] > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Dyn"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_VolumeSpike_KAMATrend"
+timeframe = "1d"
 leverage = 1.0
