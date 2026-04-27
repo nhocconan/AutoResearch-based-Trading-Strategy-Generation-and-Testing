@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,98 +13,127 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and ATR-based volatility filter
+    # Get daily data for KAMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    # Calculate ATR(14) on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily data
     close_1d = df_1d['close'].values
+    # Efficiency Ratio (ER)
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
+    er = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i == 0:
+            er[i] = 0
+        else:
+            er[i] = change[i] / (volatility + 1e-10) if volatility > 0 else 0
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # KAMA calculation
+    kama_1d = np.zeros_like(close_1d)
+    kama_1d[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d[i] - kama_1d[i-1])
+    # Align KAMA to 1d timeframe (already daily, but align for safety)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First TR has no previous close
+    # Get weekly data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Get daily data for RSI calculation
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate RSI(14) on daily data
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    # Align RSI to 1d timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate volatility ratio for regime filter (ATR-based)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Get 4h data for price channel (Donchian breakout)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Get 1d data for volume spike detection
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    
-    # Volatility regime filter: ATR(14) > 1.5 * ATR(50) indicates high volatility (trending)
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
-    volatility_regime = atr_14_aligned > (1.5 * atr_50_aligned)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Volatility regime: high volatility when ATR > 1.5 * ATR(50)
+    atr_ma = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_vol = atr > 1.5 * atr_ma
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(50, 20)
+    start_idx = 60  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(atr_14_aligned[i]) or
-            np.isnan(atr_50_aligned[i])):
+        if (np.isnan(kama_1d_aligned[i]) or
+            np.isnan(ema_200_1w_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_20_aligned[i] if vol_ma_20_aligned[i] > 0 else 0
         
-        # Volatility filter: only trade in high volatility regimes (trending markets)
-        if not volatility_regime[i]:
-            signals[i] = 0.0
-            continue
+        # KAMA direction: price above KAMA = bullish, below = bearish
+        kama_bullish = price > kama_1d_aligned[i]
+        kama_bearish = price < kama_1d_aligned[i]
         
-        # Volume confirmation: spike > 2.0x average
-        volume_confirmation = vol_ratio > 2.0
+        # Weekly EMA200 trend filter
+        uptrend = price > ema_200_1w_aligned[i]
+        downtrend = price < ema_200_1w_aligned[i]
+        
+        # RSI conditions: avoid extremes, look for momentum
+        rsi_not_overbought = rsi_1d_aligned[i] < 70
+        rsi_not_oversold = rsi_1d_aligned[i] > 30
+        rsi_momentum_up = rsi_1d_aligned[i] > 50
+        rsi_momentum_down = rsi_1d_aligned[i] < 50
+        
+        # Volatility filter: avoid extreme volatility periods
+        vol_filter = not high_vol[i]
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high with volume
-            if price > donchian_high_aligned[i] and volume_confirmation:
+            # Long entry: price above KAMA, above weekly EMA200, RSI momentum up, not overbought
+            if (kama_bullish and uptrend and rsi_momentum_up and 
+                rsi_not_overbought and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short breakdown: price breaks below Donchian low with volume
-            elif price < donchian_low_aligned[i] and volume_confirmation:
+            # Short entry: price below KAMA, below weekly EMA200, RSI momentum down, not oversold
+            elif (kama_bearish and downtrend and rsi_momentum_down and 
+                  rsi_not_oversold and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Donchian low or volatility drops
-            if price < donchian_low_aligned[i] or not volatility_regime[i]:
+            # Long exit: price below KAMA or trend turns bearish
+            if price < kama_1d_aligned[i] or price < ema_200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above Donchian high or volatility drops
-            if price > donchian_high_aligned[i] or not volatility_regime[i]:
+            # Short exit: price above KAMA or trend turns bullish
+            if price > kama_1d_aligned[i] or price > ema_200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volatility_Volume_Filter"
-timeframe = "4h"
+name = "1d_KAMA_EMA200_RSI_Momentum_VolFilter"
+timeframe = "1d"
 leverage = 1.0
