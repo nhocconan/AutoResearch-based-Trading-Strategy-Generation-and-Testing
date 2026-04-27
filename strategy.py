@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Institutional Flow Detector with 1d Trend Filter and Volume Confirmation.
-Long when: 1) Institutional flow > 0 (large volume + price close near high), 2) Price > 1d EMA50, 3) Volume > 2x average.
-Short when: 1) Institutional flow < 0 (large volume + price close near low), 2) Price < 1d EMA50, 3) Volume > 2x average.
-Exit when institutional flow crosses zero.
-Uses 1d EMA50 for trend filter to avoid counter-trend trades.
-Designed for 6h timeframe: targets 50-150 total trades over 4 years (12-37/year).
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
+Long when: Price breaks above Camarilla R1 level + 1d EMA34 up + volume spike
+Short when: Price breaks below Camarilla S1 level + 1d EMA34 down + volume spike
+Exit when price crosses back below/above EMA34 or volume drops below average
+Designed for 4h timeframe: targets 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -22,78 +21,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for Camarilla levels and EMA34
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
+    # Calculate Camarilla pivot levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Institutional Flow: (close - low) - (high - close) normalized by range, scaled by volume
-    # Positive = buying pressure (close near high), Negative = selling pressure (close near low)
-    price_range = high - low
-    # Avoid division by zero
-    price_range = np.where(price_range == 0, 1, price_range)
-    money_flow_multiplier = ((close - low) - (high - close)) / price_range  # [-1, 1]
-    money_flow_volume = money_flow_multiplier * volume
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Sum over 6 periods (1 day equivalent on 6h chart) for institutional flow
-    inst_flow = np.full(n, np.nan, dtype=np.float64)
-    for i in range(5, n):
-        inst_flow[i] = np.sum(money_flow_volume[i-5:i+1])
+    # Camarilla levels
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Volume filter: volume > 2x 24-period average (48 hours = 2 days)
-    vol_ma_24 = np.full(n, np.nan, dtype=np.float64)
-    for i in range(23, n):
-        vol_ma_24[i] = np.mean(volume[i-23:i+1])
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need institutional flow (5 periods) + volume MA + 1d EMA
-    start_idx = max(23, 50, 5)  # Need all indicators
+    # Warmup: need Camarilla (1 day), EMA34 (34 days), volume MA (20 periods)
+    start_idx = max(34, 20)  # Need EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(inst_flow[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
-        flow_now = inst_flow[i]
-        ema_trend = ema_50_1d_aligned[i]
+        price = close[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_24[i]
+        vol_avg = vol_ma_20[i]
         
-        # Volume filter: volume > 2x average
-        vol_filter = vol_now > 2.0 * vol_avg
+        # Volume filter
+        vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: institutional buying + price > 1d EMA50 + volume spike
-            if flow_now > 0 and close[i] > ema_trend and vol_filter:
+            # Long: price breaks above R1 + EMA up + volume spike
+            if price > r1_level and price > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: institutional selling + price < 1d EMA50 + volume spike
-            elif flow_now < 0 and close[i] < ema_trend and vol_filter:
+            # Short: price breaks below S1 + EMA down + volume spike
+            elif price < s1_level and price < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: institutional flow turns negative (selling pressure)
-            if flow_now < 0:
+            # Exit long: price crosses below EMA34 or volume drops
+            if price < ema_trend or vol_now < vol_avg:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: institutional flow turns positive (buying pressure)
-            if flow_now > 0:
+            # Exit short: price crosses above EMA34 or volume drops
+            if price > ema_trend or vol_now < vol_avg:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Institutional_Flow_Detector_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
