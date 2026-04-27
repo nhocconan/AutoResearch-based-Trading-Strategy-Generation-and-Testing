@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_ChopFilter_v1
-Hypothesis: KAMA trend + RSI momentum + chop filter works on 1d for BTC/ETH in both bull and bear markets.
-KAMA adapts to market noise, RSI captures momentum extremes, chop filter avoids whipsaws in ranging markets.
-Target: 20-60 trades over 4 years (5-15/year) to minimize fee drag.
+6h_Donchian_Breakout_WeeklyPivot_Direction_Volume
+Hypothesis: Donchian(20) breakouts on 6h timeframe, filtered by weekly pivot point direction (bullish/bearish) and volume confirmation, capture high-probability trend continuation moves. Weekly pivot direction is derived from prior week's close vs pivot point. Volume filter requires current volume > 1.5x 20-period average. Designed to work in both bull and bear markets by using directional pivot filter. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -20,95 +18,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA, RSI, chop
-    df_1d = get_htf_data(prices, '1d')
-    
-    # KAMA: Kaufman Adaptive Moving Average
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # KAMA calculation
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # RSI(14) on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index on 1d
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr1 = np.maximum(tr1, np.absolute(low - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]
-    tr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    atr_14 = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
-    chop = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
-    
-    # Weekly trend filter: price vs 1w EMA50
+    # Get weekly data for pivot point calculation
     df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to primary timeframe (1d)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate weekly pivot point and direction from prior week
+    # Pivot = (High + Low + Close) / 3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Direction: 1 if close > pivot (bullish), -1 if close < pivot (bearish)
+    weekly_direction = np.where(close_1w > pivot_1w, 1, -1)
+    
+    # Donchian channel (20-period) on 6h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_avg)
+    
+    # Align weekly direction and volume confirmation to 6h timeframe
+    weekly_direction_aligned = align_htf_to_ltf(prices, df_1w, weekly_direction)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1w, volume_confirm)  # volume is 6h, but align using weekly index for signal stability
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need KAMA (1), RSI (14), chop (14), EMA50 (50)
-    start_idx = max(1, 14, 14, 50)
+    # Warmup: need Donchian (20), weekly data (1)
+    start_idx = max(20, 1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_direction_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = chop_aligned[i]
-        ema50 = ema50_1w_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        direction = weekly_direction_aligned[i]
+        vol_conf = volume_confirm_aligned[i]
         
         if position == 0:
-            # Long: price > KAMA, RSI > 50 (momentum), not choppy (chop < 61.8), above weekly EMA50
-            if close_val > kama_val and rsi_val > 50 and chop_val < 61.8 and close_val > ema50:
+            # Long: price breaks above Donchian high with bullish weekly direction and volume
+            if close_val > upper and direction == 1 and vol_conf:
                 signals[i] = size
                 position = 1
                 entry_price = close_val
-            # Short: price < KAMA, RSI < 50, not choppy, below weekly EMA50
-            elif close_val < kama_val and rsi_val < 50 and chop_val < 61.8 and close_val < ema50:
+            # Short: price breaks below Donchian low with bearish weekly direction and volume
+            elif close_val < lower and direction == -1 and vol_conf:
                 signals[i] = -size
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Exit: price < KAMA or RSI < 40 (loss of momentum)
-            if close_val < kama_val or rsi_val < 40:
+            # Exit: price retrace to Donchian low or opposite breakout
+            if close_val < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: price > KAMA or RSI > 60 (loss of momentum)
-            if close_val > kama_val or rsi_val > 60:
+            # Exit: price retrace to Donchian high or opposite breakout
+            if close_val > upper:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_Donchian_Breakout_WeeklyPivot_Direction_Volume"
+timeframe = "6h"
 leverage = 1.0
