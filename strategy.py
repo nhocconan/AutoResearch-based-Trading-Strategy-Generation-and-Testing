@@ -1,31 +1,74 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Williams Alligator with daily volume confirmation and 12h trend filter.
-Enters long when price is above Alligator's teeth (green line) with volume above average and 12h uptrend.
-Enters short when price is below Alligator's teeth with volume above average and 12h downtrend.
-Alligator uses smoothed moving averages (SMMA) of median price (HL/2) with specific periods.
-Williams Alligator is designed to identify trends and filter out ranging markets, making it suitable
-for both bull and bear markets when combined with higher timeframe trend filter.
-Target: 20-40 trades/year per symbol to minimize fee drag.
+Hypothesis: 1-hour mean reversion with 4h Donchian breakout direction and 1d volume confirmation.
+In ranging markets (identified by low 4h ADX), look for 1h price rejection at Donchian bands with volume spike.
+In trending markets (high 4h ADX), trade breakouts of 1h Donchian channels in direction of 4h trend.
+Uses volume filter to avoid false breaks. Target: 15-35 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(source, length):
-    """Smoothed Moving Average (SMMA) - also called Wilder's smoothing"""
-    if length <= 0:
-        return np.full_like(source, np.nan)
-    result = np.full_like(source, np.nan, dtype=np.float64)
-    if len(source) < length:
-        return result
-    # First value is simple average
-    result[length-1] = np.mean(source[:length])
-    # Subsequent values: SMMA = (prev SMMA * (length-1) + current price) / length
-    for i in range(length, len(source)):
-        result[i] = (result[i-1] * (length-1) + source[i]) / length
-    return result
+def calculate_adx(high, low, close, length=14):
+    """Calculate Average Directional Index"""
+    plus_dm = np.zeros_like(high)
+    minus_dm = np.zeros_like(high)
+    
+    for i in range(1, len(high)):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        elif low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    tr = np.zeros_like(high)
+    for i in range(len(high)):
+        if i == 0:
+            tr[i] = high[i] - low[i]
+        else:
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = np.zeros_like(high)
+    for i in range(len(high)):
+        if i < length:
+            atr[i] = np.nan
+        elif i == length:
+            atr[i] = np.mean(tr[1:length+1])
+        else:
+            atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
+    
+    plus_di = np.where(atr != 0, 100 * plus_dm / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm / atr, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    adx = np.full_like(dx, np.nan)
+    for i in range(len(dx)):
+        if i < 2*length - 1:
+            adx[i] = np.nan
+        elif i == 2*length - 1:
+            adx[i] = np.mean(dx[length:2*length])
+        else:
+            adx[i] = (adx[i-1] * (length-1) + dx[i]) / length
+    
+    return adx
+
+def calculate_donchian_channels(high, low, length=20):
+    """Calculate Donchian channels"""
+    upper = np.full_like(high, np.nan)
+    lower = np.full_like(high, np.nan)
+    
+    for i in range(len(high)):
+        if i < length - 1:
+            upper[i] = np.nan
+            lower[i] = np.nan
+        else:
+            upper[i] = np.max(high[i-length+1:i+1])
+            lower[i] = np.min(low[i-length+1:i+1])
+    
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,89 +80,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume filter
+    # Get 4h data for trend and ranging filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Calculate 4h ADX for trend/ranging detection
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    adx_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
     
-    # Calculate median price (HL/2) for Alligator
-    median_price = (high + low) / 2
+    # Calculate 4h Donchian channels for structure
+    upper_4h, lower_4h = calculate_donchian_channels(high_4h, low_4h, 20)
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
     
-    # Williams Alligator lines (all SMMA)
-    # Jaw (blue line): 13-period SMMA, shifted 8 bars forward
-    jaw = smma(median_price, 13)
-    # Teeth (red line): 8-period SMMA, shifted 5 bars forward  
-    teeth = smma(median_price, 8)
-    # Lips (green line): 5-period SMMA, shifted 3 bars forward
-    lips = smma(median_price, 5)
-    
-    # Calculate daily volume MA(20)
+    # Calculate 1d volume MA for filter
     vol_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 12h close for trend filter
-    close_12h = df_12h['close'].values
-    # Use close price directly for trend (no need for MA to avoid lag)
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    # Calculate 1h Donchian for entry timing
+    upper_1h, lower_1h = calculate_donchian_channels(high, low, 10)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    position = 0
+    size = 0.20
     
-    # Warmup: need Alligator components (lips needs 5-period SMMA + 3 shift = 8 min)
-    # Jaw: 13+8=21, Teeth: 8+5=13, Lips: 5+3=8 -> max is 21
-    start_idx = max(21, 20)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    # Warmup
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(close_12h_aligned[i])):
+        # Session filter
+        if hours[i] < 8 or hours[i] > 20:
+            signals[i] = 0.0
+            continue
+            
+        # Skip if data not ready
+        if (np.isnan(adx_4h_aligned[i]) or np.isnan(upper_4h_aligned[i]) or 
+            np.isnan(lower_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 4h price and volume
-        price_now = close[i]
-        vol_now = volume[i]
+        adx = adx_4h_aligned[i]
         vol_ma = vol_ma_20_1d_aligned[i]
-        trend_12h = close_12h_aligned[i]
+        vol_now = volume[i]
+        vol_filter = vol_now > 1.5 * vol_ma
         
-        # Current Alligator values
-        lips_now = lips[i]
-        teeth_now = teeth[i]
-        jaw_now = jaw[i]
+        # Determine market regime
+        is_ranging = adx < 25
+        is_trending = adx >= 25
         
-        # Volume filter: volume > 1.3x daily average
-        vol_filter = vol_now > 1.3 * vol_ma
-        
-        # Entry conditions: price vs teeth (green line) with volume + 12h trend
         if position == 0:
-            # Long: price above teeth with volume + 12h uptrend
-            if price_now > teeth_now and vol_filter and price_now > trend_12h:
-                signals[i] = size
-                position = 1
-            # Short: price below teeth with volume + 12h downtrend
-            elif price_now < teeth_now and vol_filter and price_now < trend_12h:
-                signals[i] = -size
-                position = -1
-            else:
-                signals[i] = 0.0
+            if is_ranging:
+                # Mean reversion: reject at Donchian bands
+                if close[i] <= lower_1h[i] and vol_filter:
+                    signals[i] = size
+                    position = 1
+                elif close[i] >= upper_1h[i] and vol_filter:
+                    signals[i] = -size
+                    position = -1
+            else:  # trending
+                # Breakout in trend direction
+                if close[i] > upper_1h[i] and close[i] > upper_4h_aligned[i] and vol_filter:
+                    signals[i] = size
+                    position = 1
+                elif close[i] < lower_1h[i] and close[i] < lower_4h_aligned[i] and vol_filter:
+                    signals[i] = -size
+                    position = -1
         elif position == 1:
-            # Exit long: price crosses below teeth or 12h trend turns down
-            if price_now < teeth_now or price_now < trend_12h:
+            # Exit: opposite Donchian touch or volume drying up
+            if close[i] >= upper_1h[i] or vol_now < 0.7 * vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above teeth or 12h trend turns up
-            if price_now > teeth_now or price_now > trend_12h:
+            # Exit: opposite Donchian touch or volume drying up
+            if close[i] <= lower_1h[i] or vol_now < 0.7 * vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +175,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dVolume_12hTrend"
-timeframe = "4h"
+name = "1h_DonchianMeanReversion_4hADX_1dVolume"
+timeframe = "1h"
 leverage = 1.0
