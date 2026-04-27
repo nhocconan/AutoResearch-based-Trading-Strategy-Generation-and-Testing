@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_v2
 Hypothesis: Trade 4h timeframe with daily CAMARILLA R1/S1 breakouts filtered by 1d EMA34 trend and volume spikes.
-Targets 15-35 trades/year to minimize fee drag. Works in bull markets via breakouts and bear via mean reversion at S1/R1 levels.
+Target 20-30 trades/year to minimize fee drift. Uses breakouts in uptrend and mean-reversion at S1/R1 in downtrend.
+Works in bull markets via breakouts and bear via mean reversion at S1/R1 levels.
 """
 
 import numpy as np
@@ -68,8 +69,8 @@ def generate_signals(prices):
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Require minimum 6 bars since last exit to avoid churn (~1 day on 4h)
-            if bars_since_exit >= 6:
+            # Require minimum 12 bars since last exit to avoid churn (~2 days on 4h)
+            if bars_since_exit >= 12:
                 # Long: price breaks above R1 with volume confirmation AND above 1d EMA34 (uptrend)
                 if close[i] > camarilla_r1_val and vol_conf and close[i] > ema_34_val:
                     signals[i] = size
@@ -97,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
