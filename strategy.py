@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_RegimeFilter
-Hypothesis: Daily Camarilla R1/S1 breakout with 1-week EMA50 trend filter and volume confirmation.
-Designed for 1d timeframe targeting 30-100 total trades over 4 years.
-Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets:
-In trending regimes (price > EMA50 for longs, < EMA50 for shorts),
-breakouts at R1/S1 with volume spike capture momentum continuations.
-Exit on trend reversal (close crosses EMA50).
+6h_Adaptive_Kelly_Donchian_Volume_Regime
+Hypothesis: Donchian(20) breakout on 6h with volatility regime filter (ATR ratio) and adaptive Kelly sizing.
+In high volatility regimes (ATR(7)/ATR(30) > 1.2), breakouts capture strong moves with reduced size.
+In low volatility regimes (ATR ratio <= 1.2), breakouts are faded with mean reversion at Donchian mid.
+Uses discrete position sizing tiers (0.0, ±0.15, ±0.25) to minimize fee churn.
+Designed for 6h timeframe targeting 50-150 total trades over 4 years.
+Works in bull/bear markets: volatility regime adapts to changing market conditions.
 """
 
 import numpy as np
@@ -23,89 +23,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    # 1w EMA50 trend filter
-    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # ATR for volatility regime (7 and 30 period)
+    tr1 = pd.Series(high - low).values
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
+    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr7 / (atr30 + 1e-10)  # Avoid division by zero
     
-    # Get 1d data for Camarilla levels (completed daily bar)
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Camarilla levels from previous 1d bar (completed)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    rng = prev_high - prev_low
-    r1 = prev_close + (rng * 1.1 / 12)
-    s1 = prev_close - (rng * 1.1 / 12)
-    
-    # Align Camarilla levels to 1d (already aligned but use helper for consistency)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume spike: current > 2.0 * 20-period average
+    # Volume confirmation: current > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    size = 0.25  # Discrete size to reduce fee churn
+    size_normal = 0.25   # Normal size in low volatility
+    size_high_vol = 0.15 # Reduced size in high volatility
     
-    # Warmup: need 1d shift, EMA50, vol avg
-    start_idx = max(30, 50, 20)
+    # Warmup: need Donchian(20), ATR(30), vol avg(20)
+    start_idx = max(20, 30, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(donch_mid[i]) or np.isnan(atr_ratio[i]) or
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_val = ema_50_aligned[i]
-        vol_spike = volume_spike[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
+        mid = donch_mid[i]
+        vol_regime = atr_ratio[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with EMA alignment and volume spike
-            long_condition = (close_val > r1_val and 
-                            close_val > ema_val and 
-                            vol_spike)
-            short_condition = (close_val < s1_val and 
-                             close_val < ema_val and 
-                             vol_spike)
-            
-            if long_condition:
-                signals[i] = size
-                position = 1
-                entry_price = close_val
-            elif short_condition:
-                signals[i] = -size
-                position = -1
-                entry_price = close_val
+            # Entry logic based on volatility regime
+            if vol_regime > 1.2:  # High volatility: trade breakouts
+                long_condition = (close_val > upper and vol_conf)
+                short_condition = (close_val < lower and vol_conf)
+                if long_condition:
+                    signals[i] = size_high_vol
+                    position = 1
+                elif short_condition:
+                    signals[i] = -size_high_vol
+                    position = -1
+            else:  # Low volatility: fade extreme moves, mean revert to mid
+                # Fade when price touches bands with volume confirmation
+                long_condition = (close_val <= lower and vol_conf and close_val < mid)
+                short_condition = (close_val >= upper and vol_conf and close_val > mid)
+                if long_condition:
+                    signals[i] = size_normal
+                    position = 1
+                elif short_condition:
+                    signals[i] = -size_normal
+                    position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA50 (trend reversal)
-            if close_val < ema_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = size
+            # Exit logic: reverse when price reaches opposite extreme or mid
+            if vol_regime > 1.2:  # High vol: exit on opposite band touch
+                if close_val >= upper:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = size_high_vol
+            else:  # Low vol: exit when price reaches mid or opposite band
+                if close_val >= mid:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = size_normal
         elif position == -1:
-            # Exit short: price crosses above EMA50 (trend reversal)
-            if close_val > ema_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = -size
+            # Exit logic for short position
+            if vol_regime > 1.2:  # High vol: exit on opposite band touch
+                if close_val <= lower:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -size_high_vol
+            else:  # Low vol: exit when price reaches mid or opposite band
+                if close_val <= mid:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -size_normal
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_RegimeFilter"
-timeframe = "1d"
+name = "6h_Adaptive_Kelly_Donchian_Volume_Regime"
+timeframe = "6h"
 leverage = 1.0
