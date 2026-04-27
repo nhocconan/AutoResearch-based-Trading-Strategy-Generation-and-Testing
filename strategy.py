@@ -1,3 +1,9 @@
+# 6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT
+# Hypothesis: 6h timeframe with daily trend filter (EMA34) and volume spike (2x avg) for breakout confirmation at Camarilla R3/S3 levels.
+# Uses daily EMA34 for trend direction, daily Camarilla R3/S3 for entries, and volume spike to avoid false breakouts.
+# Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets by aligning with higher timeframe structure.
+# Target: 50-150 total trades over 4 years = 12-37/year. HARD MAX: 300 total.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,74 +19,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for price action and volume
+    # Get daily data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Daily EMA(34) for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Weekly EMA(50) for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Daily Camarilla levels (based on previous day)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily Donchian(20) - previous 20 days
-    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Align Donchian levels to daily
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # Resistance and Support levels (R3, S3)
+    R3 = pivot + (range_hl * 1.1 / 4)  # R3 level
+    S3 = pivot - (range_hl * 1.1 / 4)  # S3 level
     
-    # Daily volume average (20-period)
-    vol_ma = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    # Align to 6h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # 6h volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need weekly EMA50 and daily data
-    start_idx = max(50, 20)
+    # Warmup: need daily EMA34 and volume data
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema50_1w_aligned[i]
-        vol_ma_val = vol_ma_aligned[i]
-        vol_current = df_1d['volume'].iloc[i] if i < len(df_1d) else 0
+        ema_trend = ema34_1d_aligned[i]
+        vol_ma_val = vol_ma[i]
+        vol_current = volume[i]
         
-        # Volume filter: current volume > 1.3 * 20-period average
-        vol_filter = vol_current > (vol_ma_val * 1.3)
+        # Volume filter: current volume > 2.0 * 20-period average (volume spike)
+        vol_filter = vol_current > (vol_ma_val * 2.0)
         
         if position == 0:
-            # Long: price breaks above 20-day high with weekly uptrend and volume
-            if close[i] > high_20_aligned[i] and close[i] > ema_trend and vol_filter:
+            # Long: price breaks above R3 with daily uptrend and volume spike
+            if close[i] > R3_aligned[i] and close[i] > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below 20-day low with weekly downtrend and volume
-            elif close[i] < low_20_aligned[i] and close[i] < ema_trend and vol_filter:
+            # Short: price breaks below S3 with daily downtrend and volume spike
+            elif close[i] < S3_aligned[i] and close[i] < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below 20-day low or weekly trend turns down
-            if close[i] < low_20_aligned[i] or close[i] < ema_trend:
+            # Exit long: price crosses below S3 or daily trend turns down
+            if close[i] < S3_aligned[i] or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above 20-day high or weekly trend turns up
-            if close[i] > high_20_aligned[i] or close[i] > ema_trend:
+            # Exit short: price crosses above R3 or daily trend turns up
+            if close[i] > R3_aligned[i] or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_WeeklyTrend_VolumeFilter"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
+timeframe = "6h"
 leverage = 1.0
