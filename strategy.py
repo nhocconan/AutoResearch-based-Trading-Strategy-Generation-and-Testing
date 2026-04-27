@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop
-Hypothesis: Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spike capture sustained moves in both bull and bear markets. ATR-based stoploss (2.5x ATR) controls drawdown. Discrete sizing (0.25) limits fee churn. Target: 75-200 trades over 4 years.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spike capture sustained moves in both bull and bear markets. ATR-based stoploss (2.5x ATR) controls drawdown. Discrete sizing (0.25) limits fee churn. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
@@ -35,12 +35,12 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.1 * rng_1d / 2
     camarilla_s3 = close_1d - 1.1 * rng_1d / 2
     
-    # Align all indicators to primary timeframe (4h)
+    # Align all indicators to primary timeframe (12h)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current volume > 2.0 * 24-period average (6h equivalent)
+    # Volume confirmation: current volume > 2.0 * 24-period average (1d equivalent for 12h)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
@@ -123,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
