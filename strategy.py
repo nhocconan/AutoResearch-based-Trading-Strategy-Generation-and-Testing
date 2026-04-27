@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
+    # Get 1d data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -23,7 +23,7 @@ def generate_signals(prices):
     ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1d ATR(14) for volatility filter
+    # 1d ATR(20) for volatility
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_arr = df_1d['close'].values
@@ -31,27 +31,27 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    tr[0] = tr1[0]  # First period has no previous close
+    atr20_1d = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr20_1d)
     
-    # Volume filter: volume > 1.5x 20-period average (moderate filter)
+    # Volume filter: volume > 1.5x 20-period average (moderate)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
-    # Volatility filter: ATR below its 30-period median (low volatility regime)
-    atr_median = pd.Series(atr14_1d_aligned).rolling(window=30, min_periods=15).median().values
-    vol_filter = atr14_1d_aligned < atr_median
+    # Volatility filter: ATR below its 40-period median (low volatility regime)
+    atr_median = pd.Series(atr20_1d_aligned).rolling(window=40, min_periods=20).median().values
+    vol_filter = atr20_1d_aligned < atr_median
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 100
+    start_idx = 80
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr20_1d_aligned[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(atr_median[i])):
             signals[i] = 0.0
             continue
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6d_EMA50_Vol_LowVol_Filter_v1"
-timeframe = "6h"
+name = "4h_EMA50_Vol_LowVol_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
