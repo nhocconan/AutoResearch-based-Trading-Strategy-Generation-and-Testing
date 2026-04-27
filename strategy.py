@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ChopRegime
-Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike, and choppiness regime filter.
-Works in bull/bear: In trending markets (CHOP < 61.8), breakouts with volume and EMA alignment capture momentum.
-In ranging markets (CHOP >= 61.8), filter prevents false breakouts. Designed for ~20-40 trades/year on 4h.
+6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakout on 6h with 1d EMA50 trend filter and volume confirmation.
+Works in bull/bear markets: In trending regimes (price > EMA50 for longs, < EMA50 for shorts),
+breakouts at R3/S3 with volume capture momentum. Uses discrete position sizing (0.25) to limit
+drawdown and reduce fee churn. Targets 50-150 trades over 4 years on 6h timeframe.
 """
 
 import numpy as np
@@ -31,61 +32,47 @@ def generate_signals(prices):
     r3 = prev_close + (rng * 1.1 / 4)
     s3 = prev_close - (rng * 1.1 / 4)
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 6h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 1d EMA34 trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # 1d EMA50 trend filter
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Volume spike: current > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_avg)
-    
-    # Choppiness Index (CHOP) regime filter
-    atr_period = 14
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr2])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    tr_sum = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).sum().values
-    chop = 100 * np.log10(tr_sum / (atr * atr_period)) / np.log10(atr_period)
-    trending_regime = chop < 61.8  # Trending when CHOP < 61.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     size = 0.25  # 25% position
     
-    # Warmup: need 1d shift (30 bars for safety), EMA34, vol avg, ATR
-    start_idx = max(30, 34, 20, atr_period)
+    # Warmup: need 1d shift, EMA50, vol avg
+    start_idx = max(30, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(trending_regime[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
-        ema_val = ema_34_aligned[i]
+        ema_val = ema_50_aligned[i]
         vol_spike = volume_spike[i]
-        regime = trending_regime[i]
         
         if position == 0:
-            # Look for entry: Camarilla breakout with EMA alignment, volume spike, and trending regime
+            # Look for entry: Camarilla breakout with EMA alignment and volume spike
             long_condition = (close_val > r3_val and 
                             close_val > ema_val and 
-                            vol_spike and 
-                            regime)
+                            vol_spike)
             short_condition = (close_val < s3_val and 
                              close_val < ema_val and 
-                             vol_spike and 
-                             regime)
+                             vol_spike)
             
             if long_condition:
                 signals[i] = size
@@ -114,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_RegimeFilter"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
