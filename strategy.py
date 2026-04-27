@@ -1,3 +1,8 @@
+# BTC/ETH 6h Camarilla R4/S4 Breakout with 1D EMA34 Filter
+# Hypothesis: Price breaking R4/S4 levels with volume confirmation and trend alignment
+# captures strong momentum moves while avoiding false breakouts. Works in bull/bear
+# by filtering with daily trend (EMA34) and requiring volume spikes.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -41,14 +46,14 @@ def generate_signals(prices):
     r4 = prev_close + camarilla_factor
     s4 = prev_close - camarilla_factor
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 6h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate 2-period volume average for spike detection (12h x 2 = 1 day)
+    # Calculate 6-period volume average for spike detection (6h x 1 = 1 day)
     vol_ma = np.full(n, np.nan)
-    vol_period = 2
+    vol_period = 6
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -99,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R4_S4_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "6h_Camarilla_R4_S4_Breakout_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
