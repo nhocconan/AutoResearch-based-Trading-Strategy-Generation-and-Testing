@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Uses daily (1d) Camarilla pivot levels (R3/S3) for breakout entries on 12h timeframe, confirmed by 1d EMA34 trend and volume spike (>2x 20-period average). Designed for medium-term mean-reversion breakouts with low trade frequency (~12-37/year) to minimize fee drift. Works in both bull and bear markets by combining pivot-based reversals with trend confirmation. Volume confirmation and trend filter reduce false breakouts. Position size fixed at 0.25 to control drawdown.
+4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike
+Hypothesis: Combines 1d Camarilla R3/S3 breakout with 12h EMA50 trend and volume spike (>2x 20-period average) for high-probability momentum entries. Designed for low trade frequency (~20-30 trades/year) to minimize fee drag, working in both bull and bear markets by aligning with dominant trend.
 """
 
 import numpy as np
@@ -32,13 +32,16 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
+    # Align Camarilla levels to 4h timeframe (wait for previous day's close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # 1d EMA34 for trend confirmation
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 12h EMA50 for trend confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,39 +52,39 @@ def generate_signals(prices):
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for EMA and volume
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         camarilla_r3_val = camarilla_r3_aligned[i]
         camarilla_s3_val = camarilla_s3_aligned[i]
-        ema34_val = ema34_1d_aligned[i]
+        ema50_val = ema50_12h_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: price breaks above R3, above EMA34 trend, volume confirmation
-            if close[i] > camarilla_r3_val and close[i] > ema34_val and vol_conf:
+            # Long: price breaks above R3, above EMA50 trend, volume confirmation
+            if close[i] > camarilla_r3_val and close[i] > ema50_val and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3, below EMA34 trend, volume confirmation
-            elif close[i] < camarilla_s3_val and close[i] < ema34_val and vol_conf:
+            # Short: price breaks below S3, below EMA50 trend, volume confirmation
+            elif close[i] < camarilla_s3_val and close[i] < ema50_val and vol_conf:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA34
-            if close[i] < ema34_val:
+            # Exit long: price crosses below EMA50
+            if close[i] < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA34
-            if close[i] > ema34_val:
+            # Exit short: price crosses above EMA50
+            if close[i] > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
