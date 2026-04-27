@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Fractal + 1d EMA34 trend + volume spike
-# Uses 1d Williams fractals for reversal signals (bullish fractal = potential long setup,
-# bearish fractal = potential short setup) with 1d EMA34 trend filter to align with higher timeframe momentum.
-# Volume confirmation (>2.0x 24-period average) ensures institutional participation.
-# Targets 20-30 trades/year to minimize fee decay while capturing high-probability reversals.
-# Works in bull/bear markets by using trend filter to avoid counter-trend trades.
+# Hypothesis: 4h Choppiness Index regime filter + Donchian(20) breakout + volume confirmation
+# Uses Choppiness Index(14) to filter regimes: >61.8 = ranging (mean revert), <38.2 = trending (trend follow)
+# In ranging markets: fade Donchian breaks (sell upper, buy lower) with volume confirmation
+# In trending markets: follow Donchian breaks (buy upper, sell lower) with volume confirmation
+# Volume > 1.5x 20-period average confirms breakout strength
+# Target: 20-30 trades/year to minimize fee decay while capturing both trending and ranging markets
+# Focus on BTC/ETH as primary assets with proven regime effectiveness from research
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,39 +21,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for fractals and trend
+    # Get 1d data for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate 1d Williams Fractals
+    # Calculate 1d Choppiness Index(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    bearish_fractal = np.zeros(len(high_1d), dtype=bool)
-    bullish_fractal = np.zeros(len(low_1d), dtype=bool)
+    close_1d = df_1d['close'].values
     
-    for i in range(2, len(high_1d) - 2):
-        # Bearish fractal: high[i] is highest among i-2,i-1,i,i+1,i+2
-        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and 
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = True
-        # Bullish fractal: low[i] is lowest among i-2,i-1,i,i+1,i+2
-        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and 
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = True
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # Williams fractals need 2 extra bars for confirmation (bar must close 2 periods after fractal)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2)
+    # ATR(14)
+    atr_period = 14
+    atr = np.full(len(close_1d), np.nan)
+    for i in range(atr_period, len(close_1d)):
+        atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
     
-    # Calculate 24-period average volume for spike detection (4h bars in 1d = 6, so 24 = 4d)
+    # Sum of ATR over 14 periods
+    sum_atr = np.full(len(close_1d), np.nan)
+    for i in range(atr_period, len(close_1d)):
+        sum_atr[i] = np.nansum(atr[i-atr_period+1:i+1])
+    
+    # Highest high and lowest low over 14 periods
+    max_hh = np.full(len(close_1d), np.nan)
+    min_ll = np.full(len(close_1d), np.nan)
+    for i in range(atr_period, len(close_1d)):
+        max_hh[i] = np.nanmax(high_1d[i-atr_period+1:i+1])
+        min_ll[i] = np.nanmin(low_1d[i-atr_period+1:i+1])
+    
+    # Choppiness Index
+    chop = np.full(len(close_1d), 50.0)  # default neutral
+    for i in range(atr_period, len(close_1d)):
+        if max_hh[i] != min_ll[i] and sum_atr[i] > 0:
+            chop[i] = 100 * np.log10(sum_atr[i] / (max_hh[i] - min_ll[i])) / np.log10(atr_period)
+    
+    chop_align = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate Donchian(20) on 4h data
+    donchian_period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(donchian_period, n):
+        upper[i] = np.max(high[i-donchian_period:i])
+        lower[i] = np.min(low[i-donchian_period:i])
+    
+    # 20-period average volume for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 24
+    vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -61,47 +84,66 @@ def generate_signals(prices):
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(vol_period, 1)
+    start_idx = max(donchian_period, vol_period, 1)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(bullish_fractal_aligned[i])):
+        if (np.isnan(chop_align[i]) or
+            np.isnan(upper[i]) or
+            np.isnan(lower[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from 1d EMA34
-        uptrend = price > ema_34_1d_aligned[i]
-        downtrend = price < ema_34_1d_aligned[i]
+        # Determine regime from Choppiness Index
+        ranging = chop_align[i] > 61.8
+        trending = chop_align[i] < 38.2
         
-        # Volume confirmation: spike > 2.0x average
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation: spike > 1.5x average
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long entry: bullish fractal + uptrend + volume spike
-            if bullish_fractal_aligned[i] > 0.5 and uptrend and volume_confirmation:
-                signals[i] = size
-                position = 1
-            # Short entry: bearish fractal + downtrend + volume spike
-            elif bearish_fractal_aligned[i] > 0.5 and downtrend and volume_confirmation:
-                signals[i] = -size
-                position = -1
+            if ranging:
+                # In ranging markets: mean reversion at Donchian bands
+                if price > upper[i] and volume_confirmation:
+                    signals[i] = -size  # sell at upper band
+                    position = -1
+                elif price < lower[i] and volume_confirmation:
+                    signals[i] = size   # buy at lower band
+                    position = 1
+                else:
+                    signals[i] = 0.0
+            elif trending:
+                # In trending markets: follow breakouts
+                if price > upper[i] and volume_confirmation:
+                    signals[i] = size   # buy breakout
+                    position = 1
+                elif price < lower[i] and volume_confirmation:
+                    signals[i] = -size  # sell breakdown
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
+                # Neutral chop: no position
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: bearish fractal appears or trend reverses
-            if bearish_fractal_aligned[i] > 0.5 or price < ema_34_1d_aligned[i]:
+            # Long exit: price returns to middle of range or breaks lower band
+            if ranging and price < (upper[i] + lower[i]) / 2:
+                signals[i] = 0.0
+                position = 0
+            elif price < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: bullish fractal appears or trend reverses
-            if bullish_fractal_aligned[i] > 0.5 or price > ema_34_1d_aligned[i]:
+            # Short exit: price returns to middle of range or breaks upper band
+            if ranging and price > (upper[i] + lower[i]) / 2:
+                signals[i] = 0.0
+                position = 0
+            elif price > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsFractal_1dEMA34_Trend_Volume"
+name = "4h_Chop_Regime_Donchian_Breakout_Volume"
 timeframe = "4h"
 leverage = 1.0
