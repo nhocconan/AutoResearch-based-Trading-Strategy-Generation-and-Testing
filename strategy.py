@@ -13,64 +13,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volatility regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 12h data for primary HTF trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily ATR(14) for volatility regime
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr_14_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(tr_1d)):
-        atr_14_1d[i] = np.mean(tr_1d[i-14:i])
-    
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Calculate ATR ratio: current ATR(7) / ATR(14) - volatility expansion signal
-    tr1_7 = high_1d[1:] - low_1d[1:]
-    tr2_7 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_7 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_7d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1_7, np.maximum(tr2_7, tr3_7))])
-    
-    atr_7_1d = np.full(len(df_1d), np.nan)
-    for i in range(7, len(tr_7d)):
-        atr_7_1d[i] = np.mean(tr_7d[i-7:i])
-    
-    atr_7_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_7_1d)
-    
-    # ATR ratio: ATR(7)/ATR(14) > 1.3 indicates volatility expansion
-    atr_ratio = np.full(n, np.nan)
-    valid_mask = (~np.isnan(atr_7_1d_aligned)) & (~np.isnan(atr_14_1d_aligned)) & (atr_14_1d_aligned > 0)
-    atr_ratio[valid_mask] = atr_7_1d_aligned[valid_mask] / atr_14_1d_aligned[valid_mask]
-    
-    # Get weekly data for trend filter: EMA(34) on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_1w_34 = np.full(len(df_1w), np.nan)
-    alpha_w = 2 / (34 + 1)
-    for i in range(len(close_1w)):
+    close_12h = df_12h['close'].values
+    # Calculate EMA(34) on 12h close
+    ema_12h_34 = np.full(len(df_12h), np.nan)
+    alpha = 2 / (34 + 1)
+    for i in range(len(close_12h)):
         if i < 33:
-            ema_1w_34[i] = np.mean(close_1w[:i+1]) if i > 0 else close_1w[i]
+            ema_12h_34[i] = np.mean(close_12h[:i+1]) if i > 0 else close_12h[i]
         else:
-            if np.isnan(ema_1w_34[i-1]):
-                ema_1w_34[i] = np.mean(close_1w[i-33:i+1])
+            if np.isnan(ema_12h_34[i-1]):
+                ema_12h_34[i] = np.mean(close_12h[i-33:i+1])
             else:
-                ema_1w_34[i] = close_1w[i] * alpha_w + ema_1w_34[i-1] * (1 - alpha_w)
+                ema_12h_34[i] = close_12h[i] * alpha + ema_12h_34[i-1] * (1 - alpha)
     
-    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
+    ema_12h_34_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_34)
     
-    # Calculate 4-period RSI for mean reentry signals
+    # Get 1d data for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    # Calculate volume SMA(20) on 1d volume
+    vol_sma_20_1d = np.full(len(df_1d), np.nan)
+    for i in range(len(volume_1d)):
+        if i < 19:
+            vol_sma_20_1d[i] = np.mean(volume_1d[:i+1]) if i > 0 else volume_1d[i]
+        else:
+            vol_sma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
+    
+    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
+    
+    # Calculate 4h volume ratio: current volume / 12-period average
+    vol_ma_12 = np.full(n, np.nan)
+    for i in range(n):
+        if i < 11:
+            vol_ma_12[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+        else:
+            vol_ma_12[i] = np.mean(volume[i-11:i+1])
+    
+    volume_ratio = np.full(n, np.nan)
+    valid_vol = (~np.isnan(vol_ma_12)) & (vol_ma_12 > 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma_12[valid_vol]
+    
+    # Calculate 4-period RSI for mean reversion signals
     delta = np.diff(close, prepend=close[0])
     gain = np.maximum(delta, 0)
     loss = np.maximum(-delta, 0)
@@ -95,47 +86,45 @@ def generate_signals(prices):
     position = 0
     
     # Warmup
-    start_idx = max(14, 34, 4)
+    start_idx = max(34, 20, 4)
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_ratio[i]) or 
-            np.isnan(ema_1w_34_aligned[i]) or
+        if (np.isnan(ema_12h_34_aligned[i]) or 
+            np.isnan(volume_ratio[i]) or
             np.isnan(rsi_4[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        
-        # Volatility regime filter: ATR ratio > 1.3 = expansion (favor trend)
-        vol_expansion = atr_ratio[i] > 1.3
+        # Volume spike filter: current volume > 1.5x 12-period average
+        volume_spike = volume_ratio[i] > 1.5
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volatility expansion + weekly uptrend
+            # Long: RSI < 30 (oversold) + volume spike + 12h uptrend
             if (rsi_4[i] < 30 and 
-                vol_expansion and 
-                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
+                volume_spike and 
+                ema_12h_34_aligned[i] > ema_12h_34_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + volatility expansion + weekly downtrend
+            # Short: RSI > 70 (overbought) + volume spike + 12h downtrend
             elif (rsi_4[i] > 70 and 
-                  vol_expansion and 
-                  ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
+                  volume_spike and 
+                  ema_12h_34_aligned[i] < ema_12h_34_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI > 70 or weekly trend turns down
+            # Long exit: RSI > 70 or 12h trend turns down
             if (rsi_4[i] > 70 or 
-                ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
+                ema_12h_34_aligned[i] < ema_12h_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 30 or weekly trend turns up
+            # Short exit: RSI < 30 or 12h trend turns up
             if (rsi_4[i] < 30 or 
-                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
+                ema_12h_34_aligned[i] > ema_12h_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -143,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
-timeframe = "12h"
+name = "4h_VolumeSpike_RSI4_12hEMA34_v1"
+timeframe = "4h"
 leverage = 1.0
