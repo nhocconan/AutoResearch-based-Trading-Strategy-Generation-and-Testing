@@ -1,10 +1,3 @@
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Strategy: Camarilla pivot levels (R1, S1) breakout with 1d trend filter and volume confirmation
-# Timeframe: 4h for entry, 1d for trend and pivot calculation
-# Why it works: Camarilla levels identify key support/resistance; breakouts with volume and trend
-# align with institutional flow. Works in bull (breakouts continue) and bear (breakdowns continue).
-# Uses discrete position sizing to minimize fee churn. Target: 20-50 trades/year.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -16,11 +9,11 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend
+    # Get 1d data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -29,27 +22,21 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla levels (R1, S1)
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    # Using previous day's values to avoid look-ahead
-    pivot_1d = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3
-    range_1d = np.roll(high_1d, 1) - np.roll(low_1d, 1)
-    r1_1d = np.roll(close_1d, 1) + range_1d * 1.1 / 12
-    s1_1d = np.roll(close_1d, 1) - range_1d * 1.1 / 12
+    # Calculate 13-period EMA for trend filter (1d)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align to 4h timeframe (will be available after 1d bar closes)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Calculate Elder Ray components (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align Elder Ray components to daily timeframe (1d primary)
+    bull_power = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    ema13 = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # Volume filter: volume > 1.8x 20-period average (higher threshold to reduce trades)
+    # Volume filter: volume > 1.5x 20-period average (1d)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,27 +46,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema34_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema13[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price breaks above R1 with uptrend and volume spike
-        long_breakout = (close[i] > r1_4h[i] and close[i] > ema34_4h[i] and volume_spike[i])
+        # Long conditions:
+        # 1. Bull Power > 0 with price above EMA13 and volume spike
+        # 2. Bear Power < 0 turning up with price above EMA13 and volume spike (early reversal)
+        long_bull = (bull_power[i] > 0 and close[i] > ema13[i] and volume_spike[i])
+        long_reversal = (bear_power[i] < 0 and bear_power[i] > bear_power[i-1] and 
+                         close[i] > ema13[i] and volume_spike[i])
         
-        # Short conditions: price breaks below S1 with downtrend and volume spike
-        short_breakout = (close[i] < s1_4h[i] and close[i] < ema34_4h[i] and volume_spike[i])
+        # Short conditions:
+        # 1. Bear Power < 0 with price below EMA13 and volume spike
+        # 2. Bull Power > 0 turning down with price below EMA13 and volume spike (early reversal)
+        short_bear = (bear_power[i] < 0 and close[i] < ema13[i] and volume_spike[i])
+        short_reversal = (bull_power[i] > 0 and bull_power[i] < bull_power[i-1] and 
+                          close[i] < ema13[i] and volume_spike[i])
         
-        if long_breakout:
+        if long_bull or long_reversal:
             signals[i] = 0.25
             position = 1
-        elif short_breakout:
+        elif short_bear or short_reversal:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to opposite pivot level
-        elif position == 1 and close[i] < s1_4h[i]:
+        # Exit conditions: opposite power signal with volume confirmation
+        elif position == 1 and bear_power[i] < 0 and volume_spike[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > r1_4h[i]:
+        elif position == -1 and bull_power[i] > 0 and volume_spike[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -93,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_ElderRay_BullBearPower_EMA13_Volume1.5x_1d"
+timeframe = "1d"
 leverage = 1.0
