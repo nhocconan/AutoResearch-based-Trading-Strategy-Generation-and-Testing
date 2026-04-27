@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,16 +15,22 @@ def generate_signals(prices):
     
     # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA(34) for trend
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -36,8 +42,8 @@ def generate_signals(prices):
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 6h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align indicators to 12h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
@@ -53,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(vol_avg_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -64,7 +70,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
         atr_val = atr_14_1d_aligned[i]
         vol_avg = vol_avg_1d_aligned[i]
         vol_current = volume[i]
@@ -81,11 +87,11 @@ def generate_signals(prices):
         
         # Entry conditions: long only in bullish trend, short only in bearish trend
         if position == 0:
-            # Long: daily trend up + volatility + volume
+            # Long: weekly trend up + volatility + volume
             if close[i] > ema_trend and vol_filter and volume_filter:
                 signals[i] = size
                 position = 1
-            # Short: daily trend down + volatility + volume
+            # Short: weekly trend down + volatility + volume
             elif close[i] < ema_trend and vol_filter and volume_filter:
                 signals[i] = -size
                 position = -1
@@ -108,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyTrend_VolumeVolatilityFilter_v3"
-timeframe = "6h"
+name = "12h_WeeklyTrend_VolumeVolatilityFilter_v3"
+timeframe = "12h"
 leverage = 1.0
