@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_1dADXTrend_VolumeSpike_HTF
-Hypothesis: Donchian(20) breakout on 6h filtered by 1d ADX>25 (strong trend) and volume spike (>2x 20-bar average).
-Only breakouts in the direction of the 1d trend are taken. ADX ensures we trade strong trending markets,
-while volume spike confirms institutional participation. Works in both bull and bear markets by only
-trading in the direction of the 1d trend. Target: 50-150 total trades over 4 years.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: Camarilla R1/S1 breakout on 4h with 1d trend filter (price > EMA34) and volume spike, plus ATR-based stoploss.
+Breakouts at R1/S1 levels capture momentum with 1d trend alignment and volume confirmation. ATR stoploss limits drawdown in bear markets.
+Works in both bull and bear markets by only trading in the direction of the 1d trend. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -21,48 +20,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ADX for trend strength filter
+    # Calculate ATR for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 34:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d Camarilla pivot levels (focus on R1/S1 for breakout entries)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First bar
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])  # First bar
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])   # First bar
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    PP = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    # Key levels: R1 and S1 for breakout entries
+    R1 = PP + range_1d * 1.1 / 12.0
+    S1 = PP - range_1d * 1.1 / 12.0
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 6h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,48 +63,51 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need enough for Donchian (20), volume avg (20), and ADX (14+14+14)
-    start_idx = max(100, 20, 20, 30)
+    # Warmup: need enough for ATR, EMA34, and volume average
+    start_idx = max(100, 34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        adx_val = adx_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_spike = volume_spike[i]
+        atr_val = atr[i]
         size = 0.25  # 25% position size
         
         if position == 0:
-            # Flat - look for entry: Donchian breakout in direction of 1d trend with volume spike and ADX>25
-            # Long: price breaks above Donchian high AND ADX>25 (strong trend) AND volume spike
-            # Short: price breaks below Donchian low AND ADX>25 (strong trend) AND volume spike
-            long_breakout = close_val > donchian_high[i]
-            short_breakout = close_val < donchian_low[i]
-            strong_trend = adx_val > 25
+            # Flat - look for entry: breakout in direction of 1d trend with volume spike
+            # Long: price breaks above R1 AND 1d trend is up (price > EMA34) AND volume spike
+            # Short: price breaks below S1 AND 1d trend is down (price < EMA34) AND volume spike
+            long_breakout = close_val > R1_aligned[i]
+            short_breakout = close_val < S1_aligned[i]
+            trend_up = close_val > ema_trend
+            trend_down = close_val < ema_trend
             
-            if long_breakout and strong_trend and vol_spike:
+            if long_breakout and trend_up and vol_spike:
                 signals[i] = size
                 position = 1
                 entry_price = close_val
-            elif short_breakout and strong_trend and vol_spike:
+            elif short_breakout and trend_down and vol_spike:
                 signals[i] = -size
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Long - exit when price breaks below Donchian low (failed breakout/trend reversal)
-            if close_val < donchian_low[i]:
+            # Long - exit when price breaks below S1 (failed breakout) or ATR stoploss hit
+            if close_val < S1_aligned[i] or close_val < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price breaks above Donchian high (failed breakout/trend reversal)
-            if close_val > donchian_high[i]:
+            # Short - exit when price breaks above R1 (failed breakout) or ATR stoploss hit
+            if close_val > R1_aligned[i] or close_val > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -122,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dADXTrend_VolumeSpike_HTF"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
