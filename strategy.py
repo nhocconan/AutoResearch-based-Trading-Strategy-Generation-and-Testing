@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Donchian(20) breakout captures breakout momentum.
-# 1d EMA50 filter ensures alignment with daily trend.
-# Volume > 1.5x 20-period average confirms institutional participation.
-# Designed for ~20-30 trades/year per symbol to minimize fee drag.
-# Works in both bull and bear markets by following the higher timeframe trend.
+# Hypothesis: 6h Williams %R with 1d EMA trend filter and volume spike.
+# Williams %R identifies overbought/oversold conditions.
+# Readings below -80 = oversold (buy signal), above -20 = overbought (sell signal).
+# Strategy: In uptrends (price > 1d EMA50), buy when Williams %R crosses above -80 from below.
+# In downtrends (price < 1d EMA50), sell when Williams %R crosses below -20 from above.
+# Volume spike (>1.5x 20-period average) confirms institutional participation.
+# Designed for ~15-30 trades/year per symbol (~60-120 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,9 +21,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams %R calculation (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    hl_range = highest_high - lowest_low
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
+    willr = -100 * (highest_high - close) / hl_range  # Values between -100 and 0
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -46,32 +51,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(willr[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price breaks above Donchian upper band + trend up + volume
-        if close[i] > highest_high[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
-            signals[i] = 0.25
-            position = 1
-        # Short entry: price breaks below Donchian lower band + trend down + volume
-        elif close[i] < lowest_low[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
-            signals[i] = -0.25
-            position = -1
-        # Exit conditions: reverse signal or trend change
-        elif position == 1 and (close[i] < ema50_1d_aligned[i] or not volume_filter[i]):
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and (close[i] > ema50_1d_aligned[i] or not volume_filter[i]):
-            signals[i] = 0.0
-            position = 0
+        # Uptrend: price above 1d EMA50
+        if close[i] > ema50_1d_aligned[i]:
+            # Buy signal: Williams %R crosses above -80 from below (oversold bounce)
+            if willr[i] > -80 and willr[i-1] <= -80:
+                if volume_filter[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Exit long: Williams %R rises above -20 (overbought)
+            elif position == 1 and willr[i] >= -20:
+                signals[i] = 0.0
+                position = 0
+        # Downtrend: price below 1d EMA50
+        elif close[i] < ema50_1d_aligned[i]:
+            # Sell signal: Williams %R crosses below -20 from above (overbought reversal)
+            if willr[i] < -20 and willr[i-1] >= -20:
+                if volume_filter[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Exit short: Williams %R falls below -80 (oversold)
+            elif position == -1 and willr[i] <= -80:
+                signals[i] = 0.0
+                position = 0
+        # Neutral: price near EMA50 - hold flat
         else:
-            # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_VolumeFilter"
-timeframe = "4h"
+name = "6h_WilliamsR_1dEMA50_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
