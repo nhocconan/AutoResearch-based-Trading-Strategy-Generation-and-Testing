@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_v1
-Hypothesis: Combines Camarilla pivot levels (R3/S3) with 1d trend filter and volume spike.
-This strategy targets institutional levels with trend alignment and volume confirmation to capture
-strong directional moves while minimizing false breakouts. Designed for low trade frequency
-(20-50 trades/year) to reduce fee drag in both bull and bear markets.
+1d_RSI_MeanReversion_WeeklyTrend_Filter
+Hypothesis: Uses weekly trend filter with daily RSI mean reversion. In strong weekly uptrend, buy RSI<30; in strong weekly downtrend, sell RSI>70. Weekly trend avoids counter-trend trades in major moves, while RSI captures pullbacks. Designed for low frequency (10-25 trades/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,90 +10,70 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate daily pivot points and Camarilla levels
-    # Use 1d data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate pivot point and Camarilla levels for each day
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla levels
-    r3_1d = close_1d + (range_1d * 1.1 / 2.0)  # R3 = C + (H-L)*1.1/2
-    s3_1d = close_1d - (range_1d * 1.1 / 2.0)  # S3 = C - (H-L)*1.1/2
+    # Daily RSI(14) for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 1d trend filter: EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
-    
-    # Align all 1d indicators to 4h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
+    # Align weekly EMA50 to daily
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for calculations
-    start_idx = 34  # EMA34 needs 34 periods
+    start_idx = 50  # EMA50 needs 50 periods
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
+        # Skip if weekly trend data not ready
+        if np.isnan(ema50_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
+        rsi_val = rsi[i]
+        ema50 = ema50_1w_aligned[i]
         close_val = close[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        ema34 = ema34_1d_aligned[i]
-        vol_conf = volume_confirm_aligned[i]
         
         if position == 0:
-            # Determine trend: price vs EMA34 (1d)
-            uptrend = close_val > ema34
-            downtrend = close_val < ema34
+            # Determine weekly trend
+            uptrend = close_val > ema50
+            downtrend = close_val < ema50
             
-            if uptrend and vol_conf:
-                # Long: break above R3 with volume
-                if close_val > r3:
-                    signals[i] = size
-                    position = 1
-                    entry_price = close_val
-            elif downtrend and vol_conf:
-                # Short: break below S3 with volume
-                if close_val < s3:
-                    signals[i] = -size
-                    position = -1
-                    entry_price = close_val
+            if uptrend and rsi_val < 30:
+                # Long in uptrend on RSI oversold
+                signals[i] = size
+                position = 1
+            elif downtrend and rsi_val > 70:
+                # Short in downtrend on RSI overbought
+                signals[i] = -size
+                position = -1
         elif position == 1:
-            # Exit: price re-enters below R3 or trend reversal
-            if close_val < r3:  # Re-enter below R3
+            # Exit long: RSI reaches neutral (50) or trend change
+            if rsi_val >= 50 or close_val < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: price re-enters above S3 or trend reversal
-            if close_val > s3:  # Re-enter above S3
+            # Exit short: RSI reaches neutral (50) or trend change
+            if rsi_val <= 50 or close_val > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_v1"
-timeframe = "4h"
+name = "1d_RSI_MeanReversion_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
