@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
-# Uses Williams %R to identify overbought/oversold conditions (reversal signals),
-# 1d EMA trend filter to ensure alignment with higher timeframe trend,
-# and volume > 1.5x average to confirm momentum.
-# Works in both bull and bear markets by only taking reversals in the direction of the 1d trend.
-# Target: 20-30 trades/year to minimize fee decay while capturing high-probability reversals.
+# Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction + volume confirmation
+# Weekly pivot levels (based on Sunday close) act as strong weekly support/resistance.
+# Long when price breaks above Donchian(20) high AND above weekly pivot (support).
+# Short when price breaks below Donchian(20) low AND below weekly pivot (resistance).
+# Volume > 1.5x 20-period average confirms breakout strength.
+# Works in both bull and bear markets by requiring alignment with weekly pivot bias.
+# Target: 12-30 trades/year to minimize fee decay while capturing strong weekly trend moves.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,27 +21,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for weekly pivot calculation (need Sunday closes)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA on 1d (34-period)
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2) / (34 + 1) + ema_34_1d[i-1] * (33) / (34 + 1)
+    # Calculate weekly pivot: (weekly high + weekly low + weekly close) / 3
+    # Using Sunday close as weekly reference (start of week)
+    weekly_high = np.full(len(df_1d), np.nan)
+    weekly_low = np.full(len(df_1d), np.nan)
+    weekly_close = np.full(len(df_1d), np.nan)
     
-    # Williams %R on 4h (14-period)
-    williams_r = np.full(n, np.nan)
-    lookback = 14
-    for i in range(lookback, n):
-        highest_high = np.max(high[i-lookback+1:i+1])
-        lowest_low = np.min(low[i-lookback+1:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
+    for i in range(len(df_1d)):
+        # Find Sunday of current week (weekday 6)
+        dt = pd.Timestamp(df_1d.index[i])
+        # Go back to Sunday of this week
+        days_to_sunday = (dt.weekday() + 1) % 7  # Monday=0, Sunday=6
+        sunday = dt - pd.Timedelta(days=days_to_sunday)
+        
+        # Find index of this Sunday
+        try:
+            sunday_idx = df_1d.index.get_loc(sunday)
+            # Get week from Sunday to Saturday
+            week_end = sunday + pd.Timedelta(days=6)
+            week_mask = (df_1d.index >= sunday) & (df_1d.index <= week_end)
+            week_data = df_1d[week_mask]
+            if len(week_data) > 0:
+                weekly_high[i] = week_data['high'].max()
+                weekly_low[i] = week_data['low'].min()
+                weekly_close[i] = week_data['close'].iloc[-1]
+        except KeyError:
+            pass  # Sunday not in data
+    
+    # Weekly pivot point
+    weekly_pivot = np.full(len(df_1d), np.nan)
+    valid = ~(np.isnan(weekly_high) | np.isnan(weekly_low) | np.isnan(weekly_close))
+    weekly_pivot[valid] = (weekly_high[valid] + weekly_low[valid] + weekly_close[valid]) / 3.0
+    
+    # Donchian channels (20-period)
+    donchian_period = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    
+    for i in range(donchian_period, n):
+        donchian_high[i] = np.max(high[i-donchian_period:i])
+        donchian_low[i] = np.min(low[i-donchian_period:i])
     
     # 20-period average volume for spike detection
     vol_ma = np.full(n, np.nan)
@@ -48,20 +73,21 @@ def generate_signals(prices):
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
-    # Align HTF indicators to 4h
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align weekly pivot to 6h
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(lookback, vol_period)
+    start_idx = max(donchian_period, vol_period) + 50  # extra for weekly calc
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma[i]) or
+            np.isnan(weekly_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -69,36 +95,36 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         # Conditions:
-        # 1. Williams %R oversold (< -80) or overbought (> -20)
-        # 2. Price above/below 1d EMA for trend alignment
+        # 1. Donchian breakout: price breaks above/below 20-period channel
+        # 2. Weekly pivot alignment: price must be on correct side of pivot
         # 3. Volume confirmation: > 1.5x average volume
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        uptrend = price > ema_34_1d_aligned[i]
-        downtrend = price < ema_34_1d_aligned[i]
+        breakout_up = price > donchian_high[i]
+        breakout_down = price < donchian_low[i]
+        above_pivot = price > weekly_pivot_aligned[i]
+        below_pivot = price < weekly_pivot_aligned[i]
         volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long: oversold during uptrend with volume
-            if oversold and uptrend and volume_confirmation:
+            # Long: breakout above Donchian high AND above weekly pivot
+            if breakout_up and above_pivot and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: overbought during downtrend with volume
-            elif overbought and downtrend and volume_confirmation:
+            # Short: breakout below Donchian low AND below weekly pivot
+            elif breakout_down and below_pivot and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Williams %R returns to neutral or trend changes
-            if williams_r[i] > -50 or price < ema_34_1d_aligned[i]:
+            # Long exit: price returns to weekly pivot or breaks below Donchian low
+            if price < weekly_pivot_aligned[i] or price < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Williams %R returns to neutral or trend changes
-            if williams_r[i] < -50 or price > ema_34_1d_aligned[i]:
+            # Short exit: price returns to weekly pivot or breaks above Donchian high
+            if price > weekly_pivot_aligned[i] or price > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_EMATrend_Volume"
-timeframe = "4h"
+name = "6h_Donchian_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
