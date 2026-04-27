@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-#100929 - 4h_Donchian20_1dTrend_Volume_Slope
-Hypothesis: Donchian(20) breakout with 1d EMA trend filter and volume confirmation on 4h timeframe.
-Adds price slope filter to reduce false breakouts. Targets 20-50 trades/year (80-200 total) to minimize fee drift.
-Works in bull (breakouts with trend) and bear (mean reversion via stop/reversal).
+#100931 - 6h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: Breakout at Camarilla R3/S3 levels (stronger breakout than R1/S1) with volume confirmation and 1d EMA trend filter on 6h timeframe.
+Targets 12-37 trades/year (50-150 total) to minimize fee dash. Uses 6h primary timeframe with 1d EMA34 for trend and daily pivot for Camarilla levels.
+Works in bull (breakouts with trend) and bear (mean reversion to pivot). R3/S3 breakouts are rarer but higher quality, reducing trade frequency and improving win rate.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,74 +20,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Calculate 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day (to avoid look-ahead)
+    daily_pivot = (high_1d + low_1d + close_1d) / 3
+    daily_range = high_1d - low_1d
+    daily_r3 = close_1d + daily_range * 1.1 / 4
+    daily_s3 = close_1d - daily_range * 1.1 / 4
     
-    # Calculate price slope (5-period linear regression slope)
-    def rolling_slope(series, window):
-        slopes = np.full_like(series, np.nan, dtype=np.float64)
-        for i in range(window - 1, len(series)):
-            y = series[i - window + 1:i + 1]
-            x = np.arange(window)
-            if np.all(np.isnan(y)):
-                slopes[i] = np.nan
-            else:
-                # Use polyfit for slope (degree 1)
-                coeffs = np.polyfit(x, y, 1)
-                slopes[i] = coeffs[0]
-        return slopes
+    # Align to 6h timeframe (previous day's levels for current period)
+    camarilla_r3 = align_htf_to_ltf(prices, df_1d, daily_r3)
+    camarilla_s3 = align_htf_to_ltf(prices, df_1d, daily_s3)
+    camarilla_pivot = align_htf_to_ltf(prices, df_1d, daily_pivot)
     
-    price_slope = rolling_slope(close, 5)
-    
-    # Volume filter: volume > 1.8x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(price_slope[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or np.isnan(camarilla_pivot[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above Donchian high, above 1d EMA34, positive slope, volume spike
-        if (close[i] > high_20[i] and 
+        # Long condition: price breaks above R3, above 1d EMA34, volume spike
+        if (close[i] > camarilla_r3[i] and 
             close[i] > ema34_1d_aligned[i] and 
-            price_slope[i] > 0 and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below Donchian low, below 1d EMA34, negative slope, volume spike
-        elif (close[i] < low_20[i] and 
+        # Short condition: price breaks below S3, below 1d EMA34, volume spike
+        elif (close[i] < camarilla_s3[i] and 
               close[i] < ema34_1d_aligned[i] and 
-              price_slope[i] < 0 and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to opposite Donchian level or opposite EMA
-        elif position == 1 and (close[i] < low_20[i] or close[i] < ema34_1d_aligned[i]):
+        # Exit conditions: price returns to Camarilla Pivot (mean reversion)
+        elif position == 1 and close[i] < camarilla_pivot[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] > high_20[i] or close[i] > ema34_1d_aligned[i]):
+        elif position == -1 and close[i] > camarilla_pivot[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -101,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dTrend_Volume_Slope"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
