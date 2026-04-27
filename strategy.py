@@ -36,6 +36,12 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
+    # Calculate daily Donchian(20) channels
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
@@ -49,7 +55,9 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i])):
+            np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(donchian_high_20_aligned[i]) or
+            np.isnan(donchian_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -65,19 +73,15 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely high volatility periods
         vol_filter = atr_14_1d_aligned[i] > 0 and atr_14_1d_aligned[i] < np.median(atr_14_1d_aligned[:i+1]) * 3
         
-        # Volume filter: above average volume
-        vol_ma_14_1d = pd.Series(volume_1d).rolling(window=14, min_periods=14).mean().values
-        vol_ma_14_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_14_1d)
-        if np.isnan(vol_ma_14_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
-        vol_spike = volume[i] > vol_ma_14_1d_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high_20_aligned[i]
+        short_breakout = close[i] < donchian_low_20_aligned[i]
         
-        # Long conditions: bullish trend + volatility filter + volume spike
-        long_condition = (price_above_ema and vol_filter and vol_spike)
+        # Long conditions: bullish trend + volatility filter + Donchian breakout
+        long_condition = (price_above_ema and vol_filter and long_breakout)
         
-        # Short conditions: bearish trend + volatility filter + volume spike
-        short_condition = (price_below_ema and vol_filter and vol_spike)
+        # Short conditions: bearish trend + volatility filter + Donchian breakout
+        short_condition = (price_below_ema and vol_filter and short_breakout)
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -103,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyEMA34_VolumeFilter_Session"
+name = "4h_DailyEMA34_Donchian20_Breakout"
 timeframe = "4h"
 leverage = 1.0
