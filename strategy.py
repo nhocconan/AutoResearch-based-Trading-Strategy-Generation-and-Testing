@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Multi-timeframe strategy combining 4h price action with 1h entry timing.
-Hypothesis: 4h momentum filters reduce false signals in choppy markets,
-while 1h entry timing captures momentum bursts with controlled frequency.
-Trades target: 20-40/year (80-160 total over 4 years) to avoid fee drag.
-Works in bull/bear via momentum + volatility filters.
+Hypothesis: 6h timeframe with 1-week pivot levels and volume confirmation.
+- Use weekly R3/S3 levels for mean reversion (fade extreme deviations)
+- Use weekly R4/S4 levels for breakout continuation (strong momentum)
+- Only trade when price is outside weekly pivot range (avoid chop)
+- Volume > 1.5x average confirms institutional participation
+- Works in bull/bear: fade extremes in ranging markets, follow breakouts in trending
+Target: 15-35 trades/year per symbol (60-140 over 4 years)
 """
 
 import numpy as np
@@ -21,94 +23,141 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for momentum filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 4h momentum (close vs open)
-    close_4h = df_4h['close'].values
-    open_4h = df_4h['open'].values
-    momentum_4h = close_4h - open_4h
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 4h momentum to 1h timeframe
-    momentum_4h_aligned = align_htf_to_ltf(prices, df_4h, momentum_4h)
+    # Calculate weekly pivot points (using previous week)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    # R4 = R3 + (H - L), S4 = S3 - (H - L)
     
-    # 1h volatility filter (ATR-based)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]
+    pivot_1w = np.full(len(close_1w), np.nan)
+    r1_1w = np.full(len(close_1w), np.nan)
+    s1_1w = np.full(len(close_1w), np.nan)
+    r2_1w = np.full(len(close_1w), np.nan)
+    s2_1w = np.full(len(close_1w), np.nan)
+    r3_1w = np.full(len(close_1w), np.nan)
+    s3_1w = np.full(len(close_1w), np.nan)
+    r4_1w = np.full(len(close_1w), np.nan)
+    s4_1w = np.full(len(close_1w), np.nan)
     
-    # 1h momentum (price change)
-    price_change = np.diff(close, prepend=close[0])
+    for i in range(1, len(close_1w)):
+        H = high_1w[i-1]
+        L = low_1w[i-1]
+        C = close_1w[i-1]
+        
+        if np.isnan(H) or np.isnan(L) or np.isnan(C):
+            continue
+            
+        P = (H + L + C) / 3.0
+        pivot_1w[i] = P
+        r1_1w[i] = 2 * P - L
+        s1_1w[i] = 2 * P - H
+        r2_1w[i] = P + (H - L)
+        s2_1w[i] = P - (H - L)
+        r3_1w[i] = H + 2 * (P - L)
+        s3_1w[i] = L - 2 * (H - P)
+        r4_1w[i] = r3_1w[i] + (H - L)
+        s4_1w[i] = s3_1w[i] - (H - L)
     
-    # Volume filter
-    vol_ma = np.zeros(n)
-    vol_ma[0] = volume[0]
-    for i in range(1, n):
-        vol_ma[i] = 0.9 * vol_ma[i-1] + 0.1 * volume[i]
+    # Align weekly pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    
+    # Volume confirmation (20-period average)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
-    position = 0
-    size = 0.20  # 20% position size
+    position = 0  # 0: flat, 1: long, -1: short
+    size = 0.25   # 25% position size
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # Start after warmup period
-    start_idx = 50
+    # Warmup: need weekly pivots and volume MA
+    start_idx = 20  # Need at least 20 bars for volume MA and week data
     
     for i in range(start_idx, n):
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Skip if any data not ready
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or 
+            np.isnan(s3_1w_aligned[i]) or np.isnan(r4_1w_aligned[i]) or 
+            np.isnan(s4_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+            signals[i] = 0.0
+            continue
         
-        if not in_session:
-            signals[i] = 0.0
-            continue
-            
-        # Skip if data not ready
-        if np.isnan(momentum_4h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
-            signals[i] = 0.0
-            continue
-            
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        mom_threshold = 0.5 * atr[i]  # Dynamic threshold based on volatility
+        price = close[i]
+        vol_now = volume[i]
+        vol_avg = vol_ma_20[i]
+        
+        # Volume filter: require volume above average
+        vol_filter = vol_now > 1.5 * vol_avg
+        
+        # Get weekly levels
+        pivot = pivot_1w_aligned[i]
+        r3 = r3_1w_aligned[i]
+        s3 = s3_1w_aligned[i]
+        r4 = r4_1w_aligned[i]
+        s4 = s4_1w_aligned[i]
         
         if position == 0:
-            # Long: 4h bullish momentum + 1h price up + volume surge
-            if (momentum_4h_aligned[i] > mom_threshold and 
-                price_change[i] > 0 and 
-                vol_ratio > 1.5):
-                signals[i] = size
-                position = 1
-            # Short: 4h bearish momentum + 1h price down + volume surge
-            elif (momentum_4h_aligned[i] < -mom_threshold and 
-                  price_change[i] < 0 and 
-                  vol_ratio > 1.5):
-                signals[i] = -size
-                position = -1
+            # Long conditions:
+            # 1. Fade at S3: price < S3 and volume spike (mean reversion)
+            # 2. Breakout at R4: price > R4 and volume spike (continuation)
+            if vol_filter:
+                if price < s3:
+                    signals[i] = size
+                    position = 1
+                elif price > r4:
+                    signals[i] = size
+                    position = 1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
+                
         elif position == 1:
-            # Exit long: 4h momentum turns bearish OR price reverses
-            if momentum_4h_aligned[i] < -mom_threshold * 0.5 or price_change[i] < 0:
+            # Exit conditions:
+            # 1. Price returns to pivot (mean reversion target)
+            # 2. Price reaches opposite R3 (take profit)
+            # 3. Price fails at R4 and reverses (for breakout trades)
+            if price >= pivot or price >= r3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
+                
         elif position == -1:
-            # Exit short: 4h momentum turns bullish OR price reverses
-            if momentum_4h_aligned[i] > mom_threshold * 0.5 or price_change[i] > 0:
-                signals[i] = 0.0
-                position = 0
+            # Short conditions:
+            # 1. Fade at R3: price > R3 and volume spike (mean reversion)
+            # 2. Breakdown at S4: price < S4 and volume spike (continuation)
+            if vol_filter:
+                if price > r3:
+                    signals[i] = -size
+                    position = -1
+                elif price < s4:
+                    signals[i] = -size
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = -size
-    
+                signals[i] = 0.0
+                
     return signals
 
-name = "4h_Momentum_1h_Volume_Entry"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R3S3_R4S4_Volume"
+timeframe = "6h"
 leverage = 1.0
