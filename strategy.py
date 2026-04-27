@@ -88,9 +88,13 @@ def generate_signals(prices):
         # Calculate Camarilla pivot levels from daily data
         # Camarilla: H4 = C + ((H-L)*1.1/2), L4 = C - ((H-L)*1.1/2)
         # But we use simpler R3/S3 and R4/S4 as in the strategy
-        high_1d_i = high_1d[i // 96]  # Approximate daily index (96 15m bars per day)
-        low_1d_i = low_1d[i // 96]
-        close_1d_i = close_1d[i // 96]
+        daily_idx = i // 4  # 6h bars per day = 4
+        if daily_idx >= len(df_1d):
+            signals[i] = 0.0
+            continue
+        high_1d_i = high_1d[daily_idx]
+        low_1d_i = low_1d[daily_idx]
+        close_1d_i = close_1d[daily_idx]
         
         # Calculate Camarilla levels
         range_1d = high_1d_i - low_1d_i
