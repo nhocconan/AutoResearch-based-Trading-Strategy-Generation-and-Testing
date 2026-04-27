@@ -1,9 +1,3 @@
-# The strategy uses 6h timeframe with 12h trend filter (EMA34), 12h Camarilla pivot levels, and volume confirmation
-# Entry logic: Price breaks above/below S3/R3 with trend alignment and volume > 1.5x average
-# Exit: Opposite Camarilla level break (S1/R1) or trend reversal
-# Designed for moderate trade frequency (12-37/year) with clear risk control
-# Works in bull/bear via trend filter and mean-reversion at extreme pivot levels
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,45 +13,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for higher timeframe context
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data for higher timeframe context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h_series = pd.Series(close_12h)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h EMA 34 for trend direction
-    ema_34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 1d EMA 34 for trend direction
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Camarilla pivot levels
-    # Camarilla formulas: 
-    # R4 = close + ((high - low) * 1.1/2)
-    # R3 = close + ((high - low) * 1.1/4)
-    # R2 = close + ((high - low) * 1.1/6)
-    # R1 = close + ((high - low) * 1.1/12)
-    # S1 = close - ((high - low) * 1.1/12)
-    # S2 = close - ((high - low) * 1.1/6)
-    # S3 = close - ((high - low) * 1.1/4)
-    # S4 = close - ((high - low) * 1.1/2)
-    diff_12h = (high_12h - low_12h)
-    r3_12h = close_12h + (diff_12h * 1.1 / 4)
-    s3_12h = close_12h - (diff_12h * 1.1 / 4)
-    r1_12h = close_12h + (diff_12h * 1.1 / 12)
-    s1_12h = close_12h - (diff_12h * 1.1 / 12)
+    # 4h Donchian channels (20-period for robustness)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 6h timeframe
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Volume filter: volume > 1.2x 30-period average (moderate filter)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (vol_ma * 1.2)
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Choppiness regime filter (14-period)
+    atr = pd.Series(np.maximum(high - low, 
+                               np.maximum(np.abs(high - np.roll(close, 1)), 
+                                          np.abs(low - np.roll(close, 1))))).rolling(14, min_periods=14).mean().values
+    sum_true_range = pd.Series(atr).rolling(14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(high).rolling(14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_true_range / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop_filter = chop > 50  # Range regime (mean reversion friendly)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,38 +53,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or
-            np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(chop_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA34
-        price_above_ema = close[i] > ema_34_12h_aligned[i]
-        price_below_ema = close[i] < ema_34_12h_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Volume condition
-        vol_ok = volume_filter[i]
+        # Long conditions: price breaks above upper Donchian + above 1d EMA + volume + chop filter
+        long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_filter[i] and chop_filter[i])
+        # Short conditions: price breaks below lower Donchian + below 1d EMA + volume + chop filter
+        short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_filter[i] and chop_filter[i])
         
-        # Long conditions: price breaks above S3 with uptrend and volume
-        long_signal = (close[i] > s3_12h_aligned[i-1] and price_above_ema and vol_ok)
-        # Short conditions: price breaks below R3 with downtrend and volume
-        short_signal = (close[i] < r3_12h_aligned[i-1] and price_below_ema and vol_ok)
-        
-        if long_signal:
+        if long_breakout:
             signals[i] = 0.25
             position = 1
-        elif short_signal:
+        elif short_breakout:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: 
-        # 1. Opposite Camarilla level break (S1 for longs, R1 for shorts)
-        # 2. Trend reversal
-        elif position == 1 and (close[i] < s1_12h_aligned[i-1] or not price_above_ema):
+        # Exit conditions: opposite Donchian breakout
+        elif position == 1 and close[i] < lowest_low[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] > r1_12h_aligned[i-1] or not price_below_ema):
+        elif position == -1 and close[i] > highest_high[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -112,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_S3R3_Breakout_12hEMA34_VolumeFilter"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA34_Volume_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
