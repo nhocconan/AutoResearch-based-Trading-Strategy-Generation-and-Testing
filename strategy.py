@@ -39,12 +39,12 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 6h Donchian channels (12-period - faster for 6h)
-    highest_high = pd.Series(high).rolling(window=12, min_periods=12).max().values
-    lowest_low = pd.Series(low).rolling(window=12, min_periods=12).min().values
+    # 12-hour Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.3x 12-period average
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume filter: volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
@@ -65,9 +65,9 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_50_1d_aligned[i]
         price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Volatility filter: current 6h ATR > 1.1x 1d ATR (avoid low volatility periods)
-        atr_6h = np.abs(high[i] - low[i])
-        vol_filter = atr_6h > (atr_1d_aligned[i] * 1.1)
+        # Volatility filter: current 12h ATR > 1.1x 1d ATR (avoid low volatility periods)
+        atr_12h = np.abs(high[i] - low[i])
+        vol_filter = atr_12h > (atr_1d_aligned[i] * 1.1)
         
         # Long conditions: price breaks above upper Donchian + above 1d EMA + volume + volatility
         long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_filter[i] and vol_filter)
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian12_Breakout_1dEMA50_VolVolFilter"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA50_VolVolFilter"
+timeframe = "12h"
 leverage = 1.0
