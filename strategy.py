@@ -1,9 +1,11 @@
-# 6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Camarilla pivot levels from daily data provide strong support/resistance.
-# At 6h timeframe, price breaking above R3 or below S3 with volume confirmation and daily trend alignment
-# indicates momentum continuation. This captures breakout moves while avoiding false breakouts in ranging markets.
-# Works in both bull and bear markets by following daily trend direction.
-# Target: 15-35 trades/year per symbol to minimize fee drag.
+#!/usr/bin/env python3
+"""
+12h CAMARILLA PIVOT BREAKOUT + DAILY VOLUME SPIKE + WEEKLY CHOPPINESS FILTER
+Hypothesis: Price breaking above/below CAMARILLA R3/S3 levels on 12h with daily volume
+spike and weekly choppy market (range) conditions produces high-probability mean-reversion
+entries. Uses weekly chop to avoid trending markets where breakouts fail. Works in bull
+and bear markets by adapting to range conditions via chop filter. Target: 15-30 trades/year.
+"""
 
 import numpy as np
 import pandas as pd
@@ -19,99 +21,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
+    # Get daily data for CAMARILLA pivot and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using standard Camarilla formulas based on previous day's OHLC
+    # Get weekly data for chop filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Calculate DAILY CAMARILLA pivot levels (R3, S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Range
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
+    R3_1d = pivot_1d + range_1d * 1.1
+    S3_1d = pivot_1d - range_1d * 1.1
     
-    # Camarilla levels
-    r3 = close_1d + (range_1d * 1.1000 / 4)  # ~1.1/4 = 0.275
-    s3 = close_1d - (range_1d * 1.1000 / 4)
-    r4 = close_1d + (range_1d * 1.1000 / 2)  # ~1.1/2 = 0.55
-    s4 = close_1d - (range_1d * 1.1000 / 2)
-    
-    # Align Camarilla levels to 6h timeframe (use previous day's levels)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Daily volume spike detector (volume > 2x 20-day average)
+    # Calculate DAILY volume spike filter (volume > 2x 20-day average)
     vol_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    vol_spike = vol_1d > (2.0 * vol_ma_20_1d)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    vol_spike_1d = vol_1d > (2.0 * vol_ma_20_1d)
+    
+    # Calculate WEEKLY chop filter (Choppiness Index > 61.8 = ranging)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Sum of TRUE RANGE over 14 periods
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log(sum_tr_14 / (hh_14 - ll_14)) / log(14)
+    range_14 = hh_14 - ll_14
+    chop = 100 * np.log(sum_tr_14 / range_14) / np.log(14)
+    chop = np.where(range_14 == 0, 100, chop)  # avoid div by zero
+    
+    # Choppiness > 61.8 indicates ranging market
+    chop_filter = chop > 61.8
+    
+    # Align HTF arrays to 12h timeframe
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    chop_filter_aligned = align_htf_to_ltf(prices, df_1w, chop_filter.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.25   # 25% position
     
-    # Warmup: need Camarilla levels, trend, and volume spike
-    start_idx = max(34, 20)
+    # Warmup: need daily pivot (5), volume MA (20), weekly chop (14)
+    start_idx = max(5, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_filter_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 6h price and volume
         price_now = close[i]
-        vol_now = volume[i]
-        
-        # Current levels
-        r3_now = r3_6h[i]
-        s3_now = s3_6h[i]
-        r4_now = r4_6h[i]
-        s4_now = s4_6h[i]
-        trend_now = ema_34_1d_aligned[i]
-        vol_spike_now = vol_spike_aligned[i] > 0.5  # Boolean from aligned spike
+        vol_spike = bool(vol_spike_1d_aligned[i])
+        chop_filter_val = bool(chop_filter_aligned[i])
+        R3 = R3_1d_aligned[i]
+        S3 = S3_1d_aligned[i]
         
         # Breakout conditions
-        breakout_up = price_now > r3_now
-        breakout_down = price_now < s3_now
+        breakout_up = price_now > R3
+        breakout_down = price_now < S3
         
-        # Entry conditions
+        # Entry conditions: breakout + volume spike + choppy (ranging) market
         if position == 0:
-            # Long: break above R3 with volume spike and daily uptrend
-            if breakout_up and vol_spike_now and price_now > trend_now:
-                signals[i] = size
-                position = 1
-            # Short: break below S3 with volume spike and daily downtrend
-            elif breakout_down and vol_spike_now and price_now < trend_now:
+            if breakout_up and vol_spike and chop_filter_val:
+                # In ranging market, selling the breakout (fade)
                 signals[i] = -size
                 position = -1
+            elif breakout_down and vol_spike and chop_filter_val:
+                # In ranging market, buying the breakout (fade)
+                signals[i] = size
+                position = 1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S3 or reverses below R3
-            if price_now < s3_now or price_now < r3_now:
+            # Exit long: price returns to pivot or volatility expands
+            if price_now < pivot_1d[-1] or not chop_filter_val:  # pivot from last available day
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R3 or reverses above S3
-            if price_now > r3_now or price_now > s3_now:
+            # Exit short: price returns to pivot or volatility expands
+            if price_now > pivot_1d[-1] or not chop_filter_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_1wChop"
+timeframe = "12h"
 leverage = 1.0
