@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3_1d = close_1d_arr + (high_1d - low_1d) * 1.1 / 4.0
     s3_1d = close_1d_arr - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align to 6h timeframe (previous day's levels available at open)
+    # Align to 12h timeframe (previous day's levels available at open)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
