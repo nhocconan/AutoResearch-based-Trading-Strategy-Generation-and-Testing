@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyATRBreakout_1wTrend_Filter
-Hypothesis: Daily breakout of weekly ATR-based channel with weekly trend filter.
-In bull markets: buy when price exceeds weekly ATR upper band (close + 2*ATR).
-In bear markets: sell when price breaks below weekly ATR lower band (close - 2*ATR).
-Weekly trend filter (price vs weekly EMA20) prevents counter-trend entries.
-Target: 15-30 trades per year to minimize fee drag while capturing major moves.
-Works in both bull and bear by following weekly trend direction.
+6h_Keltner_RSI_Reversal_1dTrend_Volume
+Hypothesis: On 6h timeframe, price reversals from Keltner Channel extremes (2*ATR) 
+combined with RSI overbought/oversold conditions, filtered by 1d EMA50 trend 
+and volume > 1.5x average, provide edge in both bull and bear markets.
+Keltner Channels adapt to volatility, making them effective across regimes.
+RSI extremes signal exhaustion. Volume confirms institutional interest.
+Target: 60-120 total trades over 4 years (~15-30/year) to balance opportunity and cost.
 """
 
 import numpy as np
@@ -21,92 +21,107 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for ATR and EMA calculations
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly ATR(14)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
-    
-    tr_weekly = np.maximum(high_weekly - low_weekly,
-                          np.maximum(np.abs(high_weekly - np.roll(close_weekly, 1)),
-                                   np.abs(low_weekly - np.roll(close_weekly, 1))))
-    tr_weekly[0] = high_weekly[0] - low_weekly[0]
-    
-    atr_weekly = np.full(len(close_weekly), np.nan)
-    atr_period = 14
-    for i in range(atr_period, len(close_weekly)):
-        atr_weekly[i] = np.mean(tr_weekly[i-atr_period+1:i+1])
-    
-    # Calculate weekly EMA20 for trend filter
-    ema_period = 20
-    ema_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= ema_period:
-        ema_weekly[ema_period-1] = np.mean(close_weekly[:ema_period])
+    # Calculate EMA(50) on 1d close
+    close_1d = df_1d['close'].values
+    ema_period = 50
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
         multiplier = 2 / (ema_period + 1)
-        for i in range(ema_period, len(close_weekly)):
-            ema_weekly[i] = (close_weekly[i] * multiplier) + (ema_weekly[i-1] * (1 - multiplier))
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Calculate weekly ATR-based channels
-    upper_band = close_weekly + 2.0 * atr_weekly
-    lower_band = close_weekly - 2.0 * atr_weekly
+    # Align 1d EMA to 6h timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Align weekly indicators to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_weekly, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_weekly, lower_band)
-    ema_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # ATR for Keltner Channels (2*ATR from EMA20)
+    atr_period = 20
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = np.full(n, np.nan)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
+    
+    # EMA(20) for Keltner middle line
+    ema20_period = 20
+    ema20 = np.full(n, np.nan)
+    if n >= ema20_period:
+        ema20[ema20_period-1] = np.mean(close[:ema20_period])
+        multiplier = 2 / (ema20_period + 1)
+        for i in range(ema20_period, n):
+            ema20[i] = (close[i] * multiplier) + (ema20[i-1] * (1 - multiplier))
+    
+    # Keltner Channels: upper = EMA20 + 2*ATR, lower = EMA20 - 2*ATR
+    keltner_upper = ema20 + 2 * atr
+    keltner_lower = ema20 - 2 * atr
+    
+    # RSI(14) for overbought/oversold
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(rsi_period, n):
+        avg_gain[i] = np.mean(gain[i-rsi_period+1:i+1])
+        avg_loss[i] = np.mean(loss[i-rsi_period+1:i+1])
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation
+    vol_ma_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period:i])
     
     signals = np.zeros(n)
-    position = 0
     
-    # Start after warmup period
-    start_idx = max(atr_period, ema_period)
+    # Warmup: need all indicators
+    start_idx = max(atr_period, ema20_period, rsi_period, vol_ma_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_aligned[i])):
+        if (np.isnan(ema_aligned[i]) or
+            np.isnan(keltner_upper[i]) or
+            np.isnan(keltner_lower[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Weekly trend filter
+        # Trend filter: price above/below 1d EMA50
         uptrend = price > ema_aligned[i]
         downtrend = price < ema_aligned[i]
         
-        if position == 0:
-            # Enter long when price breaks above weekly upper band in uptrend
-            if uptrend and price > upper_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Enter short when price breaks below weekly lower band in downtrend
-            elif downtrend and price < lower_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+        # Volume confirmation: > 1.5x average volume
+        volume_confirmation = vol_ratio > 1.5
+        
+        if uptrend and volume_confirmation:
+            # In uptrend, look for pullbacks to lower Keltner with RSI oversold
+            if price <= keltner_lower[i] and rsi[i] < 30:
+                signals[i] = 0.25  # Long 25%
             else:
                 signals[i] = 0.0
-        elif position == 1:
-            # Exit long when price crosses below weekly EMA (trend change)
-            if not uptrend:
-                signals[i] = 0.0
-                position = 0
+        elif downtrend and volume_confirmation:
+            # In downtrend, look for bounces to upper Keltner with RSI overbought
+            if price >= keltner_upper[i] and rsi[i] > 70:
+                signals[i] = -0.25  # Short 25%
             else:
-                signals[i] = 0.25  # Maintain position
-        elif position == -1:
-            # Exit short when price crosses above weekly EMA (trend change)
-            if not downtrend:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25  # Maintain position
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyATRBreakout_1wTrend_Filter"
-timeframe = "1d"
+name = "6h_Keltner_RSI_Reversal_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
