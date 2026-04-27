@@ -1,24 +1,7 @@
-# Hyp: 12h Williams Alligator + volume + RSI filter
-# Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs
-# Long when Lips > Teeth > Jaw + RSI < 50 + volume > 1.5x avg
-# Short when Lips < Teeth < Jaw + RSI > 50 + volume > 1.5x avg
-# Exit on Alligator crossover reverse or RSI extreme
-# Works in trends (trending markets) and avoids whipsaws with volume filter
-# Target: 50-150 trades over 4 years
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def sma(arr, period):
-    """Simple moving average with NaN for insufficient data"""
-    if period < 1:
-        return np.full_like(arr, np.nan)
-    result = np.full(len(arr), np.nan)
-    for i in range(period - 1, len(arr)):
-        result[i] = np.mean(arr[i - period + 1:i + 1])
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,61 +13,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator and RSI
+    # Get 1d data for ATR and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Typical price for Alligator
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate 14-period ATR
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                               np.abs(low_1d[1:] - close_1d[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr_1d = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        atr_1d[i] = np.mean(tr[i-14:i])
     
-    # Williams Alligator lines
-    jaw_1d = sma(typical_price_1d, 13)  # 13-period, shifted 8 bars
-    teeth_1d = sma(typical_price_1d, 8)   # 8-period, shifted 5 bars
-    lips_1d = sma(typical_price_1d, 5)    # 5-period, shifted 3 bars
-    
-    # Apply shifts (Alligator specific)
-    jaw_1d = np.roll(jaw_1d, 8)
-    teeth_1d = np.roll(teeth_1d, 5)
-    lips_1d = np.roll(lips_1d, 3)
-    # Set shifted values to NaN
-    jaw_1d[:8] = np.nan
-    teeth_1d[:5] = np.nan
-    lips_1d[:3] = np.nan
-    
-    # RSI calculation
+    # Calculate 14-period RSI
     delta = np.diff(close_1d)
     delta = np.concatenate([[np.nan], delta])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing (alpha = 1/14)
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    for i in range(len(gain)):
-        if i < 14:
-            continue
-        elif i == 14:
+    avg_gain = np.full(len(gain), np.nan)
+    avg_loss = np.full(len(loss), np.nan)
+    for i in range(14, len(gain)):
+        if i == 14:
             avg_gain[i] = np.mean(gain[1:15])
             avg_loss[i] = np.mean(loss[1:15])
         else:
             avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
             avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
     rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align all indicators to 12h timeframe
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h EMA50
+    ema_period = 50
+    ema_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= ema_period:
+        ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
+        for i in range(ema_period, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * (2 / (ema_period + 1)) + 
+                        ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
+    
+    # Align indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Volume filter: current volume > 2.0x 20-period average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
@@ -94,50 +79,47 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need all indicators ready
-    start_idx = max(13+8, 8+5, 5+3, 14, vol_period) + 5
+    # Warmup: need ATR, RSI, EMA, and volume MA
+    start_idx = max(14, 50, vol_period) + 20  # extra buffer for ATR calculation
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
-            np.isnan(lips_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        jaw = jaw_1d_aligned[i]
-        teeth = teeth_1d_aligned[i]
-        lips = lips_1d_aligned[i]
-        rsi = rsi_1d_aligned[i]
+        price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        atr = atr_1d_aligned[i]
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) + RSI < 50 + volume confirmation
-            if (lips > teeth > jaw and 
-                rsi < 50 and 
-                vol_ratio > 1.5):
+            # Long: RSI < 30 (oversold) + volume spike + price > 4h EMA50
+            if (rsi_1d_aligned[i] < 30 and 
+                vol_ratio > 2.0 and 
+                price > ema_4h_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: Lips < Teeth < Jaw (bearish alignment) + RSI > 50 + volume confirmation
-            elif (lips < teeth < jaw and 
-                  rsi > 50 and 
-                  vol_ratio > 1.5):
+            # Short: RSI > 70 (overbought) + volume spike + price < 4h EMA50
+            elif (rsi_1d_aligned[i] > 70 and 
+                  vol_ratio > 2.0 and 
+                  price < ema_4h_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Alligator bearish cross OR RSI > 70 (overbought)
-            if (lips < teeth or 
-                rsi > 70):
+            # Long exit: RSI > 50 (mean reversion) OR ATR-based stop
+            if (rsi_1d_aligned[i] > 50 or 
+                price < close[i-1] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Alligator bullish cross OR RSI < 30 (oversold)
-            if (lips > teeth or 
-                rsi < 30):
+            # Short exit: RSI < 50 (mean reversion) OR ATR-based stop
+            if (rsi_1d_aligned[i] < 50 or 
+                price > close[i-1] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -145,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_Volume_RSI"
-timeframe = "12h"
+name = "4h_RSI_MeanReversion_VolumeSpike_EMA50"
+timeframe = "4h"
 leverage = 1.0
