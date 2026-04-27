@@ -18,17 +18,16 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day close prices
+    # Calculate 1-day CLOSE (for Donchian channel)
     close_1d = df_1d['close'].values
     
-    # Calculate 1-day Donchian channel (20-period) - vectorized
+    # Calculate 1-day Donchian channel (20-period)
     upper = np.full(len(close_1d), np.nan)
     lower = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 20:
-        # Use pandas rolling for vectorized calculation
-        close_series = pd.Series(close_1d)
-        upper = close_series.rolling(window=20, min_periods=20).max().values
-        lower = close_series.rolling(window=20, min_periods=20).min().values
+        for i in range(20-1, len(close_1d)):
+            upper[i] = np.max(close_1d[i-20+1:i+1])
+            lower[i] = np.min(close_1d[i-20+1:i+1])
     
     # Calculate 1-day ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
@@ -43,7 +42,6 @@ def generate_signals(prices):
     
     atr_14_1d = np.full(len(tr), np.nan)
     if len(tr) >= 14:
-        # Wilder's smoothing
         atr_14_1d[13] = np.mean(tr[1:15])
         for i in range(14, len(tr)):
             atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
