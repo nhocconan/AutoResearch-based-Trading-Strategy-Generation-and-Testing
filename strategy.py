@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using weekly pivot points (R3/S3 levels) with volume confirmation and weekly EMA(34) trend filter.
+# Hypothesis: 1d strategy using weekly pivot points (R3/S3 levels) with volume confirmation and weekly EMA(34) trend filter.
 # Enters long when price breaks above S3 with volume, short when breaks below R3 with volume.
-# Designed for ~25-40 trades/year by requiring significant breakouts (R3/S3) rather than minor S1/R1 levels.
+# Designed for ~15-30 trades/year by requiring significant breakouts (weekly R3/S3) rather than minor levels.
 # Works in bull/bear: buys support breaks, sells resistance breaks.
 # Uses strict volume filter (volume > 2x 30-period average) to avoid false breakouts.
 # Exit when price returns to pivot or trend changes.
+# This strategy targets the 1d timeframe with 1h trend filter to reduce whipsaw and improve win rate.
 
 def generate_signals(prices):
     n = len(prices)
@@ -45,7 +46,7 @@ def generate_signals(prices):
     r3 = high_prev + 2 * (pivot - low_prev)
     s3 = low_prev - 2 * (high_prev - pivot)
     
-    # Align weekly pivots to 4h
+    # Align weekly pivots to 1d
     pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
@@ -54,7 +55,7 @@ def generate_signals(prices):
     ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume filter: volume > 2.0 x 30-period average (4h) for significance
+    # Volume filter: volume > 2.0 x 30-period average (1d) for significance
     vol_ma_30 = np.full(n, np.nan)
     for i in range(29, n):
         vol_ma_30[i] = np.mean(volume[i-29:i+1])
@@ -112,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyPivot_S3R3_Volume_Trend"
-timeframe = "4h"
+name = "1d_WeeklyPivot_S3R3_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
