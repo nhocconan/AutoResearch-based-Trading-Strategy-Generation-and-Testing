@@ -1,54 +1,21 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily RSI(14) with 200-day SMA trend filter and weekly volatility filter.
-Enters long when RSI crosses above 30 from below with price above 200-day SMA and weekly ATR contraction.
-Enters short when RSI crosses below 70 from above with price below 200-day SMA and weekly ATR contraction.
-Uses weekly ATR contraction (current ATR < 0.8 * ATR 4 weeks ago) to identify low volatility periods for mean reversion.
-Targets 10-25 trades/year per symbol (40-100 total over 4 years) to minimize fee drag.
-Works in both bull and bear markets by combining mean reversion with trend filter.
+Hypothesis: 6-hour Elder Ray Index with 12-hour trend filter and volume confirmation.
+Elder Ray uses Bull Power (High - EMA) and Bear Power (Low - EMA) to measure bull/bear strength.
+Long when Bull Power > 0 and rising + Bear Power < 0 + price above 12h EMA + volume > 1.5x average.
+Short when Bear Power < 0 and falling + Bull Power < 0 + price below 12h EMA + volume > 1.5x average.
+Uses 12h EMA for trend to avoid counter-trend trades. Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def rsi(close, period=14):
-    """Relative Strength Index"""
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    # First average
-    if len(close) >= period:
-        avg_gain[period-1] = np.mean(gain[:period])
-        avg_loss[period-1] = np.mean(loss[:period])
-        
-        # Subsequent values
-        for i in range(period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_val = 100 - (100 / (1 + rs))
-    return rsi_val
-
-def atr(high, low, close, period=14):
-    """Average True Range"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    
-    atr_val = np.zeros_like(close)
-    if len(close) >= period:
-        atr_val[period-1] = np.mean(tr[:period])
-        for i in range(period, len(close)):
-            atr_val[i] = (atr_val[i-1] * (period-1) + tr[i]) / period
-    return atr_val
+def ema(data, period):
+    """Exponential Moving Average"""
+    if len(data) < period:
+        return np.full_like(data, np.nan, dtype=float)
+    return pd.Series(data).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -58,99 +25,87 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for RSI and SMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for EMA and trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Get weekly data for ATR volatility filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Calculate 6h EMA(13) for Elder Ray
+    ema_13 = ema(close, 13)
     
-    # Calculate daily RSI(14)
-    rsi_val = rsi(close, 14)
+    # Bull Power = High - EMA
+    bull_power = high - ema_13
     
-    # Calculate daily SMA(200) for trend filter
-    sma_200 = np.full_like(close, np.nan)
-    if len(close) >= 200:
-        sma_200[199] = np.mean(close[:200])
-        for i in range(200, len(close)):
-            sma_200[i] = np.mean(close[i-199:i+1])
+    # Bear Power = Low - EMA
+    bear_power = low - ema_13
     
-    # Calculate weekly ATR(14) for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    atr_1w = atr(high_1w, low_1w, close_1w, 14)
+    # Align Elder Ray components to 6h timeframe
+    ema_13_aligned = align_htf_to_ltf(prices, df_12h, ema_13)
+    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
     
-    # Align indicators to daily timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_val)
-    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Calculate 12h EMA(21) for trend filter
+    close_12h = df_12h['close'].values
+    ema_21_12h = ema(close_12h, 21)
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    
+    # Calculate 6h volume MA(20)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need RSI, SMA, and ATR
-    start_idx = max(14, 200, 14)
+    # Warmup: need EMA(13), Bull/Bear Power, EMA(21)
+    start_idx = max(13, 21, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi_aligned[i]) or np.isnan(sma_200_aligned[i]) or 
-            np.isnan(atr_1w_aligned[i])):
+        if (np.isnan(ema_13_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(ema_21_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current values
-        rsi_now = rsi_aligned[i]
-        rsi_prev = rsi_aligned[i-1]
-        sma_200_now = sma_200_aligned[i]
-        atr_now = atr_1w_aligned[i]
         price_now = close[i]
+        vol_now = volume[i]
+        vol_ma = vol_ma_20[i]
+        ema_13_now = ema_13_aligned[i]
+        bull_power_now = bull_power_aligned[i]
+        bear_power_now = bear_power_aligned[i]
+        trend_12h = ema_21_12h_aligned[i]
         
-        # Weekly ATR contraction: current ATR < 0.8 * ATR 4 weeks ago
-        # Need to look back 4 weeks in weekly data
-        atr_contraction = False
-        if i >= 28:  # Need at least 4 weeks of data (approximate)
-            # Get ATR from approximately 4 weeks ago (28 days)
-            idx_4w_ago = i - 28
-            if idx_4w_ago >= 0 and not np.isnan(atr_1w_aligned[idx_4w_ago]):
-                atr_4w_ago = atr_1w_aligned[idx_4w_ago]
-                atr_contraction = atr_now < 0.8 * atr_4w_ago
+        # Volume filter: volume > 1.5x average
+        vol_filter = vol_now > 1.5 * vol_ma
         
-        # RSI crossing conditions
-        rsi_cross_above_30 = rsi_prev <= 30 and rsi_now > 30
-        rsi_cross_below_70 = rsi_prev >= 70 and rsi_now < 70
-        
-        # Trend filter
-        above_sma200 = price_now > sma_200_now
-        below_sma200 = price_now < sma_200_now
+        # Elder Ray signals
+        bull_rising = bull_power_now > bull_power_aligned[i-1] if i > 0 else False
+        bear_falling = bear_power_now < bear_power_aligned[i-1] if i > 0 else False
         
         # Entry conditions
         if position == 0:
-            # Long: RSI crosses above 30 + price above SMA200 + ATR contraction
-            if rsi_cross_above_30 and above_sma200 and atr_contraction:
+            # Long: Bull Power > 0 and rising + Bear Power < 0 + above trend + volume
+            if bull_power_now > 0 and bull_rising and bear_power_now < 0 and price_now > trend_12h and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: RSI crosses below 70 + price below SMA200 + ATR contraction
-            elif rsi_cross_below_70 and below_sma200 and atr_contraction:
+            # Short: Bear Power < 0 and falling + Bull Power < 0 + below trend + volume
+            elif bear_power_now < 0 and bear_falling and bull_power_now < 0 and price_now < trend_12h and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI crosses below 50 or price closes below SMA200
-            if rsi_now < 50 or price_now < sma_200_now:
+            # Exit long: Bull Power <= 0 or trend turns down
+            if bull_power_now <= 0 or price_now < trend_12h:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI crosses above 50 or price closes above SMA200
-            if rsi_now > 50 or price_now > sma_200_now:
+            # Exit short: Bear Power >= 0 or trend turns up
+            if bear_power_now >= 0 or price_now > trend_12h:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -158,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "daily_RSI14_SMA200_ATRcontraction"
-timeframe = "1d"
+name = "6h_ElderRay_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
