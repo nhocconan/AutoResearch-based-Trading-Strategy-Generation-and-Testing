@@ -5,12 +5,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     """
-    4h KAMA with RSI and Chop regime.
-    Hypothesis: KAMA adapts to market regime (trend vs range), RSI filters extreme readings,
-    Chop filter distinguishes trending from ranging markets. Works in both bull/bear by adapting.
-    Long when: KAMA rising + RSI in neutral zone (40-60) + Chop > 61.8 (range) or Chop < 38.2 (trend)
-    Short when: KAMA falling + RSI in neutral zone (40-60) + Chop > 61.8 (range) or Chop < 38.2 (trend)
-    Exit: Opposite KAMA direction or Chop extreme reversal.
+    6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+    Novelty: Uses weekly Pivot Points (calculated from weekly OHLC) for trend bias.
+    Long when: Close > Donchian Upper(20) + volume spike + price > weekly pivot
+    Short when: Close < Donchian Lower(20) + volume spike + price < weekly pivot
     """
     n = len(prices)
     if n < 50:
@@ -21,157 +19,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Chop calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Pivot Point calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate KAMA on 4h close
-    def kama(close, er_period=10, fast_ema=2, slow_ema=30):
-        n = len(close)
-        kama_arr = np.full(n, np.nan)
-        if n < er_period:
-            return kama_arr
-        
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=er_period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0) if n >= er_period else np.full(n-1, np.nan)
-        # For each point, calculate ER
-        er = np.full(n, np.nan)
-        for i in range(er_period, n):
-            if volatility[i-er_period:i] > 0:
-                er[i] = change[i-er_period] / np.sum(np.abs(np.diff(close[i-er_period:i])))
-            else:
-                er[i] = 0
-        
-        # Smoothing constants
-        sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-        
-        # Initialize KAMA
-        kama_arr[er_period] = close[er_period]
-        for i in range(er_period+1, n):
-            if not np.isnan(sc[i]):
-                kama_arr[i] = kama_arr[i-1] + sc[i] * (close[i] - kama_arr[i-1])
-            else:
-                kama_arr[i] = kama_arr[i-1]
-        return kama_arr
+    # Calculate weekly Pivot Point: PP = (High + Low + Close) / 3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
     
-    kama_val = kama(close, 10, 2, 30)
+    # Align weekly Pivot to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # Calculate RSI(14)
-    def rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(close, np.nan)
-        avg_loss = np.full_like(close, np.nan)
-        
-        # Initial average
-        if len(close) > period:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-            
-            for i in range(period+1, len(close)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_val = 100 - (100 / (1 + rs))
-        return rsi_val
+    # Calculate Donchian channels (20-period) on 6h data
+    donchian_upper = np.full(n, np.nan)
+    donchian_lower = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_upper[i] = np.max(high[i-20:i])
+        donchian_lower[i] = np.min(low[i-20:i])
     
-    rsi_val = rsi(close, 14)
-    
-    # Calculate Chop on daily data
-    def chop(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # Sum of TR over period
-        tr_sum = np.full(len(close), np.nan)
-        for i in range(period, len(close)):
-            tr_sum[i] = np.sum(tr[i-period+1:i+1])
-        
-        # Highest high and lowest low over period
-        hh = np.full(len(close), np.nan)
-        ll = np.full(len(close), np.nan)
-        for i in range(period-1, len(close)):
-            hh[i] = np.max(high[i-period+1:i+1])
-            ll[i] = np.min(low[i-period+1:i+1])
-        
-        # Chop calculation
-        chop_val = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(period)
-        return chop_val
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    chop_val = chop(high_1d, low_1d, close_1d, 14)
-    
-    # Align daily Chop to 4h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_val)
-    
-    # Calculate ATR for stop
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Calculate 20-period volume average
+    vol_ma = np.full(n, np.nan)
+    vol_period = 20
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
-    # Warmup
-    start_idx = max(30, 14, 14) + 5
+    # Warmup period
+    start_idx = max(20, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_val[i]) or np.isnan(rsi_val[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA direction
-        kama_rising = kama_val[i] > kama_val[i-1]
-        kama_falling = kama_val[i] < kama_val[i-1]
+        price = close[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # RSI in neutral zone (avoid extremes)
-        rsi_neutral = (rsi_val[i] >= 40) & (rsi_val[i] <= 60)
-        
-        # Chop regime: >61.8 = range, <38.2 = trend
-        chop_range = chop_aligned[i] > 61.8
-        chop_trend = chop_aligned[i] < 38.2
+        # Volume spike filter: at least 1.5x average volume
+        vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: KAMA rising + RSI neutral + (range OR trend)
-            if kama_rising and rsi_neutral and (chop_range or chop_trend):
+            # Long: Price breaks above Donchian Upper with volume and above weekly pivot
+            if price > donchian_upper[i] and vol_filter and price > pivot_1w_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: KAMA falling + RSI neutral + (range OR trend)
-            elif kama_falling and rsi_neutral and (chop_range or chop_trend):
+            # Short: Price breaks below Donchian Lower with volume and below weekly pivot
+            elif price < donchian_lower[i] and vol_filter and price < pivot_1w_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: KAMA falling OR Chop extreme reversal
-            if kama_falling or (chop_aligned[i] > 61.8 and chop_aligned[i-1] <= 61.8):
+            # Long exit: Price closes below Donchian Lower or below weekly pivot
+            if price < donchian_lower[i] or price < pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: KAMA rising OR Chop extreme reversal
-            if kama_rising or (chop_aligned[i] < 38.2 and chop_aligned[i-1] >= 38.2):
+            # Short exit: Price closes above Donchian Upper or above weekly pivot
+            if price > donchian_upper[i] or price > pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -179,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_RSI_Chop_Regime"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
