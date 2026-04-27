@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,23 +13,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (EMA34)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 35:
+    # Get 1d data for trend filter (EMA34) and volatility
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate EMA34 on 12h close
-    close_12h = df_12h['close'].values
-    ema_34 = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 34:
-        ema_34[33] = np.mean(close_12h[:34])
-        for i in range(34, len(close_12h)):
-            ema_34[i] = (close_12h[i] * 2 + ema_34[i-1] * 33) / 35
+    # Calculate EMA34 on 1d close
+    close_1d = df_1d['close'].values
+    ema_34 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34[i] = (close_1d[i] * 2 + ema_34[i-1] * 33) / 35
     
-    # Align EMA34 to 6h
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
+    # Align EMA34 to 4h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 14-period ATR
+    # Calculate ATR(14) for volatility filter
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
@@ -72,11 +72,11 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume AND above 12h EMA34
+            # Long: Price breaks above Donchian high with volume AND above 1d EMA34
             if price > high_max[i] and vol_ratio > 2.0 and price > ema_34_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume AND below 12h EMA34
+            # Short: Price breaks below Donchian low with volume AND below 1d EMA34
             elif price < low_min[i] and vol_ratio > 2.0 and price < ema_34_aligned[i]:
                 signals[i] = -size
                 position = -1
@@ -99,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_12hEMA34_Volume_Trend"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
