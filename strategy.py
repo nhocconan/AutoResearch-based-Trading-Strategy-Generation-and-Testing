@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Daily Camarilla R1/S1 breakout with 1-week EMA34 trend filter and volume confirmation.
-Breakouts above/below Camarilla R1/S1 levels capture strong intraday momentum moves.
-Trend filter ensures we only trade in direction of weekly trend to avoid counter-trend whipsaws.
-Volume spike confirms breakout authenticity. Designed for 1d timeframe with target 30-100 trades over 4 years.
-Uses discrete position sizing (0.25) to balance return and drawdown. Works in both bull and bear markets
-by aligning with longer-term weekly trend, reducing whipsaws during sideways periods.
+6h_Donchian20_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Donchian(20) breakout on 6h with 1d EMA50 trend filter and volume confirmation.
+Breakouts above/below 20-period high/low capture strong momentum moves. Trend filter ensures we
+only trade in direction of daily trend to avoid counter-trend whipsaws. Volume spike confirms
+breakout authenticity. Designed for 6h timeframe with target 50-150 trades over 4 years.
+Uses discrete position sizing (0.25) to balance return and drawdown. Works in both bull and
+bear markets by aligning with intermediate-term daily trend.
 """
 
 import numpy as np
@@ -23,25 +23,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for daily timeframe using previous day's OHLC
-    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    # We need to shift by 1 to avoid look-ahead (use previous day's range)
-    prev_high = np.concatenate([[high[0]], high[:-1]])
-    prev_low = np.concatenate([[low[0]], low[:-1]])
-    prev_close = np.concatenate([[close[0]], close[:-1]])
+    # Calculate Donchian Channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    rang = prev_high - prev_low
-    camarilla_r1 = prev_close + rang * 1.1 / 12
-    camarilla_s1 = prev_close - rang * 1.1 / 12
-    
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,27 +44,27 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Warmup: need enough for Camarilla (shifted), EMA34 and volume average
-    start_idx = max(100, 34, 20, 20)
+    # Warmup: need enough for Donchian, EMA50 and volume average
+    start_idx = max(100, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_trend = ema_34_aligned[i]
+        ema_trend = ema_50_aligned[i]
         vol_spike = volume_spike[i]
         size = 0.25  # 25% position size
         
         if position == 0:
-            # Flat - look for entry: breakout in direction of 1w trend with volume spike
-            # Long: price breaks above Camarilla R1 AND 1w trend is up (close > EMA34) AND volume spike
-            # Short: price breaks below Camarilla S1 AND 1w trend is down (close < EMA34) AND volume spike
-            long_breakout = close_val > camarilla_r1[i]
-            short_breakout = close_val < camarilla_s1[i]
+            # Flat - look for entry: breakout in direction of 1d trend with volume spike
+            # Long: price breaks above Donchian upper band AND 1d trend is up (price > EMA50) AND volume spike
+            # Short: price breaks below Donchian lower band AND 1d trend is down (price < EMA50) AND volume spike
+            long_breakout = close_val > donchian_high[i]
+            short_breakout = close_val < donchian_low[i]
             trend_up = close_val > ema_trend
             trend_down = close_val < ema_trend
             
@@ -84,16 +77,16 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Long - exit when price breaks below Camarilla S1 (failed breakout) or reverse below EMA34
-            if close_val < camarilla_s1[i] or close_val < ema_trend:
+            # Long - exit when price breaks below Donchian lower band (failed breakout)
+            if close_val < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price breaks above Camarilla R1 (failed breakout) or reverse above EMA34
-            if close_val > camarilla_r1[i] or close_val > ema_trend:
+            # Short - exit when price breaks above Donchian upper band (failed breakout)
+            if close_val > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -102,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
