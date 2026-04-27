@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF_v2
-Hypothesis: Uses daily Camarilla pivot levels (R3/S3) for breakout entries on 12h timeframe.
-Enter long when price breaks above daily R3 AND 1d close > EMA34 (uptrend) AND volume > 2.0 * 20-period average.
-Enter short when price breaks below daily S3 AND 1d close < EMA34 (downtrend) AND volume > 2.0 * 20-period average.
-Exit when price returns to daily pivot (PP) level OR trend reverses.
-Camarilla R3/S3 represent strong breakout levels; daily trend filter ensures alignment with higher timeframe structure.
-High volume threshold (2.0x) filters weak breakouts. Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position size.
-Designed to work in both bull and bear markets via trend filter and breakout logic.
-Added stricter volume confirmation and minimum holding period to reduce overtrading.
+4h_Donchian20_Breakout_12hTrend_VolumeATR_Stop
+Hypothesis: Uses 4h Donchian(20) breakouts aligned with 12h EMA50 trend filter and volume confirmation (>1.5x 20-bar avg). 
+ATR-based trailing stop (3x ATR) manages risk. Designed for moderate trade frequency (~25-40/year) to avoid fee drag.
+Works in bull/bear via trend filter and volatility-based stops.
 """
 
 import numpy as np
@@ -17,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,119 +20,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and daily trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d EMA34 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h EMA50 for trend filter
+    close_12h_series = pd.Series(df_12h['close'].values)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla pivots on 1d data (using previous day's OHLC)
-    # Camarilla levels: R3 = C + ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/4), PP = (H+L+C)/3
-    # We need previous day's data to calculate today's levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # ATR(14) for stoploss and volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Shift by 1 to get previous day's OHLC for today's Camarilla levels
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First value will be invalid (rolled from last), set to nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Donchian(20) channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_range = prev_high - prev_low
-    camarilla_r3 = camarilla_pp + (camarilla_range * 1.1 / 4.0)
-    camarilla_s3 = camarilla_pp - (camarilla_range * 1.1 / 4.0)
-    
-    # Align 1d Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
-    bars_since_entry = 0  # Track bars in position to enforce minimum holding
     
-    # Warmup: need 1d EMA34 (34), volume avg (20), 1d data shifted (1)
-    start_idx = max(34, 20, 1)
+    # Warmup: need 12h EMA50 (50), ATR (14), Donchian (20), volume avg (20)
+    start_idx = max(50, 14, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_pp_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
         close_val = close[i]
-        ema_val = ema_34_1d_aligned[i]
-        r3_level = camarilla_r3_aligned[i]
-        s3_level = camarilla_s3_aligned[i]
-        pp_level = camarilla_pp_aligned[i]
+        ema_val = ema_50_12h_aligned[i]
+        atr_val = atr[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: breakout of Camarilla R3/S3 levels with 1d trend filter AND volume
-            # Long: price breaks above R3 AND 1d uptrend AND volume
-            long_condition = (close_val > r3_level) and (close_val > ema_val) and vol_conf
-            # Short: price breaks below S3 AND 1d downtrend AND volume
-            short_condition = (close_val < s3_level) and (close_val < ema_val) and vol_conf
+            # Look for entry: Donchian breakout with 12h trend filter AND volume
+            # Long: price breaks above upper channel AND 12h uptrend AND volume
+            long_condition = (close_val > upper_channel) and (close_val > ema_val) and vol_conf
+            # Short: price breaks below lower channel AND 12h downtrend AND volume
+            short_condition = (close_val < lower_channel) and (close_val < ema_val) and vol_conf
             
             if long_condition:
                 signals[i] = size
                 position = 1
-                bars_since_entry = 0
             elif short_condition:
                 signals[i] = -size
                 position = -1
-                bars_since_entry = 0
         elif position == 1:
-            # Increment bars in position
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (24h) to reduce churn
-            if bars_since_entry < 2:
-                signals[i] = size
-                continue
-            # Exit long when price returns to pivot level OR trend breaks
-            exit_condition = (close_val <= pp_level) or (close_val < ema_val)
-            
-            if exit_condition:
+            # Trail long: exit when price drops to highest_high - 3*ATR
+            exit_level = upper_channel - (3.0 * atr_val)
+            if close_val <= exit_level:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Increment bars in position
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (24h) to reduce churn
-            if bars_since_entry < 2:
-                signals[i] = -size
-                continue
-            # Exit short when price returns to pivot level OR trend breaks
-            exit_condition = (close_val >= pp_level) or (close_val > ema_val)
-            
-            if exit_condition:
+            # Trail short: exit when price rises to lowest_low + 3*ATR
+            exit_level = lower_channel + (3.0 * atr_val)
+            if close_val >= exit_level:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF_v2"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hTrend_VolumeATR_Stop"
+timeframe = "4h"
 leverage = 1.0
