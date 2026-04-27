@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Spike and Weekly Trend Filter.
-Long when price breaks above Donchian(20) high AND price > weekly EMA20 AND volume > 1.5x average.
-Short when price breaks below Donchian(20) low AND price < weekly EMA20 AND volume > 1.5x average.
-Exit when price crosses back through Donchian(20) midpoint.
+4h Fibonacci Retracement Breakout with Volume Confirmation and 12h Trend Filter.
+Long when price breaks above 61.8% retracement level AND price > 12h EMA50 AND volume > 1.5x average.
+Short when price breaks below 38.2% retracement level AND price < 12h EMA50 AND volume > 1.5x average.
+Exit when price crosses back through 50% retracement level.
+Uses 12h swing high/low calculated from prior 12h period for zero look-ahead.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,76 +21,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for swing points and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 12h swing high and low (using prior 12h period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Donchian(20) channels
-    donchian_high = np.full(n, np.nan, dtype=np.float64)
-    donchian_low = np.full(n, np.nan, dtype=np.float64)
-    for i in range(19, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # 12h range
+    range_12h = high_12h - low_12h
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Fibonacci levels (based on prior 12h swing)
+    level_618 = low_12h + 0.618 * range_12h  # 61.8% retracement
+    level_500 = low_12h + 0.500 * range_12h  # 50% retracement
+    level_382 = low_12h + 0.382 * range_12h  # 38.2% retracement
+    
+    # Align 12h levels to 4h timeframe (use prior 12h period's levels)
+    level_618_aligned = align_htf_to_ltf(prices, df_12h, level_618)
+    level_500_aligned = align_htf_to_ltf(prices, df_12h, level_500)
+    level_382_aligned = align_htf_to_ltf(prices, df_12h, level_382)
+    
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Volume filter: volume > 1.5x 24-period average (6 hours)
+    vol_ma_24 = np.full(n, np.nan, dtype=np.float64)
+    for i in range(23, n):
+        vol_ma_24[i] = np.mean(volume[i-23:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian(20) + weekly EMA + volume MA
-    start_idx = max(19, 20)
+    # Warmup: need 12h data (1 period) + volume MA
+    start_idx = max(23, 50)  # Need EMA50 and vol MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(level_618_aligned[i]) or np.isnan(level_500_aligned[i]) or 
+            np.isnan(level_382_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price_now = close[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        midpoint = donchian_mid[i]
-        ema_trend = ema_20_1w_aligned[i]
+        level_618_val = level_618_aligned[i]
+        level_500_val = level_500_aligned[i]
+        level_382_val = level_382_aligned[i]
+        ema_trend = ema_50_12h_aligned[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        vol_avg = vol_ma_24[i]
         
         # Volume filter: volume > 1.5x average
         vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price breaks above Donchian high AND price > weekly EMA20 AND volume spike
-            if price_now > upper and price_now > ema_trend and vol_filter:
+            # Long: price breaks above 61.8% level AND price > 12h EMA50 AND volume spike
+            if price_now > level_618_val and price_now > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian low AND price < weekly EMA20 AND volume spike
-            elif price_now < lower and price_now < ema_trend and vol_filter:
+            # Short: price breaks below 38.2% level AND price < 12h EMA50 AND volume spike
+            elif price_now < level_382_val and price_now < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian midpoint
-            if price_now < midpoint:
+            # Exit long: price crosses below 50% level
+            if price_now < level_500_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above Donchian midpoint
-            if price_now > midpoint:
+            # Exit short: price crosses above 50% level
+            if price_now > level_500_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_VolumeSpike_WeeklyTrend"
+name = "4h_Fibonacci_Retracement_Breakout_Volume_12hTrend"
 timeframe = "4h"
 leverage = 1.0
