@@ -3,58 +3,62 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1-day EMA34 trend filter and volume confirmation.
-# Bull Power = High - EMA13 (buying strength), Bear Power = EMA13 - Low (selling strength).
-# In bull markets: Buy when Bull Power > 0 and rising, price > EMA34, volume spike.
-# In bear markets: Sell when Bear Power > 0 and rising, price < EMA34, volume spike.
-# Elder Ray captures institutional buying/selling pressure; EMA34 filter avoids counter-trend trades.
-# Volume spike (>1.5x 20-period average) confirms conviction.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: Daily RSI(14) mean-reversion with weekly trend filter and volume confirmation.
+# RSI < 30 = oversold (long), RSI > 70 = overbought (short) only when aligned with weekly trend.
+# Weekly EMA20 trend filter ensures trades follow higher timeframe momentum.
+# Volume > 1.5x 20-day average confirms institutional participation.
+# Target: 15-25 trades/year to minimize fee drag while capturing mean-reversion edges.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation and trend filter
+    # Get daily data for RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA13 for Elder Ray (13-period EMA of close)
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate RSI(14) on daily closes
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Elder Ray components
-    bull_power_1d = high_1d - ema13_1d  # Buying strength
-    bear_power_1d = ema13_1d - low_1d   # Selling strength
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
     
-    # Align Elder Ray components to 6h timeframe (wait for 1d bar to close)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Wilder's smoothing
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    for i in range(15, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Volume filter: volume > 1.5x 20-period average
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[:14] = np.nan  # Not enough data for first 14 periods
+    
+    # Align RSI to daily timeframe (already aligned, just need to map)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Weekly EMA20 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    
+    # Volume filter: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
-    
-    # Rising momentum: current value > previous value
-    bull_power_rising = bull_power_aligned > np.roll(bull_power_aligned, 1)
-    bear_power_rising = bear_power_aligned > np.roll(bear_power_aligned, 1)
-    # Handle first bar
-    bull_power_rising[0] = False
-    bear_power_rising[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,30 +68,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: Bull Power > 0 and rising, price > EMA34, volume spike
-        if (bull_power_aligned[i] > 0 and 
-            bull_power_rising[i] and 
-            close[i] > ema34_1d_aligned[i] and 
+        # Long: RSI oversold (<30) with weekly uptrend and volume confirmation
+        if (rsi_1d_aligned[i] < 30 and 
+            close[i] > ema20_1w_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short entry: Bear Power > 0 and rising, price < EMA34, volume spike
-        elif (bear_power_aligned[i] > 0 and 
-              bear_power_rising[i] and 
-              close[i] < ema34_1d_aligned[i] and 
+        # Short: RSI overbought (>70) with weekly downtrend and volume confirmation
+        elif (rsi_1d_aligned[i] > 70 and 
+              close[i] < ema20_1w_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: reverse signal or loss of momentum
-        elif position == 1 and (bull_power_aligned[i] <= 0 or not bull_power_rising[i]):
+        # Exit: RSI returns to neutral zone (40-60) or opposite extreme
+        elif position == 1 and (rsi_1d_aligned[i] > 50 or rsi_1d_aligned[i] > 70):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (bear_power_aligned[i] <= 0 or not bear_power_rising[i]):
+        elif position == -1 and (rsi_1d_aligned[i] < 50 or rsi_1d_aligned[i] < 30):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -101,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA34_VolumeFilter"
-timeframe = "6h"
+name = "1d_RSI14_MeanReversion_1wEMA20_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
