@@ -3,13 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray with 1d trend filter.
-# Uses Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) on 6h for trend direction.
-# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low (13-period EMA).
-# Long when: Teeth > Jaw (uptrend), Bull Power > 0, and 1d close > EMA34.
-# Short when: Teeth < Jaw (downtrend), Bear Power > 0, and 1d close < EMA34.
-# Exit when Alligator reverses or Elder Power fails.
-# Designed for ~20-30 trades/year with clear trend/filter alignment.
+# Hypothesis: 12h KAMA + RSI + Chop regime. KAMA adapts to market noise, reducing whipsaw in chop.
+# RSI filters overbought/oversold. Chop regime ensures we only trade in trending markets (Chop < 38.2).
+# Designed for ~20-30 trades/year with strict entry conditions to avoid overtrading.
+# Works in bull (trend following) and bear (avoids false signals in chop).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,76 +17,128 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Chop and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Chop (14-period)
+    atr_1d = np.zeros(len(close_1d))
+    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
+                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
+                                  np.abs(low_1d[1:] - close_1d[:-1])))
+    tr_1d = np.concatenate([[np.abs(high_1d[0] - low_1d[0])], tr_1d])
+    for i in range(len(atr_1d)):
+        if i == 0:
+            atr_1d[i] = tr_1d[0]
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
     
-    # Williams Alligator on 6h: SMAs of median price
-    median_price = (high + low) / 2.0
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # 13-period
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # 8-period
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values    # 5-period
+    # Calculate highest high and lowest low over 14 periods
+    hh_1d = np.full(len(close_1d), np.nan)
+    ll_1d = np.full(len(close_1d), np.nan)
+    for i in range(13, len(close_1d)):
+        hh_1d[i] = np.max(high_1d[i-13:i+1])
+        ll_1d[i] = np.min(low_1d[i-13:i+1])
     
-    # Elder Ray Power (13-period EMA of close)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = ema13 - low   # Bear Power = EMA13 - Low
+    chop = np.full(len(close_1d), 50.0)
+    for i in range(13, len(close_1d)):
+        if hh_1d[i] - ll_1d[i] != 0:
+            chop[i] = 100 * np.log10(sum(tr_1d[i-13:i+1]) / (hh_1d[i] - ll_1d[i])) / np.log10(14)
+    
+    # Calculate RSI (14-period)
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(len(close_1d), np.nan)
+    avg_loss = np.full(len(close_1d), np.nan)
+    for i in range(1, len(close_1d)):
+        if i < 14:
+            if i == 1:
+                avg_gain[i] = gain[0]
+                avg_loss[i] = loss[0]
+            else:
+                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i-1]) / i
+                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i-1]) / i
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    
+    rs = np.full(len(close_1d), np.nan)
+    rsi = np.full(len(close_1d), 50.0)
+    for i in range(14, len(close_1d)):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+    
+    # Calculate KAMA (10-period ER, 2/30 fast/slow)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, k=10))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)[:len(change)]
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    
+    # KAMA
+    kama = np.full(len(close_1d), np.nan)
+    kama[9] = close_1d[9]
+    for i in range(10, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Align 1d indicators to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Alligator components and Elder Power
-    start_idx = 13  # max period for jaw calculation
+    # Warmup: need 10-period KAMA
+    start_idx = 10
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema34_aligned[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(kama_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator trend: Teeth > Jaw = uptrend, Teeth < Jaw = downtrend
-        bullish_alligator = teeth[i] > jaw[i]
-        bearish_alligator = teeth[i] < jaw[i]
+        price = close[i]
+        chop_val = chop_aligned[i]
+        rsi_val = rsi_aligned[i]
+        kama_val = kama_aligned[i]
         
-        # Elder Ray confirmation
-        bullish_elder = bull_power[i] > 0
-        bearish_elder = bear_power[i] > 0
-        
-        # 1d trend filter
-        bullish_1d = close > ema34_aligned[i]
-        bearish_1d = close < ema34_aligned[i]
+        # Chop regime: only trade when trending (Chop < 38.2)
+        trending = chop_val < 38.2
         
         if position == 0:
-            # Long: uptrend + bullish elder power + bullish 1d trend
-            if bullish_alligator and bullish_elder and bullish_1d:
+            # Long: price > KAMA and RSI < 70 (not overbought) in trending market
+            if price > kama_val and rsi_val < 70 and trending:
                 signals[i] = size
                 position = 1
-            # Short: downtrend + bearish elder power + bearish 1d trend
-            elif bearish_alligator and bearish_elder and bearish_1d:
+            # Short: price < KAMA and RSI > 30 (not oversold) in trending market
+            elif price < kama_val and rsi_val > 30 and trending:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: trend turns down or elder power fails
-            if not bullish_alligator or not bullish_elder:
+            # Exit long: price < KAMA or RSI > 70 (overbought) or chop > 61.8 (choppy)
+            if price < kama_val or rsi_val > 70 or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: trend turns up or elder power fails
-            if not bearish_alligator or not bearish_elder:
+            # Exit short: price > KAMA or RSI < 30 (oversold) or chop > 61.8 (choppy)
+            if price > kama_val or rsi_val < 30 or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_ElderRay_1dTrend"
-timeframe = "6h"
+name = "12h_KAMA_RSI_Chop_Trend"
+timeframe = "12h"
 leverage = 1.0
