@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_Aggressive_Squeeze_Breakout_1dTrend_Volume
-Hypothesis: Combines Bollinger Band squeeze detection with Donchian breakout on 6h, filtered by 1d trend and volume spike.
-Works in bull markets via breakout continuation and in bear via mean-reversion off volatility contractions.
-Target: 50-150 total trades over 4 years (~12-37/year) to avoid fee drag.
+4h_KAMA_Trend_1dVWAP_MeanReversion
+Hypothesis: KAMA identifies trend on 4h; mean-reversion to 1d VWAP during pullbacks.
+Works in bull via trend continuation, in bear via reversion to mean during pullbacks.
+Target: 15-30 trades/year (60-120 total) to avoid fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_ktf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,125 +20,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Bollinger Bands
+    # Get 1d data for VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands (20, 2) on 1d
-    close_1d = df_1d['close'].values
-    bb_period = 20
-    bb_std = 2.0
-    sma_1d = np.full(len(close_1d), np.nan)
-    std_1d = np.full(len(close_1d), np.nan)
-    upper_bb = np.full(len(close_1d), np.nan)
-    lower_bb = np.full(len(close_1d), np.nan)
+    # Calculate VWAP on 1d: cumulative (price * volume) / cumulative volume
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
+    pv_1d = typical_price_1d * df_1d['volume'].values
+    cum_pv = np.cumsum(pv_1d)
+    cum_vol = np.cumsum(df_1d['volume'].values)
+    vwap_1d = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
     
-    if len(close_1d) >= bb_period:
-        for i in range(bb_period - 1, len(close_1d)):
-            sma_1d[i] = np.mean(close_1d[i - bb_period + 1:i + 1])
-            std_1d[i] = np.std(close_1d[i - bb_period + 1:i + 1])
-            upper_bb[i] = sma_1d[i] + bb_std * std_1d[i]
-            lower_bb[i] = sma_1d[i] - bb_std * std_1d[i]
+    # Align 1d VWAP to 4h
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Bollinger Band Width (normalized)
-    bb_width = np.full(len(close_1d), np.nan)
-    for i in range(bb_period - 1, len(close_1d)):
-        if sma_1d[i] > 0:
-            bb_width[i] = (upper_bb[i] - lower_bb[i]) / sma_1d[i]
+    # KAMA on 4h close
+    def kama(close, period=10, fast=2, slow=30):
+        dir = np.abs(np.diff(close, period))
+        vol = np.sum(np.abs(np.diff(close)), axis=1) if len(close) > 1 else np.array([1e-10])
+        er = np.where(vol != 0, dir / vol, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama_out = np.full_like(close, np.nan)
+        kama_out[period] = close[period]
+        for i in range(period+1, len(close)):
+            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
+        return kama_out
     
-    # Bollinger Band squeeze: BB width below 20-period percentile (20th percentile)
-    bb_width_percentile = np.full(len(close_1d), np.nan)
-    lookback = 20
-    for i in range(lookback - 1, len(close_1d)):
-        if not np.isnan(bb_width[i - lookback + 1:i + 1]).all():
-            bb_width_percentile[i] = np.percentile(
-                bb_width[i - lookback + 1:i + 1], 20
-            )
+    kama_val = kama(close, 10, 2, 30)
     
-    squeeze = np.full(len(close_1d), False)
-    for i in range(bb_period - 1, len(close_1d)):
-        if not np.isnan(bb_width[i]) and not np.isnan(bb_width_percentile[i]):
-            squeeze[i] = bb_width[i] < bb_width_percentile[i]
+    # Pullback detection: price deviation from VWAP
+    dev_pct = (close - vwap_aligned) / vwap_aligned
     
-    # 1d trend: EMA(50)
-    ema_period = 50
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
-        multiplier = 2 / (ema_period + 1)
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i - 1] * (1 - multiplier))
-    
-    # Align 1d indicators to 6h
-    squeeze_aligned = align_ltf_to_htf(prices, df_1d, squeeze)
-    ema_aligned = align_ltf_to_htf(prices, df_1d, ema_1d)
-    
-    # 6h Donchian breakout (20-period)
-    donch_period = 20
-    upper_donch = np.full(n, np.nan)
-    lower_donch = np.full(n, np.nan)
-    
-    if n >= donch_period:
-        for i in range(donch_period - 1, n):
-            upper_donch[i] = np.max(high[i - donch_period + 1:i + 1])
-            lower_donch[i] = np.min(low[i - donch_period + 1:i + 1])
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_period = 20
+    # Volume filter: avoid low-volume whipsaws
     vol_ma = np.full(n, np.nan)
-    for i in range(vol_ma_period, n):
-        vol_ma[i] = np.mean(volume[i - vol_ma_period:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0
-    size = 0.25  # 25% position size
+    size = 0.25
     
-    # Warmup: need Donchian (20), volume MA (20), 1d indicators
-    start_idx = max(donch_period - 1, vol_ma_period, 1)
+    start_idx = max(100, 20)  # KAMA needs warmup, vol MA needs 20
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(upper_donch[i]) or
-            np.isnan(lower_donch[i])):
+        if (np.isnan(kama_val[i]) or
+            np.isnan(vwap_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend filter: price above/below 1d EMA(50)
-        uptrend = price > ema_aligned[i]
-        downtrend = price < ema_aligned[i]
+        # Trend: price vs KAMA
+        uptrend = price > kama_val[i]
+        downtrend = price < kama_val[i]
         
-        # Volume confirmation: > 1.5x average volume
-        volume_confirmation = vol_ratio > 1.5
-        
-        # Squeeze condition from 1d (must be in squeeze)
-        in_squeeze = squeeze_aligned[i] if not np.isnan(squeeze_aligned[i]) else False
-        
+        # Mean-reversion signal: deviation from VWAP
         if position == 0:
-            # Long entry: price breaks above Donchian upper in uptrend, volume, and squeeze
-            if price > upper_donch[i] and uptrend and volume_confirmation and in_squeeze:
+            # Long: uptrend + price significantly below VWAP (pullback to buy)
+            if uptrend and dev_pct[i] < -0.015 and vol_ratio > 1.2:
                 signals[i] = size
                 position = 1
-            # Short entry: price breaks below Donchian lower in downtrend, volume, and squeeze
-            elif price < lower_donch[i] and downtrend and volume_confirmation and in_squeeze:
+            # Short: downtrend + price significantly above VWAP (pullback to sell)
+            elif downtrend and dev_pct[i] > 0.015 and vol_ratio > 1.2:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns below Donchian lower or trend reverses
-            if price < lower_donch[i] or not uptrend:
+            # Exit long: price returns to VWAP or trend breaks
+            if dev_pct[i] > -0.005 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price returns above Donchian upper or trend reverses
-            if price > upper_donch[i] or not downtrend:
+            # Exit short: price returns to VWAP or trend breaks
+            if dev_pct[i] < 0.005 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -146,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Aggressive_Squeeze_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_KAMA_Trend_1dVWAP_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
