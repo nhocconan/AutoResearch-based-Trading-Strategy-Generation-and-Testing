@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,21 +13,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations (called ONCE before loop)
+    # Get 1d data for calculations (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day SMA (20-period) for trend
-    close_1d = df_1d['close'].values
-    sma_20_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        for i in range(19, len(close_1d)):
-            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
-    
-    # Calculate 1-day ATR (14-period) for volatility
+    # Calculate 1-day ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     close_1d_prev = np.roll(close_1d, 1)
     close_1d_prev[0] = close_1d[0]
     
@@ -43,23 +37,24 @@ def generate_signals(prices):
             atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
     
     # Calculate 1-day Bollinger Bands (20, 2.0)
+    sma_20_1d = np.full(len(close_1d), np.nan)
     std_20_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 20:
         for i in range(19, len(close_1d)):
+            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
             std_20_1d[i] = np.std(close_1d[i-19:i+1])
     
     upper_bb_1d = sma_20_1d + (2 * std_20_1d)
     lower_bb_1d = sma_20_1d - (2 * std_20_1d)
     
-    # Align 1d indicators to daily timeframe (same timeframe)
-    sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
+    # Align 1d indicators to 12h timeframe
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
     lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # Calculate volume moving average (20-period)
+    # Calculate 6-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 20
+    vol_period = 6
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -68,11 +63,10 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(19, vol_period) + 5
+    start_idx = max(14, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(sma_20_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
+        if (np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(upper_bb_1d_aligned[i]) or 
             np.isnan(lower_bb_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
@@ -82,30 +76,30 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume filter: at least 1.5x average volume
+        # Volume spike filter: at least 1.5x average volume
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price above SMA20, touches lower BB, with volume (mean reversion in uptrend)
-            if price > sma_20_1d_aligned[i] and price <= lower_bb_1d_aligned[i] and vol_filter:
+            # Long: Price breaks above upper Bollinger Band with volume
+            if price > upper_bb_1d_aligned[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price below SMA20, touches upper BB, with volume (mean reversion in downtrend)
-            elif price < sma_20_1d_aligned[i] and price >= upper_bb_1d_aligned[i] and vol_filter:
+            # Short: Price breaks below lower Bollinger Band with volume
+            elif price < lower_bb_1d_aligned[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses above SMA20 or volatility spike
-            if price >= sma_20_1d_aligned[i] or vol_ratio > 2.5:
+            # Long exit: Price closes below lower Bollinger Band or volatility spike (potential reversal)
+            if price < lower_bb_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses below SMA20 or volatility spike
-            if price <= sma_20_1d_aligned[i] or vol_ratio > 2.5:
+            # Short exit: Price closes above upper Bollinger Band or volatility spike (potential reversal)
+            if price > upper_bb_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_BB_MeanRev_SMA20_Filter_Volume"
-timeframe = "1d"
+name = "12h_Bollinger_20_1dATR_Volume"
+timeframe = "12h"
 leverage = 1.0
