@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla Pivot-based strategy using 1d levels for breakout/mean-reversion
-# - In trending markets: break above R3 or below S3 with volume continuation
-# - In ranging markets: fade at R4/S4 with mean reversion to pivot
-# - Uses 1w trend filter to determine regime (trending vs ranging)
-# - Designed to work in both bull (buy breakouts) and bear (sell breakdowns)
-# - Target: 20-40 trades/year to avoid excessive fees
+# Hypothesis: 12h Williams Fractal breakout with 1w trend filter and volume confirmation.
+# In trending markets, price breaks beyond recent fractal highs/lows with continuation.
+# Uses 1w EMA50 for trend direction and volume spike for confirmation.
+# Designed to work in both bull (breakouts up) and bear (breakouts down) markets.
+# Target: 15-30 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,222 +19,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels from previous day
-    camarilla_pp = np.full(len(df_1d), np.nan)
-    camarilla_r3 = np.full(len(df_1d), np.nan)
-    camarilla_s3 = np.full(len(df_1d), np.nan)
-    camarilla_r4 = np.full(len(df_1d), np.nan)
-    camarilla_s4 = np.full(len(df_1d), np.nan)
-    
-    for i in range(1, len(df_1d)):
-        # Previous day's values
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        
-        # Pivot point
-        pp = (ph + pl + pc) / 3
-        camarilla_pp[i] = pp
-        
-        # Range
-        range_val = ph - pl
-        
-        # Camarilla levels
-        camarilla_r3[i] = pp + (range_val * 1.1 / 2)
-        camarilla_s3[i] = pp - (range_val * 1.1 / 2)
-        camarilla_r4[i] = pp + (range_val * 1.1)
-        camarilla_s4[i] = pp - (range_val * 1.1)
-    
-    # Align Camarilla levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Get weekly data for trend filter (ADX)
+    # Get weekly data for trend filter (EMA50)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
+    close_1w = df_1w['close'].values
+    # Calculate EMA(50) on weekly close
+    ema_50_1w = np.full(len(df_1w), np.nan)
+    alpha = 2 / (50 + 1)
+    for i in range(len(close_1w)):
+        if i < 49:
+            ema_50_1w[i] = np.mean(close_1w[:i+1]) if i > 0 else close_1w[i]
+        else:
+            if np.isnan(ema_50_1w[i-1]):
+                ema_50_1w[i] = np.mean(close_1w[i-49:i+1])
+            else:
+                ema_50_1w[i] = close_1w[i] * alpha + ema_50_1w[i-1] * (1 - alpha)
+    
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get weekly data for Williams Fractals (need 2 bars confirmation)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
-    # Calculate ADX(14) on weekly data
-    def calculate_adx(high, low, close, period=14):
-        n = len(high)
-        if n < period:
-            return np.full(n, np.nan)
-        
-        # True Range
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.maximum(
-                np.abs(high[1:] - close[:-1]),
-                np.abs(low[1:] - close[:-1])
-            )
-        )
-        tr = np.concatenate([[np.nan], tr])
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        plus_dm = np.concatenate([[np.nan], plus_dm])
-        minus_dm = np.concatenate([[np.nan], minus_dm])
-        
-        # Smoothed values
-        def smooth_wilder(arr, period):
-            n = len(arr)
-            result = np.full(n, np.nan)
-            if n < period:
-                return result
-            
-            # First value is simple average
-            result[period-1] = np.nansum(arr[1:period]) / period
-            
-            # Wilder smoothing
-            for i in range(period, n):
-                if not np.isnan(result[i-1]):
-                    result[i] = (result[i-1] * (period-1) + arr[i]) / period
-                else:
-                    result[i] = np.nan
-            return result
-        
-        atr = smooth_wilder(tr, period)
-        plus_dm_smooth = smooth_wilder(plus_dm, period)
-        minus_dm_smooth = smooth_wilder(minus_dm, period)
-        
-        # Directional Indicators
-        plus_di = np.where(atr != 0, (plus_dm_smooth / atr) * 100, 0)
-        minus_di = np.where(atr != 0, (minus_dm_smooth / atr) * 100, 0)
-        
-        # DX and ADX
-        dx = np.where((plus_di + minus_di) != 0, 
-                      np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-        adx = smooth_wilder(dx, period)
-        
-        return adx
+    # Calculate Williams Fractals on weekly data
+    bearish_fractal = np.zeros(len(df_1w), dtype=bool)
+    bullish_fractal = np.zeros(len(df_1w), dtype=bool)
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    for i in range(2, len(df_1w) - 2):
+        # Bearish fractal: high[i] is highest among 5 bars (i-2 to i+2)
+        if (high_1w[i] > high_1w[i-1] and high_1w[i] > high_1w[i-2] and
+            high_1w[i] > high_1w[i+1] and high_1w[i] > high_1w[i+2]):
+            bearish_fractal[i] = True
+        # Bullish fractal: low[i] is lowest among 5 bars (i-2 to i+2)
+        if (low_1w[i] < low_1w[i-1] and low_1w[i] < low_1w[i-2] and
+            low_1w[i] < low_1w[i+1] and low_1w[i] < low_1w[i+2]):
+            bullish_fractal[i] = True
     
-    # Volume spike: current volume > 2 * 20-period average
+    # Williams fractals need 2 extra weekly bars for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal.astype(float), additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal.astype(float), additional_delay_bars=2)
+    
+    # Volume spike: current volume > 1.5 * 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup
-    start_idx = max(20, 30)
+    # Warmup: need enough data for indicators
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or
-            np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or
+            np.isnan(bullish_fractal_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine market regime: ADX > 25 = trending, ADX < 20 = ranging
-        is_trending = adx_1w_aligned[i] > 25
-        is_ranging = adx_1w_aligned[i] < 20
+        # Determine trend direction from weekly EMA50
+        # Use previous bar's EMA to avoid look-ahead
+        if i > 0 and not np.isnan(ema_50_1w_aligned[i-1]):
+            trend_up = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
+            trend_down = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]
+        else:
+            trend_up = False
+            trend_down = False
         
         if position == 0:
-            if is_trending:
-                # Trending market: breakout strategy
-                # Long: break above R3 with volume
-                if (close[i] > r3_aligned[i] and 
-                    volume_spike[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # Short: break below S3 with volume
-                elif (close[i] < s3_aligned[i] and 
-                      volume_spike[i]):
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif is_ranging:
-                # Ranging market: mean reversion at extremes
-                # Long: touch S4 with rejection
-                if (low[i] <= s4_aligned[i] and 
-                    close[i] > s4_aligned[i]):
-                    signals[i] = 0.20
-                    position = 1
-                # Short: touch R4 with rejection
-                elif (high[i] >= r4_aligned[i] and 
-                      close[i] < r4_aligned[i]):
-                    signals[i] = -0.20
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long entry: bullish fractal breakout + uptrend + volume spike
+            if (bullish_fractal_aligned[i] > 0 and 
+                trend_up and 
+                volume_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short entry: bearish fractal breakout + downtrend + volume spike
+            elif (bearish_fractal_aligned[i] > 0 and 
+                  trend_down and 
+                  volume_spike[i]):
+                signals[i] = -0.25
+                position = -1
             else:
-                # Transition regime: no trade
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit conditions
-            if is_trending:
-                # Exit on trend weakening or S3 touch
-                if (adx_1w_aligned[i] < 20 or 
-                    low[i] <= s3_aligned[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif is_ranging:
-                # Exit on reversion to pivot or opposite extreme
-                if (close[i] >= pp_aligned[i] or 
-                    high[i] >= r4_aligned[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20
-            else:
+            # Long exit: trend turns down or opposite fractal appears
+            if (not trend_up or 
+                bearish_fractal_aligned[i] > 0):
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit conditions
-            if is_trending:
-                # Exit on trend weakening or R3 touch
-                if (adx_1w_aligned[i] < 20 or 
-                    high[i] >= r3_aligned[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            elif is_ranging:
-                # Exit on reversion to pivot or opposite extreme
-                if (close[i] <= pp_aligned[i] or 
-                    low[i] <= s4_aligned[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20
-            else:
+            # Short exit: trend turns up or opposite fractal appears
+            if (not trend_down or 
+                bullish_fractal_aligned[i] > 0):
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_Camarilla_Pivot_Regime_ADX_Volume_v1"
-timeframe = "6h"
+name = "12h_WilliamsFractal_Breakout_1wEMA50_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
