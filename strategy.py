@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Keltner Channel Breakout with 1-week trend filter and 1-day volume confirmation
-Trades breakouts above upper Keltner Channel (EMA20 + 2*ATR) when weekly trend is up
-and volume exceeds 1-day average. Exits on lower channel touch.
-Designed for trending markets with volatility filtering to avoid whipsaws.
-Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+Hypothesis: 4-hour Donchian breakout with 1-day volume confirmation and 1-day ADX trend filter.
+Trades breakouts when price closes above/below Donchian(20) channel, volume exceeds 1.5x daily average,
+and ADX(14) > 25 confirms strong trend. Uses ATR(10) stoploss to manage risk.
+Designed to work in both bull and bear markets by requiring trend strength (ADX) and volume confirmation.
+Target: 25-40 trades/year per symbol (100-160 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,68 +21,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Keltner calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4-hour data for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4-hour Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR(10) on 12h
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Align Donchian levels to 4-hour timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
     
-    # Calculate EMA(20) on 12h
-    ema = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel: EMA(20) ± 2*ATR(10)
-    upper = ema + 2 * atr
-    lower = ema - 2 * atr
-    
-    # Align Keltner channels to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate EMA(50) on 1w for trend
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get 1d data for volume filter
+    # Get daily data for volume filter and ADX trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate volume MA(20) on 1d
+    # Calculate 1-day volume MA(20)
     vol_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
+    # Calculate 1-day ADX(14) for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d > 0, 100 * dm_plus_smooth / atr_1d, 0)
+    di_minus = np.where(atr_1d > 0, 100 * dm_minus_smooth / atr_1d, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need all indicators
-    start_idx = max(10, 20, 50)  # ATR, EMA, volume MA
+    # Warmup: need Donchian channels, volume MA, and ADX
+    start_idx = max(20, 20, 14)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -92,36 +103,51 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Current 12h price and volume
+        # Current 4-hour price and volume
         price_now = close[i]
         vol_now = volume[i]
         vol_ma = vol_ma_20_1d_aligned[i]
-        weekly_trend = ema_50_1w_aligned[i]
+        adx_now = adx_aligned[i]
         
-        # Current Keltner levels
-        upper_now = upper_aligned[i]
-        lower_now = lower_aligned[i]
+        # Current Donchian levels
+        donch_high_now = donch_high_aligned[i]
+        donch_low_now = donch_low_aligned[i]
         
         # Volume filter: volume > 1.5x 1-day average
         vol_filter = vol_now > 1.5 * vol_ma
         
-        # Entry conditions: breakout above upper Keltner with volume and weekly uptrend
+        # Trend filter: ADX > 25 indicates strong trend
+        trend_filter = adx_now > 25
+        
+        # Entry conditions: Donchian breakout with volume and trend confirmation
         if position == 0:
-            if price_now > upper_now and vol_filter and price_now > weekly_trend:
+            # Long: price breaks above Donchian high with volume + trend
+            if price_now > donch_high_now and vol_filter and trend_filter:
                 signals[i] = size
                 position = 1
+            # Short: price breaks below Donchian low with volume + trend
+            elif price_now < donch_low_now and vol_filter and trend_filter:
+                signals[i] = -size
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price touches lower Keltner or weekly trend turns down
-            if price_now < lower_now or price_now < weekly_trend:
+            # Exit long: price returns to Donchian low or trend weakens
+            if price_now < donch_low_now or adx_now < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
+        elif position == -1:
+            # Exit short: price returns to Donchian high or trend weakens
+            if price_now > donch_high_now or adx_now < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -size
     
     return signals
 
-name = "12h_KeltnerBreakout_Volume_1wTrend"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dVolume_ADXTrend"
+timeframe = "4h"
 leverage = 1.0
