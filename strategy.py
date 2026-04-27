@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R3_S3_Breakout_4hTrend_Volume
-Hypothesis: Uses 4h timeframe for trend direction (EMA34) and daily Camarilla levels (R3/S3) for breakout signals. Entries occur on 1h chart when price breaks R3/S3 with 4h EMA34 confirmation and volume spike (>2x 20-period average). Exits when price crosses 4h EMA34. Designed for medium-term breakouts with controlled frequency (15-35 trades/year) to minimize fee drag. Works in bull/bear markets via trend filter.
+6h_Donchian20_Breakout_WeeklyPivot_Direction_TrendFilter
+Hypothesis: Uses 6h Donchian(20) breakout in the direction of weekly pivot trend (price above/below weekly pivot) with volume confirmation. Weekly pivot provides structural support/resistance that works in both bull and bear markets. Designed for low trade frequency (~15-25 trades/year) to minimize fee drag on 6h timeframe.
 """
 
 import numpy as np
@@ -18,79 +18,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R3/S3)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate weekly pivot point (using previous week's OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Previous week's OHLC for pivot calculation
+    prev_weekly_high = df_1w['high'].shift(1).values
+    prev_weekly_low = df_1w['low'].shift(1).values
+    prev_weekly_close = df_1w['close'].shift(1).values
     
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # Weekly pivot point: (H + L + C) / 3
+    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align weekly pivot to 6h timeframe (wait for previous week's close)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # 4h EMA34 for trend confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
+    # 6h Donchian channel (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # Position size: 20% of capital
+    size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and volume
-    start_idx = 40
+    # Warmup: need enough data for Donchian and volume
+    start_idx = max(20, 20)  # Donchian(20) and volume MA(20)
     
     for i in range(start_idx, n):
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_4h_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        ema34_val = ema34_4h_aligned[i]
+        pivot_val = weekly_pivot_aligned[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: price breaks above R3, above 4h EMA34 trend, volume confirmation
-            if close[i] > camarilla_r3_val and close[i] > ema34_val and vol_conf:
+            # Long: price breaks above Donchian upper channel, above weekly pivot, volume confirmation
+            if close[i] > upper_channel and close[i] > pivot_val and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3, below 4h EMA34 trend, volume confirmation
-            elif close[i] < camarilla_s3_val and close[i] < ema34_val and vol_conf:
+            # Short: price breaks below Donchian lower channel, below weekly pivot, volume confirmation
+            elif close[i] < lower_channel and close[i] < pivot_val and vol_conf:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 4h EMA34
-            if close[i] < ema34_val:
+            # Exit long: price crosses below weekly pivot
+            if close[i] < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 4h EMA34
-            if close[i] > ema34_val:
+            # Exit short: price crosses above weekly pivot
+            if close[i] > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R3_S3_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Donchian20_Breakout_WeeklyPivot_Direction_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
