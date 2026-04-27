@@ -1,33 +1,11 @@
-# Hypothesis: 4h Williams Alligator + Volume Spike + Regime Filter
-# Williams Alligator uses 3 smoothed moving averages (Jaw, Teeth, Lips) to identify trends.
-# In trending markets, the lines are well-separated and aligned (Jaw below Teeth below Lips for uptrend).
-# In ranging markets, the lines intertwine. We use this as a trend filter.
-# Volume spike confirms institutional interest. We take trades in the direction of the Alligator trend
-# when volume exceeds 1.5x its 20-period average.
-# This strategy avoids overtrading by requiring both trend alignment and volume confirmation.
-# Works in bull/bear: Alligator identifies trend direction, volume confirms strength.
-# Risk: 25% position size, exit when Alligator lines re-intertwine (trend weakens).
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(source, period):
-    """Smoothed Moving Average (SMMA) - used in Williams Alligator"""
-    if len(source) < period:
-        return np.full(len(source), np.nan)
-    result = np.full(len(source), np.nan)
-    # First value is simple average
-    result[period-1] = np.mean(source[:period])
-    # Subsequent values: (prev * (period-1) + current) / period
-    for i in range(period, len(source)):
-        result[i] = (result[i-1] * (period-1) + source[i]) / period
-    return result
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,98 +13,123 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Williams Alligator (smoothed MAs)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 13:
+    # Get 1d data for Williams Alligator
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator parameters (13, 8, 5) with future shifts (8, 5, 3)
+    # Williams Alligator (Jaws, Teeth, Lips) - 13,8,5 SMAs with shifts
+    # Jaws: 13-period SMA, shifted 8 bars forward
     jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
     jaw_shift = 8
+    sma_jaw = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= jaw_period:
+        for i in range(jaw_period - 1, len(close_1d)):
+            sma_jaw[i] = np.mean(close_1d[i - jaw_period + 1:i + 1])
+    jaw = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= jaw_period + jaw_shift:
+        for i in range(jaw_shift, len(close_1d)):
+            jaw[i] = sma_jaw[i - jaw_shift]
+    
+    # Teeth: 8-period SMA, shifted 5 bars forward
+    teeth_period = 8
     teeth_shift = 5
+    sma_teeth = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= teeth_period:
+        for i in range(teeth_period - 1, len(close_1d)):
+            sma_teeth[i] = np.mean(close_1d[i - teeth_period + 1:i + 1])
+    teeth = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= teeth_period + teeth_shift:
+        for i in range(teeth_shift, len(close_1d)):
+            teeth[i] = sma_teeth[i - teeth_shift]
+    
+    # Lips: 5-period SMA, shifted 3 bars forward
+    lips_period = 5
     lips_shift = 3
+    sma_lips = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= lips_period:
+        for i in range(lips_period - 1, len(close_1d)):
+            sma_lips[i] = np.mean(close_1d[i - lips_period + 1:i + 1])
+    lips = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= lips_period + lips_shift:
+        for i in range(lips_shift, len(close_1d)):
+            lips[i] = sma_lips[i - lips_shift]
     
-    # Calculate SMMA for each line
-    jaw = smma(close_4h, jaw_period)
-    teeth = smma(close_4h, teeth_period)
-    lips = smma(close_4h, lips_period)
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Apply future shifts (Alligator's "smile" - looking into future)
-    jaw = np.roll(jaw, -jaw_shift)
-    teeth = np.roll(teeth, -teeth_shift)
-    lips = np.roll(lips, -lips_shift)
-    # Set shifted values to NaN (not available yet)
-    jaw[-jaw_shift:] = np.nan
-    teeth[-teeth_shift:] = np.nan
-    lips[-lips_shift:] = np.nan
+    # Get 12h data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Align to 4h timeframe (wait for bar close)
-    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_4h, lips)
+    volume_12h = df_12h['volume'].values
+    # Calculate 20-period average volume on 12h
+    avg_vol_12h = np.full(len(volume_12h), np.nan)
+    if len(volume_12h) >= 20:
+        for i in range(19, len(volume_12h)):
+            avg_vol_12h[i] = np.mean(volume_12h[i - 19:i + 1])
     
-    # Volume spike filter: current volume > 1.5x 20-period average
-    vol_ma = np.full(n, np.nan)
-    if n >= 20:
-        # Simple moving average of volume
-        vol_sum = np.nansum(volume[:20])  # Initialize with first 20 values
-        vol_ma[19] = vol_sum / 20
-        for i in range(20, n):
-            vol_sum = vol_sum - volume[i-20] + volume[i]
-            vol_ma[i] = vol_sum / 20
+    avg_vol_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_vol_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Alligator lines and volume MA
-    start_idx = max(jaw_period, teeth_period, lips_period, 20) + max(jaw_shift, teeth_shift, lips_shift)
+    # Warmup: need Alligator lines and volume average
+    start_idx = max(34, 20)  # Need enough data for Alligator and volume average
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(lips_aligned[i]) or np.isnan(avg_vol_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Check for Alligator alignment (trending market)
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
+        price = close[i]
+        vol = volume[i]
+        avg_vol = avg_vol_12h_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x average 12h volume
+        vol_confirm = vol > 1.5 * avg_vol
+        
+        # Williams Alligator signals:
+        # Bullish alignment: Lips > Teeth > Jaws (alligator eating with mouth up)
+        # Bearish alignment: Lips < Teeth < Jaws (alligator eating with mouth down)
         lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
         
-        # Uptrend: Lips > Teeth > Jaw (all separated)
-        is_uptrend = (lips_val > teeth_val) and (teeth_val > jaw_val)
-        # Downtrend: Lips < Teeth < Jaw (all separated)
-        is_downtrend = (lips_val < teeth_val) and (teeth_val < jaw_val)
-        
-        # Volume confirmation: current volume > 1.5x MA
-        vol_spike = volume[i] > (1.5 * vol_ma[i])
+        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
+        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
         
         if position == 0:
-            # Enter long: uptrend + volume spike
-            if is_uptrend and vol_spike:
+            # Long: Bullish alignment + volume confirmation
+            if bullish_alignment and vol_confirm:
                 signals[i] = size
                 position = 1
-            # Enter short: downtrend + volume spike
-            elif is_downtrend and vol_spike:
+            # Short: Bearish alignment + volume confirmation
+            elif bearish_alignment and vol_confirm:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: trend weakens (lines intertwine) or volume drops
-            if not is_uptrend or not vol_spike:
+            # Exit long: When alignment breaks (lips crosses below teeth)
+            if lips_val <= teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: trend weakens or volume drops
-            if not is_downtrend or not vol_spike:
+            # Exit short: When alignment breaks (lips crosses above teeth)
+            if lips_val >= teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -134,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Williams_Alligator_Volume_Spike"
-timeframe = "4h"
+name = "6H_Williams_Alligator_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
