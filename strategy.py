@@ -15,18 +15,17 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    
     # Calculate 34-period EMA for trend filter (1d)
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34 = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Get weekly data for higher timeframe bias
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
@@ -38,7 +37,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
     
-    # Donchian channels (20-period) on 12h
+    # Donchian channels (20-period) on daily
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -88,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_VolumeSpike_DualTrendFilter_1d_1w"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_VolumeSpike_DualTrendFilter_1d_1w"
+timeframe = "1d"
 leverage = 1.0
