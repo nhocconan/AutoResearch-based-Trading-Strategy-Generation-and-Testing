@@ -1,3 +1,9 @@
+# Hypothesis: Using 12h timeframe with 1-week high/low breakout and volume confirmation
+# This strategy aims to capture major trend changes with infrequent entries to minimize fee drag.
+# 1-week high/low acts as strong support/resistance, and breakouts with volume confirm institutional interest.
+# Works in both bull and bear markets by following the dominant trend direction.
+# Target: 12-37 trades per year to stay within fee-efficient range.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,102 +19,75 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for Camarilla pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Get 1w data for weekly high/low (key levels)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate Camarilla pivots from previous day's data
-    # P = (H + L + C) / 3
-    # Range = H - L
-    # Resistance levels: R1 = P + Range * 1.1/12, R2 = P + Range * 1.1/6, R3 = P + Range * 1.1/4, R4 = P + Range * 1.1/2
-    # Support levels: S1 = P - Range * 1.1/12, S2 = P - Range * 1.1/6, S3 = P - Range * 1.1/4, S4 = P - Range * 1.1/2
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate weekly high and low from previous week
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_high_1w[0] = np.nan
+    prev_low_1w[0] = np.nan
     
-    P = (prev_high + prev_low + prev_close) / 3
-    Range = prev_high - prev_low
+    # Align weekly levels to 12h timeframe
+    weekly_high = align_htf_to_ltf(prices, df_1w, prev_high_1w)
+    weekly_low = align_htf_to_ltf(prices, df_1w, prev_low_1w)
     
-    R3 = P + Range * 1.1 / 4
-    S3 = P - Range * 1.1 / 4
-    R4 = P + Range * 1.1 / 2
-    S4 = P - Range * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe
-    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
-    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
-    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Volume filter: volume > 1.5x 30-period average (on 12h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(R4_6h[i]) or np.isnan(S4_6h[i]) or 
-            np.isnan(ema34_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions:
-        # 1. Break above R4 with uptrend (close > EMA34) and volume spike -> continuation
-        # 2. Reject from S3 with uptrend and volume spike -> bounce
-        long_breakout = (close[i] > R4_6h[i] and close[i-1] <= R4_6h[i-1] and 
-                         close[i] > ema34_6h[i] and volume_spike[i])
-        long_bounce = (close[i] > S3_6h[i] and close[i-1] <= S3_6h[i-1] and 
-                       close[i] > ema34_6h[i] and volume_spike[i])
+        # Long signal: break above weekly high with volume spike
+        long_signal = (close[i] > weekly_high[i] and 
+                       close[i-1] <= weekly_high[i-1] and 
+                       volume_spike[i])
         
-        # Short conditions:
-        # 1. Break below S4 with downtrend (close < EMA34) and volume spike -> continuation
-        # 2. Reject from R3 with downtrend and volume spike -> rejection
-        short_breakout = (close[i] < S4_6h[i] and close[i-1] >= S4_6h[i-1] and 
-                          close[i] < ema34_6h[i] and volume_spike[i])
-        short_reject = (close[i] < R3_6h[i] and close[i-1] >= R3_6h[i-1] and 
-                        close[i] < ema34_6h[i] and volume_spike[i])
+        # Short signal: break below weekly low with volume spike
+        short_signal = (close[i] < weekly_low[i] and 
+                        close[i-1] >= weekly_low[i-1] and 
+                        volume_spike[i])
         
-        if long_breakout or long_bounce:
-            signals[i] = 0.25
+        if long_signal and position != 1:
+            signals[i] = 0.30
             position = 1
-        elif short_breakout or short_reject:
-            signals[i] = -0.25
+        elif short_signal and position != -1:
+            signals[i] = -0.30
             position = -1
-        # Exit conditions: return to opposite S3/R3 level
-        elif position == 1 and close[i] < S3_6h[i]:
+        # Exit when price returns to the opposite weekly level (mean reversion within the weekly range)
+        elif position == 1 and close[i] < weekly_low[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > R3_6h[i]:
+        elif position == -1 and close[i] > weekly_high[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_Camarilla_R3_S3_R4_S4_Breakout_Bounce_EMA34_Volume2x_1d"
-timeframe = "6h"
+name = "12h_WeeklyHighLow_Breakout_Volume1.5x"
+timeframe = "12h"
 leverage = 1.0
