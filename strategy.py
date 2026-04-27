@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_WeeklyVolumeSpike_ExitOnReverse
-Hypothesis: Uses KAMA (10,2,30) on daily timeframe for trend direction, with weekly volume spike confirmation for entry, and exits on trend reversal. KAMA adapts to market noise, reducing whipsaws in sideways markets. Weekly volume spike (>2.0x 20-week average) confirms institutional interest. Designed to work in both bull (trend following) and bear (avoiding false breakouts via volume filter) markets. Target: 20-80 total trades over 4 years (5-20/year) with 0.25 position size.
+6h_Ichimoku_Kumo_Twist_Trend_Continuation
+Hypothesis: Uses Ichimoku cloud twist (Senkou Span A/B cross) on 1d timeframe as trend filter for 6h breakout entries.
+Enter long when price breaks above 6h Donchian(20) high AND 1d cloud is bullish (Senkou A > Senkou B) AND price > 1d Kumo.
+Enter short when price breaks below 6h Donchian(20) low AND 1d cloud is bearish (Senkou A < Senkou B) AND price < 1d Kumo.
+Exit when price returns to 6h Donchian(20) midpoint OR cloud twists opposite.
+Ichimoku cloud twist confirms higher timeframe trend change with minimal lag. Donchian breakout provides clean entry.
+Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position size. Works in bull/bear via cloud filter.
 """
 
 import numpy as np
@@ -10,65 +15,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get daily and weekly data
+    # Get 1d and 6h data
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    df_6h = get_htf_data(prices, '6h')
     
-    # KAMA on daily close: ER = 10, Fast = 2, Slow = 30
-    close_1d_series = pd.Series(df_1d['close'].values)
-    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(close_1d_series - close_1d_series.shift(10))
-    volatility = close_1d_series.diff().abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)  # avoid div by zero
-    # Smoothing constants: sc = [ER*(2/(2+1)-2/(30+1)) + 2/(30+1)]^2
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # KAMA: kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
-    kama = np.full_like(close_1d_series, np.nan, dtype=float)
-    kama[9] = close_1d_series.iloc[9]  # seed after 10 periods
-    for i in range(10, len(close_1d_series)):
-        if not np.isnan(sc.iloc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close_1d_series.iloc[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    kama_values = kama.values
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_values)
+    # Calculate Ichimoku components on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly volume spike: current weekly volume > 2.0 * 20-week average
-    vol_1w_series = pd.Series(df_1w['volume'].values)
-    vol_avg_1w = vol_1w_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = df_1w['volume'].values > (2.0 * vol_avg_1w)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_sen = (high_tenkan + low_tenkan) / 2.0
+    
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_sen = (high_kijun + low_kijun) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2.0)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2 shifted 26 periods ahead
+    period_senkou_b = 52
+    high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((high_senkou_b + low_senkou_b) / 2.0)
+    
+    # Current Kumo (cloud) boundaries: Senkou Span A/B shifted back 26 periods
+    # For current cloud, we need values that were plotted 26 periods ago
+    senkou_a_lagged = np.roll(senkou_a, 26)
+    senkou_b_lagged = np.roll(senkou_b, 26)
+    # First 26 values invalid
+    senkou_a_lagged[:26] = np.nan
+    senkou_b_lagged[:26] = np.nan
+    
+    # Align 1d Ichimoku to 6h timeframe
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_lagged)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_lagged)
+    
+    # 6h Donchian(20) for breakout signals
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Align 6h Donchian to 6h timeframe (no additional alignment needed as already 6h)
+    donchian_high_aligned = donchian_high  # Already 6h data
+    donchian_low_aligned = donchian_low
+    donchian_mid_aligned = donchian_mid
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need KAMA (10 + 1 seed), volume avg (20)
-    start_idx = max(30, 20)  # KAMA needs ~30 to stabilize, volume 20
+    # Warmup: need Ichimoku (52), Donchian (20)
+    start_idx = max(52, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        kama_val = kama_aligned[i]
-        vol_spike = volume_spike_aligned[i]
+        senkou_a_val = senkou_a_aligned[i]
+        senkou_b_val = senkou_b_aligned[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        donchian_mid_val = donchian_mid_aligned[i]
+        
+        # Determine cloud state
+        cloud_bullish = senkou_a_val > senkou_b_val
+        cloud_bearish = senkou_a_val < senkou_b_val
+        price_above_cloud = close_val > max(senkou_a_val, senkou_b_val)
+        price_below_cloud = close_val < min(senkou_a_val, senkou_b_val)
         
         if position == 0:
-            # Look for entry: price crosses KAMA with weekly volume spike
-            # Long: price crosses above KAMA AND volume spike
-            long_condition = (close_val > kama_val) and vol_spike
-            # Short: price crosses below KAMA AND volume spike
-            short_condition = (close_val < kama_val) and vol_spike
+            # Look for entry: Donchian breakout with cloud alignment
+            # Long: price breaks above Donchian high AND bullish cloud AND price above cloud
+            long_condition = (close_val > donchian_high_val) and cloud_bullish and price_above_cloud
+            # Short: price breaks below Donchian low AND bearish cloud AND price below cloud
+            short_condition = (close_val < donchian_low_val) and cloud_bearish and price_below_cloud
             
             if long_condition:
                 signals[i] = size
@@ -77,15 +117,19 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price crosses below KAMA (trend reversal)
-            if close_val < kama_val:
+            # Exit long when price returns to Donchian midpoint OR cloud turns bearish
+            exit_condition = (close_val <= donchian_mid_val) or (not cloud_bullish)
+            
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price crosses above KAMA (trend reversal)
-            if close_val > kama_val:
+            # Exit short when price returns to Donchian midpoint OR cloud turns bullish
+            exit_condition = (close_val >= donchian_mid_val) or (not cloud_bearish)
+            
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_WeeklyVolumeSpike_ExitOnReverse"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_Trend_Continuation"
+timeframe = "6h"
 leverage = 1.0
