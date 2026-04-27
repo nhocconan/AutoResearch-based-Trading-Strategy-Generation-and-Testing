@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d ADX trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian upper band, ADX > 25 (trending), and volume > 1.5x 20-period average.
-# Short when price breaks below 20-period Donchian lower band, ADX > 25, and volume > 1.5x average.
-# Donchian captures breakouts, ADX filters for trending markets to avoid whipsaws, volume confirms conviction.
-# Designed for ~25-35 trades/year per symbol.
+# Hypothesis: 1-day Choppiness Index regime filter with 1-week EMA34 trend and volume confirmation.
+# Long when: CHOP > 61.8 (ranging market) + price near lower Bollinger Band + EMA34 rising + volume spike.
+# Short when: CHOP > 61.8 + price near upper Bollinger Band + EMA34 falling + volume spike.
+# Exit when: CHOP < 38.2 (trending market) or opposite signal.
+# Designed for ~10-25 trades/year per symbol to avoid fee drag in low-volatility regimes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,53 +19,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Choppiness Index (14-period)
+    atr14 = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean()
+    sum_atr14 = atr14.rolling(window=14, min_periods=14).sum()
+    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(sum_atr14 / (highest_high14 - lowest_low14)) / np.log10(14)
+    chop = chop.values
     
-    # ADX (14-period) on 1d for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Bollinger Bands (20, 2)
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    lower_bb = sma20 - 2 * std20
+    upper_bb = sma20 + 2 * std20
+    lower_bb = lower_bb.values
+    upper_bb = upper_bb.values
+    
+    # 1-week EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx[np.isnan(dx)] = 0
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Volume filter: volume > 2x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_filter = volume > (vol_ma20 * 2.0)
+    vol_ma20 = vol_ma20.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,25 +56,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(chop[i]) or np.isnan(lower_bb[i]) or np.isnan(upper_bb[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: break above upper band, ADX > 25, volume filter
-        if (close[i] > donch_high[i] and 
-            adx_aligned[i] > 25 and 
+        # Long conditions: ranging market (CHOP > 61.8), price near lower BB, EMA34 rising, volume spike
+        if (chop[i] > 61.8 and 
+            close[i] <= lower_bb[i] * 1.02 and  # within 2% of lower BB
+            ema34_1w_aligned[i] > ema34_1w_aligned[i-1] and  # EMA rising
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short conditions: break below lower band, ADX > 25, volume filter
-        elif (close[i] < donch_low[i] and 
-              adx_aligned[i] > 25 and 
+        # Short conditions: ranging market, price near upper BB, EMA34 falling, volume spike
+        elif (chop[i] > 61.8 and 
+              close[i] >= upper_bb[i] * 0.98 and  # within 2% of upper BB
+              ema34_1w_aligned[i] < ema34_1w_aligned[i-1] and  # EMA falling
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
+        # Exit conditions: trending market (CHOP < 38.2) or opposite signal
+        elif chop[i] < 38.2:
+            signals[i] = 0.0
+            position = 0
         else:
-            # Hold current position or flat
+            # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -103,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_1dADX25_VolumeFilter"
-timeframe = "4h"
+name = "1d_ChoppinessIndex_1wEMA34_VolumeFilter_BB"
+timeframe = "1d"
 leverage = 1.0
