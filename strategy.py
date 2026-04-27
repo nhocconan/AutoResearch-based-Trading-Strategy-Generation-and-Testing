@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -42,7 +41,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 2.0 x 24-period average (4h periods = 4 days)
+    # Volume filter: volume > 2.5 x 24-period average (4h periods = 4 days)
     vol_ma_24 = np.full(n, np.nan)
     for i in range(23, n):
         vol_ma_24[i] = np.mean(volume[i-23:i+1])
@@ -66,7 +65,7 @@ def generate_signals(prices):
         vol_avg = vol_ma_24[i]
         
         # Volume filter: significant volume spike (higher threshold = fewer trades)
-        vol_filter = vol_now > 2.0 * vol_avg
+        vol_filter = vol_now > 2.5 * vol_avg
         
         # Trend filter from 1d EMA
         bullish_trend = price > ema_34_aligned[i]
@@ -103,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
