@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-Hypothesis: 12h timeframe reduces trade frequency while maintaining edge. Uses 1d Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend filter. Target: 15-30 trades/year.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla breakout on 12h with 1d trend filter and volume confirmation works in both bull/bear markets.
+Uses strict volume threshold (3x average) and price close beyond pivot to reduce false breaks.
+Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -39,16 +41,16 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Volume confirmation: volume > 2.5 * 30-period average (balanced for 12h)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > (vol_ma * 2.5)
+    # Volume confirmation: volume > 3.0 * 20-period average (stricter)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 3.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for volume MA and EMA
-    start_idx = max(34, 30)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -89,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
