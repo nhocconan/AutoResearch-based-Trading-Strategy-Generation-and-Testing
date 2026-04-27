@@ -1,28 +1,60 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot R3/S3 Breakout with Volume Spike and Daily Trend Filter.
-Long when price breaks above R3 with volume spike and daily EMA34 uptrend.
-Short when price breaks below S3 with volume spike and daily EMA34 downtrend.
-Exit when price reverts to daily EMA34 or breaks opposite S3/R3 level.
-Designed to generate 15-35 trades/year per symbol with strong institutional level-based edge.
+4h Camarilla R3/S3 Breakout with Volume Spike and Choppiness Filter.
+Long when price breaks above R3 with volume spike and chop > 61.8 (ranging).
+Short when price breaks below S3 with volume spike and chop > 61.8.
+Exit when price crosses back below R3 (long) or above S3 (short).
+Designed to generate 20-50 trades/year per symbol with mean-reversion edge in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ema(values, period):
-    """Exponential Moving Average"""
-    n = len(values)
-    result = np.empty(n, dtype=np.float64)
-    result.fill(np.nan)
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close"""
+    range_val = high - low
+    if range_val == 0:
+        return close, close, close, close, close, close, close, close
+    c = close
+    h = high
+    l = low
+    # Camarilla levels
+    r4 = c + range_val * 1.1 / 2
+    r3 = c + range_val * 1.1 / 4
+    r2 = c + range_val * 1.1 / 6
+    r1 = c + range_val * 1.1 / 12
+    s1 = c - range_val * 1.1 / 12
+    s2 = c - range_val * 1.1 / 6
+    s3 = c - range_val * 1.1 / 4
+    s4 = c - range_val * 1.1 / 2
+    return r3, r2, r1, c, s1, s2, s3, s4
+
+def calculate_choppiness(high, low, close, period=14):
+    """Calculate Choppiness Index"""
+    n = len(high)
+    cp = np.full(n, np.nan)
     if n < period:
-        return result
-    alpha = 2.0 / (period + 1.0)
-    result[0] = values[0]
-    for i in range(1, n):
-        result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-    return result
+        return cp
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Sum of true range over period
+    atr_sum = np.zeros(n)
+    for i in range(period-1, n):
+        atr_sum[i] = np.sum(tr[i-period+1:i+1])
+    # Sum of absolute price change over period
+    price_change = np.abs(np.diff(close))
+    price_change_sum = np.zeros(n)
+    for i in range(period-1, n):
+        price_change_sum[i] = np.sum(price_change[i-period+1:i+1])
+    # Choppiness formula
+    for i in range(period-1, n):
+        if atr_sum[i] > 0:
+            cp[i] = 100 * np.log10(price_change_sum[i] / atr_sum[i]) / np.log10(period)
+    return cp
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,40 +66,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and trend filter
+    # Get 1d data for Camarilla levels and Choppiness
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's range
-    # Using previous day's high, low, close (standard Camarilla formula)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Camarilla levels for each 1d bar
+    n_1d = len(df_1d)
+    r3_1d = np.full(n_1d, np.nan)
+    s3_1d = np.full(n_1d, np.nan)
     
-    # Calculate pivot and support/resistance levels
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
+    for i in range(n_1d):
+        r3, _, _, _, _, _, s3, _ = calculate_camarilla(
+            df_1d['high'].iloc[i],
+            df_1d['low'].iloc[i],
+            df_1d['close'].iloc[i]
+        )
+        r3_1d[i] = r3
+        s3_1d[i] = s3
     
-    # Camarilla levels
-    R3 = pivot + (range_hl * 1.1 / 2.0)
-    S3 = pivot - (range_hl * 1.1 / 2.0)
-    R4 = pivot + (range_hl * 1.1)
-    S4 = pivot - (range_hl * 1.1)
+    # Calculate Choppiness for each 1d bar
+    chop_1d = calculate_choppiness(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values,
+        period=14
+    )
     
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Align to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Daily EMA34 for trend filter
-    ema34 = calculate_ema(df_1d['close'].values, 34)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
-    
-    # Volume filter: volume > 2.0x average (to capture institutional interest)
-    vol_ma_20 = np.empty_like(volume, dtype=np.float64)
-    vol_ma_20.fill(np.nan)
+    # Volume filter: volume > 2.0x average (to avoid false signals)
+    vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
@@ -75,13 +107,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Camarilla calculation (needs previous day) + EMA34 + volume MA
-    start_idx = max(34, 19)
+    # Warmup: need Camarilla + chop + volume MA
+    start_idx = max(19, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -90,34 +122,37 @@ def generate_signals(prices):
         vol_now = volume[i]
         
         # Current levels
-        r3 = R3_aligned[i]
-        s3 = S3_aligned[i]
-        ema34_val = ema34_aligned[i]
+        r3 = r3_1d_aligned[i]
+        s3 = s3_1d_aligned[i]
+        chop = chop_1d_aligned[i]
         
         # Volume filter: volume > 2.0x average
         vol_filter = vol_now > 2.0 * vol_ma_20[i]
         
+        # Choppiness filter: chop > 61.8 (ranging market)
+        chop_filter = chop > 61.8
+        
         if position == 0:
-            # Long: price breaks above R3 with volume spike and daily uptrend
-            if price_now > r3 and vol_filter and price_now > ema34_val:
+            # Long: price breaks above R3 + volume spike + chop filter
+            if price_now > r3 and vol_filter and chop_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3 with volume spike and daily downtrend
-            elif price_now < s3 and vol_filter and price_now < ema34_val:
+            # Short: price breaks below S3 + volume spike + chop filter
+            elif price_now < s3 and vol_filter and chop_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S3 (reversion) or falls below daily EMA34
-            if price_now < s3 or price_now < ema34_val:
+            # Exit long: price crosses back below R3
+            if price_now < r3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R3 (reversion) or rises above daily EMA34
-            if price_now > r3 or price_now > ema34_val:
+            # Exit short: price crosses back above S3
+            if price_now > s3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +160,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_Volume_EMA34"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
