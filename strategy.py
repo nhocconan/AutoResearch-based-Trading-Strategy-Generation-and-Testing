@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high with 1d uptrend and volume spike.
-# Short when price breaks below Donchian(20) low with 1d downtrend and volume spike.
-# Volume filter: current volume > 2x 20-period average.
-# Uses discrete position sizing (0.25) to limit churn. Designed for 15-30 trades/year per symbol.
-# Works in both bull and bear markets by following 1d trend and requiring volatility expansion.
+# Hypothesis: 1d weekly pivot reversal with volume confirmation and ADX filter.
+# Long when price crosses above weekly pivot from below with volume spike and ADX < 25 (range).
+# Short when price crosses below weekly pivot from above with volume spike and ADX < 25.
+# Uses weekly pivot points from prior week: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H.
+# Designed for 10-30 trades/year per symbol (40-120 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by fading extremes in ranging conditions.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,24 +20,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # 50-period EMA on 1d close for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly pivot levels: P, R1, S1
+    pivot = (high_weekly + low_weekly + close_weekly) / 3.0
+    r1 = 2 * pivot - low_weekly
+    s1 = 2 * pivot - high_weekly
     
-    # Donchian channels (20-period) on 4h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align weekly pivot levels to daily timeframe (wait for weekly bar to close)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
     
-    # Volume filter: volume > 2x 20-period average
+    # ADX filter: only trade in ranging markets (ADX < 25)
+    # Calculate ADX(14) on daily data
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    
+    # Pad arrays to match length
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
+    
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
+        result[0] = data[0]
+        for i in range(1, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + (data[i] / period)
+        return result
+    
+    period = 14
+    atr = wilders_smooth(tr, period)
+    plus_di = 100 * wilders_smooth(plus_dm, period) / atr
+    minus_di = 100 * wilders_smooth(minus_dm, period) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smooth(dx, period)
+    
+    # Volume filter: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,21 +77,19 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price breaks above Donchian high AND 1d uptrend AND volume spike
-        if (close[i] > high_roll[i] and 
-            close[i] > ema50_1d_aligned[i] and 
-            volume_filter[i]):
+        # Long conditions: price crosses above pivot from below AND ADX < 25 AND volume spike
+        if (close[i] > pivot_aligned[i] and close[i-1] <= pivot_aligned[i-1] and
+            adx[i] < 25 and volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short conditions: price breaks below Donchian low AND 1d downtrend AND volume spike
-        elif (close[i] < low_roll[i] and 
-              close[i] < ema50_1d_aligned[i] and 
-              volume_filter[i]):
+        # Short conditions: price crosses below pivot from above AND ADX < 25 AND volume spike
+        elif (close[i] < pivot_aligned[i] and close[i-1] >= pivot_aligned[i-1] and
+              adx[i] < 25 and volume_filter[i]):
             signals[i] = -0.25
             position = -1
         else:
@@ -75,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1d_WeeklyPivotReversion_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
