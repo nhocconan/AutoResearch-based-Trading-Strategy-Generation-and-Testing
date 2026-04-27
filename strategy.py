@@ -1,11 +1,3 @@
-# 6h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: 6h Camarilla pivot R3/S3 breakout with 1d EMA trend filter and volume confirmation
-# Camarilla pivot levels (especially R3/S3) act as strong support/resistance on 6h chart.
-# Breakout above R3 with volume and bullish 1d trend = long.
-# Breakdown below S3 with volume and bearish 1d trend = short.
-# Uses 1d EMA for trend filter to avoid counter-trend trades.
-# Target: 15-35 trades per year to minimize fee drag on 6h timeframe.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -21,91 +13,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and trend filter
+    # Get 1d data for ATR-based volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    # Using previous day's high/low/close
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate ATR(14) on daily timeframe
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        atr_14[i] = np.nanmean(tr[i-13:i+1])
     
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # Align ATR to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate 4-period RSI on 4h close
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    for i in range(14, len(close)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:14])
+            avg_loss[i] = np.mean(loss[0:14])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 1d EMA trend filter (34-period)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 4-period SMA of RSI for smoothing
+    rsi_sma = np.full_like(rsi, np.nan)
+    for i in range(3, len(rsi)):
+        rsi_sma[i] = np.mean(rsi[i-3:i+1])
     
-    # Volume filter: volume > 2.0 x 24-period average (to reduce trades)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(23, n):
-        vol_ma_24[i] = np.mean(volume[i-23:i+1])
+    # Volume filter: volume > 1.5 x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Camarilla (1 day), EMA (34), volume MA (24)
-    start_idx = max(1, 34, 24)
+    # Warmup: need ATR (14), RSI (14+3), volume MA (20)
+    start_idx = max(14+3, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(rsi_sma[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        atr = atr_14_aligned[i]
+        rsi_val = rsi_sma[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_24[i]
+        vol_avg = vol_ma_20[i]
         
-        # Volume filter: significant volume spike (higher threshold = fewer trades)
-        vol_filter = vol_now > 2.0 * vol_avg
+        # Volatility filter: only trade when ATR > 0.5% of price (avoid choppy markets)
+        vol_filter = atr > 0.005 * price
         
-        # Trend filter from 1d EMA
-        bullish_trend = price > ema_34_aligned[i]
-        bearish_trend = price < ema_34_aligned[i]
+        # Volume filter: moderate volume confirmation
+        vol_conf = vol_now > 1.5 * vol_avg
         
-        camarilla_r3 = camarilla_r3_aligned[i]
-        camarilla_s3 = camarilla_s3_aligned[i]
+        # RSI conditions: oversold (<30) for long, overbought (>70) for short
+        rsi_oversold = rsi_val < 30
+        rsi_overbought = rsi_val > 70
         
         if position == 0:
-            # Long: price breaks above R3 + volume + bullish 1d trend
-            if price > camarilla_r3 and vol_filter and bullish_trend:
+            # Long: RSI oversold + volatility + volume confirmation
+            if rsi_oversold and vol_filter and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3 + volume + bearish 1d trend
-            elif price < camarilla_s3 and vol_filter and bearish_trend:
+            # Short: RSI overbought + volatility + volume confirmation
+            elif rsi_overbought and vol_filter and vol_conf:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S3 or trend turns bearish
-            if price < camarilla_s3 or not bullish_trend:
+            # Exit long: RSI returns to neutral (50) or volatility drops
+            if rsi_val >= 50 or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R3 or trend turns bullish
-            if price > camarilla_r3 or not bearish_trend:
+            # Exit short: RSI returns to neutral (50) or volatility drops
+            if rsi_val <= 50 or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_RSI_Volatility_Filter_Volume"
+timeframe = "4h"
 leverage = 1.0
