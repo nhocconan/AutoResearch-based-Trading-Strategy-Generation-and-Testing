@@ -13,77 +13,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculation
+    # Get daily data for pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Previous day's high, low, close (1d shift for completed day)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla levels (R4 and S4 - stronger levels than R3/S3)
+    range_hl = prev_high - prev_low
+    R4 = prev_close + range_hl * 1.1 / 2
+    S4 = prev_close - range_hl * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    R4_12h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_12h = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Get daily EMA50 for trend filter (more stable than EMA34)
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 20-period ATR for volatility filter (on daily)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr20_1d = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr20_1d)
-    
-    # Calculate 50-period SMA for trend confirmation (on daily)
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
-    
-    # Volume spike detection: current volume > 2.0 * 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Volume spike: current volume > 2.5 * 24-period average (48h lookback)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24[i] = np.mean(volume[i-24:i])
+    volume_spike = volume > (2.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup
-    start_idx = max(34, 20, 50) + 1
+    # Warmup: need enough data for calculations
+    start_idx = max(50, 24) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr20_1d_aligned[i]) or 
-            np.isnan(sma50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(R4_12h[i]) or np.isnan(S4_12h[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price above EMA34 AND above SMA50 AND volume spike
-            if (close[i] > ema34_1d_aligned[i] and 
-                close[i] > sma50_1d_aligned[i] and 
-                volume_spike[i]):
+            # Long entry: price breaks above R4 + 1-day uptrend + volume spike
+            if (close[i] > R4_12h[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below EMA34 AND below SMA50 AND volume spike
-            elif (close[i] < ema34_1d_aligned[i] and 
-                  close[i] < sma50_1d_aligned[i] and 
-                  volume_spike[i]):
+            # Short entry: price breaks below S4 + 1-day downtrend + volume spike
+            elif (close[i] < S4_12h[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below EMA34 OR ATR-based stop
-            if (close[i] < ema34_1d_aligned[i] or 
-                close[i] < (ema34_1d_aligned[i] - 1.5 * atr20_1d_aligned[i])):
+            # Long exit: price breaks below S4 (reversal) or trend changes
+            if (close[i] < S4_12h[i] or close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above EMA34 OR ATR-based stop
-            if (close[i] > ema34_1d_aligned[i] or 
-                close[i] > (ema34_1d_aligned[i] + 1.5 * atr20_1d_aligned[i])):
+            # Short exit: price breaks above R4 (reversal) or trend changes
+            if (close[i] > R4_12h[i] or close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_SMA50_VolumeSpike_ATRStop"
-timeframe = "1d"
+name = "12h_Camarilla_R4S4_1dTrend_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
