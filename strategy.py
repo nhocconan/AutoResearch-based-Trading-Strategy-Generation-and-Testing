@@ -26,7 +26,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6h Donchian channels (20-period for structure)
+    # 4h Donchian channels (20-period for structure)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -81,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dEMA34_VolumeFilter"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
