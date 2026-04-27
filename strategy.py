@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_DeMark_Sequential_Setup_Trend_Filter_Volume
-Hypothesis: Trade 12h timeframe with Tom DeMark Sequential setup (9/13) for trend exhaustion,
-filtered by 1d trend (EMA50) and volume confirmation. TD Sequential identifies exhaustion
-points in extended trends, providing high-probability reversal entries. Works in both
-bull and bear markets by catching trend reversals at overextended levels.
+1h_MultiTF_Trend_With_Volume_Filter
+Hypothesis: Use 4h EMA trend and 1d RSI filter for direction, enter on 1h EMA cross with volume confirmation. 
+Works in bull via 4h uptrend + 1h golden crosses, in bear via 4h downtrend + 1h death crosses.
+Volume filter ensures momentum behind moves. Target 15-30 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,99 +20,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for TD Sequential and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate TD Sequential setup phase (count of 9 consecutive closes)
-    # Buy setup: 9 consecutive closes > close 4 bars ago
-    # Sell setup: 9 consecutive closes < close 4 bars ago
-    close_1d = df_1d['close'].values
+    # Get 1d data for RSI filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Initialize setup counters
-    buy_setup = np.zeros(len(close_1d))
-    sell_setup = np.zeros(len(close_1d))
+    # 4h EMA50 for trend direction
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    buy_count = 0
-    sell_count = 0
+    # 1d RSI for overbought/oversold filter
+    delta = pd.Series(df_1d['close'].values).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_vals = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_vals)
     
-    for i in range(4, len(close_1d)):
-        if close_1d[i] > close_1d[i-4]:
-            buy_count += 1
-            sell_count = 0
-        elif close_1d[i] < close_1d[i-4]:
-            sell_count += 1
-            buy_count = 0
-        else:
-            buy_count = 0
-            sell_count = 0
-        
-        # Cap at 9 for setup phase
-        buy_setup[i] = min(buy_count, 9)
-        sell_setup[i] = min(sell_count, 9)
+    # 1h EMA cross for entry timing (fast=12, slow=26)
+    ema_fast = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_slow = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    ema_cross = ema_fast - ema_slow
     
-    # TD Sequential signals: buy setup = 9, sell setup = 9
-    td_buy_signal = (buy_setup == 9).astype(float)
-    td_sell_signal = (sell_setup == 9).astype(float)
-    
-    # Align TD signals to 12h timeframe
-    td_buy_aligned = align_htf_to_ltf(prices, df_1d, td_buy_signal)
-    td_sell_aligned = align_htf_to_ltf(prices, df_1d, td_sell_signal)
-    
-    # 1d EMA50 for trend filter
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # Volume confirmation: current volume > 1.8 * 24-period average (on 12h data, ~12 days)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (1.8 * vol_avg)
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need enough data for TD Sequential, EMA, and volume average
-    start_idx = max(24, 50)
+    # Warmup: need enough data for all indicators
+    start_idx = max(50, 26, 20)
     
     for i in range(start_idx, n):
-        bars_since_exit += 1
-        
         # Skip if any data not ready
-        if (np.isnan(td_buy_aligned[i]) or np.isnan(td_sell_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(ema_cross[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        td_buy = td_buy_aligned[i] > 0.5
-        td_sell = td_sell_aligned[i] > 0.5
-        ema_50_val = ema_50_aligned[i]
+        ema_4h_val = ema_4h_aligned[i]
+        rsi_1d_val = rsi_1d_aligned[i]
+        cross_val = ema_cross[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Require minimum 24 bars since last exit to avoid churn (~12 days on 12h)
-            if bars_since_exit >= 24:
-                # Long: TD buy setup (9) + above EMA50 (uptrend) + volume confirmation
-                if td_buy and close[i] > ema_50_val and vol_conf:
-                    signals[i] = size
-                    position = 1
-                    bars_since_exit = 0
-                # Short: TD sell setup (9) + below EMA50 (downtrend) + volume confirmation
-                elif td_sell and close[i] < ema_50_val and vol_conf:
-                    signals[i] = -size
-                    position = -1
-                    bars_since_exit = 0
+            # Long: 4h uptrend, 1h golden cross, not overbought, volume confirmation
+            if (close[i] > ema_4h_val and 
+                cross_val > 0 and 
+                rsi_1d_val < 70 and 
+                vol_conf):
+                signals[i] = size
+                position = 1
+            # Short: 4h downtrend, 1h death cross, not oversold, volume confirmation
+            elif (close[i] < ema_4h_val and 
+                  cross_val < 0 and 
+                  rsi_1d_val > 30 and 
+                  vol_conf):
+                signals[i] = -size
+                position = -1
         elif position == 1:
-            # Exit long: TD sell setup (9) or price crosses below EMA50
-            if td_sell or close[i] < ema_50_val:
+            # Exit long: 4h trend turns down OR 1h death cross
+            if (close[i] < ema_4h_val or cross_val < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: TD buy setup (9) or price crosses above EMA50
-            if td_buy or close[i] > ema_50_val:
+            # Exit short: 4h trend turns up OR 1h golden cross
+            if (close[i] > ema_4h_val or cross_val > 0):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_DeMark_Sequential_Setup_Trend_Filter_Volume"
-timeframe = "12h"
+name = "1h_MultiTF_Trend_With_Volume_Filter"
+timeframe = "1h"
 leverage = 1.0
