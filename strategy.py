@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,12 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context (1d)
+    # Get daily data for higher timeframe context (1d) - trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Calculate daily EMA(34) for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -51,7 +53,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -71,8 +73,8 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 4h volume above average (more strict)
-        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 1.2
+        # Volume filter: current volume above 4h average (more strict)
+        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 1.5
         
         # Breakout signals: price breaks 4h Donchian channels
         breakout_up = close[i] > donchian_high_aligned[i]
