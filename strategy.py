@@ -1,56 +1,47 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour RSI(14) with 1-week RSI(49) trend filter and 1-day volume confirmation.
-In oversold conditions (RSI<30) with weekly uptrend: long.
-In overbought conditions (RSI>70) with weekly downtrend: short.
-Weekly RSI provides robust trend filter less prone to whipsaw than moving averages,
-while daily volume confirms participation. Target: 15-30 trades/year per symbol.
+Hypothesis: Daily Bollinger Band breakout with weekly trend filter and volume confirmation.
+In bull markets: long when price breaks above upper BB with weekly uptrend and high volume.
+In bear markets: short when price breaks below lower BB with weekly downtrend and high volume.
+Uses Bollinger Bands (20,2) for volatility breakouts, weekly EMA50 for trend filter,
+and volume > 1.5x 20-day average for confirmation. Designed for 1d timeframe to
+capture multi-day trends while minimizing trade frequency (<20 trades/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(close, length=14):
-    """Relative Strength Index with proper smoothing"""
-    if len(close) < length + 1:
-        return np.full_like(close, np.nan, dtype=np.float64)
+def calculate_bollinger_bands(close, length=20, std_dev=2.0):
+    """Calculate Bollinger Bands: upper, middle (SMA), lower"""
+    if len(length) < length:
+        return np.full_like(close, np.nan), np.full_like(close, np.nan), np.full_like(close, np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    sma = pd.Series(close).rolling(window=length, min_periods=length).mean().values
+    std = pd.Series(close).rolling(window=length, min_periods=length).std().values
     
-    avg_gain = np.full_like(close, np.nan, dtype=np.float64)
-    avg_loss = np.full_like(close, np.nan, dtype=np.float64)
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
     
-    # First average
-    avg_gain[length] = np.mean(gain[:length])
-    avg_loss[length] = np.mean(loss[:length])
+    return upper, sma, lower
+
+def calculate_ema(values, period):
+    """Exponential Moving Average"""
+    if len(values) < period:
+        return np.full_like(values, np.nan, dtype=np.float64)
     
-    # Smooth subsequent values
-    for i in range(length + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (length - 1) + gain[i-1]) / length
-        avg_loss[i] = (avg_loss[i-1] * (length - 1) + loss[i-1]) / length
+    ema = np.full_like(values, np.nan, dtype=np.float64)
+    alpha = 2.0 / (period + 1)
+    ema[period-1] = np.mean(values[:period])
     
-    rs = np.full_like(close, np.nan, dtype=np.float64)
-    for i in range(length, len(close)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-        else:
-            rs[i] = np.inf
+    for i in range(period, len(values)):
+        ema[i] = alpha * values[i] + (1 - alpha) * ema[i-1]
     
-    rsi = np.full_like(close, np.nan, dtype=np.float64)
-    for i in range(length, len(close)):
-        if rs[i] == np.inf:
-            rsi[i] = 100.0
-        else:
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-    
-    return rsi
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -60,13 +51,16 @@ def generate_signals(prices):
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 49:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly RSI49 for trend
+    # Calculate weekly EMA50 for trend
     wk_close = df_1w['close'].values
-    rsi_49_1w = calculate_rsi(wk_close, 49)
-    rsi_49_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_49_1w)
+    ema_50_1w = calculate_ema(wk_close, 50)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate daily Bollinger Bands (20,2)
+    upper_bb, middle_bb, lower_bb = calculate_bollinger_bands(close, 20, 2.0)
     
     # Get daily volume for confirmation
     df_1d = get_htf_data(prices, '1d')
@@ -77,60 +71,63 @@ def generate_signals(prices):
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 6h RSI14
-    rsi_14_6h = calculate_rsi(close, 14)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need RSI14 (14), weekly RSI49 (49), volume MA (20)
-    start_idx = max(14, 49, 20)
+    # Warmup: need BB (20) + EMA (50) + volume MA (20)
+    start_idx = max(20, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi_14_6h[i]) or np.isnan(rsi_49_1w_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 6h price and volume
+        # Current price and volume
         price_now = close[i]
         vol_now = volume[i]
         vol_ma = vol_ma_20_1d_aligned[i]
         
         # Current indicators
-        rsi_now = rsi_14_6h[i]
-        weekly_rsi = rsi_49_1w_aligned[i]
+        bb_upper = upper_bb[i]
+        bb_lower = lower_bb[i]
+        bb_middle = middle_bb[i]
+        ema_trend = ema_50_1w_aligned[i]
         
-        # Volume filter: volume > 1.3x daily average
-        vol_filter = vol_now > 1.3 * vol_ma
+        # Volume filter: volume > 1.5x daily average
+        vol_filter = vol_now > 1.5 * vol_ma
         
-        # Trend filter: weekly RSI > 50 = uptrend, < 50 = downtrend
-        weekly_uptrend = weekly_rsi > 50
-        weekly_downtrend = weekly_rsi < 50
+        # Trend filter: weekly close above/below weekly EMA50
+        wk_close_price = df_1w['close'].values
+        wk_close_aligned = align_htf_to_ltf(prices, df_1w, wk_close_price)
+        if np.isnan(wk_close_aligned[i]):
+            signals[i] = 0.0
+            continue
+        weekly_close = wk_close_aligned[i]
         
         if position == 0:
-            # Oversold with weekly uptrend: long
-            if rsi_now < 30 and weekly_uptrend and vol_filter:
+            # Bullish breakout: price above upper BB with weekly uptrend and high volume
+            if price_now > bb_upper and weekly_close > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Overbought with weekly downtrend: short
-            elif rsi_now > 70 and weekly_downtrend and vol_filter:
+            # Bearish breakout: price below lower BB with weekly downtrend and high volume
+            elif price_now < bb_lower and weekly_close < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: overbought or trend change
-            if rsi_now > 70 or weekly_rsi < 50:
+            # Exit long: price crosses below middle BB or trend changes
+            if price_now < bb_middle or weekly_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: oversold or trend change
-            if rsi_now < 30 or weekly_rsi > 50:
+            # Exit short: price crosses above middle BB or trend changes
+            if price_now > bb_middle or weekly_close > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -138,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI14_WeeklyRSI49_Volume"
-timeframe = "6h"
+name = "1d_BollingerBreakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
