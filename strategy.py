@@ -13,28 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get weekly data for monthly pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate weekly pivot from daily data (last 5 days)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate monthly pivot from weekly data (last 4 weeks)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot using last 5 daily bars
-    weekly_pivot = np.full(len(high_1d), np.nan)
-    for i in range(4, len(high_1d)):  # Need at least 5 days
-        week_high = np.max(high_1d[i-4:i+1])
-        week_low = np.min(low_1d[i-4:i+1])
-        week_close = close_1d[i]
-        weekly_pivot[i] = (week_high + week_low + week_close) / 3
+    # Calculate monthly pivot using last 4 weekly bars
+    monthly_pivot = np.full(len(high_1w), np.nan)
+    for i in range(3, len(high_1w)):  # Need at least 4 weeks
+        week_high = np.max(high_1w[i-3:i+1])
+        week_low = np.min(low_1w[i-3:i+1])
+        week_close = close_1w[i]
+        monthly_pivot[i] = (week_high + week_low + week_close) / 3
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Align monthly pivot to daily timeframe
+    monthly_pivot_aligned = align_htf_to_ltf(prices, df_1w, monthly_pivot)
     
-    # Calculate 20-period Donchian channels directly on 6h data
+    # Calculate 20-period Donchian channels directly on daily data
     lookback = 20
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
@@ -53,13 +53,13 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup period: need at least 20 for Donchian, 20 for volume, 5 for weekly pivot
-    start_idx = max(lookback, vol_period, 5)
+    # Warmup period: need at least 20 for Donchian, 20 for volume, 4 for monthly pivot
+    start_idx = max(lookback, vol_period, 3)
     
     for i in range(start_idx, n):
         if (np.isnan(highest_high[i]) or
             np.isnan(lowest_low[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(monthly_pivot_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,9 +67,9 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from weekly pivot
-        bullish = price > weekly_pivot_aligned[i]
-        bearish = price < weekly_pivot_aligned[i]
+        # Determine trend from monthly pivot
+        bullish = price > monthly_pivot_aligned[i]
+        bearish = price < monthly_pivot_aligned[i]
         
         # Volume confirmation: spike > 2.0x average
         volume_confirmation = vol_ratio > 2.0
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Trend_Volume"
-timeframe = "6h"
+name = "1d_Donchian20_MonthlyPivot_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
