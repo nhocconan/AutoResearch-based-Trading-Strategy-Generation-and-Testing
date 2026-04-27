@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3_1d = close_1d_arr + (high_1d - low_1d) * 1.1 / 4.0
     s3_1d = close_1d_arr - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align to 1h timeframe (previous day's levels available at open)
+    # Align to 12h timeframe (previous day's levels available at open)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -66,14 +66,14 @@ def generate_signals(prices):
                 close[i] > ema34_1d_aligned[i] and 
                 volume_filter[i] and 
                 session_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S3 in downtrend with volume confirmation and during session
             elif (close[i] < s3_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
                   volume_filter[i] and 
                   session_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
@@ -83,17 +83,17 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short exit: price closes above EMA34 (trend change)
             if close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Session"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
