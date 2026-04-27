@@ -13,9 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volatility regime
+    # Get daily data for ATR and volatility regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -34,7 +34,7 @@ def generate_signals(prices):
     
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate ATR ratio: ATR(7)/ATR(14) for volatility expansion
+    # Calculate ATR ratio: current ATR(7) / ATR(14) - volatility expansion signal
     tr1_7 = high_1d[1:] - low_1d[1:]
     tr2_7 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3_7 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -46,7 +46,7 @@ def generate_signals(prices):
     
     atr_7_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_7_1d)
     
-    # ATR ratio: ATR(7)/ATR(14) > 1.4 indicates volatility expansion
+    # ATR ratio: ATR(7)/ATR(14) > 1.3 indicates volatility expansion
     atr_ratio = np.full(n, np.nan)
     valid_mask = (~np.isnan(atr_7_1d_aligned)) & (~np.isnan(atr_14_1d_aligned)) & (atr_14_1d_aligned > 0)
     atr_ratio[valid_mask] = atr_7_1d_aligned[valid_mask] / atr_14_1d_aligned[valid_mask]
@@ -106,18 +106,18 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Volatility regime filter: ATR ratio > 1.4 = expansion (favor trend)
-        vol_expansion = atr_ratio[i] > 1.4
+        # Volatility regime filter: ATR ratio > 1.3 = expansion (favor trend)
+        vol_expansion = atr_ratio[i] > 1.3
         
         if position == 0:
-            # Long: RSI < 25 (oversold) + volatility expansion + weekly uptrend
-            if (rsi_4[i] < 25 and 
+            # Long: RSI < 30 (oversold) + volatility expansion + weekly uptrend
+            if (rsi_4[i] < 30 and 
                 vol_expansion and 
                 ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 75 (overbought) + volatility expansion + weekly downtrend
-            elif (rsi_4[i] > 75 and 
+            # Short: RSI > 70 (overbought) + volatility expansion + weekly downtrend
+            elif (rsi_4[i] > 70 and 
                   vol_expansion and 
                   ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
                 signals[i] = -0.25
@@ -125,16 +125,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI > 75 or weekly trend turns down
-            if (rsi_4[i] > 75 or 
+            # Long exit: RSI > 70 or weekly trend turns down
+            if (rsi_4[i] > 70 or 
                 ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 25 or weekly trend turns up
-            if (rsi_4[i] < 25 or 
+            # Short exit: RSI < 30 or weekly trend turns up
+            if (rsi_4[i] < 30 or 
                 ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
@@ -143,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolatilityExpansion_RSI4_WeeklyEMA34_v2"
+name = "4h_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
 timeframe = "4h"
 leverage = 1.0
