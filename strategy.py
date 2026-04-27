@@ -22,15 +22,26 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA 34 for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d Williams %R (14-period)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    williams_r[highest_high_14 == lowest_low_14] = -50  # avoid division by zero
     
-    # 1h Donchian channels (20-period for tighter entries)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams %R levels: oversold < -80, overbought > -20
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Volume filter: volume > 1.5x 20-period average (moderate filter)
+    # 60-period EMA on 1d for trend filter
+    ema_60_1d = pd.Series(close_1d).ewm(span=60, adjust=False, min_periods=60).mean().values
+    ema_60_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_60_1d)
+    
+    # 6h Williams %R (14-period) for entry timing
+    highest_high_6h = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_6h = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r_6h = -100 * (highest_high_6h - close) / (highest_high_6h - lowest_low_6h)
+    williams_r_6h[highest_high_6h == lowest_low_6h] = -50
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
@@ -38,49 +49,58 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema_60_1d_aligned[i]) or 
+            np.isnan(williams_r_6h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # 1d trend filter: price above/below 60 EMA
+        price_above_ema = close[i] > ema_60_1d_aligned[i]
+        price_below_ema = close[i] < ema_60_1d_aligned[i]
         
-        # Long conditions: price breaks above upper Donchian + above 1d EMA + volume
-        long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_filter[i])
-        # Short conditions: price breaks below lower Donchian + below 1d EMA + volume
-        short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_filter[i])
+        # 1d Williams %R conditions
+        wr_oversold = williams_r_aligned[i] < -80
+        wr_overbought = williams_r_aligned[i] > -20
         
-        if long_breakout:
-            signals[i] = 0.20
+        # 6h Williams %R for entry timing: look for reversal from extreme
+        wr_6h_oversold = williams_r_6h[i] < -80
+        wr_6h_overbought = williams_r_6h[i] > -20
+        
+        # Long conditions: 1d oversold + 6h showing oversold reversal + volume
+        long_setup = wr_oversold and wr_6h_oversold and price_above_ema and volume_filter[i]
+        # Short conditions: 1d overbought + 6h showing overbought reversal + volume
+        short_setup = wr_overbought and wr_6h_overbought and price_below_ema and volume_filter[i]
+        
+        if long_setup:
+            signals[i] = 0.25
             position = 1
-        elif short_breakout:
-            signals[i] = -0.20
+        elif short_setup:
+            signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite Donchian breakout
-        elif position == 1 and close[i] < lowest_low[i-1]:
+        # Exit conditions: opposite 1d Williams %R extreme
+        elif position == 1 and williams_r_aligned[i] > -20:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > highest_high[i-1]:
+        elif position == -1 and williams_r_aligned[i] < -80:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Donchian20_Breakout_1dEMA34_VolumeFilter"
-timeframe = "1h"
+name = "6h_WilliamsR_WR_1dTrend_6hTiming_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
