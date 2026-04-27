@@ -13,81 +13,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot calculation (using daily high/low/close)
+    # Get 1d data for ATR and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points using last completed week (Monday open to Friday close)
-    # We'll use 5-day rolling window to approximate weekly OHLC
-    def calculate_weekly_pivot(high_arr, low_arr, close_arr):
-        if len(high_arr) < 5:
-            return np.array([np.nan]), np.array([np.nan]), np.array([np.nan])
-        
-        # Use last 5 days for weekly OHLC (approximation)
-        weekly_high = np.max(high_arr[-5:])
-        weekly_low = np.min(low_arr[-5:])
-        weekly_close = close_arr[-1]  # Most recent close
-        
-        pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        r1 = 2 * pivot - weekly_low
-        s1 = 2 * pivot - weekly_high
-        r2 = pivot + (weekly_high - weekly_low)
-        s2 = pivot - (weekly_high - weekly_low)
-        r3 = weekly_high + 2 * (pivot - weekly_low)
-        s3 = weekly_low - 2 * (weekly_high - pivot)
-        
-        return np.array([pivot]), np.array([r1]), np.array([s1]), np.array([r2]), np.array([s2]), np.array([r3]), np.array([s3])
+    # Calculate 14-period ATR using Wilder's smoothing
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                               np.abs(low_1d[1:] - close_1d[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr_1d = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr_1d[i] = np.mean(tr[1:15])
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Get weekly pivot values (updated weekly)
-    pivot_val, r1_val, s1_val, r2_val, s2_val, r3_val, s3_val = calculate_weekly_pivot(high_1d, low_1d, close_1d)
+    # Calculate 14-period RSI using Wilder's smoothing
+    delta = np.diff(close_1d)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(len(gain), np.nan)
+    avg_loss = np.full(len(loss), np.nan)
+    for i in range(14, len(gain)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # If we don't have enough data for weekly pivot, use daily pivot as fallback
-    if np.isnan(pivot_val[0]):
-        # Daily pivot calculation
-        daily_high = high_1d[-1]
-        daily_low = low_1d[-1]
-        daily_close = close_1d[-1]
-        
-        pivot_val = np.array([(daily_high + daily_low + daily_close) / 3.0])
-        r1_val = np.array([2 * pivot_val[0] - daily_low])
-        s1_val = np.array([2 * pivot_val[0] - daily_high])
-        r2_val = np.array([pivot_val[0] + (daily_high - daily_low)])
-        s2_val = np.array([pivot_val[0] - (daily_high - daily_low)])
-        r3_val = np.array([daily_high + 2 * (pivot_val[0] - daily_low)])
-        s3_val = np.array([daily_low - 2 * (daily_high - pivot_val[0])])
-    
-    # Get 6h data for EMA20 trend filter (more responsive for 6h timeframe)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_6h = df_6h['close'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 6h EMA20
-    ema_period = 20
-    ema_6h = np.full(len(close_6h), np.nan)
-    if len(close_6h) >= ema_period:
-        ema_6h[ema_period - 1] = np.mean(close_6h[:ema_period])
-        for i in range(ema_period, len(close_6h)):
-            ema_6h[i] = (close_6h[i] * (2 / (ema_period + 1)) + 
-                        ema_6h[i-1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 4h EMA50
+    ema_period = 50
+    ema_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= ema_period:
+        ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
+        for i in range(ema_period, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * (2 / (ema_period + 1)) + 
+                        ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Align indicators to 6h timeframe (our primary timeframe)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), pivot_val[0]))
-    r1_aligned = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r1_val[0]))
-    s1_aligned = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s1_val[0]))
-    r2_aligned = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r2_val[0]))
-    s2_aligned = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s2_val[0]))
-    r3_aligned = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3_val[0]))
-    s3_aligned = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3_val[0]))
-    ema_6h_aligned = align_htf_to_ltf(prices, df_6h, ema_6h)
+    # Align indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Volume filter: current volume > 1.5x 20-period average (more reasonable threshold)
+    # Volume filter: current volume > 2.0x 20-period average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
@@ -97,57 +82,47 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need EMA and volume MA
-    start_idx = max(ema_period, vol_period) + 5
+    # Warmup: need ATR, RSI, EMA, and volume MA
+    start_idx = max(14, 50, vol_period) + 20  # extra buffer for ATR calculation
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_6h_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        ema = ema_6h_aligned[i]
-        pivot = pivot_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
+        atr = atr_1d_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R1 with volume, above EMA20 (bullish bias)
-            if (price > r1 and 
-                vol_ratio > 1.5 and 
-                price > ema):
+            # Long: RSI < 30 (oversold) + volume spike + price > 4h EMA50
+            if (rsi_1d_aligned[i] < 30 and 
+                vol_ratio > 2.0 and 
+                price > ema_4h_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below S1 with volume, below EMA20 (bearish bias)
-            elif (price < s1 and 
-                  vol_ratio > 1.5 and 
-                  price < ema):
+            # Short: RSI > 70 (overbought) + volume spike + price < 4h EMA50
+            elif (rsi_1d_aligned[i] > 70 and 
+                  vol_ratio > 2.0 and 
+                  price < ema_4h_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price breaks below S1 (mean reversion) or EMA20 turns bearish
-            if (price < s1 or 
-                price < ema):
+            # Long exit: RSI > 50 (mean reversion) OR ATR-based stop
+            if (rsi_1d_aligned[i] > 50 or 
+                price < close[i-1] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price breaks above R1 (mean reversion) or EMA20 turns bullish
-            if (price > r1 or 
-                price > ema):
+            # Short exit: RSI < 50 (mean reversion) OR ATR-based stop
+            if (rsi_1d_aligned[i] < 50 or 
+                price > close[i-1] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -155,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_PivotPoints_R1S1_Breakout_EMA20_Volume"
-timeframe = "6h"
+name = "4h_RSI_MeanReversion_VolumeSpike_EMA50"
+timeframe = "4h"
 leverage = 1.0
