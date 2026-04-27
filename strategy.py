@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -27,7 +27,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d RSI 14 for overbought/oversold conditions
+    # Calculate 1d RSI for overbought/oversold conditions
     delta_1d = pd.Series(close_1d).diff()
     gain_1d = delta_1d.where(delta_1d > 0, 0)
     loss_1d = -delta_1d.where(delta_1d < 0, 0)
@@ -50,18 +50,34 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
+    # Calculate 4h Donchian channels for entry signals
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+            np.isnan(vol_ma_1d_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -79,14 +95,20 @@ def generate_signals(prices):
         # Volume filter: current volume above 1d average
         volume_filter = volume[i] > vol_ma_1d_aligned[i]
         
-        # Long conditions: price above EMA34 + RSI not overbought + volume + volatility
-        long_condition = (price_above_ema and 
+        # Donchian breakout signals
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
+        
+        # Long conditions: Donchian breakout + trend + RSI not overbought + volume + volatility
+        long_condition = (long_breakout and 
+                         price_above_ema and 
                          rsi_not_overbought and 
                          volume_filter and 
                          vol_filter)
         
-        # Short conditions: price below EMA34 + RSI not oversold + volume + volatility
-        short_condition = (price_below_ema and 
+        # Short conditions: Donchian breakdown + trend + RSI not oversold + volume + volatility
+        short_condition = (short_breakout and 
+                          price_below_ema and 
                           rsi_not_oversold and 
                           volume_filter and 
                           vol_filter)
@@ -97,11 +119,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal
-        elif position == 1 and not price_above_ema:
+        # Exit conditions: Donchian reversal or trend reversal
+        elif position == 1 and (close[i] < donchian_low_aligned[i] or not price_above_ema):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not price_below_ema:
+        elif position == -1 and (close[i] > donchian_high_aligned[i] or not price_below_ema):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -115,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_RSI14_VolumeFilter_1dTrend"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_RSI_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
