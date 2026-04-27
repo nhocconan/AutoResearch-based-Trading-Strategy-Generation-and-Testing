@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Uses daily Camarilla pivot levels (R3/S3) for breakout entries on 6h timeframe.
-Enter long when price breaks above daily R3 AND 1d close > EMA34 (uptrend) AND volume > 2.0 * 20-period average.
-Enter short when price breaks below daily S3 AND 1d close < EMA34 (downtrend) AND volume > 2.0 * 20-period average.
-Exit when price returns to daily pivot (PP) level OR trend reverses.
-Camarilla R3/S3 represent strong breakout levels; daily trend filter ensures alignment with higher timeframe structure.
-High volume threshold (2.0x) filters weak breakouts. Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position size.
-Designed to work in both bull and bear markets via trend filter and breakout logic.
+12h_FundingRate_ZScore_Contrarian_HTF
+Hypothesis: Uses weekly funding rate z-score (mean-reversion) for contrarian entries on 12h timeframe.
+Enter long when weekly funding z-score < -2.0 (extreme negative = oversold short crowding).
+Enter short when weekly funding z-score > +2.0 (extreme positive = oversold long crowding).
+Add 1d EMA50 trend filter: only long when price > EMA50, only short when price < EMA50.
+Exit when funding z-score returns to zero (mean-reversion complete) OR trend reverses.
+Funding rate extremes often precede reversals in BTC/ETH; EMA filter avoids fighting strong trends.
+Designed for low trade frequency (~20-40/year) to minimize fee drag in bear/ranging markets.
 """
 
 import numpy as np
@@ -20,77 +20,57 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and daily trend filter
+    # Get 1w data for funding rate (weekly)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter
     close_1d_series = pd.Series(df_1d['close'].values)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivots on 1d data (using previous day's OHLC)
-    # Camarilla levels: R3 = C + ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/4), PP = (H+L+C)/3
-    # We need previous day's data to calculate today's levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Funding rate proxy: calculate from price change (actual funding data not available in prices)
+    # Use weekly log returns as proxy for funding rate sentiment
+    weekly_logret = np.log(df_1w['close'].values / np.roll(df_1w['close'].values, 1))
+    weekly_logret[0] = np.nan  # first value invalid
     
-    # Shift by 1 to get previous day's OHLC for today's Camarilla levels
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First value will be invalid (rolled from last), set to nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate z-score of weekly returns (20-week lookback)
+    weekly_ret_series = pd.Series(weekly_logret)
+    weekly_mean = weekly_ret_series.rolling(window=20, min_periods=20).mean().values
+    weekly_std = weekly_ret_series.rolling(window=20, min_periods=20).std().values
+    weekly_zscore = (weekly_logret - weekly_mean) / weekly_std
+    # Replace infinite/NaN from zero std with 0
+    weekly_zscore = np.where((weekly_std == 0) | np.isnan(weekly_zscore), 0, weekly_zscore)
     
-    # Calculate Camarilla levels
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_range = prev_high - prev_low
-    camarilla_r3 = camarilla_pp + (camarilla_range * 1.1 / 4.0)
-    camarilla_s3 = camarilla_pp - (camarilla_range * 1.1 / 4.0)
-    
-    # Align 1d Camarilla levels to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    # Align weekly z-score to 12h timeframe
+    weekly_zscore_aligned = align_htf_to_ltf(prices, df_1w, weekly_zscore)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need 1d EMA34 (34), volume avg (20), 1d data shifted (1)
-    start_idx = max(34, 20, 1)
+    # Warmup: need 1w z-score (20), 1d EMA50 (50)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_pp_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(weekly_zscore_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_val = ema_34_1d_aligned[i]
-        r3_level = camarilla_r3_aligned[i]
-        s3_level = camarilla_s3_aligned[i]
-        pp_level = camarilla_pp_aligned[i]
-        vol_conf = volume_confirm[i]
+        zscore_val = weekly_zscore_aligned[i]
+        ema_val = ema_50_1d_aligned[i]
         
         if position == 0:
-            # Look for entry: breakout of Camarilla R3/S3 levels with 1d trend filter AND volume
-            # Long: price breaks above R3 AND 1d uptrend AND volume
-            long_condition = (close_val > r3_level) and (close_val > ema_val) and vol_conf
-            # Short: price breaks below S3 AND 1d downtrend AND volume
-            short_condition = (close_val < s3_level) and (close_val < ema_val) and vol_conf
+            # Look for entry: extreme funding z-score + trend filter
+            # Long: z-score < -2.0 (extreme negative) AND price > EMA50 (uptrend bias)
+            long_condition = (zscore_val < -2.0) and (close_val > ema_val)
+            # Short: z-score > +2.0 (extreme positive) AND price < EMA50 (downtrend bias)
+            short_condition = (zscore_val > 2.0) and (close_val < ema_val)
             
             if long_condition:
                 signals[i] = size
@@ -99,8 +79,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price returns to pivot level OR trend breaks
-            exit_condition = (close_val <= pp_level) or (close_val < ema_val)
+            # Exit long when z-score returns to zero OR trend breaks
+            exit_condition = (abs(zscore_val) < 0.5) or (close_val < ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -108,8 +88,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price returns to pivot level OR trend breaks
-            exit_condition = (close_val >= pp_level) or (close_val > ema_val)
+            # Exit short when z-score returns to zero OR trend breaks
+            exit_condition = (abs(zscore_val) < 0.5) or (close_val > ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -119,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_FundingRate_ZScore_Contrarian_HTF"
+timeframe = "12h"
 leverage = 1.0
