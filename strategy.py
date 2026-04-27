@@ -1,3 +1,11 @@
+# 6h_WeeklyPivot_R3S3_Breakout_1DTrend_Volume
+# Hypothesis: Combines weekly pivot points (R3/S3 levels) for structural support/resistance, 
+# daily trend filter to align with higher timeframe momentum, and volume confirmation to avoid false breakouts.
+# Works in bull markets by catching breakouts above R3 with uptrend and volume.
+# Works in bear markets by catching breakdowns below S3 with downtrend and volume.
+# Weekly pivots provide robust levels less prone to noise than daily pivots.
+# Target: 50-150 trades over 4 years on 6h timeframe.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,113 +21,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for pivot points
+    df_wk = get_htf_data(prices, '1w')
+    if len(df_wk) < 1:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly pivot points: (H + L + C) / 3
+    wk_high = df_wk['high'].values
+    wk_low = df_wk['low'].values
+    wk_close = df_wk['close'].values
+    wk_pivot = (wk_high + wk_low + wk_close) / 3.0
+    
+    # Calculate R3 and S3 levels
+    wk_range = wk_high - wk_low
+    wk_r3 = wk_pivot + wk_range * 1.1  # R3 = Pivot + 1.1 * (High - Low)
+    wk_s3 = wk_pivot - wk_range * 1.1  # S3 = Pivot - 1.1 * (High - Low)
+    
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period ATR
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                               np.abs(low_1d[1:] - close_1d[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr_1d = np.full(len(tr), np.nan)
-    for i in range(14, len(tr)):
-        atr_1d[i] = np.mean(tr[i-14:i])
+    # Calculate 50-period EMA on daily for trend filter
+    ema_period = 50
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                        ema_1d[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate 14-period RSI
-    delta = np.diff(close_1d)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full(len(gain), np.nan)
-    avg_loss = np.full(len(loss), np.nan)
-    for i in range(14, len(gain)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Get 1w data for weekly EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for volume filter (more stable than 6h volume)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate weekly EMA50
-    ema_period = 50
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= ema_period:
-        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
-        for i in range(ema_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
-                        ema_1w[i-1] * (1 - (2 / (ema_period + 1))))
-    
-    # Align indicators to 1d timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume filter: current volume > 2.0x 20-period average
-    vol_ma = np.full(n, np.nan)
+    # Calculate 20-period average volume on 12h
+    vol_ma_12h = np.full(len(volume_12h), np.nan)
     vol_period = 20
+    for i in range(vol_period, len(volume_12h)):
+        vol_ma_12h[i] = np.mean(volume_12h[i-vol_period:i])
+    
+    # Align all indicators to 6h timeframe
+    wk_r3_aligned = align_htf_to_ltf(prices, df_wk, wk_r3)
+    wk_s3_aligned = align_htf_to_ltf(prices, df_wk, wk_s3)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    
+    # Volume filter: current 6h volume > 1.5x 12h average volume
+    vol_ma_6h = np.full(n, np.nan)
     for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+        vol_ma_6h[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ATR, RSI, EMA, and volume MA
-    start_idx = max(14, 50, vol_period) + 20  # extra buffer for ATR calculation
+    # Warmup: need weekly pivot, daily EMA, and volume averages
+    start_idx = max(50, vol_period) + 5  # buffer for calculations
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(wk_r3_aligned[i]) or np.isnan(wk_s3_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        atr = atr_1d_aligned[i]
+        vol_ratio = volume[i] / vol_ma_6h[i] if vol_ma_6h[i] > 0 else 0
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volume spike + price > weekly EMA50
-            if (rsi_1d_aligned[i] < 30 and 
-                vol_ratio > 2.0 and 
-                price > ema_1w_aligned[i]):
+            # Long: price breaks above weekly R3 + daily uptrend + volume surge
+            if (price > wk_r3_aligned[i] and 
+                price > ema_1d_aligned[i] and 
+                vol_ratio > 1.5):
                 signals[i] = size
                 position = 1
-            # Short: RSI > 70 (overbought) + volume spike + price < weekly EMA50
-            elif (rsi_1d_aligned[i] > 70 and 
-                  vol_ratio > 2.0 and 
-                  price < ema_1w_aligned[i]):
+            # Short: price breaks below weekly S3 + daily downtrend + volume surge
+            elif (price < wk_s3_aligned[i] and 
+                  price < ema_1d_aligned[i] and 
+                  vol_ratio > 1.5):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI > 50 (mean reversion) OR ATR-based stop
-            if (rsi_1d_aligned[i] > 50 or 
-                price < close[i-1] - 1.5 * atr):
+            # Long exit: price returns below weekly pivot OR trend reverses
+            if (price < wk_pivot[min(i // (7*24*60//6), len(wk_pivot)-1)] if i >= 7*24*60//6 else wk_pivot[0] or 
+                price < ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: RSI < 50 (mean reversion) OR ATR-based stop
-            if (rsi_1d_aligned[i] < 50 or 
-                price > close[i-1] + 1.5 * atr):
+            # Short exit: price returns above weekly pivot OR trend reverses
+            if (price > wk_pivot[min(i // (7*24*60//6), len(wk_pivot)-1)] if i >= 7*24*60//6 else wk_pivot[0] or 
+                price > ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_MeanReversion_VolumeSpike_WeeklyEMA50"
-timeframe = "1d"
+name = "6h_WeeklyPivot_R3S3_Breakout_1DTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
