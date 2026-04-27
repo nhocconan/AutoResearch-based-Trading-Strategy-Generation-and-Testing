@@ -15,14 +15,31 @@ def generate_signals(prices):
     
     # Get daily data for higher timeframe context (1d)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate daily EMA(34) for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily ATR(14) for volatility normalization
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Calculate daily RSI(14) for mean reversion signals
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
     # Get weekly data for higher timeframe context (1w)
     df_1w = get_htf_data(prices, '1w')
@@ -30,21 +47,10 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     
-    # Calculate weekly EMA(10) for trend direction
-    ema_10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
-    
-    # Calculate weekly ATR(14) for volatility filter
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w, additional_delay_bars=0)
+    # Calculate weekly EMA(20) for trend direction
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -58,9 +64,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(ema_10_1w_aligned[i]) or
-            np.isnan(atr_14_1w_aligned[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(rsi_14_1d_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -69,18 +75,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA34 and weekly EMA10
-        price_above_ema = close[i] > ema_34_1d_aligned[i] and close[i] > ema_10_1w_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i] and close[i] < ema_10_1w_aligned[i]
+        # Calculate normalized distance from weekly EMA
+        price_diff = close[i] - ema_20_1w_aligned[i]
+        normalized_diff = price_diff / (atr_14_1d_aligned[i] + 1e-10)
         
-        # Volatility filter: avoid extremely high volatility periods
-        vol_filter = atr_14_1w_aligned[i] > 0 and atr_14_1w_aligned[i] < np.median(atr_14_1w_aligned[:i+1]) * 3
+        # Mean reversion conditions: price deviates significantly from weekly trend
+        extreme_deviation = abs(normalized_diff) > 2.0
         
-        # Long conditions: bullish trend + volatility filter
-        long_condition = (price_above_ema and vol_filter)
+        # RSI conditions for mean reversion
+        rsi_oversold = rsi_14_1d_aligned[i] < 30
+        rsi_overbought = rsi_14_1d_aligned[i] > 70
         
-        # Short conditions: bearish trend + volatility filter
-        short_condition = (price_below_ema and vol_filter)
+        # Long conditions: price significantly below weekly trend + RSI oversold
+        long_condition = extreme_deviation and (normalized_diff < -2.0) and rsi_oversold
+        
+        # Short conditions: price significantly above weekly trend + RSI overbought
+        short_condition = extreme_deviation and (normalized_diff > 2.0) and rsi_overbought
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -88,11 +98,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal on either timeframe
-        elif position == 1 and not (close[i] > ema_34_1d_aligned[i] and close[i] > ema_10_1w_aligned[i]):
+        # Exit conditions: price returns toward weekly mean or RSI normalizes
+        elif position == 1 and (normalized_diff > -0.5 or rsi_14_1d_aligned[i] > 50):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not (close[i] < ema_34_1d_aligned[i] and close[i] < ema_10_1w_aligned[i]):
+        elif position == -1 and (normalized_diff < 0.5 or rsi_14_1d_aligned[i] < 50):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -106,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_1wEMA10_VolatilityFilter"
+name = "1d_RSI14_ATRNorm_WeeklyEMA20_MeanReversion"
 timeframe = "1d"
 leverage = 1.0
