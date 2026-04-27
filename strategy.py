@@ -143,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
-timeframe = "4h"
+name = "12h_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
+timeframe = "12h"
 leverage = 1.0
