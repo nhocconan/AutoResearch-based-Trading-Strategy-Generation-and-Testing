@@ -1,28 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Williams_Alligator_Jaw_Signal
-Long when price crosses above Alligator Jaw (13-period SMMA) with price > Teeth (8-period SMMA) and Lips (5-period SMMA) in bullish alignment (Jaw < Teeth < Lips).
-Short when price crosses below Alligator Jaw with price < Teeth and Lips in bearish alignment (Jaw > Teeth > Lips).
-Exit when price crosses back through the Jaw.
-Uses SMMA (Smoothed Moving Average) for smooth trend detection, targeting 20-30 trades per year.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Long when price breaks above Camarilla R1 on 12h with 1d EMA34 uptrend and volume > 1.5x average.
+Short when price breaks below Camarilla S1 on 12h with 1d EMA34 downtrend and volume > 1.5x average.
+Exit when price returns to Camarilla pivot point (PP).
+Uses Camarilla levels from daily timeframe for structure, targeting 15-30 trades per year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def smma(source, period):
-    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
-    n = len(source)
-    result = np.full(n, np.nan)
-    if n < period:
-        return result
-    # First value is simple average
-    result[period - 1] = np.mean(source[:period])
-    # Subsequent values: SMMA = (prev_smma * (period-1) + current_price) / period
-    for i in range(period, n):
-        result[i] = (result[i-1] * (period - 1) + source[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,21 +21,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (optional - can be removed if needed)
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(ldf_1d) < 50:  # Note: this is intentionally wrong to trigger early return if data insufficient
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Alligator components (Smoothed Moving Averages)
-    jaw_period = 13   # Blue line
-    teeth_period = 8  # Red line  
-    lips_period = 5   # Green line
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    jaw = smma(close, jaw_period)
-    teeth = smma(close, teeth_period)
-    lips = smma(close, lips_period)
+    # Calculate Camarilla levels from previous day
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pp = (high_1d + low_1d + close_1d) / 3
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Volume confirmation (20-period average)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_period = 34
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
+    
+    # Align 1d EMA to 12h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
@@ -57,12 +64,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need all SMMA periods and volume MA
-    start_idx = max(jaw_period, teeth_period, lips_period, 19)
+    # Warmup: need EMA1d and volume MA20
+    start_idx = max(ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -72,36 +80,31 @@ def generate_signals(prices):
         vol_avg = vol_ma_20[i]
         
         # Volume filter: require volume above average
-        vol_filter = vol_now > 1.2 * vol_avg  # Slightly reduced threshold for more signals
+        vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Bullish alignment: Jaw < Teeth < Lips (alligator sleeping, waking up bullish)
-            bullish_alignment = jaw[i] < teeth[i] and teeth[i] < lips[i]
-            # Bearish alignment: Jaw > Teeth > Lips (alligator sleeping, waking up bearish)
-            bearish_alignment = jaw[i] > teeth[i] and teeth[i] > lips[i]
-            
-            # Long: price crosses above Jaw with bullish alignment and volume
-            if (price > jaw[i] and price <= jaw[i-1] and  # Cross above jaw
-                bullish_alignment and vol_filter):
+            # Long: price breaks above R1 with 1d EMA34 uptrend and volume filter
+            if (price > r1_aligned[i] and close[i - 1] <= r1_aligned[i - 1] and 
+                price > ema_1d_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price crosses below Jaw with bearish alignment and volume
-            elif (price < jaw[i] and price >= jaw[i-1] and  # Cross below jaw
-                  bearish_alignment and vol_filter):
+            # Short: price breaks below S1 with 1d EMA34 downtrend and volume filter
+            elif (price < s1_aligned[i] and close[i - 1] >= s1_aligned[i - 1] and 
+                  price < ema_1d_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back below Jaw
-            if price < jaw[i] and price >= jaw[i-1]:
+            # Exit long: price returns to PP
+            if price <= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses back above Jaw
-            if price > jaw[i] and price <= jaw[i-1]:
+            # Exit short: price returns to PP
+            if price >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Williams_Alligator_Jaw_Signal"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
