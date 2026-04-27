@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA trend filter and volume confirmation.
-Designed for 12h timeframe targeting 75-150 total trades over 4 years (19-37/year) to stay within 
-fee drag limits. Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear 
-markets: In trending regimes (price > EMA for longs, < EMA for shorts), breakouts at R1/S1 with 
-volume confirmation capture strong momentum continuations. Exit on trend reversal (close crosses EMA).
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Regime_Revised
+Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
+Revised to increase trade frequency by lowering volume threshold from 2.0x to 1.5x and 
+adding EMA34 alignment confirmation for breakouts. Designed for 4h timeframe targeting 
+100-250 total trades over 4 years (25-60/year) to stay within fee drag limits while 
+ensuring sufficient samples for statistical significance. Uses discrete position sizing 
+(0.25) to minimize fee churn. Works in bull/bear markets: In trending regimes (price > 
+EMA34 for longs, < EMA34 for shorts), breakouts at R1/S1 with volume confirmation capture 
+strong momentum continuations. Exit on trend reversal (close crosses EMA34).
 """
 
 import numpy as np
@@ -33,7 +36,7 @@ def generate_signals(prices):
     r1 = prev_close + (rng * 1.1 / 12)
     s1 = prev_close - (rng * 1.1 / 12)
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -41,9 +44,9 @@ def generate_signals(prices):
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume spike: current > 2.0 * 20-period average
+    # Volume spike: current > 1.5 * 20-period average (lowered from 2.0x to increase trades)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_avg)
+    volume_spike = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,7 +87,7 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Exit long: price crosses below EMA (trend reversal)
+            # Exit long: price crosses below EMA34 (trend reversal)
             if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -92,7 +95,7 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA (trend reversal)
+            # Exit short: price crosses above EMA34 (trend reversal)
             if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -102,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Regime_Revised"
+timeframe = "4h"
 leverage = 1.0
