@@ -23,7 +23,7 @@ def generate_signals(prices):
     # Calculate EMA34 on daily close for trend filter
     ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align daily EMA to 4h
+    # Align daily EMA to 1h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate 14-period ATR for volatility filter
@@ -44,15 +44,25 @@ def generate_signals(prices):
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
+    # Precompute hour filter
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0
-    size = 0.25
+    size = 0.20
     
     # Warmup period
     start_idx = max(34, 14, vol_period) + 5
     
     for i in range(start_idx, n):
+        # Skip if any data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
@@ -87,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_Volume_Filter_Refined_v2"
-timeframe = "4h"
+name = "1h_EMA34_Volume_Filter_Session_v3"
+timeframe = "1h"
 leverage = 1.0
