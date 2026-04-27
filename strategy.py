@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Williams Alligator with 1d Trend Filter and Volume Spike.
-Long when price above Alligator teeth (green line) + 1d trend up + volume spike.
-Short when price below Alligator teeth + 1d trend down + volume spike.
-Exit when price crosses Alligator jaw (blue line) or trend reverses.
-Designed for low frequency (12-37 trades/year) to minimize fee drag on 12h timeframe.
-Uses Williams Alligator (SMAs with specific periods) and 1d EMA for trend filter.
+4h KAMA Trend + RSI Filter + Chop Regime Filter.
+Long when KAMA is rising, RSI > 50, and Chop < 61.8 (trending market).
+Short when KAMA is falling, RSI < 50, and Chop < 61.8 (trending market).
+Exit when opposite signal or Chop > 61.8 (range market).
+Designed for low frequency (20-50 trades/year) to minimize fee drag.
+Uses KAMA for trend, RSI for momentum filter, and Chop for regime filter.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,120 +22,143 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # KAMA parameters
+    er_len = 10
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = np.empty_like(close_1d, dtype=np.float64)
-    ema_1d.fill(np.nan)
-    # Calculate EMA properly with alpha
-    alpha = 2.0 / (50 + 1)
-    for i in range(len(close_1d)):
-        if i == 0:
-            ema_1d[i] = close_1d[i]
-        elif np.isnan(ema_1d[i-1]):
-            ema_1d[i] = close_1d[i]
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if False else None  # placeholder
+    # Proper ER calculation
+    er = np.zeros(n)
+    er[:] = np.nan
+    for i in range(er_len, n):
+        if i >= er_len:
+            price_change = np.abs(close[i] - close[i-er_len])
+            abs_changes = np.sum(np.abs(np.diff(close[i-er_len:i+1])))
+            if abs_changes > 0:
+                er[i] = price_change / abs_changes
+            else:
+                er[i] = 0
+    
+    # Smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    kama[er_len] = close[er_len]
+    for i in range(er_len + 1, n):
+        if not np.isnan(kama[i-1]) and not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
         else:
-            ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
+            kama[i] = kama[i-1]
     
-    # Align 1d EMA to 12h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Williams Alligator: Jaw (Blue) = SMA(13, 8), Teeth (Green) = SMA(8, 5), Lips (Red) = SMA(5, 3)
-    # Calculate SMAs with proper handling
-    jaw_period = 13
-    jaw_shift = 8
-    teeth_period = 8
-    teeth_shift = 5
-    lips_period = 5
-    lips_shift = 3
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[:] = np.nan
+    avg_loss[:] = np.nan
     
-    # Jaw (Blue line)
-    jaw = np.full(n, np.nan)
-    for i in range(jaw_period - 1 + jaw_shift, n):
-        start_idx = i - jaw_shift - jaw_period + 1
-        end_idx = i - jaw_shift + 1
-        if start_idx >= 0:
-            jaw[i] = np.mean(close[start_idx:end_idx])
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[14:15])
+            avg_loss[i] = np.mean(loss[14:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Teeth (Green line)
-    teeth = np.full(n, np.nan)
-    for i in range(teeth_period - 1 + teeth_shift, n):
-        start_idx = i - teeth_shift - teeth_period + 1
-        end_idx = i - teeth_shift + 1
-        if start_idx >= 0:
-            teeth[i] = np.mean(close[start_idx:end_idx])
+    rsi = np.zeros(n)
+    rsi[:] = 50
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
     
-    # Lips (Red line)
-    lips = np.full(n, np.nan)
-    for i in range(lips_period - 1 + lips_shift, n):
-        start_idx = i - lips_shift - lips_period + 1
-        end_idx = i - lips_shift + 1
-        if start_idx >= 0:
-            lips[i] = np.mean(close[start_idx:end_idx])
+    # Choppy Index (CHOP) - using 14-period
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Volume filter: volume > 2.0x average (to avoid false breakouts)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    atr = np.zeros(n)
+    atr[:] = np.nan
+    for i in range(atr_period, n):
+        if i == atr_period:
+            atr[i] = np.mean(tr[1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    
+    # Calculate highest high and lowest low over ATR period
+    hh = np.zeros(n)
+    ll = np.zeros(n)
+    hh[:] = np.nan
+    ll[:] = np.nan
+    for i in range(atr_period-1, n):
+        hh[i] = np.max(high[i-atr_period+1:i+1])
+        ll[i] = np.min(low[i-atr_period+1:i+1])
+    
+    # Chop calculation
+    chop = np.zeros(n)
+    chop[:] = 50
+    for i in range(atr_period, n):
+        if atr[i] > 0 and hh[i] > ll[i]:
+            sum_tr = np.sum(tr[i-atr_period+1:i+1])
+            chop[i] = 100 * np.log10(sum_tr / (atr[i] * atr_period)) / np.log10(atr_period)
+        else:
+            chop[i] = 50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Alligator lines + 1d EMA + volume MA (20)
-    start_idx = max(
-        jaw_period - 1 + jaw_shift,
-        teeth_period - 1 + teeth_shift,
-        lips_period - 1 + lips_shift,
-        19,  # volume MA
-        50   # 1d EMA
-    )
+    # Warmup: need KAMA (10), RSI (14), CHOP (14)
+    start_idx = max(er_len + 1, 14, atr_period) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama[i-1]) or 
+            np.isnan(rsi[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Current price and volume
-        price_now = close[i]
-        vol_now = volume[i]
+        # Current values
+        kama_now = kama[i]
+        kama_prev = kama[i-1]
+        rsi_now = rsi[i]
+        chop_now = chop[i]
         
-        # Current indicators
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]  # Green line - main signal
-        lips_val = lips[i]
-        trend_1d = ema_1d_aligned[i]
-        
-        # Volume filter: volume > 2.0x average
-        vol_filter = vol_now > 2.0 * vol_ma_20[i]
+        # Regime filter: Chop < 61.8 = trending market
+        trending_regime = chop_now < 61.8
         
         if position == 0:
-            # Bull: price above teeth (green) + 1d trend up + volume spike
-            if price_now > teeth_val and price_now > trend_1d and vol_filter:
+            # Long: KAMA rising + RSI > 50 + trending regime
+            if kama_now > kama_prev and rsi_now > 50 and trending_regime:
                 signals[i] = size
                 position = 1
-            # Bear: price below teeth (green) + 1d trend down + volume spike
-            elif price_now < teeth_val and price_now < trend_1d and vol_filter:
+            # Short: KAMA falling + RSI < 50 + trending regime
+            elif kama_now < kama_prev and rsi_now < 50 and trending_regime:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below jaw (blue line) or 1d trend turns down
-            if price_now < jaw_val or price_now < trend_1d:
+            # Exit long: KAMA falling OR RSI < 50 OR Chop > 61.8 (range)
+            if kama_now < kama_prev or rsi_now < 50 or chop_now > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above jaw (blue line) or 1d trend turns up
-            if price_now > jaw_val or price_now > trend_1d:
+            # Exit short: KAMA rising OR RSI > 50 OR Chop > 61.8 (range)
+            if kama_now > kama_prev or rsi_now > 50 or chop_now > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -143,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_KAMA_RSI_Chop_Trend"
+timeframe = "4h"
 leverage = 1.0
