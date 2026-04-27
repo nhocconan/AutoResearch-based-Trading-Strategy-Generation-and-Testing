@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1d EMA34 trend filter and volume confirmation.
-Trades only in direction of daily trend to avoid counter-trend whipsaws. Volume spike confirms breakout strength.
-Designed for low trade frequency (target: 12-37/year) to minimize fee drag. Works in both bull and bear markets
-by aligning with intermediate-term trend. Uses discrete position sizing (0.25) to reduce churn.
-Adds ATR-based stoploss to manage risk and avoid large drawdowns.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
+Uses higher timeframe (1d) trend to avoid whipsaws in choppy markets like 2022 and 2025.
+Volume spike confirms breakout strength. Designed for low trade frequency (target: 20-50/year)
+to minimize fee drag. Works in both bull and bear markets by aligning with daily trend.
 """
 
 import numpy as np
@@ -38,25 +37,21 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Camarilla pivot levels (focus on R3/S3 for breakout entries)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
-        return np.zeros(n)
+    # Calculate 1d Camarilla pivot levels (focus on R3/S3 for breakout entries)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    PP = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    PP = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
     # Key levels: R3 and S3 for breakout entries
-    R3 = PP + range_12h * 1.1 / 4.0
-    S3 = PP - range_12h * 1.1 / 4.0
+    R3 = PP + range_1d * 1.1 / 4.0
+    S3 = PP - range_1d * 1.1 / 4.0
     
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -118,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
