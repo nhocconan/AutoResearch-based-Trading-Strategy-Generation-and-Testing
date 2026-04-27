@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Donchian channel breakout with 1-day volume confirmation and 1-week trend filter.
-Trades breakouts above the 20-period Donchian high with volume above 1-day average and weekly uptrend,
-or breakdowns below the 20-period Donchian low with volume above 1-day average and weekly downtrend.
-Designed to work in both bull and bear markets by using weekly trend as filter and volume to confirm breakout strength.
-Target: 12-37 trades/year per symbol (48-148 total over 4 years) to minimize fee drift.
+Hypothesis: 4-hour RSI(14) extreme reversal with 12-hour volume confirmation and 12-hour trend filter.
+Trades RSI extremes (<30 for long, >70 for short) when 12h volume exceeds average and 12h trend aligns.
+Designed to work in both bull and bear markets by using 12h trend as filter and volume to confirm reversal strength.
+Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,40 +20,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12-hour data for Donchian calculation
+    # Get 4-hour data for RSI calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 4-hour RSI(14)
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    
+    for i in range(15, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)
+    rsi = np.where(avg_gain == 0, 0, rsi)
+    
+    # Align RSI to 4-hour timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
+    
+    # Get 12-hour data for volume filter and trend
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 12-hour Donchian channel (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 12-hour volume MA(20)
+    vol_12h = df_12h['volume'].values
+    vol_ma_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
     
-    # Align Donchian levels to 12h timeframe (already aligned via get_htf_data)
-    donchian_high_12h = donchian_high
-    donchian_low_12h = donchian_low
-    
-    # Get daily data for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1-day volume MA(20)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1-week EMA(50) for trend
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12-hour EMA(25) for trend
+    close_12h = df_12h['close'].values
+    ema_25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema_25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_25_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,13 +71,13 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need Donchian channels, volume MA, and weekly EMA
-    start_idx = max(20, 20, 50)  # max of lookbacks
+    # Warmup: need RSI, volume MA, and 12h EMA
+    start_idx = max(14, 20, 25)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20_12h_aligned[i]) or 
+            np.isnan(ema_25_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -79,41 +87,40 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Current 12h price and volume
+        # Current 4-hour price and volume
         price_now = close[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        trend_1w = ema_50_1w_aligned[i]
+        vol_ma = vol_ma_20_12h_aligned[i]
+        trend_12h = ema_25_12h_aligned[i]
         
-        # Current Donchian levels
-        donchian_high_now = donchian_high_12h[i]
-        donchian_low_now = donchian_low_12h[i]
+        # Current RSI
+        rsi_now = rsi_aligned[i]
         
-        # Volume filter: volume > 1.3x 1-day average
-        vol_filter = vol_now > 1.3 * vol_ma
+        # Volume filter: volume > 1.5x 12-hour average
+        vol_filter = vol_now > 1.5 * vol_ma
         
-        # Entry conditions: Donchian breakout with volume and weekly trend alignment
+        # Entry conditions: RSI extreme with volume and 12h trend alignment
         if position == 0:
-            # Long: price breaks above Donchian high with volume + weekly uptrend
-            if price_now > donchian_high_now and vol_filter and price_now > trend_1w:
+            # Long: RSI < 30 (oversold) with volume + 12h uptrend
+            if rsi_now < 30 and vol_filter and price_now > trend_12h:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian low with volume + weekly downtrend
-            elif price_now < donchian_low_now and vol_filter and price_now < trend_1w:
+            # Short: RSI > 70 (overbought) with volume + 12h downtrend
+            elif rsi_now > 70 and vol_filter and price_now < trend_12h:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian low or weekly trend turns down
-            if price_now < donchian_low_now or price_now < trend_1w:
+            # Exit long: RSI > 50 or price breaks below 12h trend
+            if rsi_now > 50 or price_now < trend_12h:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to Donchian high or weekly trend turns up
-            if price_now > donchian_high_now or price_now > trend_1w:
+            # Exit short: RSI < 50 or price breaks above 12h trend
+            if rsi_now < 50 or price_now > trend_12h:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_1dVolume_1wTrend"
-timeframe = "12h"
+name = "4h_RSIExtreme_12hVolume_12hTrend"
+timeframe = "4h"
 leverage = 1.0
