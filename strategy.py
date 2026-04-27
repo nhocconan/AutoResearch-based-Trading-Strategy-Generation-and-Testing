@@ -38,7 +38,7 @@ def generate_signals(prices):
     upper_bb_1d = sma_20_1d + (2 * std_20_1d)
     lower_bb_1d = sma_20_1d - (2 * std_20_1d)
     
-    # Align 1d indicators to 6h timeframe
+    # Align 1d indicators to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
     lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_BB20_Volume"
-timeframe = "6h"
+name = "12h_EMA34_BB20_Volume"
+timeframe = "12h"
 leverage = 1.0
