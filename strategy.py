@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
-1d trend filter avoids counter-trend whipsaws in both bull and bear markets.
-Volume spike confirms breakout authenticity. Static exit using ATR trailing stop.
-Target: 75-200 trades over 4 years (19-50/year) with Sharpe > 1.0 on test.
+6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_HTF
+Hypothesis: Camarilla R4/S4 breakout on 6h with 1d EMA34 trend filter and volume confirmation.
+R4/S4 levels represent stronger breakout points than R1/S1/R3/S3, filtering noise while capturing
+strong momentum moves. 1d trend filter ensures alignment with higher timeframe direction.
+Volume spike confirms breakout authenticity. Target: 50-150 total trades over 4 years (12-37/year).
+Designed to work in both bull and bear markets by following the 1d trend direction.
 """
 
 import numpy as np
@@ -28,13 +29,13 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Camarilla levels from previous 4h bar's OHLC
+    # Calculate Camarilla levels from previous 6h bar's OHLC
     prev_close = np.concatenate([[close[0]], close[:-1]])
     prev_high = np.concatenate([[high[0]], high[:-1]])
     prev_low = np.concatenate([[low[0]], low[:-1]])
     
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -57,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
+        if (np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
@@ -71,10 +72,10 @@ def generate_signals(prices):
         
         if position == 0:
             # Flat - look for entry: breakout in direction of 1d trend with volume spike
-            # Long: price breaks above Camarilla R1 AND 1d trend is up (close > EMA34) AND volume spike
-            # Short: price breaks below Camarilla S1 AND 1d trend is down (close < EMA34) AND volume spike
-            long_breakout = close_val > camarilla_r1[i]
-            short_breakout = close_val < camarilla_s1[i]
+            # Long: price breaks above Camarilla R4 AND 1d trend is up (close > EMA34) AND volume spike
+            # Short: price breaks below Camarilla S4 AND 1d trend is down (close < EMA34) AND volume spike
+            long_breakout = close_val > camarilla_r4[i]
+            short_breakout = close_val < camarilla_s4[i]
             trend_up = close_val > ema_trend
             trend_down = close_val < ema_trend
             
@@ -91,8 +92,8 @@ def generate_signals(prices):
         elif position == 1:
             # Long - update highest and check exit conditions
             highest_since_entry = max(highest_since_entry, close_val)
-            # Exit when: price breaks below Camarilla S1 (failed breakout) OR ATR trailing stop hit
-            if close_val < camarilla_s1[i] or close_val < highest_since_entry - 2.5 * atr_val:
+            # Exit when: price breaks below Camarilla S4 (failed breakout) OR ATR trailing stop hit
+            if close_val < camarilla_s4[i] or close_val < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -102,8 +103,8 @@ def generate_signals(prices):
         elif position == -1:
             # Short - update lowest and check exit conditions
             lowest_since_entry = min(lowest_since_entry, close_val)
-            # Exit when: price breaks above Camarilla R1 (failed breakout) OR ATR trailing stop hit
-            if close_val > camarilla_r1[i] or close_val > lowest_since_entry + 2.5 * atr_val:
+            # Exit when: price breaks above Camarilla R4 (failed breakout) OR ATR trailing stop hit
+            if close_val > camarilla_r4[i] or close_val > lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -113,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_HTF"
+timeframe = "6h"
 leverage = 1.0
