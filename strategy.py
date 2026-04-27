@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,113 +13,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and structure
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Get 1d data for longer-term context
+    # Get 1d data for daily pivot calculation and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 4h EMA(50) for trend
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate daily pivot points (using prior day OHLC)
+    # Pivot = (H + L + C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    high_prev = np.roll(high_1d, 1)
+    low_prev = np.roll(low_1d, 1)
+    close_prev = np.roll(close_1d, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
     
-    # 1d EMA(200) for long-term trend
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    r1 = 2 * pivot - low_prev
+    s1 = 2 * pivot - high_prev
+    r2 = pivot + (high_prev - low_prev)
+    s2 = pivot - (high_prev - low_prev)
+    r3 = high_prev + 2 * (pivot - low_prev)
+    s3 = low_prev - 2 * (high_prev - pivot)
     
-    # 4h ATR(14) for volatility filter
-    tr_4h = np.maximum(
-        high_4h[1:] - low_4h[1:],
-        np.maximum(
-            np.abs(high_4h[1:] - close_4h[:-1]),
-            np.abs(low_4h[1:] - close_4h[:-1])
-        )
-    )
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
+    # Align daily pivots to 12h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 4h Donchian(20) for breakout levels
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.max(arr[i-window+1:i+1])
-        return res
+    # Daily trend: price above/below daily EMA(34)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.min(arr[i-window+1:i+1])
-        return res
-    
-    donch_high_20 = rolling_max(high_4h, 20)
-    donch_low_20 = rolling_min(low_4h, 20)
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
-    
-    # Volume filter: 4h volume > 1.5 x 20-period average
-    vol_4h = df_4h['volume'].values
-    vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # Volume filter: volume > 1.5 x 20-period average (12h)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Warmup: need 4h EMA(50), 1d EMA(200), ATR(14), Donchian(20), volume MA
-    start_idx = max(50, 200, 14, 20, 20)
+    # Warmup: need pivots (1), daily EMA (34), volume MA (20)
+    start_idx = max(1, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
-            np.isnan(atr_14_4h_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or
-            np.isnan(donch_low_20_aligned[i]) or np.isnan(vol_ma_20_4h_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_14_4h_aligned[i]
-        vol_filter = volume[i] > 1.5 * vol_ma_20_4h_aligned[i]
+        vol_now = volume[i]
+        vol_avg = vol_ma_20[i]
         
-        # Trend filters
-        bullish_4h = price > ema_50_4h_aligned[i]
-        bullish_1d = price > ema_200_1d_aligned[i]
+        # Volume filter
+        vol_filter = vol_now > 1.5 * vol_avg
         
-        # Breakout conditions with volatility-adjusted thresholds
-        upper_break = donch_high_20_aligned[i] + 0.5 * atr
-        lower_break = donch_low_20_aligned[i] - 0.5 * atr
+        # Daily trend filter
+        bullish_daily = price > ema_34_1d_aligned[i]
+        bearish_daily = price < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume and bullish trend
-            if price > upper_break and vol_filter and bullish_4h and bullish_1d:
+            # Long: price crosses above S1 with volume and bullish daily trend
+            if price > s1_aligned[i] and vol_filter and bullish_daily:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below lower Donchian with volume and bearish trend
-            elif price < lower_break and vol_filter and not bullish_4h and not bullish_1d:
+            # Short: price crosses below R1 with volume and bearish daily trend
+            elif price < r1_aligned[i] and vol_filter and bearish_daily:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below lower Donchian or trend turns bearish
-            if price < donch_low_20_aligned[i] or not (bullish_4h and bullish_1d):
+            # Exit long: price crosses below pivot or daily trend turns bearish
+            if price < pivot_aligned[i] or not bullish_daily:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above upper Donchian or trend turns bullish
-            if price > donch_high_20_aligned[i] or (bullish_4h and bullish_1d):
+            # Exit short: price crosses above pivot or daily trend turns bullish
+            if price > pivot_aligned[i] or not bearish_daily:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_DonchianBreakout_4h1dEMA_VolumeFilter"
-timeframe = "1h"
+name = "12h_Pivot_S1R1_DailyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
