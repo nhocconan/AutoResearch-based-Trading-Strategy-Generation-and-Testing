@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend + 1d RSI mean reversion + volume confirmation
-# Uses 12h Kaufman Adaptive Moving Average for trend direction (long when price > KAMA, short when price < KAMA)
-# and 1d RSI for mean reversion entries (long when RSI < 30, short when RSI > 70)
-# Volume > 1.5x 20-period average confirms momentum. Trend filter avoids counter-trend trades.
-# Target: 15-25 trades/year to minimize fee decay while capturing strong momentum with mean reversion entries.
-# Focus on BTC/ETH as primary assets with proven KAMA and RSI edge.
+# Hypothesis: 4h TRIX + Volume Spike + Choppiness Regime
+# TRIX (9) filters noise and captures momentum in trending markets
+# Volume > 2.0x 20-period average confirms institutional interest
+# Choppiness Index (14) < 38.2 identifies trending regimes (avoid range-bound whipsaws)
+# Works in both bull/bear: TRIX adapts to momentum direction, volume confirms strength, chop filter avoids false signals
+# Target: 20-30 trades/year to minimize fee drag while capturing strong momentum moves
+# Focus on BTC/ETH as primary assets with proven TRIX effectiveness
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,68 +21,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for KAMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12h KAMA for trend filter
-    close_12h = df_12h['close'].values
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_12h, n=10))
-    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)
-    # Handle volatility calculation for ER
-    volatility_series = []
-    for i in range(len(close_12h)):
-        if i < 10:
-            volatility_series.append(np.nan)
-        else:
-            vol_sum = np.sum(np.abs(np.diff(close_12h[i-9:i+1])))
-            volatility_series.append(vol_sum if vol_sum > 0 else 1)
-    volatility = np.array(volatility_series)
-    er = np.where(volatility > 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close_12h, np.nan)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    kama_12h = kama
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
-    
-    # Get 1d data for RSI calculation
+    # Get 1d data for TRIX and Choppiness calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 14-period RSI for mean reversion
+    # Calculate TRIX (9) on 1d closes
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # EMA1
+    ema1 = pd.Series(close_1d).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # EMA2
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # EMA3
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # TRIX = 100 * (EMA3 - prev_EMA3) / prev_EMA3
+    trix = np.full(len(close_1d), np.nan)
+    trix[1:] = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
+    trix_smoothed = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_smoothed)
     
-    # Calculate average gain and loss
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
+    # Calculate Choppiness Index (14) on 1d data
+    # TR = max(high-low, abs(high-previous_close), abs(low-previous_close))
+    tr = np.maximum(
+        high[1:] - low[1:],
+        np.maximum(
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+    )
+    # Add first TR (high-low)
+    tr = np.concatenate([[high[0] - low[0]], tr])
     
-    # Initial average gain/loss
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        
-        # Wilder's smoothing
-        for i in range(14, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    # Sum of TR over 14 periods
+    tr_sum = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        tr_sum[i] = np.sum(tr[i-14:i])
     
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_14_1d = rsi
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Highest high and lowest low over 14 periods
+    max_high = np.full(len(high), np.nan)
+    min_low = np.full(len(low), np.nan)
+    for i in range(14, len(high)):
+        max_high[i] = np.max(high[i-14:i])
+        min_low[i] = np.min(low[i-14:i])
+    
+    # Chop = 100 * log10(sum(TR) / (max_high - min_low)) / log10(14)
+    chop = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        if tr_sum[i] > 0 and (max_high[i] - min_low[i]) > 0:
+            chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     # 20-period average volume for spike detection
     vol_ma = np.full(n, np.nan)
@@ -94,11 +83,11 @@ def generate_signals(prices):
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(20, vol_period, 14)
+    start_idx = max(20, vol_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_12h_aligned[i]) or
-            np.isnan(rsi_14_1d_aligned[i]) or
+        if (np.isnan(trix_aligned[i]) or
+            np.isnan(chop_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -106,34 +95,37 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from 12h KAMA
-        uptrend = price > kama_12h_aligned[i]
-        downtrend = price < kama_12h_aligned[i]
+        # TRIX momentum: positive = bullish, negative = bearish
+        trix_bullish = trix_aligned[i] > 0
+        trix_bearish = trix_aligned[i] < 0
         
-        # Volume confirmation: spike > 1.5x average
-        volume_confirmation = vol_ratio > 1.5
+        # Volume confirmation: spike > 2.0x average
+        volume_confirmation = vol_ratio > 2.0
+        
+        # Choppiness regime: < 38.2 = trending (avoid chop > 61.8 = ranging)
+        trending_regime = chop_aligned[i] < 38.2
         
         if position == 0:
-            # Long entry: price above KAMA (uptrend) AND RSI < 30 (oversold) with volume confirmation
-            if uptrend and rsi_14_1d_aligned[i] < 30 and volume_confirmation:
+            # Long entry: TRIX bullish + volume spike + trending regime
+            if trix_bullish and volume_confirmation and trending_regime:
                 signals[i] = size
                 position = 1
-            # Short entry: price below KAMA (downtrend) AND RSI > 70 (overbought) with volume confirmation
-            elif downtrend and rsi_14_1d_aligned[i] > 70 and volume_confirmation:
+            # Short entry: TRIX bearish + volume spike + trending regime
+            elif trix_bearish and volume_confirmation and trending_regime:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price below KAMA or RSI > 70 (overbought)
-            if price < kama_12h_aligned[i] or rsi_14_1d_aligned[i] > 70:
+            # Long exit: TRIX turns bearish OR chop enters ranging regime
+            if trix_aligned[i] <= 0 or chop_aligned[i] >= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price above KAMA or RSI < 30 (oversold)
-            if price > kama_12h_aligned[i] or rsi_14_1d_aligned[i] < 30:
+            # Short exit: TRIX turns bullish OR chop enters ranging regime
+            if trix_aligned[i] >= 0 or chop_aligned[i] >= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_MeanReversion_Volume"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChoppinessRegime"
+timeframe = "4h"
 leverage = 1.0
