@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context
+    # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -23,9 +23,9 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA 50 for trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d EMA 34 for trend direction
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1d RSI for overbought/oversold conditions
     delta_1d = pd.Series(close_1d).diff()
@@ -58,16 +58,16 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
         # RSI filter: avoid extreme overbought/oversold conditions
         rsi_not_overbought = rsi_1d_aligned[i] < 70
@@ -79,13 +79,13 @@ def generate_signals(prices):
         # Volume filter: current volume above 1d average
         volume_filter = volume[i] > vol_ma_1d_aligned[i]
         
-        # Long conditions: price above EMA50 + RSI not overbought + volume + volatility
+        # Long conditions: price above EMA34 + RSI not overbought + volume + volatility
         long_condition = (price_above_ema and 
                          rsi_not_overbought and 
                          volume_filter and 
                          vol_filter)
         
-        # Short conditions: price below EMA50 + RSI not oversold + volume + volatility
+        # Short conditions: price below EMA34 + RSI not oversold + volume + volatility
         short_condition = (price_below_ema and 
                           rsi_not_oversold and 
                           volume_filter and 
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA50_RSI14_VolumeFilter_1dTrend"
-timeframe = "4h"
+name = "12h_EMA34_RSI14_VolumeFilter_1dTrend"
+timeframe = "12h"
 leverage = 1.0
