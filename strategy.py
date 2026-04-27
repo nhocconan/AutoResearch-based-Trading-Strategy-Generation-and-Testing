@@ -35,7 +35,7 @@ def generate_signals(prices):
         else:
             atr_1d[i] = (atr_1d[i-1] * 33 + tr_1d[i]) / 34
     
-    # Align daily ATR to 4h timeframe
+    # Align daily ATR to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Get 12h data for trend (EMA50)
@@ -55,21 +55,21 @@ def generate_signals(prices):
             else:
                 ema_12h_50[i] = close_12h[i] * alpha + ema_12h_50[i-1] * (1 - alpha)
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
+    # Align 12h EMA50 to 12h timeframe (no conversion needed)
+    ema_12h_50_aligned = ema_12h_50
     
-    # Calculate ATR(14) for 4h volatility filter
-    tr1_4h = high[1:] - low[1:]
-    tr2_4h = np.abs(high[1:] - close[:-1])
-    tr3_4h = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[high[0] - low[0]], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
+    # Calculate ATR(14) for 12h volatility filter
+    tr1_12h = high[1:] - low[1:]
+    tr2_12h = np.abs(high[1:] - close[:-1])
+    tr3_12h = np.abs(low[1:] - close[:-1])
+    tr_12h = np.concatenate([[high[0] - low[0]], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
     
-    atr_4h = np.zeros(n)
+    atr_12h = np.zeros(n)
     for i in range(n):
         if i < 13:
-            atr_4h[i] = np.mean(tr_4h[:i+1]) if i > 0 else tr_4h[i]
+            atr_12h[i] = np.mean(tr_12h[:i+1]) if i > 0 else tr_12h[i]
         else:
-            atr_4h[i] = (atr_4h[i-1] * 13 + tr_4h[i]) / 14
+            atr_12h[i] = (atr_12h[i-1] * 13 + tr_12h[i]) / 14
     
     # Calculate volume average (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -95,8 +95,8 @@ def generate_signals(prices):
         # Volume confirmation: > 2.0x average volume
         volume_confirmation = vol_ratio > 2.0
         
-        # ATR volatility filter: only trade when 4h ATR is above 60% of daily ATR
-        vol_filter = atr_4h[i] > atr_1d_aligned[i] * 0.6
+        # ATR volatility filter: only trade when 12h ATR is above 60% of daily ATR
+        vol_filter = atr_12h[i] > atr_1d_aligned[i] * 0.6
         
         if position == 0:
             # Long: price above 12h EMA50 with volume and volatility
@@ -111,14 +111,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long exit: price crosses below 12h EMA50 or volatility drops
-            if price < ema_12h_50_aligned[i] or atr_4h[i] < atr_1d_aligned[i] * 0.4:
+            if price < ema_12h_50_aligned[i] or atr_12h[i] < atr_1d_aligned[i] * 0.4:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
             # Short exit: price crosses above 12h EMA50 or volatility drops
-            if price > ema_12h_50_aligned[i] or atr_4h[i] < atr_1d_aligned[i] * 0.4:
+            if price > ema_12h_50_aligned[i] or atr_12h[i] < atr_1d_aligned[i] * 0.4:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_EMA50_Trend_VolumeFilter_v1"
-timeframe = "4h"
+name = "12h_EMA50_Trend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
