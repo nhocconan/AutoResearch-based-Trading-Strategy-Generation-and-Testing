@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_WeeklyTrend_VolumeConfirm
-Hypothesis: Daily strategy using Camarilla R1/S1 levels from weekly OHLC for breakout entries with weekly EMA21 trend filter and volume confirmation. 
-Enter long when price closes above weekly R1 with weekly uptrend (price > weekly EMA21) and volume > 1.8x 20-day average. 
-Enter short when price closes below weekly S1 with weekly downtrend (price < weekly EMA21) and volume confirmation. 
-Exit on opposite Camarilla level touch (S1/R1) or weekly trend reversal (price crosses weekly EMA21). 
-Designed for low trade frequency (~10-25/year) with discrete position sizing (0.30) to minimize fee drag and maximize edge.
-Works in both bull and bear markets by following the weekly trend while using Camarilla levels for precise daily breakout entries.
+6h_ElderRay_BullBearPower_12hTrend_VolumeConfirm
+Hypothesis: 6h strategy using Elder Ray Bull/Bear Power (EMA13) with 12h EMA34 trend filter and volume confirmation.
+Enter long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND price > 12h EMA34 (uptrend) AND volume > 1.5x 20-period average.
+Enter short when Bear Power < 0 AND Bull Power > 0 (bearish momentum) AND price < 12h EMA34 (downtrend) AND volume confirmation.
+Exit on opposite Elder Ray signal (Bear Power > 0 for long exit, Bull Power < 0 for short exit) or 12h trend reversal.
+Elder Ray captures momentum strength while filtering with higher timeframe trend reduces whipsaw in choppy markets.
+Designed for low trade frequency (~12-25/year) with discrete position sizing (0.25) to minimize fee drag.
+Works in both bull and bear markets by following the 12h trend while using Elder Ray for precise momentum entries.
 """
 
 import numpy as np
@@ -23,59 +24,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels and EMA trend
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly OHLC for Camarilla levels
-    o_1w = df_1w['open'].values
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
+    # Calculate 12h EMA34 for trend filter
+    close_12h_series = pd.Series(df_12h['close'].values)
+    ema_34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Camarilla levels: R1/S1 from weekly OHLC (tighter levels for more precise entries)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = c_1w + (h_1w - l_1w) * 1.1 / 12
-    camarilla_s1 = c_1w - (h_1w - l_1w) * 1.1 / 12
+    # Align 12h EMA to 6h timeframe (completed bars only)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Weekly EMA21 for trend filter
-    close_1w_series = pd.Series(c_1w)
-    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 6h EMA13)
+    close_s = pd.Series(close)
+    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Align weekly indicators to daily timeframe (completed bars only)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Volume confirmation: current volume > 1.8 * 20-day average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.30   # Position size: 30% of capital (discrete level)
+    size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need weekly EMA21 (21) + volume avg (20)
-    start_idx = max(21, 20)
+    # Warmup: need 12h EMA34 (34) + 6h EMA13 (13) + volume avg (20)
+    start_idx = max(34, 13, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_21_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_val = ema_21_aligned[i]
+        ema_val = ema_34_12h_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with weekly EMA21 trend filter and volume confirmation
-            # Long: price closes above R1 AND above weekly EMA21 (weekly uptrend)
-            long_condition = (close_val > r1_val) and (close_val > ema_val) and vol_conf
-            # Short: price closes below S1 AND below weekly EMA21 (weekly downtrend)
-            short_condition = (close_val < s1_val) and (close_val < ema_val) and vol_conf
+            # Look for entry: Elder Ray momentum with 12h EMA34 trend filter and volume confirmation
+            # Long: Bull Power > 0 (bullish momentum) AND Bear Power < 0 (confirming no bearish pressure) 
+            #        AND price > EMA34 (12h uptrend) AND volume spike
+            long_condition = (bull_val > 0) and (bear_val < 0) and (close_val > ema_val) and vol_conf
+            # Short: Bear Power < 0 (bearish momentum) AND Bull Power > 0 (confirming no bullish pressure)
+            #        AND price < EMA34 (12h downtrend) AND volume confirmation
+            short_condition = (bear_val < 0) and (bull_val > 0) and (close_val < ema_val) and vol_conf
             
             if long_condition:
                 signals[i] = size
@@ -84,15 +80,15 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price touches S1 (opposite level) OR weekly EMA21 turns bearish (price below EMA)
-            if (close_val < s1_val) or (close_val < ema_val):
+            # Exit long: Bear Power > 0 (bearish pressure appears) OR 12h EMA34 turns bearish (price below EMA)
+            if (bear_val > 0) or (close_val < ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price touches R1 (opposite level) OR weekly EMA21 turns bullish (price above EMA)
-            if (close_val > r1_val) or (close_val > ema_val):
+            # Exit short: Bull Power < 0 (bullish pressure appears) OR 12h EMA34 turns bullish (price above EMA)
+            if (bull_val < 0) or (close_val > ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_12hTrend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
