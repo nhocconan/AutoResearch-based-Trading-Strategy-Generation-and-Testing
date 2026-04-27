@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicator calculations
+    # Get daily data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -24,43 +24,27 @@ def generate_signals(prices):
     if len(close_1d) >= 34:
         ema_34_1d[33] = np.mean(close_1d[:34])
         for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34
+            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34  # EMA34
     
-    # Calculate daily RSI(14) for overbought/oversold filter
-    rsi_14_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 15:
-        delta = np.diff(close_1d)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full(len(close_1d), np.nan)
-        avg_loss = np.full(len(close_1d), np.nan)
-        avg_gain[14] = np.mean(gain[:14])
-        avg_loss[14] = np.mean(loss[:14])
-        for i in range(15, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-            rs = avg_gain[i] / avg_loss[i] if avg_loss[i] != 0 else 0
-            rsi_14_1d[i] = 100 - (100 / (1 + rs))
+    # Calculate previous day's OHLC for Camarilla (avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Calculate Bollinger Bands(20,2) for volatility regime
-    bb_upper_1d = np.full(len(close_1d), np.nan)
-    bb_lower_1d = np.full(len(close_1d), np.nan)
-    bb_middle_1d = np.full(len(close_1d), np.nan)
-    bb_width_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        for i in range(19, len(close_1d)):
-            bb_middle_1d[i] = np.mean(close_1d[i-19:i+1])
-            bb_std = np.std(close_1d[i-19:i+1])
-            bb_upper_1d[i] = bb_middle_1d[i] + 2 * bb_std
-            bb_lower_1d[i] = bb_middle_1d[i] - 2 * bb_std
-            bb_width_1d[i] = (bb_upper_1d[i] - bb_lower_1d[i]) / bb_middle_1d[i] if bb_middle_1d[i] != 0 else 0
+    # Camarilla R3 and S3 calculation
+    camarilla_factor = 1.1 * (prev_high - prev_low) * 1.1 / 4
+    r3 = prev_close + camarilla_factor
+    s3 = prev_close - camarilla_factor
     
     # Align daily indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate 4h ATR(14) for volatility filter and stoploss
+    # Calculate 4h ATR(14) for volatility filter
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
@@ -86,8 +70,8 @@ def generate_signals(prices):
     start_idx = max(34, vol_period, 14) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(bb_width_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -97,32 +81,27 @@ def generate_signals(prices):
         # Volume spike filter: at least 1.5x average volume
         vol_filter = vol_ratio > 1.5
         
-        # Bollinger width regime filter: narrow bands = low volatility (good for breakouts)
-        vol_regime_filter = bb_width_1d_aligned[i] < 0.05
-        
         if position == 0:
-            # Long: Price breaks above upper BB with volume, RSI not overbought, and above daily EMA34
-            if (price > bb_upper_1d_aligned[i] and vol_filter and 
-                rsi_14_1d_aligned[i] < 70 and price > ema_34_1d_aligned[i] and vol_regime_filter):
+            # Long: Price breaks above R3 with volume and above daily EMA34
+            if price > r3_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below lower BB with volume, RSI not oversold, and below daily EMA34
-            elif (price < bb_lower_1d_aligned[i] and vol_filter and 
-                  rsi_14_1d_aligned[i] > 30 and price < ema_34_1d_aligned[i] and vol_regime_filter):
+            # Short: Price breaks below S3 with volume and below daily EMA34
+            elif price < s3_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below middle BB or trailing stop
-            if price < bb_middle_1d_aligned[i] or price < ema_34_1d_aligned[i] - 1.5 * atr[i]:
+            # Long exit: Price closes below S3 or trailing stop
+            if price < s3_aligned[i] or price < ema_34_1d_aligned[i] - 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above middle BB or trailing stop
-            if price > bb_middle_1d_aligned[i] or price > ema_34_1d_aligned[i] + 1.5 * atr[i]:
+            # Short exit: Price closes above R3 or trailing stop
+            if price > r3_aligned[i] or price > ema_34_1d_aligned[i] + 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Bollinger_Breakout_EMA34_RSI_Volume"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
