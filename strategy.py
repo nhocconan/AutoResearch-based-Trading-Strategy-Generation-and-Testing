@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,7 +30,7 @@ def generate_signals(prices):
         else:
             ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
     
-    # Align daily EMA to 4h
+    # Align daily EMA to 6h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate 14-period ATR for volatility and stop
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA34_Trend_Volume_ATRStop_v1"
-timeframe = "4h"
+name = "6h_Donchian20_EMA34_Trend_Volume_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
