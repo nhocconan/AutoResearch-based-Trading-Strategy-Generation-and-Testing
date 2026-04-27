@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour strategy using Elder Ray (Bull/Bear Power) from 1-day timeframe with volume confirmation.
-# Elder Ray measures bullish/bearish power relative to EMA13. Strong bullish power (price > EMA13) with volume indicates
-# institutional buying; strong bearish power indicates selling. Works in both bull and bear markets by following institutional flow.
-# Uses 1-day EMA13 as the reference for power calculation. Volume filter (>1.5x 20-period average) confirms participation.
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
+# Hypothesis: 4h strategy using 1-day EMA34 trend filter with 4h Donchian(20) breakouts
+# and volume confirmation (>1.5x 20-period average volume).
+# Donchian breakouts capture momentum moves; EMA34 filter ensures trend alignment.
+# Volume confirmation filters false breakouts.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
+# Works in bull markets (bullish breakouts) and bear markets (bearish breakdowns).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,25 +20,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA13 for 1-day
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
-    
-    # Align Elder Ray components to 6h timeframe (wait for 1d bar to close)
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # 4h Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,26 +47,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: strong bullish power with volume (buying pressure)
-        if (bull_power_1d_aligned[i] > 0 and 
+        # Long breakout: price breaks above Donchian high with uptrend and volume
+        if (close[i] > high_max[i] and 
+            close[i] > ema34_1d_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short entry: strong bearish power with volume (selling pressure)
-        elif (bear_power_1d_aligned[i] < 0 and 
+        # Short breakdown: price breaks below Donchian low with downtrend and volume
+        elif (close[i] < low_min[i] and 
+              close[i] < ema34_1d_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: power fades or reverses
-        elif position == 1 and bull_power_1d_aligned[i] <= 0:
+        # Exit conditions
+        elif position == 1 and close[i] <= ema34_1d_aligned[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and bear_power_1d_aligned[i] >= 0:
+        elif position == -1 and close[i] >= ema34_1d_aligned[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -84,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA13_VolumeFilter"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
