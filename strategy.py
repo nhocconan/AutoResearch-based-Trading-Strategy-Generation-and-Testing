@@ -13,19 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and RSI
+    # Get 1d data for ADX and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 28:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period ATR using Wilder's smoothing
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                               np.abs(low_1d[1:] - close_1d[:-1])))
+    # Calculate True Range and ATR (14-period)
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     atr_1d = np.full(len(tr), np.nan)
     for i in range(14, len(tr)):
@@ -34,32 +35,57 @@ def generate_signals(prices):
         else:
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 14-period RSI using Wilder's smoothing
-    delta = np.diff(close_1d)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full(len(gain), np.nan)
-    avg_loss = np.full(len(loss), np.nan)
-    for i in range(14, len(gain)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Get 4h data for EMA50 trend filter
+    # Smoothed +DM and -DM (14-period)
+    plus_dm_smooth = np.full(len(plus_dm), np.nan)
+    minus_dm_smooth = np.full(len(minus_dm), np.nan)
+    for i in range(14, len(plus_dm)):
+        if i == 14:
+            plus_dm_smooth[i] = np.sum(plus_dm[1:15])
+            minus_dm_smooth[i] = np.sum(minus_dm[1:15])
+        else:
+            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / 14) + plus_dm[i]
+            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / 14) + minus_dm[i]
+    
+    # Calculate +DI and -DI
+    plus_di = np.full(len(plus_dm_smooth), np.nan)
+    minus_di = np.full(len(minus_dm_smooth), np.nan)
+    for i in range(14, len(plus_dm_smooth)):
+        if not np.isnan(atr_1d[i]) and atr_1d[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / atr_1d[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / atr_1d[i]
+    
+    # Calculate DX and ADX (14-period)
+    dx = np.full(len(plus_di), np.nan)
+    for i in range(14, len(plus_di)):
+        if not np.isnan(plus_di[i]) and not np.isnan(minus_di[i]):
+            di_sum = plus_di[i] + minus_di[i]
+            if di_sum > 0:
+                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx_1d = np.full(len(dx), np.nan)
+    for i in range(28, len(dx)):  # Need 14 periods of DX
+        if i == 28:
+            adx_1d[i] = np.mean(dx[14:28])
+        else:
+            adx_1d[i] = (adx_1d[i-1] * 13 + dx[i]) / 14
+    
+    # Get 4h data for EMA200 trend filter
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    if len(df_4h) < 200:
         return np.zeros(n)
     
     close_4h = df_4h['close'].values
     
-    # Calculate 4h EMA50
-    ema_period = 50
+    # Calculate 4h EMA200
+    ema_period = 200
     ema_4h = np.full(len(close_4h), np.nan)
     if len(close_4h) >= ema_period:
         ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
@@ -67,12 +93,11 @@ def generate_signals(prices):
             ema_4h[i] = (close_4h[i] * (2 / (ema_period + 1)) + 
                         ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Align indicators to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align indicators to 1h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Volume filter: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
@@ -80,49 +105,57 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
-    # Warmup: need ATR, RSI, EMA, and volume MA
-    start_idx = max(14, 50, vol_period) + 20  # extra buffer for ATR calculation
+    # Warmup: need ADX, EMA, and volume MA
+    start_idx = max(28, 200, vol_period) + 5  # extra buffer for ADX calculation
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        atr = atr_1d_aligned[i]
+        adx = adx_1d_aligned[i]
+        
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volume spike + price > 4h EMA50
-            if (rsi_1d_aligned[i] < 30 and 
-                vol_ratio > 2.0 and 
+            # Long: ADX > 25 (trending) + volume spike + price > 4h EMA200
+            if (adx > 25 and 
+                vol_ratio > 1.5 and 
                 price > ema_4h_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: RSI > 70 (overbought) + volume spike + price < 4h EMA50
-            elif (rsi_1d_aligned[i] > 70 and 
-                  vol_ratio > 2.0 and 
+            # Short: ADX > 25 (trending) + volume spike + price < 4h EMA200
+            elif (adx > 25 and 
+                  vol_ratio > 1.5 and 
                   price < ema_4h_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI > 50 (mean reversion) OR ATR-based stop
-            if (rsi_1d_aligned[i] > 50 or 
-                price < close[i-1] - 1.5 * atr):
+            # Long exit: ADX < 20 (trend weakening) OR price < EMA200
+            if (adx < 20 or 
+                price < ema_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: RSI < 50 (mean reversion) OR ATR-based stop
-            if (rsi_1d_aligned[i] < 50 or 
-                price > close[i-1] + 1.5 * atr):
+            # Short exit: ADX < 20 (trend weakening) OR price > EMA200
+            if (adx < 20 or 
+                price > ema_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +163,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_MeanReversion_VolumeSpike_EMA50"
-timeframe = "4h"
+name = "1h_ADX_Trend_VolumeSpike_EMA200"
+timeframe = "1h"
 leverage = 1.0
