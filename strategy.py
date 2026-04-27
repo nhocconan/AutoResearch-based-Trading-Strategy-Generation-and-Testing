@@ -1,29 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day price closes above/below weekly Donchian channel (20-period) with volume confirmation.
-In strong uptrends: price closes above weekly Donchian upper band -> long.
-In strong downtrends: price closes below weekly Donchian lower band -> short.
-Weekly Donchian provides robust trend structure, daily close ensures follow-through,
-volume filters weak breakouts. Target: 10-25 trades/year per symbol.
+Hypothesis: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation.
+In bull markets: long on upper band breakout with 12h uptrend.
+In bear markets: short on lower band breakout with 12h downtrend.
+Volume confirms breakout strength. Target: 25-40 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian upper and lower bands"""
-    if len(high) < period:
-        return np.full_like(high, np.nan, dtype=np.float64), np.full_like(high, np.nan, dtype=np.float64)
-    
-    upper = np.full_like(high, np.nan, dtype=np.float64)
-    lower = np.full_like(high, np.nan, dtype=np.float64)
-    
-    for i in range(period-1, len(high)):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,74 +20,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
-    wk_donch_upper, wk_donch_lower = calculate_donchian_channels(wk_high, wk_low, 20)
-    wk_donch_upper_aligned = align_htf_to_ltf(prices, df_1w, wk_donch_upper)
-    wk_donch_lower_aligned = align_htf_to_ltf(prices, df_1w, wk_donch_lower)
+    # Calculate 12h EMA50 for trend
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Get daily volume for confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate 12h close for trend comparison
+    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
     
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian (20) + volume MA (20)
-    start_idx = max(20, 20)
+    # Warmup: need Donchian (20) + EMA (50) + volume avg (20)
+    start_idx = max(20, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(wk_donch_upper_aligned[i]) or np.isnan(wk_donch_lower_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(close_12h_aligned[i]) or
+            np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             continue
         
-        # Current daily close and volume
-        price_close = close[i]
+        # Current values
+        price_now = close[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
+        vol_avg = vol_avg_20[i]
         
-        # Current weekly Donchian levels
-        donch_upper = wk_donch_upper_aligned[i]
-        donch_lower = wk_donch_lower_aligned[i]
+        # Donchian levels
+        upper_band = high_20[i]
+        lower_band = low_20[i]
         
-        # Volume filter: volume > 1.5x daily average
-        vol_filter = vol_now > 1.5 * vol_ma
+        # Trend filter: 12h price vs EMA
+        price_12h = close_12h_aligned[i]
+        ema_12h = ema_50_12h_aligned[i]
+        is_uptrend = price_12h > ema_12h
+        is_downtrend = price_12h < ema_12h
+        
+        # Volume filter: volume > 1.5x average
+        vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: daily close above weekly Donchian upper + volume
-            if price_close > donch_upper and vol_filter:
+            # Long: breakout above upper band with uptrend and volume
+            if price_now > upper_band and is_uptrend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: daily close below weekly Donchian lower + volume
-            elif price_close < donch_lower and vol_filter:
+            # Short: breakout below lower band with downtrend and volume
+            elif price_now < lower_band and is_downtrend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: daily close back below weekly Donchian upper
-            if price_close < donch_upper:
+            # Exit long: price closes below midpoint or trend changes
+            midpoint = (upper_band + lower_band) / 2
+            if price_now < midpoint or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: daily close back above weekly Donchian lower
-            if price_close > donch_lower:
+            # Exit short: price closes above midpoint or trend changes
+            midpoint = (upper_band + lower_band) / 2
+            if price_now > midpoint or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_Volume"
-timeframe = "1d"
+name = "4h_DonchianBreakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
