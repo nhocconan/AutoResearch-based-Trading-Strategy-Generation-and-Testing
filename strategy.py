@@ -1,8 +1,4 @@
-# #!/usr/bin/env python3
-# Hypothesis: 6h timeframe with 1-day RSI divergence and volume confirmation
-# RSI divergence signals potential reversals, volume confirms strength
-# Works in both bull and bear markets by catching exhaustion moves
-# Target: 15-30 trades/year (60-120 total over 4 years)
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,94 +13,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI calculation
+    # Get daily data for pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Camarilla pivot levels from previous daily bar
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
+    # Weekly EMA trend filter (13-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
     
-    # Align RSI to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Volume filter: volume > 2 x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    
-    # Price momentum: 6-period rate of change
-    roc_6 = np.full(n, np.nan)
-    for i in range(6, n):
-        if close[i-6] != 0:
-            roc_6[i] = (close[i] - close[i-6]) / close[i-6]
+    # Volume filter: volume > 2.5 x 12-period average (12 periods = 6 days)
+    vol_ma_12 = np.full(n, np.nan)
+    for i in range(11, n):
+        vol_ma_12[i] = np.mean(volume[i-11:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need RSI (14), volume MA (20), ROC (6)
-    start_idx = max(14, 20, 6)
+    # Warmup: need Camarilla (1 day), EMA (13), volume MA (12)
+    start_idx = max(1, 13, 12)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(roc_6[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_13_aligned[i]) or np.isnan(vol_ma_12[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
-        rsi = rsi_1d_aligned[i]
-        momentum = roc_6[i]
+        vol_avg = vol_ma_12[i]
         
-        # Volume filter
-        vol_filter = vol_now > 2.0 * vol_avg
+        # Volume filter: significant volume spike (higher threshold = fewer trades)
+        vol_filter = vol_now > 2.5 * vol_avg
         
-        # RSI conditions for divergence-like signals
-        # Bullish: RSI oversold (<30) with positive momentum
-        # Bearish: RSI overbought (>70) with negative momentum
+        # Trend filter from weekly EMA
+        bullish_trend = price > ema_13_aligned[i]
+        bearish_trend = price < ema_13_aligned[i]
+        
+        camarilla_r3 = camarilla_r3_aligned[i]
+        camarilla_s3 = camarilla_s3_aligned[i]
+        
         if position == 0:
-            # Long: RSI oversold + upward momentum + volume
-            if rsi < 30 and momentum > 0 and vol_filter:
+            # Long: price breaks above R3 + volume + bullish weekly trend
+            if price > camarilla_r3 and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: RSI overbought + downward momentum + volume
-            elif rsi > 70 and momentum < 0 and vol_filter:
+            # Short: price breaks below S3 + volume + bearish weekly trend
+            elif price < camarilla_s3 and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI overbought or momentum turns negative
-            if rsi > 70 or momentum < 0:
+            # Exit long: price breaks below S3 or trend turns bearish
+            if price < camarilla_s3 or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI oversold or momentum turns positive
-            if rsi < 30 or momentum > 0:
+            # Exit short: price breaks above R3 or trend turns bullish
+            if price > camarilla_r3 or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI_Divergence_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
