@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-#100963 - 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-Hypothesis: Breakout at Camarilla R1/S1 levels with volume confirmation and 12h EMA50 trend filter on 4h timeframe. 
-Combines price channel structure (Camarilla) with multi-timeframe trend alignment (12h EMA50) and volume filter.
+#100966 - 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Breakout at Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend filter on 4h timeframe. 
+Combines price channel structure (Camarilla) with higher timeframe trend alignment (1d EMA34) and volume filter.
 Works in bull markets (breakouts with trend) and bear markets (mean reversion to pivot after false breakouts).
-Target: 20-50 trades/year to minimize fee drag. Uses discrete position sizing (0.25) to reduce churn.
+Target: 25-40 trades/year to minimize fee drag. Uses discrete position sizing (0.25) to reduce churn.
 """
 
 import numpy as np
@@ -21,22 +21,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Get 1d data for Camarilla levels (daily pivot from previous day)
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Get 1d data for Camarilla levels (daily pivot from previous day)
+    # Need daily OHLC for pivot calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -64,21 +61,21 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(camarilla_r1[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1[i]) or 
             np.isnan(camarilla_s1[i]) or np.isnan(camarilla_pivot[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above R1, above 12h EMA50, volume spike
+        # Long condition: price breaks above R1, above 1d EMA34, volume spike
         if (close[i] > camarilla_r1[i] and 
-            close[i] > ema50_12h_aligned[i] and 
+            close[i] > ema34_1d_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below S1, below 12h EMA50, volume spike
+        # Short condition: price breaks below S1, below 1d EMA34, volume spike
         elif (close[i] < camarilla_s1[i] and 
-              close[i] < ema50_12h_aligned[i] and 
+              close[i] < ema34_1d_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
@@ -100,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
