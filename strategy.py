@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Pullback_to_EMA34_with_VolumeSpike
-Hypothesis: Price often pulls back to the weekly EMA34 during trends. 
-Entry: price touches EMA34 with volume spike, in direction of weekly trend (EMA50 slope).
-Exit: price closes beyond EMA34 opposite direction or trailing stop.
-Designed for fewer trades (~15-25/year) to avoid fee drag on 1d timeframe.
-Works in bull via bounces off rising EMA, in bear via bounces off falling EMA.
+6h_Aroon_Oscillator_12hTrend_Filter
+Hypothesis: Aroon oscillator (down-up) identifies trend strength on 6h. 
+Filter with 12h EMA50 trend to avoid counter-trend trades. 
+Enter when Aroon > 50 (strong uptrend) or < -50 (strong downtrend) 
+with price pulling back to 20 EMA on 6h. Works in bull via pullbacks in uptrend,
+in bear via bounces in downtrend. Target: 20-35 trades/year.
 """
 
 import numpy as np
@@ -14,83 +14,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter (slope)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_slope = ema_50_1w - np.roll(ema_50_1w, 1)
-    ema_50_1w_slope[0] = 0
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    ema_50_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w_slope)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate daily EMA34 for pullback zone
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Calculate Aroon oscillator (25-period) on 6h
+    period = 25
+    aroon_up = np.full(n, np.nan)
+    aroon_down = np.full(n, np.nan)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    for i in range(period - 1, n):
+        window_high = high[i - period + 1:i + 1]
+        window_low = low[i - period + 1:i + 1]
+        high_idx = np.argmax(window_high)
+        low_idx = np.argmin(window_low)
+        aroon_up[i] = ((period - 1 - high_idx) / (period - 1)) * 100
+        aroon_down[i] = ((period - 1 - low_idx) / (period - 1)) * 100
     
-    # Volume spike: volume > 2.0 * 20-day average (fewer trades)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    aroon_osc = aroon_up - aroon_down  # -100 to +100
+    
+    # 20 EMA on 6h for pullback entry
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for weekly EMA50 (50) and volume MA (20)
-    start_idx = 50
+    # Warmup: need enough data for Aroon and EMAs
+    start_idx = max(period - 1, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(ema_50_1w_slope_aligned[i])):
+        if (np.isnan(aroon_osc[i]) or np.isnan(ema_20[i]) or 
+            np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        ema34_val = ema_34_1d_aligned[i]
-        ema50_val = ema_50_1w_aligned[i]
-        ema50_slope = ema_50_1w_slope_aligned[i]
-        vol_spike_val = vol_spike[i]
+        aroon_val = aroon_osc[i]
+        ema_20_val = ema_20[i]
+        ema_12h_val = ema_50_12h_aligned[i]
+        close_val = close[i]
         
         if position == 0:
-            # Long: price touches EMA34 from below with volume spike and weekly uptrend
-            if low[i] <= ema34_val <= high[i] and vol_spike_val and ema50_slope > 0:
-                # Additional confirmation: price close above EMA34
-                if close[i] > ema34_val:
-                    signals[i] = size
-                    position = 1
-            # Short: price touches EMA34 from above with volume spike and weekly downtrend
-            elif low[i] <= ema34_val <= high[i] and vol_spike_val and ema50_slope < 0:
-                # Additional confirmation: price close below EMA34
-                if close[i] < ema34_val:
-                    signals[i] = -size
-                    position = -1
+            # Long: strong uptrend (Aroon > 50) + pullback to EMA20 + 12h uptrend
+            if aroon_val > 50 and close_val <= ema_20_val * 1.001 and ema_12h_val < close_val:
+                signals[i] = size
+                position = 1
+            # Short: strong downtrend (Aroon < -50) + bounce to EMA20 + 12h downtrend
+            elif aroon_val < -50 and close_val >= ema_20_val * 0.999 and ema_12h_val > close_val:
+                signals[i] = -size
+                position = -1
         elif position == 1:
-            # Exit long: price closes below EMA34 (failed hold) or weekly trend turns down
-            if close[i] < ema34_val or ema50_slope < 0:
+            # Exit long: trend weakness (Aroon < 0) or 12h trend change
+            if aroon_val < 0 or ema_12h_val > close_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above EMA34 (failed hold) or weekly trend turns up
-            if close[i] > ema34_val or ema50_slope > 0:
+            # Exit short: trend weakness (Aroon > 0) or 12h trend change
+            if aroon_val > 0 or ema_12h_val < close_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pullback_to_EMA34_with_VolumeSpike"
-timeframe = "1d"
+name = "6h_Aroon_Oscillator_12hTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
