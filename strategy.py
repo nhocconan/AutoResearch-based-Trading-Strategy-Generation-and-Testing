@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,47 +13,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for trend filter (EMA34) and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA34 on 1d close
     close_1d = df_1d['close'].values
+    ema_34 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34[i] = (close_1d[i] * 2 + ema_34[i-1] * 33) / 35
     
-    # Camarilla levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
-    # R4 = Close + ((High - Low) * 1.5)
-    # R3 = Close + ((High - Low) * 1.125)
-    # R2 = Close + ((High - Low) * 0.75)
-    # R1 = Close + ((High - Low) * 0.5)
-    # PP = (High + Low + Close) / 3
-    # S1 = Close - ((High - Low) * 0.5)
-    # S2 = Close - ((High - Low) * 0.75)
-    # S3 = Close - ((High - Low) * 1.125)
-    # S4 = Close - ((High - Low) * 1.5)
-    
-    r4_1d = close_1d + (high_1d - low_1d) * 1.5
-    r3_1d = close_1d + (high_1d - low_1d) * 1.125
-    r2_1d = close_1d + (high_1d - low_1d) * 0.75
-    r1_1d = close_1d + (high_1d - low_1d) * 0.5
-    pp_1d = (high_1d + low_1d + close_1d) / 3
-    s1_1d = close_1d - (high_1d - low_1d) * 0.5
-    s2_1d = close_1d - (high_1d - low_1d) * 0.75
-    s3_1d = close_1d - (high_1d - low_1d) * 1.125
-    s4_1d = close_1d - (high_1d - low_1d) * 1.5
-    
-    # Align Camarilla levels to 12h timeframe
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    pp_12h = align_htf_to_ltf(prices, df_1d, pp_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align EMA34 to 6h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate ATR(14) for volatility filter
     tr = np.maximum(high[1:] - low[1:], 
@@ -73,16 +47,24 @@ def generate_signals(prices):
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
+    # Calculate 20-period high/low for Donchian breakout
+    high_max = np.full(n, np.nan)
+    low_min = np.full(n, np.nan)
+    period = 20
+    for i in range(period, n):
+        high_max[i] = np.max(high[i-period:i])
+        low_min[i] = np.min(low[i-period:i])
+    
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
     # Warmup period
-    start_idx = max(14, vol_period) + 5
+    start_idx = max(14, vol_period, period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
             signals[i] = 0.0
             continue
         
@@ -90,26 +72,26 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price touches S1 level with volume confirmation
-            if price <= s1_12h[i] * 1.005 and vol_ratio > 1.5:  # Allow small buffer for touching
+            # Long: Price breaks above Donchian high with volume AND above 1d EMA34
+            if price > high_max[i] and vol_ratio > 2.0 and price > ema_34_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price touches R1 level with volume confirmation
-            elif price >= r1_12h[i] * 0.995 and vol_ratio > 1.5:  # Allow small buffer for touching
+            # Short: Price breaks below Donchian low with volume AND below 1d EMA34
+            elif price < low_min[i] and vol_ratio > 2.0 and price < ema_34_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price touches PP level or 2x ATR stop
-            if price >= pp_12h[i] * 0.995 or price < low[i] - 2 * atr[i]:
+            # Long exit: Price closes below Donchian low or 2x ATR trailing stop
+            if price < low_min[i] or price < high_max[i] - 2 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price touches PP level or 2x ATR stop
-            if price <= pp_12h[i] * 1.005 or price > high[i] + 2 * atr[i]:
+            # Short exit: Price closes above Donchian high or 2x ATR trailing stop
+            if price > high_max[i] or price > low_min[i] + 2 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Touch_Volume"
-timeframe = "12h"
+name = "6h_Donchian20_1dEMA34_Volume_Trend"
+timeframe = "6h"
 leverage = 1.0
