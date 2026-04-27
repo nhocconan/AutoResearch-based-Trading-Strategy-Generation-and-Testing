@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Direction_1dEMA34_Filter
-Hypothesis: Weekly pivot points (R1, S1) act as significant support/resistance.
-Breakouts above weekly R1 or below weekly S1 with 1d EMA34 trend filter capture
-institutional moves. Works in bull (buy R1 breaks above EMA34 uptrend) and bear
-(sell S1 breaks below EMA34 downtrend). Uses 6h timeframe for lower frequency
-to reduce fee drag. Target: 15-25 trades/year.
+12h_Pivot_Squeeze_Reversal
+Hypothesis: In low-volatility (squeeze) regimes on 12h, price often reverses sharply
+after breaking out of Bollinger Bands. Combines Bollinger Band squeeze detection
+with 1d VWAP mean reversion and volume confirmation for high-probability reversals.
+Works in both bull and bear markets as it captures mean reversion moves.
+Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -17,84 +17,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Get daily data for EMA34 trend filter
+    # Get 1d data for VWAP and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d VWAP
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_numerator = (typical_price * df_1d['volume']).cumsum()
+    vwap_denominator = df_1d['volume'].cumsum()
+    vwap = (vwap_numerator / vwap_denominator).values
+    
+    # Calculate 1d Bollinger Bands (20, 2)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # Calculate weekly pivot points (R1, S1) from prior week's OHLC
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Bollinger Band squeeze: width < 20-period average width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
     
-    # Prior week's values (shifted by 1 to avoid look-ahead)
-    phigh = np.roll(high_1w, 1)
-    plow = np.roll(low_1w, 1)
-    pclose = np.roll(close_1w, 1)
-    phigh[0] = np.nan
-    plow[0] = np.nan
-    pclose[0] = np.nan
+    # Align 1d indicators to 12h
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze.astype(float))
     
-    # Weekly pivot point and support/resistance levels
-    pp = (phigh + plow + pclose) / 3.0
-    r1 = 2 * pp - plow
-    s1 = 2 * pp - phigh
-    
-    # Align to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and pivots
-    start_idx = 34  # for EMA34
+    # Warmup
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
+            np.isnan(bb_lower_aligned[i]) or np.isnan(squeeze_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_34_val = ema_34_1d_aligned[i]
+        vwap_val = vwap_aligned[i]
+        bb_upper_val = bb_upper_aligned[i]
+        bb_lower_val = bb_lower_aligned[i]
+        bb_middle_val = bb_middle_aligned[i]
+        squeeze_val = squeeze_aligned[i] > 0.5
+        vol_confirm_val = vol_confirm[i]
         
         if position == 0:
-            # Long: break above weekly R1 with price above EMA34 (uptrend)
-            if close[i] > r1_val and close[i] > ema_34_val:
-                signals[i] = size
-                position = 1
-            # Short: break below weekly S1 with price below EMA34 (downtrend)
-            elif close[i] < s1_val and close[i] < ema_34_val:
-                signals[i] = -size
-                position = -1
+            # Look for squeeze breakout with volume confirmation
+            if squeeze_val and vol_confirm_val:
+                # Long: break above upper BB with close > VWAP (bullish rejection)
+                if close[i] > bb_upper_val and close[i] > vwap_val:
+                    signals[i] = size
+                    position = 1
+                # Short: break below lower BB with close < VWAP (bearish rejection)
+                elif close[i] < bb_lower_val and close[i] < vwap_val:
+                    signals[i] = -size
+                    position = -1
         elif position == 1:
-            # Exit long: price closes below weekly R1 (failed breakout) or below EMA34 (trend change)
-            if close[i] < r1_val or close[i] < ema_34_val:
+            # Exit long: price returns to VWAP or breaks below middle BB
+            if close[i] <= vwap_val or close[i] < bb_middle_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above weekly S1 (failed breakdown) or above EMA34 (trend change)
-            if close[i] > s1_val or close[i] > ema_34_val:
+            # Exit short: price returns to VWAP or breaks above middle BB
+            if close[i] >= vwap_val or close[i] > bb_middle_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Direction_1dEMA34_Filter"
-timeframe = "6h"
+name = "12h_Pivot_Squeeze_Reversal"
+timeframe = "12h"
 leverage = 1.0
