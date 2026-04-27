@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume
-Hypothesis: Camarilla pivot breakout on 1h with 4h trend filter and 1d volume confirmation.
-- Camarilla levels: R1/S1 (inner support/resistance) from previous 1h OHLC.
-- 4h trend: EMA50 on 4h (bullish = close > EMA50, bearish = close < EMA50).
-- 1d volume: current volume > 1.5 * 20-day average volume.
-- Long: price breaks above R1 + 4h bullish + 1d volume spike.
-- Short: price breaks below S1 + 4h bearish + 1d volume spike.
-- Exit: opposite Camarilla breakout or trend failure.
-- Session filter: 08-20 UTC to avoid low-liquidity hours.
-- Target: 15-35 trades/year (60-140 total over 4 years) on 1h.
+6h_ChaikinMoneyFlow_WeeklyTrend
+Hypothesis: 6h Chaikin Money Flow (CMF) with weekly trend filter for institutional flow confirmation.
+- CMF(20) > 0 indicates buying pressure, < 0 selling pressure on 6h
+- Weekly trend: price > weekly EMA50 for longs, < for shorts
+- Entry: CMF crosses above 0.1 + weekly uptrend (long), CMF crosses below -0.1 + weekly downtrend (short)
+- Exit: CMF crosses back through 0 or trend failure
+- Designed to capture smart money flows while avoiding counter-trend moves
+- Target: 20-35 trades/year on 6h (80-140 total over 4 years)
 """
 
 import numpy as np
@@ -18,83 +16,81 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Camarilla R1/S1 from previous bar (standard formula)
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 12
-    s1 = prev_close - 1.1 * camarilla_range / 12
+    # 6h Chaikin Money Flow (CMF) - 20 period
+    # CMF = Sum((Close - Low - (High - Close)) / (High - Low) * Volume) / Sum(Volume)
+    mfm = np.zeros_like(close)
+    mfv = np.zeros_like(close)
     
-    # 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Avoid division by zero
+    hl_range = high - low
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
     
-    # 1d volume MA(20) for volume spike filter
-    df_1d = get_htf_data(prices, '1d')
-    vol_ma20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    mfm = ((close - low) - (high - close)) / hl_range
+    mfv = mfm * volume
     
-    # Session filter: 08-20 UTC
-    hour = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hour >= 8) & (hour <= 20)
+    # Calculate 20-period sums
+    cmf = np.full(n, np.nan)
+    for i in range(20, n):
+        sum_mfv = np.sum(mfv[i-20:i+1])
+        sum_vol = np.sum(volume[i-20:i+1])
+        if sum_vol != 0:
+            cmf[i] = sum_mfv / sum_vol
+    
+    # Weekly trend filter (EMA50)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
+        return np.zeros(n)
+    close_weekly = df_weekly['close'].values
+    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup
+    # Warmup: need enough data for calculations
     start_idx = max(50, 20) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(vol_ma20_1d_aligned[i]) or not session_mask[i]):
+        if (np.isnan(cmf[i]) or np.isnan(ema50_weekly_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_spike = volume[i] > (1.5 * vol_ma20_1d_aligned[i])
-        
         if position == 0:
-            # Long entry: break above R1 + 4h bullish + 1d volume spike
-            if (close[i] > r1[i] and close[i] > ema50_4h_aligned[i] and vol_spike):
-                signals[i] = 0.20
+            # Long entry: CMF crosses above 0.1 + weekly uptrend
+            if (cmf[i] > 0.1 and cmf[i-1] <= 0.1 and close[i] > ema50_weekly_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short entry: break below S1 + 4h bearish + 1d volume spike
-            elif (close[i] < s1[i] and close[i] < ema50_4h_aligned[i] and vol_spike):
-                signals[i] = -0.20
+            # Short entry: CMF crosses below -0.1 + weekly downtrend
+            elif (cmf[i] < -0.1 and cmf[i-1] >= -0.1 and close[i] < ema50_weekly_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: break below S1 or 4h bearish
-            if (close[i] < s1[i] or close[i] < ema50_4h_aligned[i]):
+            # Long exit: CMF crosses below 0 or weekly trend failure
+            if (cmf[i] < 0 or close[i] < ema50_weekly_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above R1 or 4h bullish
-            if (close[i] > r1[i] or close[i] > ema50_4h_aligned[i]):
+            # Short exit: CMF crosses above 0 or weekly trend failure
+            if (cmf[i] > 0 or close[i] > ema50_weekly_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_ChaikinMoneyFlow_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
