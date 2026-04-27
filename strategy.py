@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_R4S4_FadeBreakout_1d1wEMA34_Trend_VolumeSpike_v3"
+name = "4h_Camarilla_R3S3_R4S4_FadeBreakout_1d1wEMA34_Trend_VolumeSpike_v4"
 timeframe = "4h"
 leverage = 1.0
