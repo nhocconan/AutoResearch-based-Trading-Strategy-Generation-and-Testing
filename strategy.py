@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spike capture sustained moves in both bull and bear markets. ATR-based stoploss (2.5x ATR) controls drawdown. Discrete sizing (0.25) limits fee churn. Target: 50-150 trades over 4 years.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_TRIXFilter
+Hypothesis: Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spike capture sustained moves. Adding TRIX(15) as momentum filter improves edge in both bull and bear markets by avoiding weak breakouts. ATR-based stoploss (2.5x ATR) controls drawdown. Discrete sizing (0.25) limits fee churn. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -25,6 +25,13 @@ def generate_signals(prices):
     close_1d_series = pd.Series(df_1d['close'].values)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
+    # Calculate 1d TRIX(15,9) for momentum filter
+    ema1 = close_1d_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix_raw = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    trix = trix_raw.fillna(0).values
+    
     # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -35,12 +42,13 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.1 * rng_1d / 2
     camarilla_s3 = close_1d - 1.1 * rng_1d / 2
     
-    # Align all indicators to primary timeframe (12h)
+    # Align all indicators to primary timeframe (4h)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current volume > 2.0 * 24-period average (1d equivalent for 12h)
+    # Volume confirmation: current volume > 2.0 * 24-period average (6h equivalent)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
@@ -58,18 +66,20 @@ def generate_signals(prices):
     entry_price = 0.0
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need 1d EMA34 (34), volume avg (24), ATR (14)
-    start_idx = max(34, 24, 14)
+    # Warmup: need 1d EMA34 (34), TRIX (15*3=45 for stability), volume avg (24), ATR (14)
+    start_idx = max(45, 34, 24, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_confirm[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(trix_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(volume_confirm[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         ema_1d_val = ema_34_1d_aligned[i]
+        trix_val = trix_aligned[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
         vol_conf = volume_confirm[i]
@@ -81,14 +91,14 @@ def generate_signals(prices):
             is_downtrend = close_val < ema_1d_val
             
             if is_uptrend:
-                # Uptrend: long when price breaks above R3 and volume confirms
-                if (close_val > r3_val) and vol_conf:
+                # Uptrend: long when price breaks above R3, volume confirms, and TRIX positive
+                if (close_val > r3_val) and vol_conf and (trix_val > 0):
                     signals[i] = size
                     position = 1
                     entry_price = close_val
             elif is_downtrend:
-                # Downtrend: short when price breaks below S3 and volume confirms
-                if (close_val < s3_val) and vol_conf:
+                # Downtrend: short when price breaks below S3, volume confirms, and TRIX negative
+                if (close_val < s3_val) and vol_conf and (trix_val < 0):
                     signals[i] = -size
                     position = -1
                     entry_price = close_val
@@ -123,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_TRIXFilter"
+timeframe = "4h"
 leverage = 1.0
