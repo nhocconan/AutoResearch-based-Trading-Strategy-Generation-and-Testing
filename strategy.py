@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 4-hour Volume Weighted Average Price (VWAP) as dynamic support/resistance.
-Price returning to VWAP after deviation shows mean-reversion tendency. Long when price > VWAP and rising,
-short when price < VWAP and falling. Uses 12-hour EMA50 trend filter and volume confirmation (>1.5x avg).
-Designed for low trade frequency (target 20-40/year) to minimize fee drag in ranging markets.
+Hypothesis: 1d strategy using weekly Donchian(20) breakout with daily EMA50 trend filter and volume confirmation.
+Breakouts aligned with daily EMA50 trend (bullish above, bearish below) tend to continue in both bull and bear markets.
+Volume > 2.0x average confirms breakout strength. Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
+Target: 15-30 trades/year (60-120 over 4 years). Includes ATR-based stoploss to limit drawdown.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,87 +20,130 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for Donchian channels
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate EMA50 on 12h close
-    close_12h = df_12h['close'].values
-    ema_50 = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema_50[49] = np.mean(close_12h[:50])  # SMA seed
+    # Calculate 20-period Donchian channels on weekly data
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    highest_high_weekly = np.full(len(df_weekly), np.nan)
+    lowest_low_weekly = np.full(len(df_weekly), np.nan)
+    
+    for i in range(20, len(df_weekly)):
+        highest_high_weekly[i] = np.max(high_weekly[i-20:i])
+        lowest_low_weekly[i] = np.min(low_weekly[i-20:i])
+    
+    # Align weekly Donchian to daily timeframe (waits for weekly bar close)
+    highest_high_aligned = align_htf_to_ltf(prices, df_weekly, highest_high_weekly)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_weekly, lowest_low_weekly)
+    
+    # Get daily data for EMA50 trend filter and volume
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
+        return np.zeros(n)
+    
+    # Calculate EMA50 on daily close
+    close_daily = df_daily['close'].values
+    ema_50 = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 50:
+        ema_50[49] = np.mean(close_daily[:50])  # SMA seed
         multiplier = 2 / (50 + 1)
-        for i in range(50, len(close_12h)):
-            ema_50[i] = (close_12h[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
+        for i in range(50, len(close_daily)):
+            ema_50[i] = (close_daily[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Align daily EMA50 to daily timeframe (no alignment needed as same timeframe)
+    ema_50_aligned = ema_50  # Already on daily timeframe
     
-    # Calculate VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, np.nan)
+    # Calculate 20-period average daily volume for spike detection
+    volume_daily = df_daily['volume'].values
+    vol_ma_daily = np.full(len(df_daily), np.nan)
+    for i in range(20, len(df_daily)):
+        vol_ma_daily[i] = np.mean(volume_daily[i-20:i])
     
-    # 20-period average volume for spike detection
-    vol_period = 20
-    vol_ma = np.full(n, np.nan)
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    # Align daily volume MA to daily timeframe
+    vol_ma_aligned = vol_ma_daily  # Already on daily timeframe
+    
+    # ATR for stoploss (using daily data)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily_arr = df_daily['close'].values
+    tr = np.zeros(len(df_daily))
+    atr = np.full(len(df_daily), np.nan)
+    for i in range(1, len(df_daily)):
+        tr[i] = max(high_daily[i] - low_daily[i], abs(high_daily[i] - close_daily_arr[i-1]), abs(low_daily[i] - close_daily_arr[i-1]))
+    
+    for i in range(14, len(df_daily)):
+        if i == 14:
+            atr[i] = np.mean(tr[1:15])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Align ATR to daily timeframe
+    atr_aligned = atr  # Already on daily timeframe
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup: need 50 for EMA50 seed, 20 for volume
-    start_idx = max(50, vol_period)
+    # Warmup: need 20 for weekly Donchian, 50 for daily EMA50, 20 for volume MA, 14 for ATR
+    start_idx = max(20, 50, 20, 14)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_aligned[i]) or
-            np.isnan(vwap[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high_aligned[i]) or
+            np.isnan(lowest_low_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma_aligned[i] if vol_ma_aligned[i] > 0 else 0
         
-        # Determine trend from 12h EMA50
-        bullish = ema_50_aligned[i] > ema_50_aligned[i-1]  # rising EMA
-        bearish = ema_50_aligned[i] < ema_50_aligned[i-1]  # falling EMA
+        # Determine trend from daily EMA50
+        bullish = price > ema_50_aligned[i]
+        bearish = price < ema_50_aligned[i]
         
-        # Volume confirmation: > 1.5x average volume
-        volume_confirmation = vol_ratio > 1.5
+        # Volume confirmation: > 2.0x average volume
+        volume_confirmation = vol_ratio > 2.0
         
         if position == 0:
-            # Long: price above VWAP, rising EMA trend, volume confirmation
-            if price > vwap[i] and bullish and volume_confirmation:
+            # Long breakout: price breaks above weekly Donchian high in bullish trend with volume
+            if bullish and price > highest_high_aligned[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: price below VWAP, falling EMA trend, volume confirmation
-            elif price < vwap[i] and bearish and volume_confirmation:
+            # Short breakdown: price breaks below weekly Donchian low in bearish trend with volume
+            elif bearish and price < lowest_low_aligned[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below VWAP or trend turns bearish
-            if price < vwap[i] or not bullish:
+            # Long exit: price breaks below weekly Donchian low or trend turns bearish or stoploss hit
+            if price < lowest_low_aligned[i] or bearish or price < (entry_price - 2.0 * atr_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price crosses above VWAP or trend turns bullish
-            if price > vwap[i] or not bearish:
+            # Short exit: price breaks above weekly Donchian high or trend turns bullish or stoploss hit
+            if price > highest_high_aligned[i] or bullish or price > (entry_price + 2.0 * atr_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -size
+        
+        # Track entry price for stoploss calculation
+        if position != 0 and signals[i] != 0:
+            if position == 1 and signals[i] == size:
+                entry_price = price
+            elif position == -1 and signals[i] == -size:
+                entry_price = price
     
     return signals
 
-name = "4h_VWAP_EMA50_Trend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_DailyEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
