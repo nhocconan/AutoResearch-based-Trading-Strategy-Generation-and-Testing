@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R with 1w trend filter and volume confirmation.
-# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100 over 14 periods.
-# Long when Williams %R crosses above -80 (oversold), 1w uptrend (price > EMA34), volume > 1.5x average.
-# Short when Williams %R crosses below -20 (overbought), 1w downtrend (price < EMA34), volume > 1.5x average.
-# Williams %R identifies overbought/oversold conditions; 1w trend filters for higher timeframe bias.
-# Volume spike confirms institutional participation. Designed for ~15-25 trades/year per symbol.
+# Hypothesis: 6h Williams %R with 1d trend filter and volume spike.
+# Williams %R measures overbought/oversold levels: (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Long when %R crosses above -80 (oversold) in 1d uptrend with volume spike.
+# Short when %R crosses below -20 (overbought) in 1d downtrend with volume spike.
+# Uses 14-period lookback. Williams %R is effective in ranging markets and captures reversals.
+# Combined with 1d trend filter to avoid counter-trend trades and volume spike for confirmation.
+# Target: ~15-25 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,21 +21,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14 periods)
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Williams %R (14-period)
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # 34-period EMA on 1w close for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    close_1d = df_1d['close'].values
+    # 34-period EMA on 1d close for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,23 +45,23 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: Williams %R crosses above -80, 1w uptrend, volume filter
-        if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
-            close[i] > ema34_1w_aligned[i] and 
+        # Long condition: Williams %R crosses above -80 (from below), 1d uptrend, volume filter
+        if (williams_r[i] > -80 and williams_r[i-1] <= -80 and
+            close[i] > ema34_1d_aligned[i] and
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short conditions: Williams %R crosses below -20, 1w downtrend, volume filter
-        elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
-              close[i] < ema34_1w_aligned[i] and 
+        # Short condition: Williams %R crosses below -20 (from above), 1d downtrend, volume filter
+        elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and
+              close[i] < ema34_1d_aligned[i] and
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
@@ -75,6 +76,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_1wEMA34_VolumeFilter"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA34_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
