@@ -84,10 +84,10 @@ def generate_signals(prices):
                          vol_filter)
         
         if long_breakout:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_breakout:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         # Exit conditions: opposite 4h Donchian breakout
         elif position == 1 and close[i] < lowest_low_4h_aligned[i-1]:
@@ -99,14 +99,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_ATRVolFilter"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeFilter_30pct"
 timeframe = "4h"
 leverage = 1.0
