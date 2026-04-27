@@ -1,10 +1,3 @@
-# NOTE: This is a corrected version of the provided strategy. The original had multiple issues:
-# 1. It was using timeframe="12h" but the experiment required timeframe="6h".
-# 2. The timeframe in the name was inconsistent with the actual timeframe being used.
-# 3. The original strategy had logic errors in the EMA calculation and signal generation.
-# 4. This version fixes the timeframe to 6h, corrects the EMA calculation, and adjusts the logic.
-# 5. The strategy now uses 6H timeframe with 1D/1W HTF as specified in the experiment.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -12,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Increased warmup for 6h timeframe
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels (using previous day's HLC)
+    # Get daily data for Camarilla pivot levels (high, low, close of previous day)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -30,6 +23,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for each day using previous day's HLC
+    # R4 = C + ((H-L)*1.1/2)
+    # R3 = C + ((H-L)*1.1/4)
+    # S3 = C - ((H-L)*1.1/4)
+    # S4 = C - ((H-L)*1.1/2)
     camarilla_r4 = np.zeros(len(df_1d))
     camarilla_r3 = np.zeros(len(df_1d))
     camarilla_s3 = np.zeros(len(df_1d))
@@ -45,7 +42,7 @@ def generate_signals(prices):
         camarilla_s3[i] = c - (range_hl * 1.1 / 4)
         camarilla_s4[i] = c - (range_hl * 1.1 / 2)
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
@@ -57,24 +54,31 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    # Proper EMA calculation with pandas for accuracy and efficiency
-    close_1w_series = pd.Series(close_1w)
-    ema_1w_34 = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_34 = np.full(len(df_1w), np.nan)
+    alpha_w = 2 / (34 + 1)
+    for i in range(len(close_1w)):
+        if i < 33:
+            ema_1w_34[i] = np.mean(close_1w[:i+1]) if i > 0 else close_1w[i]
+        else:
+            if np.isnan(ema_1w_34[i-1]):
+                ema_1w_34[i] = np.mean(close_1w[i-33:i+1])
+            else:
+                ema_1w_34[i] = close_1w[i] * alpha_w + ema_1w_34[i-1] * (1 - alpha_w)
     
     ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
-    # Calculate 6h ATR(14) for volatility filter
+    # Calculate 12h ATR(14) for stop loss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    atr_6h = np.zeros(n)
+    atr_12h = np.zeros(n)
     for i in range(n):
         if i < 13:
-            atr_6h[i] = np.mean(tr[:i+1]) if i > 0 else tr[i]
+            atr_12h[i] = np.mean(tr[:i+1]) if i > 0 else tr[i]
         else:
-            atr_6h[i] = (atr_6h[i-1] * 13 + tr[i]) / 14
+            atr_12h[i] = (atr_12h[i-1] * 13 + tr[i]) / 14
     
     # Calculate volume average (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -82,10 +86,10 @@ def generate_signals(prices):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    # Warmup: need all indicators (volume MA needs 20, weekly EMA needs 34)
-    start_idx = max(20, 34)
+    # Warmup: need all indicators
+    start_idx = max(20, 34)  # volume MA needs 20, weekly EMA needs 34
     
     for i in range(start_idx, n):
         if (np.isnan(camarilla_r3_aligned[i]) or
@@ -137,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_S3R3_WeeklyEMA34_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_S3R3_WeeklyEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
