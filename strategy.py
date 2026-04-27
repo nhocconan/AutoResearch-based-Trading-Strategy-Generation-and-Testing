@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Williams %R reversal with 1-day volume confirmation and 1-day trend filter.
-Trades reversals when Williams %R reaches oversold/overbought levels with volume spike and daily trend alignment.
-Designed to work in both bull and bear markets by using daily trend as filter and volume to confirm reversal strength.
-Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drift.
+Hypothesis: 12-hour Williams Alligator with 1-day volume confirmation and 1-week trend filter.
+Trades when price crosses above/below Alligator jaws (SMMA13) with volume > 1.5x daily average
+and weekly EMA34 confirms trend direction. Designed for low-frequency, high-conviction trades
+to minimize fee drag in both bull and bear markets.
+Target: 15-30 trades/year per symbol (60-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(arr, period):
+    """Smoothed Moving Average (SMMA) - also called Wilder's Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan, dtype=float)
+    res = np.full_like(arr, np.nan, dtype=float)
+    # First value is simple average
+    res[period-1] = np.mean(arr[:period])
+    # Subsequent values: SMMA = (prev_smma * (period-1) + current_price) / period
+    for i in range(period, len(arr)):
+        res[i] = (res[i-1] * (period-1) + arr[i]) / period
+    return res
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,38 +33,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4-hour data for Williams %R calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
-    
-    # Calculate 4-hour Williams %R (14-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    wr = (highest_high - close_4h) / (highest_high - lowest_low) * -100
-    
-    # Align Williams %R to 4-hour timeframe
-    wr_aligned = align_htf_to_ltf(prices, df_4h, wr)
-    
-    # Get daily data for volume filter and trend
+    # Get 1-day data for Williams Alligator calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1-day volume MA(20)
+    # Calculate Williams Alligator on daily timeframe
+    # Jaws (Blue): SMMA(13), Teeth (Red): SMMA(8), Lips (Green): SMMA(5)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
+    
+    # Typical price for Alligator calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    
+    jaws = smma(typical_price_1d, 13)  # SMMA(13)
+    teeth = smma(typical_price_1d, 8)   # SMMA(8)
+    lips = smma(typical_price_1d, 5)    # SMMA(5)
+    
+    # Align Alligator lines to 12-hour timeframe
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Get 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate daily volume MA(20) for volume filter
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Calculate 1-day EMA(25) for trend
-    close_1d = df_1d['close'].values
-    ema_25_1d = pd.Series(close_1d).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema_25_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_25_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,13 +78,14 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need Williams %R, volume MA, and daily EMA
-    start_idx = max(14, 20, 25)  # max of lookbacks
+    # Warmup: need Alligator lines, weekly EMA, and daily volume MA
+    start_idx = max(34, 34, 20)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(wr_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(ema_25_1d_aligned[i])):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -76,38 +95,54 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Current 4-hour price and volume
+        # Current 12-hour price and volume
         price_now = close[i]
         vol_now = volume[i]
         vol_ma = vol_ma_20_1d_aligned[i]
-        trend_1d = ema_25_1d_aligned[i]
-        wr_now = wr_aligned[i]
+        trend_1w = ema_34_1w_aligned[i]
         
-        # Volume filter: volume > 1.3x 1-day average
-        vol_filter = vol_now > 1.3 * vol_ma
+        # Current Alligator values
+        jaws_now = jaws_aligned[i]
+        teeth_now = teeth_aligned[i]
+        lips_now = lips_aligned[i]
         
-        # Entry conditions: Williams %R reversal with volume and daily trend alignment
+        # Volume filter: volume > 1.5x daily average
+        vol_filter = vol_now > 1.5 * vol_ma
+        
+        # Alligator alignment check: lips > teeth > jaws (bullish) or lips < teeth < jaws (bearish)
+        bullish_align = lips_now > teeth_now and teeth_now > jaws_now
+        bearish_align = lips_now < teeth_now and teeth_now < jaws_now
+        
+        # Entry conditions: Alligator crossover with volume and weekly trend alignment
         if position == 0:
-            # Long: Williams %R oversold (< -80) with volume + daily uptrend
-            if wr_now < -80 and vol_filter and price_now > trend_1d:
+            # Long: price crosses above jaws with bullish alignment + volume + weekly uptrend
+            if (price_now > jaws_now and 
+                lips_now <= jaws_now and  # previous lips was at or below jaws (crossing up)
+                bullish_align and 
+                vol_filter and 
+                price_now > trend_1w):
                 signals[i] = size
                 position = 1
-            # Short: Williams %R overbought (> -20) with volume + daily downtrend
-            elif wr_now > -20 and vol_filter and price_now < trend_1d:
+            # Short: price crosses below jaws with bearish alignment + volume + weekly downtrend
+            elif (price_now < jaws_now and 
+                  lips_now >= jaws_now and  # previous lips was at or above jaws (crossing down)
+                  bearish_align and 
+                  vol_filter and 
+                  price_now < trend_1w):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R reaches overbought (> -20) or daily trend turns down
-            if wr_now > -20 or price_now < trend_1d:
+            # Exit long: price crosses below teeth or weekly trend turns down
+            if price_now < teeth_now or price_now < trend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Williams %R reaches oversold (< -80) or daily trend turns up
-            if wr_now < -80 or price_now > trend_1d:
+            # Exit short: price crosses above teeth or weekly trend turns up
+            if price_now > teeth_now or price_now > trend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_Reversal_1dVolume_1dTrend"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dVolume_1wTrend"
+timeframe = "12h"
 leverage = 1.0
