@@ -3,9 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: Use 1d RSI(14) extreme levels (oversold/overbought) as contrarian signals.
+# Trade only during 08-20 UTC session to avoid low liquidity periods.
+# Use 4h ATR for volatility filter to avoid choppy markets.
+# Position size 0.20 to manage drawdown. Target: 15-30 trades/year.
+# Works in bull/bear: mean reversion at extremes works in all regimes when combined with volatility filter.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,108 +19,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for higher timeframe context
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for RSI calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA 50 for trend direction
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d RSI(14)
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    # Prepend first value as NaN since diff reduces length by 1
+    rsi_1d = np.concatenate([[np.nan], rsi_1d])
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate 12h ATR for volatility filter
-    tr_12h = np.maximum(high_12h[1:] - low_12h[1:], np.abs(high_12h[1:] - close_12h[:-1]), np.abs(low_12h[1:] - close_12h[:-1]))
-    tr_12h = np.concatenate([[np.nan], tr_12h])
-    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    
-    # Calculate 12h volume average for volume spike detection
-    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    
-    # 4h Donchian channels (20-period for structure)
+    # Get 4h data for ATR volatility filter
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 14:
         return np.zeros(n)
+    
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    highest_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
-    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
+    close_4h = df_4h['close'].values
     
-    # Volume filter: volume > 2x 20-period average (spike)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Calculate 4h ATR(14)
+    tr_4h = np.maximum(high_4h[1:] - low_4h[1:], 
+                       np.maximum(np.abs(high_4h[1:] - close_4h[:-1]), 
+                                  np.abs(low_4h[1:] - close_4h[:-1])))
+    tr_4h = np.concatenate([[np.nan], tr_4h])
+    atr_4h = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(atr_12h_aligned[i]) or 
-            np.isnan(vol_ma_12h_aligned[i]) or 
-            np.isnan(highest_high_4h_aligned[i]) or 
-            np.isnan(lowest_low_4h_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if not session_mask[i]:
+            signals[i] = 0.0
+            continue
+            
+        if (np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        price_above_ema = close[i] > ema_50_12h_aligned[i]
-        price_below_ema = close[i] < ema_50_12h_aligned[i]
+        # RSI extremes: oversold < 30, overbought > 70
+        rsi_oversold = rsi_1d_aligned[i] < 30
+        rsi_overbought = rsi_1d_aligned[i] > 70
         
-        # Volatility filter: only trade when ATR is above average (avoid choppy markets)
-        vol_filter = atr_12h_aligned[i] > np.nanmedian(atr_12h_aligned[max(0, i-50):i+1])
+        # Volatility filter: only trade when ATR is above its 50-period median
+        atr_median = np.nanmedian(atr_4h_aligned[max(0, i-50):i+1])
+        vol_filter = atr_4h_aligned[i] > atr_median
         
-        # Volume spike filter
-        vol_spike = volume_spike[i]
-        
-        # Long conditions: price breaks above 4h Donchian high + above 12h EMA + volume spike + volatility
-        long_breakout = (close[i] > highest_high_4h_aligned[i-1] and 
-                        price_above_ema and 
-                        vol_spike and 
-                        vol_filter)
-        
-        # Short conditions: price breaks below 4h Donchian low + below 12h EMA + volume spike + volatility
-        short_breakout = (close[i] < lowest_low_4h_aligned[i-1] and 
-                         price_below_ema and 
-                         vol_spike and 
-                         vol_filter)
-        
-        if long_breakout:
-            signals[i] = 0.25
+        # Long when RSI oversold + volatility
+        if rsi_oversold and vol_filter:
+            signals[i] = 0.20
             position = 1
-        elif short_breakout:
-            signals[i] = -0.25
+        # Short when RSI overbought + volatility
+        elif rsi_overbought and vol_filter:
+            signals[i] = -0.20
             position = -1
-        # Exit conditions: opposite 4h Donchian breakout
-        elif position == 1 and close[i] < lowest_low_4h_aligned[i-1]:
+        # Exit when RSI returns to neutral range (40-60)
+        elif position == 1 and rsi_1d_aligned[i] > 40:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > highest_high_4h_aligned[i-1]:
+        elif position == -1 and rsi_1d_aligned[i] < 60:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1d_RSI14_Extreme_SessionVolFilter"
+timeframe = "1h"
 leverage = 1.0
