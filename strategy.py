@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume_Spike_v1
-Hypothesis: Trade 4h timeframe with daily CAMARILLA R1/S1 breakouts filtered by 12h EMA50 trend and volume spikes.
-Breakouts at R1/S1 capture strong momentum, filtered by 12h trend and volume confirmation.
-Designed for 20-50 trades/year to minimize fee drift. Works in bull via breakouts and bear via breakdowns.
+1h_SuperTrend_Filtered_4hTrend_With_Volume_Confirmation
+Hypothesis: Use 1h SuperTrend for entry timing, filtered by 4h trend direction (EMA50) and volume spikes.
+Only trade in direction of 4h trend to avoid counter-trend whipsaws. Volume confirmation ensures momentum.
+Designed for 15-30 trades/year to minimize fee drag. Works in bull via trend continuation and bear via trend reversals.
 """
 
 import numpy as np
@@ -20,80 +20,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate CAMARILLA levels from 1d timeframe
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate SuperTrend on 1h data
+    atr_period = 10
+    atr_multiplier = 3.0
+    
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First element has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR
+    atr = np.zeros_like(tr)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (high + low) / 2 + atr_multiplier * atr
+    basic_lb = (high + low) / 2 - atr_multiplier * atr
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(basic_ub)
+    final_lb = np.zeros_like(basic_lb)
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
+    
+    for i in range(1, len(close)):
+        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
+    
+    # SuperTrend
+    supertrend = np.zeros_like(close)
+    supertrend[0] = final_ub[0]
+    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close)):
+        if close[i] > final_ub[i-1]:
+            direction[i] = 1
+        elif close[i] < final_lb[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = final_lb[i]
+        else:
+            supertrend[i] = final_ub[i]
+    
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for CAMARILLA calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # CAMARILLA R1 and S1 levels (breakout levels)
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align CAMARILLA levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    
-    # Volume confirmation: current volume > 2.0 * 24-period average (on 4h data, ~4 days)
+    # Volume confirmation: current volume > 1.5 * 24-period average (on 1h data, ~1 day)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need enough data for volume average and EMA
-    start_idx = max(24, 50)
+    # Warmup: need enough data for ATR, EMA, and volume average
+    start_idx = max(atr_period, 50, 24)
     
     for i in range(start_idx, n):
-        bars_since_exit += 1
-        
-        # Skip if any data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i])):
+        # Skip if any data not ready or outside session
+        if (np.isnan(supertrend[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(volume_confirm[i]) or not session_filter[i]):
             signals[i] = 0.0
             continue
         
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
-        ema_50_val = ema_50_aligned[i]
+        st_value = supertrend[i]
+        ema_4h_val = ema_50_4h_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Require minimum 6 bars since last exit to avoid churn (~1 day on 4h)
-            if bars_since_exit >= 6:
-                # Long: price breaks above R1 with volume confirmation AND above 12h EMA50 (uptrend)
-                if close[i] > camarilla_r1_val and vol_conf and close[i] > ema_50_val:
-                    signals[i] = size
-                    position = 1
-                    bars_since_exit = 0
-                # Short: price breaks below S1 with volume confirmation AND below 12h EMA50 (downtrend)
-                elif close[i] < camarilla_s1_val and vol_conf and close[i] < ema_50_val:
-                    signals[i] = -size
-                    position = -1
-                    bars_since_exit = 0
+            # Long: SuperTrend uptrend (close > SuperTrend) AND price above 4h EMA50 AND volume confirmation
+            if close[i] > st_value and close[i] > ema_4h_val and vol_conf:
+                signals[i] = size
+                position = 1
+            # Short: SuperTrend downtrend (close < SuperTrend) AND price below 4h EMA50 AND volume confirmation
+            elif close[i] < st_value and close[i] < ema_4h_val and vol_conf:
+                signals[i] = -size
+                position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (opposite level)
-            if close[i] < camarilla_s1_val:
+            # Exit long: SuperTrend flips to downtrend (close < SuperTrend)
+            if close[i] < st_value:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R1 (opposite level)
-            if close[i] > camarilla_r1_val:
+            # Exit short: SuperTrend flips to uptrend (close > SuperTrend)
+            if close[i] > st_value:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume_Spike_v1"
-timeframe = "4h"
+name = "1h_SuperTrend_Filtered_4hTrend_With_Volume_Confirmation"
+timeframe = "1h"
 leverage = 1.0
