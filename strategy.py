@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_RegimeFilter
-Hypothesis: Daily Camarilla R1/S1 breakout with weekly EMA34 trend filter and choppiness regime.
-Works in bull/bear: In trending markets (price > weekly EMA34 for longs, < for shorts),
-breakouts at R1/S1 with low choppiness (trending regime) capture momentum. Uses discrete
-position sizing (0.25) to limit drawdown and reduce fee churn. Targets 20-80 trades over 4 years
-on 1d timeframe. Weekly HTF ensures structural alignment, daily timeframe avoids overtrading.
+6h_ADX_Alligator_Trend_12hVolatilityFilter
+Hypothesis: Combines ADX trend strength (12h) with Williams Alligator (6h) and 12h volatility regime filter.
+In trending markets (ADX>25), Alligator alignment (jaw-teeth-lips) gives entry signals.
+Volatility filter avoids whipsaw in low-vol regimes. Works in bull/bear: ADX captures trend strength regardless of direction.
+Discrete sizing (0.25) limits drawdown and reduces fee churn. Targets 50-150 trades over 4 years on 6h timeframe.
 """
 
 import numpy as np
@@ -20,101 +19,119 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for EMA trend filter and choppiness
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for ADX and volatility filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Weekly EMA34 for trend
-    ema_34 = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    # === 12h ADX (trend strength) ===
+    # True Range
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
+    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
     
-    # Weekly choppiness: CHOP(14) = 100 * log10(sum(ATR(14)) / log10(highest-high - lowest-low) / 14)
-    # Simplified: use rolling ATR ratio as proxy for chop
-    tr = np.maximum(df_1w['high'].values - df_1w['low'].values,
-                    np.maximum(abs(df_1w['high'].values - df_1w['close'].shift(1).values),
-                               abs(df_1w['low'].values - df_1w['close'].shift(1).values)))
+    # Directional Movement
+    up_move = df_12h['high'].diff().values
+    down_move = -df_12h['low'].diff().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed TR and DM
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # DI and DX
+    plus_di = 100 * plus_dm_sum / tr_sum
+    minus_di = 100 * minus_dm_sum / tr_sum
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # === 12h Volatility Regime Filter (ATR ratio) ===
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    hh_14 = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_14 * 14) / np.log10(hh_14 - ll_14 + 1e-10)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_50  # >1 = expanding vol, <1 = contracting vol
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
     
-    # Get daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
+    # === 6h Williams Alligator ===
+    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3) - all SMMA
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        sma = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        smma_vals = np.full_like(arr, np.nan, dtype=float)
+        smma_vals[period-1] = sma[period-1]
+        for i in range(period, len(arr)):
+            smma_vals[i] = (smma_vals[i-1] * (period-1) + arr[i]) / period
+        return smma_vals
     
-    # Camarilla levels from previous daily bar (completed)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    rng = prev_high - prev_low
-    r1 = prev_close + (rng * 1.1 / 12)
-    s1 = prev_close - (rng * 1.1 / 12)
+    median_price = (high + low) / 2
+    jaw = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
     
-    # Align Camarilla levels to daily (no shift needed as 1d->1d)
-    r1_aligned = r1  # Already aligned to daily close
-    s1_aligned = s1
+    # Align Alligator lines to 6h (no extra delay needed - SMMA is not lagging in confirmation sense)
+    jaw_aligned = align_htf_to_ltf(prices, prices, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
+    lips_aligned = align_htf_to_ltf(prices, prices, lips)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     size = 0.25  # 25% position
     
-    # Warmup: need weekly EMA34, chop, and daily shift
-    start_idx = max(34, 14, 1) + 1  # +1 for shift(1)
+    # Warmup: need ADX(14+14), ATR(50), Alligator(13)
+    start_idx = max(50, 50, 13)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or
+            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i])):
             signals[i] = 0.0
             continue
         
+        adx_val = adx_aligned[i]
+        vol_ratio = atr_ratio_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         close_val = close[i]
-        ema_val = ema_34_aligned[i]
-        chop_val = chop_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
         
-        # Regime filter: only trade in trending regime (CHOP < 38.2)
-        trending_regime = chop_val < 38.2
+        # Trend strength filter: ADX > 25
+        # Volatility filter: avoid low volatility chop (ATR ratio < 0.8) and extreme volatility (ATR ratio > 2.0)
+        trend_filter = adx_val > 25.0
+        vol_filter = (vol_ratio >= 0.8) and (vol_ratio <= 2.0)
         
         if position == 0:
-            # Look for entry: Camarilla breakout with weekly trend alignment and trending regime
-            long_condition = (close_val > r1_val and 
-                            close_val > ema_val and 
-                            trending_regime)
-            short_condition = (close_val < s1_val and 
-                             close_val < ema_val and 
-                             trending_regime)
+            # Alligator alignment: Lips > Teeth > Jaw = bullish alignment
+            # Lips < Teeth < Jaw = bearish alignment
+            bullish_align = lips_val > teeth_val and teeth_val > jaw_val
+            bearish_align = lips_val < teeth_val and teeth_val < jaw_val
             
-            if long_condition:
+            if trend_filter and vol_filter and bullish_align:
                 signals[i] = size
                 position = 1
-                entry_price = close_val
-            elif short_condition:
+            elif trend_filter and vol_filter and bearish_align:
                 signals[i] = -size
                 position = -1
-                entry_price = close_val
         elif position == 1:
-            # Exit long: price re-enters Camarilla range (below S1) OR loses weekly trend OR chop becomes high
-            if close_val < s1_val or close_val < ema_val or chop_val >= 61.8:
+            # Exit long: Alligator loses bullish alignment OR ADX weakens
+            if not (lips_val > teeth_val and teeth_val > jaw_val) or adx_val < 20.0:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price re-enters Camarilla range (above R1) OR loses weekly trend OR chop becomes high
-            if close_val > r1_val or close_val > ema_val or chop_val >= 61.8:
+            # Exit short: Alligator loses bearish alignment OR ADX weakens
+            if not (lips_val < teeth_val and teeth_val < jaw_val) or adx_val < 20.0:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_RegimeFilter"
-timeframe = "1d"
+name = "6h_ADX_Alligator_Trend_12hVolatilityFilter"
+timeframe = "6h"
 leverage = 1.0
