@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""
-6h_WilliamsVixFix_MeanReversion_1dTrend
-Hypothesis: Williams Vix Fix (WVF) identifies volatility spikes and mean reversion opportunities.
-In bull markets: buy WVF > 0.8 (panic) when price > 1d EMA50 (uptrend).
-In bear markets: sell short WVF > 0.8 when price < 1d EMA50 (downtrend).
-Uses volume confirmation to avoid false signals. Target: 50-150 trades over 4 years.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,12 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for Donchian channels and EMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1d close
+    # Calculate 1d Donchian channels (20)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = np.full(len(high_1d), np.nan)
+    donchian_low = np.full(len(low_1d), np.nan)
+    lookback = 20
+    for i in range(lookback, len(high_1d)):
+        donchian_high[i] = np.max(high_1d[i-lookback:i])
+        donchian_low[i] = np.min(low_1d[i-lookback:i])
+    
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
     ema_period = 50
     ema_1d = np.full(len(close_1d), np.nan)
@@ -36,24 +38,12 @@ def generate_signals(prices):
         for i in range(ema_period, len(close_1d)):
             ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Align 1d EMA to 6h timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align 1d indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate Williams Vix Fix (WVF) on 6h data
-    # WVF = ((Highest High in period - Low) / Highest High in period) * 100
-    wvf_period = 22
-    highest_high = np.full(n, np.nan)
-    for i in range(wvf_period - 1, n):
-        highest_high[i] = np.max(high[i - wvf_period + 1:i + 1])
-    
-    wvf = np.full(n, np.nan)
-    for i in range(wvf_period - 1, n):
-        if highest_high[i] > 0:
-            wvf[i] = ((highest_high[i] - low[i]) / highest_high[i]) * 100
-        else:
-            wvf[i] = 0
-    
-    # Volume confirmation
+    # Volume confirmation (4h volume > 1.5x 20-period average)
     vol_ma_period = 20
     vol_ma = np.full(n, np.nan)
     for i in range(vol_ma_period, n):
@@ -63,12 +53,13 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup: need WVF (22), EMA (50), volume MA (20)
-    start_idx = max(wvf_period, ema_period, vol_ma_period)
+    # Warmup: need Donchian (20), EMA (50), volume MA (20)
+    start_idx = max(lookback, ema_period, vol_ma_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(wvf[i]) or
-            np.isnan(ema_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -77,36 +68,33 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         # Trend filter: price above/below 1d EMA(50)
-        uptrend = price > ema_aligned[i]
-        downtrend = price < ema_aligned[i]
+        uptrend = price > ema_1d_aligned[i]
+        downtrend = price < ema_1d_aligned[i]
         
-        # Volume confirmation: > 1.3x average volume
-        volume_confirmation = vol_ratio > 1.3
-        
-        # WVF threshold for volatility/spike detection
-        wvf_threshold = 0.8  # 80% of range
+        # Volume confirmation: > 1.5x average volume
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long entry: WVF spike (fear) in uptrend with volume
-            if wvf[i] > wvf_threshold and uptrend and volume_confirmation:
+            # Long entry: price breaks above 1d Donchian high in uptrend with volume
+            if price > donchian_high_aligned[i] and uptrend and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short entry: WVF spike (fear) in downtrend with volume
-            elif wvf[i] > wvf_threshold and downtrend and volume_confirmation:
+            # Short entry: price breaks below 1d Donchian low in downtrend with volume
+            elif price < donchian_low_aligned[i] and downtrend and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: WVF normalizes or trend reverses
-            if wvf[i] < 0.3 or not uptrend:  # Exit when fear subsides or trend breaks
+            # Long exit: price breaks below 1d Donchian low or trend reverses
+            if price < donchian_low_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: WVF normalizes or trend reverses
-            if wvf[i] < 0.3 or not downtrend:
+            # Short exit: price breaks above 1d Donchian high or trend reverses
+            if price > donchian_high_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsVixFix_MeanReversion_1dTrend"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
