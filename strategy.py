@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_ZeroLag_MA_Crossover_v2
-Hypothesis: Elder Ray (Bull/Bear Power) with zero-lag moving average crossovers on 6h timeframe captures momentum shifts in both bull and bear markets. Uses 1d EMA for trend alignment and volume confirmation to filter false signals. Discrete sizing (0.25) balances return and fee drag. Target: 50-150 total trades over 4 years.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: On 12h timeframe, Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spikes capture fewer, higher-quality moves. 
+Weekly trend filter (price vs 1w EMA50) avoids counter-trend trades. Discrete sizing (0.25) minimizes fee drag. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -18,92 +19,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter and volume average
+    # Get 1d data for Camarilla and trend
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d Camarilla levels (R3, S3) from prior day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    range_1d = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.125 * range_1d
+    camarilla_s3 = close_1d - 1.125 * range_1d
     
     # Calculate 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1d volume average (20-period)
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Get 1w data for weekly trend filter (price vs EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Zero-lag moving average (ZLMA) parameters
-    zlma_period = 21
-    # Calculate EMA
-    ema = pd.Series(close).ewm(span=zlma_period, adjust=False, min_periods=zlma_period).mean().values
-    # Calculate lag: EMA of EMA
-    ema_of_ema = pd.Series(ema).ewm(span=zlma_period, adjust=False, min_periods=zlma_period).mean().values
-    # ZLMA = 2*EMA - EMA_of_EMA
-    zlma = 2 * ema - ema_of_ema
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Align all indicators to primary timeframe (6h)
+    # Align all indicators to primary timeframe (12h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
-    zlma_aligned = align_htf_to_ltf(prices, df_1d, zlma)  # ZLMA is calculated from LTF close but aligned to ensure proper timing
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need EMA34 (34), ZLMA (21*2), EMA13 (13), volume avg (20)
-    start_idx = max(34, 42, 13, 20)
+    # Warmup: need Camarilla (1), EMA34 (34), EMA50 (50), volume avg (20)
+    start_idx = max(1, 34, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or 
-            np.isnan(zlma_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
         ema34 = ema34_1d_aligned[i]
-        vol_avg = vol_avg_1d_aligned[i]
-        zlma_val = zlma_aligned[i]
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
-        volume_val = volume[i]
+        ema50 = ema50_1w_aligned[i]
+        vol_conf = volume_confirm_aligned[i]
         
         if position == 0:
-            # Determine trend alignment: price vs 1d EMA34
-            uptrend = close_val > ema34
-            downtrend = close_val < ema34
+            # Determine trend alignment: price vs EMA34 (1d) and EMA50 (1w)
+            uptrend = close_val > ema34 and close_val > ema50
+            downtrend = close_val < ema34 and close_val < ema50
             
-            # Volume confirmation: current volume > 1.5 * 1d volume average
-            volume_confirm = volume_val > (1.5 * vol_avg)
-            
-            if uptrend and volume_confirm:
-                # Long conditions: ZLMA crossover up AND Bull Power > 0
-                if close_val > zlma_val and bull_power_val > 0:
+            if uptrend and vol_conf:
+                # Long bias: long when price breaks above R3 with volume
+                if close_val > r3:
                     signals[i] = size
                     position = 1
                     entry_price = close_val
-            elif downtrend and volume_confirm:
-                # Short conditions: ZLMA crossover down AND Bear Power < 0
-                if close_val < zlma_val and bear_power_val < 0:
+            elif downtrend and vol_conf:
+                # Short bias: short when price breaks below S3 with volume
+                if close_val < s3:
                     signals[i] = -size
                     position = -1
                     entry_price = close_val
         elif position == 1:
-            # Exit conditions: ZLMA cross down OR Bear Power < 0
-            if close_val < zlma_val or bear_power_val < 0:
+            # Exit: price breaks below S3 (mean reversion)
+            if close_val < s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit conditions: ZLMA cross up OR Bull Power > 0
-            if close_val > zlma_val or bull_power_val > 0:
+            # Exit: price breaks above R3 (mean reversion)
+            if close_val > r3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_ZeroLag_MA_Crossover_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
