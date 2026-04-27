@@ -1,97 +1,97 @@
 #!/usr/bin/env python3
 """
-#100843 - 4h_Aroon_Oscillator_1dTrend_12hVolumeFilter
-Hypothesis: Aroon oscillator identifies trend strength with low lag. Combined with 1d trend filter and 12h volume confirmation,
-it captures strong trends while avoiding chop. Works in bull (strong uptrends) and bear (strong downtrends).
-Target: 20-40 trades/year to minimize fee drag. Uses 4h primary with 1d HTF for trend and 12h for volume filter.
+#100844 - 1d_ChaikinOscillator_Breakout_1wTrend_Volume
+Hypothesis: Daily Chaikin Oscillator (3,10) crossing zero with weekly trend filter and volume confirmation.
+Works in bull (breakouts with trend) and bear (mean reversion via Chaikin reversals). Targets 10-25 trades/year.
+Uses 1d primary timeframe with 1w HTF for trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def aroon_oscillator(high, low, period=25):
-    """Aroon Oscillator = Aroon Up - Aroon Down, ranges -100 to +100"""
-    n = len(high)
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        # Periods since highest high
-        high_idx = i - np.argmax(high[i-period+1:i+1])
-        aroon_up[i] = ((period - high_idx) / period) * 100
-        
-        # Periods since lowest low
-        low_idx = i - np.argmin(low[i-period+1:i+1])
-        aroon_down[i] = ((period - low_idx) / period) * 100
-    
-    return aroon_up - aroon_down
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly EMA20 for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Get 12h data for volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Calculate Chaikin Oscillator (3,10) on daily data
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Money Flow Volume = Money Flow Multiplier * Volume
+    # ADL = cumulative sum of Money Flow Volume
+    # Chaikin Oscillator = EMA(3, ADL) - EMA(10, ADL)
     
-    volume_12h = df_12h['volume'].values
+    # Avoid division by zero
+    hl_range = high - low
+    hl_range = np.where(hl_range == 0, 1, hl_range)
     
-    # Calculate 12h volume MA20
-    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    mfm = ((close - low) - (high - close)) / hl_range
+    mfv = mfm * volume
     
-    # Aroon oscillator (25 period) on 4h
-    aroon = aroon_oscillator(high, low, 25)
+    # Calculate ADL (Accumulation/Distribution Line)
+    adl = np.cumsum(mfv)
+    
+    # Calculate EMAs of ADL
+    adl_series = pd.Series(adl)
+    ema3_adl = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10_adl = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Chaikin Oscillator
+    chaikin_osc = ema3_adl - ema10_adl
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(aroon[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma_12h_aligned[i])):
+        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(chaikin_osc[i]) or 
+            i < 10):  # Need enough data for Chaikin calculation
             signals[i] = 0.0
             continue
         
-        # Long condition: Aroon > 50 (uptrend), above 1d EMA50, volume > 1.5x 12h MA
-        if (aroon[i] > 50 and 
-            close[i] > ema50_1d_aligned[i] and 
-            volume[i] > (vol_ma_12h_aligned[i] * 1.5)):
+        # Volume filter: volume > 1.3x 20-period average
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > (vol_ma * 1.3)
+        else:
+            volume_filter = False
+        
+        # Long condition: Chaikin crosses above zero, above weekly EMA20, volume
+        if (chaikin_osc[i] > 0 and chaikin_osc[i-1] <= 0 and 
+            close[i] > ema20_1w_aligned[i] and 
+            volume_filter):
             signals[i] = 0.25
             position = 1
-        # Short condition: Aroon < -50 (downtrend), below 1d EMA50, volume > 1.5x 12h MA
-        elif (aroon[i] < -50 and 
-              close[i] < ema50_1d_aligned[i] and 
-              volume[i] > (vol_ma_12h_aligned[i] * 1.5)):
+        # Short condition: Chaikin crosses below zero, below weekly EMA20, volume
+        elif (chaikin_osc[i] < 0 and chaikin_osc[i-1] >= 0 and 
+              close[i] < ema20_1w_aligned[i] and 
+              volume_filter):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: Aroon crosses zero (trend change)
-        elif position == 1 and aroon[i] < 0:
+        # Exit conditions: Chaikin crosses zero in opposite direction
+        elif position == 1 and chaikin_osc[i] < 0 and chaikin_osc[i-1] >= 0:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and aroon[i] > 0:
+        elif position == -1 and chaikin_osc[i] > 0 and chaikin_osc[i-1] <= 0:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Aroon_Oscillator_1dTrend_12hVolumeFilter"
-timeframe = "4h"
+name = "1d_ChaikinOscillator_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
