@@ -1,10 +1,4 @@
-# 4h_Keltner_Breakout_Volume_Trend_v1
-# Hypothesis: Price breakout above/below Keltner Channel (ATR-based) with volume confirmation and 1-day EMA trend filter.
-# Keltner breakouts indicate strong momentum. Volume surge confirms institutional participation.
-# EMA trend filter ensures trades align with higher timeframe direction.
-# Works in bull (breakouts continue) and bear (false breakouts reversed quickly via EMA filter).
-# Target: 20-40 trades/year to minimize fee drag.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,72 +13,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for long-term trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly EMA20 for trend filter
+    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Keltner Channel (20-period EMA +/- 2*ATR)
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # True Range
+    # Daily ATR(14) for volatility
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First value has no previous close
+    tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema20 + (2 * atr)
-    lower_keltner = ema20 - (2 * atr)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 1.8 * 20-period average
+    # Daily Donchian(20) breakout levels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.8)
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA20, ATR, volume MA, and EMA34
-    start_idx = max(34, 20)
+    # Warmup: need enough data for EMA20 weekly, ATR, Donchian, volume MA
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(ema20[i]) or np.isnan(atr[i]):
+        if np.isnan(ema20_1w_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
-        upper_kelt = upper_keltner[i]
-        lower_kelt = lower_keltner[i]
+        weekly_trend = ema20_1w_aligned[i]
+        upper_donch = donch_high[i]
+        lower_donch = donch_low[i]
         vol_spike_val = vol_spike[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long: price closes above upper Keltner + volume spike + uptrend (price > EMA34)
-            if close[i] > upper_kelt and vol_spike_val and close[i] > ema_trend:
+            # Long: price closes above upper Donchian + volume spike + weekly uptrend (price > weekly EMA20)
+            if close[i] > upper_donch and vol_spike_val and close[i] > weekly_trend:
                 signals[i] = size
                 position = 1
-            # Short: price closes below lower Keltner + volume spike + downtrend (price < EMA34)
-            elif close[i] < lower_kelt and vol_spike_val and close[i] < ema_trend:
+            # Short: price closes below lower Donchian + volume spike + weekly downtrend (price < weekly EMA20)
+            elif close[i] < lower_donch and vol_spike_val and close[i] < weekly_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below EMA20 or trend turns down
-            if close[i] < ema20[i] or close[i] < ema_trend:
+            # Exit long: price closes below weekly EMA20 or ATR-based trailing stop
+            if close[i] < weekly_trend or close[i] < (high[i] - 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above EMA20 or trend turns up
-            if close[i] > ema20[i] or close[i] > ema_trend:
+            # Exit short: price closes above weekly EMA20 or ATR-based trailing stop
+            if close[i] > weekly_trend or close[i] > (low[i] + 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Keltner_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_WeeklyTrend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
