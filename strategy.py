@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_RSI_Trend_Follow
-Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) for trend direction and RSI for momentum confirmation in the same direction. Enter long when KAMA turns up and RSI > 50; short when KAMA turns down and RSI < 50. This captures momentum in trending markets while avoiding whipsaws in sideways markets. Works in bull (buy dips) and bear (sell rallies) by following the adaptive trend. Target: 20-40 trades/year per symbol.
+6h_LarryWilliamsVolBreakout_12hTrend_1dVolumeFilter
+Hypothesis: Larry Williams Volatility Breakout combined with 12h EMA trend filter and 1d volume spike. 
+Long: open > previous high + K*(previous high - previous low) where K=0.5, with 12h EMA up and volume spike.
+Short: open < previous low - K*(previous high - previous low) where K=0.5, with 12h EMA down and volume spike.
+Uses 6h chart for entry timing, 12h for trend, 1d for volume confirmation.
+Designed to work in both bull (breakouts) and bear (breakdowns) markets with controlled trade frequency.
+Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -10,86 +15,91 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # 1d KAMA for trend direction
-    close_1d = pd.Series(df_1d['close'].values)
-    # Calculate Efficiency Ratio (ER)
-    change = abs(close_1d - close_1d.shift(10))
-    volatility = abs(close_1d - close_1d.shift(1)).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Calculate KAMA
-    kama = np.zeros(len(close_1d))
-    kama[0] = close_1d.iloc[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close_1d.iloc[i] - kama[i-1])
-    kama = kama
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # 12h EMA21 for trend filter
+    close_12h = pd.Series(df_12h['close'].values)
+    ema21_12h = close_12h.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
     
-    # RSI(14) for momentum confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Volume filter: require volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    # 1d volume 20-period average for spike detection
+    volume_1d = pd.Series(df_1d['volume'].values)
+    vol_ma_20_1d = volume_1d.rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Williams Volatility Breakout calculation on 6h data
+    # K = 0.5 (standard Williams %R parameter)
+    K = 0.5
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_range = prev_high - prev_low
+    
+    # Long breakout: open > previous high + K * previous range
+    long_breakout_level = prev_high + K * prev_range
+    # Short breakdown: open < previous low - K * previous range
+    short_breakout_level = prev_low - K * prev_range
+    
+    # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
+    # Convert 1d average volume to 6h equivalent (1d = 4 * 6h)
+    vol_threshold = vol_ma_20_1d_aligned * 1.5 / 4.0  # Scale down for 6h comparison
+    volume_filter = volume > vol_threshold
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup period
-    start_idx = 30  # need 30 for KAMA and RSI
+    # Start after warmup period (need 1 for roll, 20 for volume MA, 21 for EMA)
+    start_idx = max(1, 20, 21)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema21_12h_aligned[i]) or np.isnan(long_breakout_level[i]) or 
+            np.isnan(short_breakout_level[i]) or np.isnan(volume_filter[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: KAMA turning up and RSI > 50 with volume confirmation
-            if (i > 0 and kama_1d_aligned[i] > kama_1d_aligned[i-1] and 
-                rsi[i] > 50 and volume_filter[i]):
+            # Long: open breaks above previous high + K*range with trend up and volume spike
+            if (open_price[i] > long_breakout_level[i] and 
+                ema21_12h_aligned[i] > ema21_12h_aligned[i-1] and  # 12h EMA rising
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turning down and RSI < 50 with volume confirmation
-            elif (i > 0 and kama_1d_aligned[i] < kama_1d_aligned[i-1] and 
-                  rsi[i] < 50 and volume_filter[i]):
+            # Short: open breaks below previous low - K*range with trend down and volume spike
+            elif (open_price[i] < short_breakout_level[i] and 
+                  ema21_12h_aligned[i] < ema21_12h_aligned[i-1] and  # 12h EMA falling
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: KAMA turns down or RSI < 40
-            if (kama_1d_aligned[i] < kama_1d_aligned[i-1] or rsi[i] < 40):
+            # Long exit: price closes below 12h EMA or reversal signal
+            if close[i] < ema21_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: KAMA turns up or RSI > 60
-            if (kama_1d_aligned[i] > kama_1d_aligned[i-1] or rsi[i] > 60):
+            # Short exit: price closes above 12h EMA or reversal signal
+            if close[i] > ema21_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Direction_RSI_Trend_Follow"
-timeframe = "4h"
+name = "6h_LarryWilliamsVolBreakout_12hTrend_1dVolumeFilter"
+timeframe = "6h"
 leverage = 1.0
