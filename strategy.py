@@ -1,17 +1,7 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-"""
-Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
-- Williams %R(14) identifies overbought/oversold conditions.
-- 12h EMA50 defines trend direction (long when price > EMA, short when price < EMA).
-- Volume > 1.5x 20-period average confirms momentum.
-- Works in both bull/bear markets: mean reversion in range, trend-following in strong moves.
-- Target: 50-150 total trades over 4 years (12-37/year).
-"""
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,42 +13,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams %R and EMA50
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Get 1d data for RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams %R(14) on 12h
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = np.full(len(high_12h), np.nan)
-    lowest_low = np.full(len(low_12h), np.nan)
+    # Calculate 14-period RSI using Wilder's smoothing
+    delta = np.diff(close_1d)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(len(gain), np.nan)
+    avg_loss = np.full(len(loss), np.nan)
+    for i in range(14, len(gain)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    for i in range(13, len(high_12h)):
-        highest_high[i] = np.max(high_12h[i-13:i+1])
-        lowest_low[i] = np.min(low_12h[i-13:i+1])
+    # Get 4h data for EMA200 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 200:
+        return np.zeros(n)
     
-    # Avoid division by zero
-    denom = highest_high - lowest_low
-    williams_r = np.full(len(high_12h), np.nan)
-    mask = denom != 0
-    williams_r[mask] = ((highest_high[mask] - close_12h[mask]) / denom[mask]) * -100
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA50
-    ema_period = 50
-    ema_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= ema_period:
-        ema_12h[ema_period - 1] = np.mean(close_12h[:ema_period])
-        for i in range(ema_period, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * (2 / (ema_period + 1)) + 
-                         ema_12h[i-1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 4h EMA200
+    ema_period = 200
+    ema_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= ema_period:
+        ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
+        for i in range(ema_period, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * (2 / (ema_period + 1)) + 
+                        ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Align indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align indicators to 4h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -70,12 +67,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Williams %R, EMA, and volume MA
-    start_idx = max(13, ema_period - 1, vol_period) + 5
+    # Warmup: need RSI, EMA, and volume MA
+    start_idx = max(14, 200, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_12h_aligned[i]) or 
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_4h_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -84,32 +81,30 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) + price > 12h EMA50 + volume confirmation
-            if (williams_r_aligned[i] < -80 and 
-                price > ema_12h_aligned[i] and 
-                vol_ratio > 1.5):
+            # Long: RSI < 30 (oversold) + volume spike + price > 4h EMA200
+            if (rsi_1d_aligned[i] < 30 and 
+                vol_ratio > 1.5 and 
+                price > ema_4h_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: Williams %R > -20 (overbought) + price < 12h EMA50 + volume confirmation
-            elif (williams_r_aligned[i] > -20 and 
-                  price < ema_12h_aligned[i] and 
-                  vol_ratio > 1.5):
+            # Short: RSI > 70 (overbought) + volume spike + price < 4h EMA200
+            elif (rsi_1d_aligned[i] > 70 and 
+                  vol_ratio > 1.5 and 
+                  price < ema_4h_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Williams %R > -50 (mean reversion) or trend change
-            if (williams_r_aligned[i] > -50 or 
-                price < ema_12h_aligned[i]):
+            # Long exit: RSI > 50 (mean reversion)
+            if rsi_1d_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Williams %R < -50 (mean reversion) or trend change
-            if (williams_r_aligned[i] < -50 or 
-                price > ema_12h_aligned[i]):
+            # Short exit: RSI < 50 (mean reversion)
+            if rsi_1d_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_12hEMA50_Volume"
-timeframe = "6h"
+name = "4h_RSI_MeanReversion_VolumeSpike_EMA200"
+timeframe = "4h"
 leverage = 1.0
