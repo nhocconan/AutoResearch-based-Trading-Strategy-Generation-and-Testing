@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index (14) + 12h Donchian Breakout (20) + Volume Spike
-# In choppy markets (CHOP > 61.8), mean-reversion at Donchian bands works well.
-# Volume spike confirms breakout validity. Uses 1w trend filter to avoid counter-trend trades.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (~12-37/year).
-# Works in bull/bear via trend filter and regime adaptation.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume spike
+# Donchian channels capture breakouts; trend filter ensures alignment with higher timeframe;
+# volume confirmation reduces false breakouts. Works in bull/bear by filtering breakout direction.
+# Target: 50-150 total trades over 4 years (~12-37/year) to avoid excessive fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,95 +18,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # 1w EMA trend filter (50-period)
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Choppiness Index (14-period)
-    atr = np.zeros(n)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    max_h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_l = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        if atr[i] > 0 and max_h[i] > min_l[i]:
-            chop[i] = 100 * np.log14(np.sum(atr[i-13:i+1]) / (max_h[i] - min_l[i])) / np.log14(14)
-        else:
-            chop[i] = 50.0  # neutral when undefined
-    
-    # Donchian Channels (20-period)
-    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: volume > 1.5 x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
+    # Calculate Donchian channels (20-period) on 4h data
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        donchian_high[i] = np.max(high[i-19:i+1])
+        donchian_low[i] = np.min(low[i-19:i+1])
+    
+    # 1d EMA trend filter (34-period)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: volume > 2.0 x 24-period average (4 days of 4h bars)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(23, n):
+        vol_ma_24[i] = np.mean(volume[i-23:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need chop (14), DC (20), EMA (50), vol MA (20)
-    start_idx = max(14, 20, 50, 20)
+    # Warmup: need Donchian (20), EMA (34), volume MA (24)
+    start_idx = max(19, 34, 24)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(chop[i]) or np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        vol_avg = vol_ma_24[i]
         
         # Volume filter: significant volume spike
-        vol_filter = vol_now > 1.5 * vol_avg
+        vol_filter = vol_now > 2.0 * vol_avg
         
-        # Trend filter from 1w EMA
-        bullish_trend = price > ema_50_1w_aligned[i]
-        bearish_trend = price < ema_50_1w_aligned[i]
-        
-        # Regime filter: choppy market (CHOP > 61.8) for mean reversion
-        chop_filter = chop[i] > 61.8
+        # Trend filter from 1d EMA
+        bullish_trend = price > ema_34_aligned[i]
+        bearish_trend = price < ema_34_aligned[i]
         
         if position == 0:
-            # Long: price at lower Donchian band in choppy market with volume
-            if chop_filter and vol_filter and price <= dc_low[i]:
+            # Long: break above Donchian high with volume and bullish trend
+            if price > donchian_high[i] and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: price at upper Donchian band in choppy market with volume
-            elif chop_filter and vol_filter and price >= dc_high[i]:
+            # Short: break below Donchian low with volume and bearish trend
+            elif price < donchian_low[i] and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches middle or upper band, or trend turns bearish
-            dc_mid = (dc_high[i] + dc_low[i]) / 2
-            if price >= dc_mid or not bullish_trend or not chop_filter:
+            # Exit long: price returns to Donchian low or trend turns bearish
+            if price <= donchian_low[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price reaches middle or lower band, or trend turns bullish
-            dc_mid = (dc_high[i] + dc_low[i]) / 2
-            if price <= dc_mid or not bearish_trend or not chop_filter:
+            # Exit short: price returns to Donchian high or trend turns bullish
+            if price >= donchian_high[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Choppiness_Donchian_MeanReversion_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
