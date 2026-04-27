@@ -18,73 +18,74 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily RSI(14) for trend filter
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rs = rs.replace([np.inf, -np.inf], 100)
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14_vals = rsi_14.values
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_vals)
+    # Daily close for trend filter
+    daily_close = df_1d['close'].values
     
-    # Daily ATR (14-period) for volatility filter
-    tr1 = pd.Series(df_1d['high'] - df_1d['low'])
-    tr2 = pd.Series(np.abs(df_1d['high'] - df_1d['close'].shift(1)))
-    tr3 = pd.Series(np.abs(df_1d['low'] - df_1d['close'].shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr.iloc[0] = 0
-    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Daily 50-period EMA for trend filter
+    daily_close_series = pd.Series(daily_close)
+    ema50_daily = daily_close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_1d, ema50_daily)
     
-    # 6h EMA(20) for entry/exit signal
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Daily 200-period SMA for long-term trend filter
+    sma200_daily = daily_close_series.rolling(window=200, min_periods=200).mean().values
+    sma200_daily_aligned = align_htf_to_ltf(prices, df_1d, sma200_daily)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # 1h Bollinger Bands (20, 2) for mean reversion
+    close_series = pd.Series(close)
+    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std20 = close_series.rolling(window=20, min_periods=20).std().values
+    upper_band = sma20 + (2 * std20)
+    lower_band = sma20 - (2 * std20)
+    
+    # Volume confirmation: volume > 1.3 * 20-period average
+    vol_ma = close_series.rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need enough data for EMA20, volume MA, and RSI
-    start_idx = max(20, 14)
+    # Warmup: need enough data for Bollinger Bands, volume MA, and daily indicators
+    start_idx = max(20, 200)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(rsi_14_aligned[i]) or np.isnan(ema20[i]) or np.isnan(atr_14_aligned[i]):
+        if np.isnan(ema50_daily_aligned[i]) or np.isnan(sma200_daily_aligned[i]) or np.isnan(sma20[i]) or np.isnan(std20[i]):
             signals[i] = 0.0
             continue
         
-        rsi_val = rsi_14_aligned[i]
-        ema_val = ema20[i]
+        price = close[i]
+        ema50_val = ema50_daily_aligned[i]
+        sma200_val = sma200_daily_aligned[i]
+        upper = upper_band[i]
+        lower = lower_band[i]
         vol_spike_val = vol_spike[i]
-        atr_val = atr_14_aligned[i]
+        
+        # Determine market regime based on daily trends
+        bullish_regime = price > sma200_val and ema50_val > sma200_val
+        bearish_regime = price < sma200_val and ema50_val < sma200_val
         
         if position == 0:
-            # Long: price crosses above EMA20 + volume spike + bullish momentum (RSI > 50)
-            if close[i] > ema_val and close[i-1] <= ema_val and vol_spike_val and rsi_val > 50:
+            # Long: price touches lower Bollinger Band in bullish regime with volume spike
+            if bullish_regime and price <= lower and vol_spike_val:
                 signals[i] = size
                 position = 1
-            # Short: price crosses below EMA20 + volume spike + bearish momentum (RSI < 50)
-            elif close[i] < ema_val and close[i-1] >= ema_val and vol_spike_val and rsi_val < 50:
+            # Short: price touches upper Bollinger Band in bearish regime with volume spike
+            elif bearish_regime and price >= upper and vol_spike_val:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA20 or momentum turns bearish
-            if close[i] < ema_val or rsi_val < 40:
+            # Exit long: price returns to middle Bollinger Band or regime changes
+            if price >= sma20[i] or not bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA20 or momentum turns bullish
-            if close[i] > ema_val or rsi_val > 60:
+            # Exit short: price returns to middle Bollinger Band or regime changes
+            if price <= sma20[i] or not bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA20_RSI_Volume_Momentum_v1"
-timeframe = "6h"
+name = "1h_Bollinger_MeanReversion_Regime_Volume_v1"
+timeframe = "1h"
 leverage = 1.0
