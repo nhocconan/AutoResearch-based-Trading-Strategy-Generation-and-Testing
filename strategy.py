@@ -31,15 +31,15 @@ def generate_signals(prices):
     atr_1d_raw = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
     
-    # 6h ATR(14) for volatility filter
-    tr1_h = high - low
-    tr2_h = np.abs(high - np.roll(close, 1))
-    tr3_h = np.abs(low - np.roll(close, 1))
-    tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
-    tr_h[0] = tr1_h[0]
-    atr_6h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
+    # 12h ATR(14) for volatility filter
+    tr1_12h = high - low
+    tr2_12h = np.abs(high - np.roll(close, 1))
+    tr3_12h = np.abs(low - np.roll(close, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
-    # 6h RSI(14) for momentum confirmation
+    # 12h RSI(14) for momentum confirmation
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -57,19 +57,19 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_6h[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_12h[i]) or 
             i >= len(atr_1d_aligned) or np.isnan(atr_1d_aligned[i]) or
             np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_1d_aligned[i]
-        atr_6h_val = atr_6h[i]
+        atr_12h_val = atr_12h[i]
         atr_1d_val = atr_1d_aligned[i]
         rsi_val = rsi[i]
         
-        # Volatility filter: 6h ATR > 0.5 * daily ATR (higher volatility regime)
-        vol_filter = atr_6h_val > (atr_1d_val * 0.5)
+        # Volatility filter: 12h ATR > 0.5 * daily ATR (higher volatility regime)
+        vol_filter = atr_12h_val > (atr_1d_val * 0.5)
         
         # RSI filter: avoid overbought/oversold extremes
         rsi_filter = (rsi_val > 30) & (rsi_val < 70)
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_Trend_VolumeRSIFilter_v1"
-timeframe = "6h"
+name = "12h_EMA34_Trend_VolumeRSIFilter_v1"
+timeframe = "12h"
 leverage = 1.0
