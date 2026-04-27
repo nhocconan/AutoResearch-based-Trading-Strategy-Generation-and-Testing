@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Camarilla Pivot Reversal with 1w Trend Filter and Volume Spike.
-Long when price touches S3 or S4 and reverses up + 1w trend up + volume spike.
-Short when price touches R3 or R4 and reverses down + 1w trend down + volume spike.
-Exit when price reaches opposite pivot level (S1 for longs, R1 for shorts) or trend reverses.
-Designed for low frequency (8-18 trades/year) to minimize fee drift.
-Uses Camarilla pivots for reversal zones and 1w EMA for trend filter.
+4h Camarilla R1/S1 Breakout with 1d Trend Filter and Volume Spike.
+Long when price breaks above R1 + 1d trend up + volume spike.
+Short when price breaks below S1 + 1d trend down + volume spike.
+Exit when price returns to pivot or trend reverses.
+Designed for low frequency (20-50 trades/year) to minimize fee drag.
+Uses Camarilla pivot levels and 1d EMA for trend filter.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,112 +22,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for pivot levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34) for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = np.full_like(close_1w, np.nan)
-    for i in range(33, len(close_1w)):
-        ema_1w[i] = np.mean(close_1w[i-33:i+1])
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = np.empty_like(close_1d, dtype=np.float64)
+    ema_1d.fill(np.nan)
+    for i in range(33, len(close_1d)):
+        ema_1d[i] = np.mean(close_1d[i-33:i+1])  # Simple MA for EMA approximation
     
-    # Align 1w EMA to 1d timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate daily Camarilla pivots
-    camarilla_r4 = np.full(n, np.nan)
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_r2 = np.full(n, np.nan)
-    camarilla_r1 = np.full(n, np.nan)
-    camarilla_s1 = np.full(n, np.nan)
-    camarilla_s2 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
-    camarilla_s4 = np.full(n, np.nan)
+    # Calculate Camarilla pivot levels from previous 1d candle
+    # R1 = close + (high - low) * 1.12
+    # S1 = close - (high - low) * 1.12
+    # Pivot = (high + low + close) / 3
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    for i in range(1, n):
-        pc = close[i-1]
-        ph = high[i-1]
-        pl = low[i-1]
-        rng = ph - pl
-        camarilla_r4[i] = pc + rng * 1.1 / 2
-        camarilla_r3[i] = pc + rng * 1.1 / 4
-        camarilla_r2[i] = pc + rng * 1.1 / 6
-        camarilla_r1[i] = pc + rng * 1.1 / 12
-        camarilla_s1[i] = pc - rng * 1.1 / 12
-        camarilla_s2[i] = pc - rng * 1.1 / 6
-        camarilla_s3[i] = pc - rng * 1.1 / 4
-        camarilla_s4[i] = pc - rng * 1.1 / 2
+    # Previous day's values (shifted by 1 to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d_vals, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Volume filter: volume > 1.3x average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Calculate pivot levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.12
+    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
+    
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
+    # Volume filter: volume > 1.5x average (to avoid false breakouts)
+    vol_ma_30 = np.empty_like(volume, dtype=np.float64)
+    vol_ma_30.fill(np.nan)
+    for i in range(29, n):
+        vol_ma_30[i] = np.mean(volume[i-29:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need pivots (1) + volume MA (20) + 1w EMA (34)
-    start_idx = max(20, 34)
+    # Warmup: need volume MA (30) + Camarilla levels (1d)
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
-            np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
+        # Current price and volume
         price_now = close[i]
         vol_now = volume[i]
         
-        r4 = camarilla_r4[i]
-        r3 = camarilla_r3[i]
-        s3 = camarilla_s3[i]
-        s4 = camarilla_s4[i]
-        r1 = camarilla_r1[i]
-        s1 = camarilla_s1[i]
-        trend_1w = ema_1w_aligned[i]
+        # Current indicators
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        pivot = camarilla_pivot_aligned[i]
+        trend_1d = ema_1d_aligned[i]
         
-        # Volume filter: volume > 1.3x average
-        vol_filter = vol_now > 1.3 * vol_ma_20[i]
-        
-        # Reversal detection: price touches level and closes back inside
-        touched_r4 = high[i] >= r4 and close[i] < r4
-        touched_r3 = high[i] >= r3 and close[i] < r3
-        touched_s3 = low[i] <= s3 and close[i] > s3
-        touched_s4 = low[i] <= s4 and close[i] > s4
+        # Volume filter: volume > 1.5x average
+        vol_filter = vol_now > 1.5 * vol_ma_30[i]
         
         if position == 0:
-            # Long: price touches S3/S4 and reverses up + 1w trend up + volume spike
-            if ((touched_s3 or touched_s4) and 
-                price_now > s1 and  # Already reversed above S1
-                trend_1w > close[i-1] and  # Uptrend
-                vol_filter):
+            # Bull: price breaks above R1 + 1d trend up + volume spike
+            if price_now > r1 and price_now > trend_1d and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price touches R3/R4 and reverses down + 1w trend down + volume spike
-            elif ((touched_r3 or touched_r4) and 
-                  price_now < r1 and  # Already reversed below R1
-                  trend_1w < close[i-1] and  # Downtrend
-                  vol_filter):
+            # Bear: price breaks below S1 + 1d trend down + volume spike
+            elif price_now < s1 and price_now < trend_1d and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches S1 (opposite) or 1w trend turns down
-            if price_now <= s1 or trend_1w < close[i-1]:
+            # Exit long: price returns to pivot or 1d trend turns down
+            if price_now < pivot or price_now < trend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price reaches R1 (opposite) or 1w trend turns up
-            if price_now >= r1 or trend_1w > close[i-1]:
+            # Exit short: price returns to pivot or 1d trend turns up
+            if price_now > pivot or price_now > trend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_CamarillaPivotReversal_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
