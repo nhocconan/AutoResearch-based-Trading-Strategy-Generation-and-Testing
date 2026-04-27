@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h VWAP deviation with 1w EMA trend filter and volume surge confirmation
-# Uses deviation from VWAP (volume-weighted average price) to identify mean reversion opportunities,
-# confirmed by 1w EMA trend direction and volume > 2x average. Works in both bull and bear markets
-# by taking mean-reversion trades against short-term deviations while following the weekly trend.
-# Target: 25-40 trades/year to minimize fee decay while capturing mean reversion after volatility spikes.
+# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
+# Uses Williams %R to identify overbought/oversold conditions (reversal signals),
+# 1d EMA trend filter to ensure alignment with higher timeframe trend,
+# and volume > 1.5x average to confirm momentum.
+# Works in both bull and bear markets by only taking reversals in the direction of the 1d trend.
+# Target: 20-30 trades/year to minimize fee decay while capturing high-probability reversals.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,60 +20,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate EMA on 1w (21-period)
-    close_1w = df_1w['close'].values
-    ema_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 21:
-        ema_1w[20] = np.mean(close_1w[:21])
-        for i in range(21, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 19) / 21
+    # Calculate EMA on 1d (34-period)
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2) / (34 + 1) + ema_34_1d[i-1] * (33) / (34 + 1)
     
-    # VWAP calculation for 4h (typical price * volume / cumulative volume)
-    typical_price = (high + low + close) / 3
-    vwap = np.full(n, np.nan)
-    cum_vol = np.full(n, np.nan)
-    cum_tpv = np.full(n, np.nan)
+    # Williams %R on 4h (14-period)
+    williams_r = np.full(n, np.nan)
+    lookback = 14
+    for i in range(lookback, n):
+        highest_high = np.max(high[i-lookback+1:i+1])
+        lowest_low = np.min(low[i-lookback+1:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
     
-    for i in range(n):
-        if i == 0:
-            cum_vol[i] = volume[i]
-            cum_tpv[i] = typical_price[i] * volume[i]
-        else:
-            cum_vol[i] = cum_vol[i-1] + volume[i]
-            cum_tpv[i] = cum_tpv[i-1] + typical_price[i] * volume[i]
-        if cum_vol[i] > 0:
-            vwap[i] = cum_tpv[i] / cum_vol[i]
-    
-    # VWAP deviation percentage
-    vwap_dev = np.full(n, np.nan)
-    for i in range(n):
-        if not np.isnan(vwap[i]) and vwap[i] > 0:
-            vwap_dev[i] = (close[i] - vwap[i]) / vwap[i] * 100
-    
-    # 20-period average volume for surge detection
+    # 20-period average volume for spike detection
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     # Align HTF indicators to 4h
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(vol_period, 21)  # VWAP needs some history, EMA needs 21
+    start_idx = max(lookback, vol_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(vwap_dev[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(williams_r[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -81,38 +69,36 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         # Conditions:
-        # 1. VWAP deviation: > 1.5% away from VWAP (extended move)
-        # 2. 1w EMA trend: price above EMA for long bias, below for short bias
-        # 3. Volume confirmation: > 2x average volume (institutional interest)
-        # 4. Mean reversion: price moving back toward VWAP
-        extended_up = vwap_dev[i] > 1.5
-        extended_down = vwap_dev[i] < -1.5
-        uptrend = price > ema_1w_aligned[i]
-        downtrend = price < ema_1w_aligned[i]
-        volume_confirmation = vol_ratio > 2.0
+        # 1. Williams %R oversold (< -80) or overbought (> -20)
+        # 2. Price above/below 1d EMA for trend alignment
+        # 3. Volume confirmation: > 1.5x average volume
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        uptrend = price > ema_34_1d_aligned[i]
+        downtrend = price < ema_34_1d_aligned[i]
+        volume_confirmation = vol_ratio > 1.5
         
-        # Mean reversion signals: fade extended moves in direction of weekly trend
         if position == 0:
-            # Long: fade downward extension in uptrend
-            if extended_down and uptrend and volume_confirmation:
+            # Long: oversold during uptrend with volume
+            if oversold and uptrend and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: fade upward extension in downtrend
-            elif extended_up and downtrend and volume_confirmation:
+            # Short: overbought during downtrend with volume
+            elif overbought and downtrend and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to VWAP or trend changes
-            if vwap_dev[i] < 0.2 or price < ema_1w_aligned[i]:  # near VWAP or trend break
+            # Long exit: Williams %R returns to neutral or trend changes
+            if williams_r[i] > -50 or price < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price returns to VWAP or trend changes
-            if vwap_dev[i] > -0.2 or price > ema_1w_aligned[i]:  # near VWAP or trend break
+            # Short exit: Williams %R returns to neutral or trend changes
+            if williams_r[i] < -50 or price > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAPDeviation_1wEMA_Trend_VolumeSurge"
+name = "4h_WilliamsR_EMATrend_Volume"
 timeframe = "4h"
 leverage = 1.0
