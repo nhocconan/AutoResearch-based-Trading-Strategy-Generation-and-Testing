@@ -1,27 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 12h Trend Filter and Volume Spike.
-Long when price breaks above Donchian(20) upper band + 12h EMA50 up + volume spike.
-Short when price breaks below Donchian(20) lower band + 12h EMA50 down + volume spike.
-Exit when price crosses back inside Donchian channel or trend reverses.
-Designed for low frequency (20-40 trades/year) to minimize fee drag.
-Uses Donchian channel for breakout signals with 12h EMA trend filter.
+1h Bollinger Band Reversal with 4h Trend and Volume Spike Filter.
+Long when price touches lower BB + 4h uptrend + volume spike.
+Short when price touches upper BB + 4h downtrend + volume spike.
+Exit when price crosses back inside Bollinger Bands or trend changes.
+Designed for low frequency (15-30 trades/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_donchian_channels(high, low, window):
-    """Calculate Donchian upper and lower bands"""
-    upper = np.full_like(high, np.nan, dtype=np.float64)
-    lower = np.full_like(low, np.nan, dtype=np.float64)
-    
-    for i in range(window-1, len(high)):
-        upper[i] = np.max(high[i-window+1:i+1])
-        lower[i] = np.min(low[i-window+1:i+1])
-    
-    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,80 +21,100 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Session filter: 08:00-20:00 UTC (precomputed)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = np.full_like(close_12h, np.nan, dtype=np.float64)
+    # Calculate 4h EMA20 for trend
+    close_4h = df_4h['close'].values
+    ema_20_4h = np.full_like(close_4h, np.nan, dtype=np.float64)
+    alpha = 2.0 / (20 + 1)
+    for i in range(len(close_4h)):
+        if i < 20:
+            if i == 0:
+                ema_20_4h[i] = close_4h[i]
+            else:
+                ema_20_4h[i] = (close_4h[i] * alpha) + (ema_20_4h[i-1] * (1 - alpha))
+        else:
+            ema_20_4h[i] = (close_4h[i] * alpha) + (ema_20_4h[i-1] * (1 - alpha))
     
-    # Calculate EMA with proper smoothing
-    alpha = 2.0 / (50 + 1)
-    ema_50_12h[49] = np.mean(close_12h[:50])  # First EMA value
-    for i in range(50, len(close_12h)):
-        ema_50_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_50_12h[i-1]
+    # Align 4h EMA20 to 1h with proper delay
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Align EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Bollinger Bands on 1h
+    bb_length = 20
+    bb_std = 2.0
+    sma = np.full(n, np.nan, dtype=np.float64)
+    std = np.full(n, np.nan, dtype=np.float64)
     
-    # Calculate Donchian channels on 4h (20-period)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
+    for i in range(n):
+        if i >= bb_length - 1:
+            sma[i] = np.mean(close[i-bb_length+1:i+1])
+            std[i] = np.std(close[i-bb_length+1:i+1])
     
-    # Volume filter: volume > 1.8x average
-    vol_ma_20 = np.empty_like(volume, dtype=np.float64)
-    vol_ma_20.fill(np.nan)
+    upper = sma + (bb_std * std)
+    lower = sma - (bb_std * std)
+    
+    # Volume filter: volume > 1.5x average (to avoid false signals)
+    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
-    # Warmup: need Donchian (20), EMA (50), volume MA (20)
-    start_idx = max(20, 50, 20)
+    # Warmup: need Bollinger Bands (20) + volume MA (20)
+    start_idx = max(bb_length, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if any data not ready or outside session
+        if (np.isnan(sma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_ma_20[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Current price and volume
+        # Current values
         price_now = close[i]
         vol_now = volume[i]
         
-        # Current indicators
-        upper_band = donchian_upper[i]
-        lower_band = donchian_lower[i]
-        trend = ema_50_12h_aligned[i]
+        # Bollinger Bands
+        upper_band = upper[i]
+        lower_band = lower[i]
         
-        # Volume filter: volume > 1.8x average
-        vol_filter = vol_now > 1.8 * vol_ma_20[i]
+        # 4h EMA20 trend
+        ema_20 = ema_20_4h_aligned[i]
+        
+        # Volume filter: volume > 1.5x average
+        vol_filter = vol_now > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Bull: price breaks above upper band + trend up + volume spike
-            if price_now > upper_band and price_now > trend and vol_filter:
+            # Long: price at or below lower BB + 4h uptrend + volume spike
+            if price_now <= lower_band and price_now > ema_20 and vol_filter:
                 signals[i] = size
                 position = 1
-            # Bear: price breaks below lower band + trend down + volume spike
-            elif price_now < lower_band and price_now < trend and vol_filter:
+            # Short: price at or above upper BB + 4h downtrend + volume spike
+            elif price_now >= upper_band and price_now < ema_20 and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back below upper band or trend turns down
-            if price_now < upper_band or price_now < trend:
+            # Exit long: price crosses back inside Bollinger Bands or 4h trend turns down
+            if price_now >= sma[i] or price_now < ema_20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses back above lower band or trend turns up
-            if price_now > lower_band or price_now > trend:
+            # Exit short: price crosses back inside Bollinger Bands or 4h trend turns up
+            if price_now <= sma[i] or price_now > ema_20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_BollingerReversal_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
