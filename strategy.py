@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF
-Hypothesis: Camarilla R3/S3 breakout on 6h with 1d trend filter (price > EMA34) and volume spike.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakout on 12h with 1d trend filter (price > EMA34) and volume spike.
 Breakouts at R3/S3 levels with 1d trend alignment and volume confirmation capture strong moves
 while avoiding false breakouts in choppy or counter-trend conditions. Works in both bull and bear
 markets by only trading in the direction of the 1d trend.
@@ -43,7 +43,7 @@ def generate_signals(prices):
     R3 = PP + range_1d * 1.1 / 4.0
     S3 = PP - range_1d * 1.1 / 4.0
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
