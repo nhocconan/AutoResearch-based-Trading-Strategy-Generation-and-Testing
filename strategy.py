@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,86 +13,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for higher timeframe trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from previous week's data
-    # Use last complete week: Monday to Friday of previous week
-    high_weekly = df_1d['high'].values
-    low_weekly = df_1d['low'].values
-    close_weekly = df_1d['close'].values
+    # Weekly EMA20 for long-term trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Weekly pivot calculation: need 5 days of data
-    # We'll use rolling window of 5 days to get weekly high/low/close
-    week_high = pd.Series(high_weekly).rolling(window=5, min_periods=5).max().values
-    week_low = pd.Series(low_weekly).rolling(window=5, min_periods=5).min().values
-    week_close = pd.Series(close_weekly).rolling(window=5, min_periods=5).last().values
+    # Get daily data for medium-term structure
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate pivot points: P = (H+L+C)/3
-    weekly_pivot = (week_high + week_low + week_close) / 3.0
-    # Weekly resistance/support levels
-    weekly_r1 = 2 * weekly_pivot - week_low
-    weekly_s1 = 2 * weekly_pivot - week_high
-    weekly_r2 = weekly_pivot + (week_high - week_low)
-    weekly_s2 = weekly_pivot - (week_high - week_low)
-    weekly_r3 = week_high + 2 * (weekly_pivot - week_low)
-    weekly_s3 = week_low - 2 * (week_high - weekly_pivot)
-    weekly_r4 = weekly_pivot + 3 * (week_high - week_low)
-    weekly_s4 = weekly_pivot - 3 * (week_high - week_low)
+    # Daily Donchian(20) channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, weekly_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, weekly_s4)
+    # Daily ATR(14) for volatility filter and stop
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(df_1d['close'].values, 1))
+    tr3 = np.abs(low_1d - np.roll(df_1d['close'].values, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Volume filter: volume > 1.8x 20-period average (stricter for 6h)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above weekly R4 with volume
-            if (close[i] > r4_aligned[i] and volume_filter[i]):
+            # Long: price breaks above Donchian high + weekly uptrend + volume
+            if (close[i] > donch_high_aligned[i] and 
+                close[i] > ema20_1w_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below weekly S4 with volume
-            elif (close[i] < s4_aligned[i] and volume_filter[i]):
+            # Short: price breaks below Donchian low + weekly downtrend + volume
+            elif (close[i] < donch_low_aligned[i] and 
+                  close[i] < ema20_1w_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price falls back below weekly R3 (failed breakout)
-            if close[i] < r3_aligned[i]:
+            # Long: hold until price breaks below Donchian low
+            if close[i] < donch_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises back above weekly S3 (failed breakdown)
-            if close[i] > s3_aligned[i]:
+            # Short: hold until price breaks above Donchian high
+            if close[i] > donch_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R4S4_Breakout_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyTrend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
