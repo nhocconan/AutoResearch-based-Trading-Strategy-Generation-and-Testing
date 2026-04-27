@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Keltner_RSI_Reversal_1dTrend_Volume
-Hypothesis: On 6h timeframe, price reversals from Keltner Channel extremes (2*ATR) 
-combined with RSI overbought/oversold conditions, filtered by 1d EMA50 trend 
-and volume > 1.5x average, provide edge in both bull and bear markets.
-Keltner Channels adapt to volatility, making them effective across regimes.
-RSI extremes signal exhaustion. Volume confirms institutional interest.
-Target: 60-120 total trades over 4 years (~15-30/year) to balance opportunity and cost.
+4h_DonchianBreakout_12hEMA50_Volume_ReversalExit
+Hypothesis: Donchian(20) breakout on 4h with 12h EMA50 trend filter and volume confirmation.
+Exit when price closes below/above 12h EMA50 (reversal signal) to avoid whipsaws.
+Designed to work in both bull and bear markets by following trend with volatility breakout.
+Target: 20-50 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -23,74 +21,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1d close
-    close_1d = df_1d['close'].values
+    # Calculate Donchian(20) on 4h high/low
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    donchian_high = np.full(len(high_4h), np.nan)
+    donchian_low = np.full(len(low_4h), np.nan)
+    
+    period = 20
+    for i in range(period - 1, len(high_4h)):
+        donchian_high[i] = np.max(high_4h[i - period + 1:i + 1])
+        donchian_low[i] = np.min(low_4h[i - period + 1:i + 1])
+    
+    # Align Donchian levels to 4h timeframe
+    dh_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    dl_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate EMA(50) on 12h close
+    close_12h = df_12h['close'].values
     ema_period = 50
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= ema_period:
+        ema_12h[ema_period - 1] = np.mean(close_12h[:ema_period])
         multiplier = 2 / (ema_period + 1)
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
+        for i in range(ema_period, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * multiplier) + (ema_12h[i - 1] * (1 - multiplier))
     
-    # Align 1d EMA to 6h timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # ATR for Keltner Channels (2*ATR from EMA20)
-    atr_period = 20
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = np.full(n, np.nan)
-    for i in range(atr_period, n):
-        atr[i] = np.mean(tr[i-atr_period+1:i+1])
-    
-    # EMA(20) for Keltner middle line
-    ema20_period = 20
-    ema20 = np.full(n, np.nan)
-    if n >= ema20_period:
-        ema20[ema20_period-1] = np.mean(close[:ema20_period])
-        multiplier = 2 / (ema20_period + 1)
-        for i in range(ema20_period, n):
-            ema20[i] = (close[i] * multiplier) + (ema20[i-1] * (1 - multiplier))
-    
-    # Keltner Channels: upper = EMA20 + 2*ATR, lower = EMA20 - 2*ATR
-    keltner_upper = ema20 + 2 * atr
-    keltner_lower = ema20 - 2 * atr
-    
-    # RSI(14) for overbought/oversold
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    for i in range(rsi_period, n):
-        avg_gain[i] = np.mean(gain[i-rsi_period+1:i+1])
-        avg_loss[i] = np.mean(loss[i-rsi_period+1:i+1])
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align 12h EMA to 4h timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Volume confirmation
     vol_ma_period = 20
     vol_ma = np.full(n, np.nan)
     for i in range(vol_ma_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_ma_period:i])
+        vol_ma[i] = np.mean(volume[i - vol_ma_period:i])
     
     signals = np.zeros(n)
+    position = 0
     
     # Warmup: need all indicators
-    start_idx = max(atr_period, ema20_period, rsi_period, vol_ma_period)
+    start_idx = max(period, ema_period, vol_ma_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_aligned[i]) or
-            np.isnan(keltner_upper[i]) or
-            np.isnan(keltner_lower[i]) or
-            np.isnan(rsi[i]) or
+        if (np.isnan(dh_aligned[i]) or
+            np.isnan(dl_aligned[i]) or
+            np.isnan(ema_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -98,30 +83,41 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend filter: price above/below 1d EMA50
+        # Trend filter: price above/below 12h EMA50
         uptrend = price > ema_aligned[i]
         downtrend = price < ema_aligned[i]
         
         # Volume confirmation: > 1.5x average volume
         volume_confirmation = vol_ratio > 1.5
         
-        if uptrend and volume_confirmation:
-            # In uptrend, look for pullbacks to lower Keltner with RSI oversold
-            if price <= keltner_lower[i] and rsi[i] < 30:
-                signals[i] = 0.25  # Long 25%
+        if position == 0:
+            # Long: Donchian breakout above upper band
+            if uptrend and volume_confirmation and price > dh_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: Donchian breakdown below lower band
+            elif downtrend and volume_confirmation and price < dl_aligned[i]:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
-        elif downtrend and volume_confirmation:
-            # In downtrend, look for bounces to upper Keltner with RSI overbought
-            if price >= keltner_upper[i] and rsi[i] > 70:
-                signals[i] = -0.25  # Short 25%
-            else:
+        elif position == 1:
+            # Long exit: price closes below 12h EMA50 (trend reversal)
+            if price < ema_aligned[i]:
                 signals[i] = 0.0
-        else:
-            signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25  # Maintain position
+        elif position == -1:
+            # Short exit: price closes above 12h EMA50 (trend reversal)
+            if price > ema_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25  # Maintain position
     
     return signals
 
-name = "6h_Keltner_RSI_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_DonchianBreakout_12hEMA50_Volume_ReversalExit"
+timeframe = "4h"
 leverage = 1.0
