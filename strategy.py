@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_Volume_And_Chop_Filter
-Hypothesis: KAMA adapts to volatility and trend strength. Combined with volume confirmation and Choppiness Index filter,
-it avoids whipsaws in choppy markets while capturing strong trends in both bull and bear regimes.
-Daily timeframe reduces trade frequency to minimize fee drag. Target: 7-25 trades/year.
+6h_RSI2_Stochastic_MeanReversion_12hTrend
+Hypothesis: Mean reversion on extreme RSI(2) with Stochastic oversold/overbought and 12h trend filter captures reversals in both bull and bear markets. 
+Long when RSI(2) < 10, Stochastic %K < 20, and 12h trend up; short when RSI(2) > 90, Stochastic %K > 80, and 12h trend down. 
+Targets 12-37 trades/year on 6h to minimize fee drag while capturing mean-reversion opportunities.
 """
 
 import numpy as np
@@ -20,100 +20,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter and Choppiness Index
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # KAMA on daily close
-    close_1w = df_1w['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1w, 10))  # 10-period change
-    # Sum of absolute differences
-    abs_diff = np.abs(np.diff(close_1w, 1))
-    volatility = pd.Series(abs_diff).rolling(window=10, min_periods=10).sum().values
-    # Avoid division by zero
-    er = np.zeros_like(close_1w)
-    er[10:] = change[10:] / np.where(volatility[10:] == 0, 1, volatility[10:])
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
-    kama = np.full_like(close_1w, np.nan)
-    kama[9] = close_1w[9]  # start
-    for i in range(10, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Align KAMA to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # RSI(2) on 6h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(span=2, adjust=False, min_periods=2).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi2 = 100 - (100 / (1 + rs))
     
-    # Choppiness Index on 1w
-    # True Range
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    hh = df_1w['high'].rolling(window=14, min_periods=14).max().values
-    ll = df_1w['low'].rolling(window=14, min_periods=14).min().values
-    # Chop calculation
-    chop = np.full_like(close_1w, 50.0)  # default neutral
-    mask = (hh - ll) > 0
-    chop[14:] = 100 * np.log10(tr_sum[14:] / (hh[14:] - ll[14:])) / np.log10(14)
-    
-    # Align Chop to daily
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
-    # Volume confirmation: volume > 1.5 * 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Stochastic(14,3,3) on 6h data
+    low_min = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    high_max = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    stoch_percent_k = np.divide((close - low_min), (high_max - low_min), out=np.zeros_like(close), where=(high_max - low_min)!=0) * 100
+    stoch_percent_k_smooth = pd.Series(stoch_percent_k).rolling(window=3, min_periods=3).mean().values
+    stoch_percent_d = pd.Series(stoch_percent_k_smooth).rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for calculations
-    start_idx = max(30, 20, 14)
+    # Warmup: need enough data for indicators
+    start_idx = max(50, 14 + 3 + 3)  # 12h EMA50 + Stochastic lookback
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(rsi2[i]) or 
+            np.isnan(stoch_percent_k_smooth[i])):
             signals[i] = 0.0
             continue
         
-        kama_val = kama_aligned[i]
-        chop_val = chop_aligned[i]
-        vol_conf = vol_confirm[i]
+        rsi_val = rsi2[i]
+        stoch_k = stoch_percent_k_smooth[i]
+        ema_trend = ema50_12h_aligned[i]
         
-        # Only trade in trending markets (Chop < 61.8)
-        if chop_val >= 61.8:
-            # In choppy markets, stay flat
-            signals[i] = 0.0
-            position = 0
-            continue
-            
         if position == 0:
-            # Long: price above KAMA and volume confirmation
-            if close[i] > kama_val and vol_conf:
+            # Long: RSI(2) oversold, Stochastic oversold, and 12h uptrend
+            if rsi_val < 10 and stoch_k < 20 and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: price below KAMA and volume confirmation
-            elif close[i] < kama_val and vol_conf:
+            # Short: RSI(2) overbought, Stochastic overbought, and 12h downtrend
+            elif rsi_val > 90 and stoch_k > 80 and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close[i] < kama_val:
+            # Exit long: RSI(2) overbought or trend turns down
+            if rsi_val > 70 or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close[i] > kama_val:
+            # Exit short: RSI(2) oversold or trend turns up
+            if rsi_val < 30 or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_With_Volume_And_Chop_Filter"
-timeframe = "1d"
+name = "6h_RSI2_Stochastic_MeanReversion_12hTrend"
+timeframe = "6h"
 leverage = 1.0
