@@ -18,7 +18,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day CLOSE (for Donchian channel)
+    # Calculate 1-day close prices
     close_1d = df_1d['close'].values
     
     # Calculate 1-day Donchian channel (20-period)
@@ -29,7 +29,7 @@ def generate_signals(prices):
             upper[i] = np.max(close_1d[i-20+1:i+1])
             lower[i] = np.min(close_1d[i-20+1:i+1])
     
-    # Calculate 1-day ATR (14-period) for volatility filter
+    # Calculate 1-day ATR (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_prev = np.roll(close_1d, 1)
@@ -46,7 +46,7 @@ def generate_signals(prices):
         for i in range(14, len(tr)):
             atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 1-day EMA (50-period) for trend filter
+    # Calculate 1-day EMA (50-period)
     ema_50_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 50:
         alpha = 2 / (50 + 1)
@@ -54,7 +54,7 @@ def generate_signals(prices):
         for i in range(1, len(close_1d)):
             ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper)
     lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_20_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
