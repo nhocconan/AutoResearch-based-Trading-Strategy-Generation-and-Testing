@@ -5,10 +5,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     """
-    6h Camarilla R3/S3 breakout with daily EMA34 trend and volume spike.
-    Novelty: Uses Camarilla levels from daily data (not intraday) for swing trading.
-    Long when: Close > R3 + volume spike + price > daily EMA34
-    Short when: Close < S3 + volume spike + price < daily EMA34
+    12h Donchian(20) breakout with 1d EMA50 trend and volume confirmation.
+    Long: Price > upper band + volume spike + price > daily EMA50
+    Short: Price < lower band + volume spike + price < daily EMA50
+    Exit: Opposite band touch or trailing stop (1.5*ATR)
     """
     n = len(prices)
     if n < 50:
@@ -19,40 +19,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and EMA34
+    # Get daily data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34  # EMA34
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50  # EMA50
     
-    # Calculate Camarilla levels from previous day's range
-    # Camarilla: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
-    # Using previous day's OHLC to avoid look-ahead
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate 12h Donchian channels (20-period)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
-    # Calculate Camarilla R3 and S3
-    camarilla_factor = 1.1 * (prev_high - prev_low) * 1.1 / 4
-    r3 = prev_close + camarilla_factor
-    s3 = prev_close - camarilla_factor
+    # Align daily EMA50 to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align daily indicators to 6h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate 6h ATR(14) for position sizing and volatility filter
+    # Calculate 12h ATR(14) for volatility filter and trailing stop
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
@@ -75,41 +65,41 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(34, vol_period, 14) + 5
+    start_idx = max(50, 20, vol_period, 14) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.5x average volume
+        # Volume filter: at least 1.5x average volume
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price breaks above R3 with volume and above daily EMA34
-            if price > r3_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
+            # Long: Price breaks above upper band with volume and above daily EMA50
+            if price > upper[i] and vol_filter and price > ema_50_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below S3 with volume and below daily EMA34
-            elif price < s3_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
+            # Short: Price breaks below lower band with volume and below daily EMA50
+            elif price < lower[i] and vol_filter and price < ema_50_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below S3 or trailing stop
-            if price < s3_aligned[i] or price < ema_34_1d_aligned[i] - 1.5 * atr[i]:
+            # Long exit: Price touches lower band or trailing stop
+            if price < lower[i] or price < ema_50_1d_aligned[i] - 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above R3 or trailing stop
-            if price > r3_aligned[i] or price > ema_34_1d_aligned[i] + 1.5 * atr[i]:
+            # Short exit: Price touches upper band or trailing stop
+            if price > upper[i] or price > ema_50_1d_aligned[i] + 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
