@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_ADX25_VolumeSpike_1d_v1"
+name = "4h_Donchian20_Breakout_ADX25_VolumeSpike_1d_v3"
 timeframe = "4h"
 leverage = 1.0
