@@ -4,8 +4,14 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
+    """
+    6h Camarilla R3/S3 breakout with daily EMA34 trend and volume spike.
+    Novelty: Uses Camarilla levels from daily data (not intraday) for swing trading.
+    Long when: Close > R3 + volume spike + price > daily EMA34
+    Short when: Close < S3 + volume spike + price < daily EMA34
+    """
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,39 +19,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and volatility filters
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get daily data for Camarilla calculation and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema_50_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 50:
-        ema_50_4h[49] = np.mean(close_4h[:50])
-        for i in range(50, len(close_4h)):
-            ema_50_4h[i] = (close_4h[i] * 0.0769 + ema_50_4h[i-1] * 0.9231)  # EMA 50
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34  # EMA34
     
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate Camarilla levels from previous day's range
+    # Camarilla: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
+    # Using previous day's OHLC to avoid look-ahead
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # 4h ATR(20) for volatility filter
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_arr = df_4h['close'].values
-    tr_4h = np.maximum(high_4h[1:] - low_4h[1:], 
-                       np.maximum(np.abs(high_4h[1:] - close_4h_arr[:-1]), 
-                                  np.abs(low_4h[1:] - close_4h_arr[:-1])))
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_4h = np.full(len(close_4h), np.nan)
-    for i in range(20, len(close_4h)):
-        if i == 20:
-            atr_4h[i] = np.mean(tr_4h[1:21])
-        else:
-            atr_4h[i] = (atr_4h[i-1] * 0.95 + tr_4h[i] * 0.05)  # Wilder's smoothing
+    # Calculate Camarilla R3 and S3
+    camarilla_factor = 1.1 * (prev_high - prev_low) * 1.1 / 4
+    r3 = prev_close + camarilla_factor
+    s3 = prev_close - camarilla_factor
     
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Align daily indicators to 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 1h ATR(14) for position sizing and stops
+    # Calculate 6h ATR(14) for position sizing and volatility filter
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
@@ -55,76 +62,54 @@ def generate_signals(prices):
         if i == 14:
             atr[i] = np.mean(tr[1:15])
         else:
-            atr[i] = (atr[i-1] * 0.9333 + tr[i] * 0.0667)  # Wilder's smoothing
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # 1h 20-period volume average
+    # Calculate 20-period volume average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
-    # 1h 10-period Donchian channels
-    high_max = np.full(n, np.nan)
-    low_min = np.full(n, np.nan)
-    period = 10
-    for i in range(period, n):
-        high_max[i] = np.max(high[i-period:i])
-        low_min[i] = np.min(low[i-period:i])
-    
     signals = np.zeros(n)
     position = 0
-    size = 0.20
+    size = 0.25
     
     # Warmup period
-    start_idx = max(50, 20, vol_period, period) + 5
-    
-    # Pre-compute hourly session filter (8-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    start_idx = max(34, vol_period, 14) + 5
     
     for i in range(start_idx, n):
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            signals[i] = 0.0
-            continue
-            
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volatility filter: only trade when 4h volatility is below median (avoid chaotic markets)
-        if i >= 50:
-            vol_median = np.nanmedian(atr_4h_aligned[max(0, i-50):i])
-            vol_filter = atr_4h_aligned[i] < vol_median
-        else:
-            vol_filter = True
+        # Volume spike filter: at least 1.5x average volume
+        vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume AND above 4h EMA50
-            if price > high_max[i] and vol_ratio > 2.0 and price > ema_50_4h_aligned[i] and vol_filter:
+            # Long: Price breaks above R3 with volume and above daily EMA34
+            if price > r3_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume AND below 4h EMA50
-            elif price < low_min[i] and vol_ratio > 2.0 and price < ema_50_4h_aligned[i] and vol_filter:
+            # Short: Price breaks below S3 with volume and below daily EMA34
+            elif price < s3_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below Donchian low or 2x ATR trailing stop
-            if price < low_min[i] or price < high_max[i] - 2.0 * atr[i]:
+            # Long exit: Price closes below S3 or trailing stop
+            if price < s3_aligned[i] or price < ema_34_1d_aligned[i] - 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above Donchian high or 2x ATR trailing stop
-            if price > high_max[i] or price > low_min[i] + 2.0 * atr[i]:
+            # Short exit: Price closes above R3 or trailing stop
+            if price > r3_aligned[i] or price > ema_34_1d_aligned[i] + 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Donchian10_4hEMA50_VolumeFilter_Session"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
