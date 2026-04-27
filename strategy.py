@@ -22,41 +22,45 @@ def generate_signals(prices):
     ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Get 12h data for price structure (Donchian channel breakout)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for price structure (Donchian channel breakout)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Donchian channel (20-period) on 12h data
-    donchian_high = np.full(len(df_12h), np.nan)
-    donchian_low = np.full(len(df_12h), np.nan)
-    for i in range(19, len(df_12h)):
-        donchian_high[i] = np.max(high_12h[i-19:i+1])
-        donchian_low[i] = np.min(low_12h[i-19:i+1])
+    # Donchian channel (20-period) on 1d data
+    donchian_high = np.full(len(df_1d), np.nan)
+    donchian_low = np.full(len(df_1d), np.nan)
+    for i in range(19, len(df_1d)):
+        donchian_high[i] = np.max(high_1d[i-19:i+1])
+        donchian_low[i] = np.min(low_1d[i-19:i+1])
     
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
-    # Warmup: need 4h EMA (50), 12h Donchian (20), volume MA (20)
+    # Warmup: need 4h EMA (50), 1d Donchian (20), volume MA (20)
     start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
+        # Skip if any data not ready or outside session
         if (np.isnan(ema_50_4h_aligned[i]) or 
             np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
@@ -103,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_4hEMA50_Volume"
-timeframe = "12h"
+name = "1h_Donchian_Breakout_4hEMA50_1d_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
