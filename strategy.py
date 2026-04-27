@@ -13,14 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for trend filter and volatility
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on daily close
+    # Calculate EMA34 on daily close for trend filter
     ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     
     # Align daily EMA to 4h
