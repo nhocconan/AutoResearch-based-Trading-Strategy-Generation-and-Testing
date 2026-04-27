@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime
-Hypothesis: Uses Camarilla pivot levels (R1, S1) from 1d timeframe for breakout entries on 12h chart, filtered by 1d EMA34 trend and volume spike (>2x average). Adds choppiness regime filter (CHOP > 61.8 = range = avoid breakouts). Enters long when price breaks above 1d R1 AND 1d close > 1d EMA34 (uptrend) AND volume > 2x average AND choppy regime filter passed. Enters short when price breaks below 1d S1 AND 1d close < 1d EMA34 (downtrend) AND volume > 2x average AND choppy regime filter passed. Exits when price reverts to 1d close (mean reversion) OR trend breaks. Uses 12h timeframe with tight entries to avoid fee drag: target 12-37 trades/year. Camarilla levels provide high-probability breakout points, volume confirmation avoids low-conviction moves, and chop filter prevents whipsaws in ranging markets. Works in both bull and bear markets via 1d trend filter and volume confirmation.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime
+Hypothesis: Uses Camarilla pivot levels (R3, S3) from 1d timeframe for breakout entries, filtered by 1d EMA34 trend and volume spike (>2x average). Adds choppiness regime filter (CHOP > 61.8 = range = avoid breakouts). Enters long when price breaks above 1d R3 AND 1d close > 1d EMA34 (uptrend) AND volume > 2x average AND choppy regime filter passed. Enters short when price breaks below 1d S3 AND 1d close < 1d EMA34 (downtrend) AND volume > 2x average AND choppy regime filter passed. Exits when price reverts to 1d close (mean reversion) OR trend breaks. Uses 4h timeframe with tight entries to avoid fee drag: target 25-40 trades/year. Camarilla R3/S3 levels provide higher-probability breakout points than R1/S1, volume confirmation avoids low-conviction moves, and chop filter prevents whipsaws in ranging markets. Works in both bull and bear markets via 1d trend filter and volume confirmation.
 """
 
 import numpy as np
@@ -27,15 +27,15 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla pivot levels for 1d timeframe
-    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    # Camarilla: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
     hl_range_1d = df_1d['high'].values - df_1d['low'].values
-    camarilla_r1_1d = df_1d['close'].values + hl_range_1d * 1.1 / 12
-    camarilla_s1_1d = df_1d['close'].values - hl_range_1d * 1.1 / 12
+    camarilla_r3_1d = df_1d['close'].values + hl_range_1d * 1.1 / 4
+    camarilla_s3_1d = df_1d['close'].values - hl_range_1d * 1.1 / 4
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    camarilla_r1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    camarilla_s1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
     
     # Volume confirmation: current volume > 2 * 20-period average
@@ -65,25 +65,25 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_1d_aligned[i]) or np.isnan(camarilla_s1_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or 
             np.isnan(volume_confirm[i]) or np.isnan(chop_filter[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         ema_1d_val = ema_34_1d_aligned[i]
-        r1_1d_val = camarilla_r1_1d_aligned[i]
-        s1_1d_val = camarilla_s1_1d_aligned[i]
+        r3_1d_val = camarilla_r3_1d_aligned[i]
+        s3_1d_val = camarilla_s3_1d_aligned[i]
         vol_conf = volume_confirm[i]
         chop_ok = chop_filter[i]
         close_1d_val = close_1d_aligned[i]
         
         if position == 0:
-            # Look for entry: price breakout above R1 (long) or below S1 (short) with trend, volume, and regime filter
-            # Long: price > R1 AND 1d uptrend AND volume confirmation AND not choppy
-            long_condition = (close_val > r1_1d_val) and (close_val > ema_1d_val) and vol_conf and chop_ok
-            # Short: price < S1 AND 1d downtrend AND volume confirmation AND not choppy
-            short_condition = (close_val < s1_1d_val) and (close_val < ema_1d_val) and vol_conf and chop_ok
+            # Look for entry: price breakout above R3 (long) or below S3 (short) with trend, volume, and regime filter
+            # Long: price > R3 AND 1d uptrend AND volume confirmation AND not choppy
+            long_condition = (close_val > r3_1d_val) and (close_val > ema_1d_val) and vol_conf and chop_ok
+            # Short: price < S3 AND 1d downtrend AND volume confirmation AND not choppy
+            short_condition = (close_val < s3_1d_val) and (close_val < ema_1d_val) and vol_conf and chop_ok
             
             if long_condition:
                 signals[i] = size
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
