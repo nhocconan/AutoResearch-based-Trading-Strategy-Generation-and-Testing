@@ -50,12 +50,6 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate 12-hour Donchian channels for entry signals
-    # We'll calculate these on the primary timeframe (12h)
-    donchian_window = 20
-    donchian_high = pd.Series(close).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(close).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -67,9 +61,7 @@ def generate_signals(prices):
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i])):
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -87,20 +79,14 @@ def generate_signals(prices):
         # Volume filter: current volume above 1d average
         volume_filter = volume[i] > vol_ma_1d_aligned[i]
         
-        # Donchian breakout conditions
-        donchian_breakout_up = close[i] > donchian_high[i-1]  # Break above previous high
-        donchian_breakout_down = close[i] < donchian_low[i-1]  # Break below previous low
-        
-        # Long conditions: price above EMA34 + Donchian breakout up + RSI not overbought + volume + volatility
+        # Long conditions: price above EMA34 + RSI not overbought + volume + volatility
         long_condition = (price_above_ema and 
-                         donchian_breakout_up and 
                          rsi_not_overbought and 
                          volume_filter and 
                          vol_filter)
         
-        # Short conditions: price below EMA34 + Donchian breakout down + RSI not oversold + volume + volatility
+        # Short conditions: price below EMA34 + RSI not oversold + volume + volatility
         short_condition = (price_below_ema and 
-                          donchian_breakout_down and 
                           rsi_not_oversold and 
                           volume_filter and 
                           vol_filter)
@@ -111,11 +97,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal or Donchian reversal
-        elif position == 1 and (not price_above_ema or close[i] < donchian_low[i]):
+        # Exit conditions: trend reversal
+        elif position == 1 and not price_above_ema:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (not price_below_ema or close[i] > donchian_high[i]):
+        elif position == -1 and not price_below_ema:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -129,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_RSI14_Donchian20_1dTrend"
-timeframe = "12h"
+name = "1d_EMA34_RSI14_VolumeFilter_1dTrend"
+timeframe = "4h"
 leverage = 1.0
