@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,56 +13,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR-based volatility filter
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Camarilla levels for each day using previous day's HLC
+    camarilla_r4 = np.zeros(len(df_1d))
+    camarilla_r3 = np.zeros(len(df_1d))
+    camarilla_s3 = np.zeros(len(df_1d))
+    camarilla_s4 = np.zeros(len(df_1d))
     
-    atr_1d = np.zeros(len(df_1d))
-    for i in range(len(tr_1d)):
-        if i < 13:
-            atr_1d[i] = np.mean(tr_1d[:i+1]) if i > 0 else tr_1d[i]
+    for i in range(1, len(df_1d)):
+        h = high_1d[i-1]
+        l = low_1d[i-1]
+        c = close_1d[i-1]
+        range_hl = h - l
+        camarilla_r4[i] = c + (range_hl * 1.1 / 2)
+        camarilla_r3[i] = c + (range_hl * 1.1 / 4)
+        camarilla_s3[i] = c - (range_hl * 1.1 / 4)
+        camarilla_s4[i] = c - (range_hl * 1.1 / 2)
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Get weekly trend filter: EMA(34) on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_1w_34 = np.full(len(df_1w), np.nan)
+    alpha_w = 2 / (34 + 1)
+    for i in range(len(close_1w)):
+        if i < 33:
+            ema_1w_34[i] = np.mean(close_1w[:i+1]) if i > 0 else close_1w[i]
         else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+            if np.isnan(ema_1w_34[i-1]):
+                ema_1w_34[i] = np.mean(close_1w[i-33:i+1])
+            else:
+                ema_1w_34[i] = close_1w[i] * alpha_w + ema_1w_34[i-1] * (1 - alpha_w)
     
-    # Align daily ATR to 6h
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
-    # Calculate 6-day average ATR for volatility regime
-    atr_ma_6d = np.full(len(atr_1d), np.nan)
-    for i in range(6, len(atr_1d)):
-        atr_ma_6d[i] = np.mean(atr_1d[i-6:i])
+    # Calculate 12h ATR(14) for stop loss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    atr_ma_6d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_6d)
-    
-    # Calculate 6h ATR(10) for entry/exit
-    tr1_6h = high[1:] - low[1:]
-    tr2_6h = np.abs(high[1:] - close[:-1])
-    tr3_6h = np.abs(low[1:] - close[:-1])
-    tr_6h = np.concatenate([[high[0] - low[0]], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
-    
-    atr_6h = np.zeros(n)
+    atr_12h = np.zeros(n)
     for i in range(n):
-        if i < 9:
-            atr_6h[i] = np.mean(tr_6h[:i+1]) if i > 0 else tr_6h[i]
+        if i < 13:
+            atr_12h[i] = np.mean(tr[:i+1]) if i > 0 else tr[i]
         else:
-            atr_6h[i] = (atr_6h[i-1] * 9 + tr_6h[i]) / 10
+            atr_12h[i] = (atr_12h[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 6h EMA(21) for trend filter
-    close_s = pd.Series(close)
-    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Calculate volume spike detector (20-period average)
+    # Calculate volume average (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -71,57 +85,58 @@ def generate_signals(prices):
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(21, 20)
+    start_idx = max(20, 34)  # volume MA needs 20, weekly EMA needs 34
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_1d_aligned[i]) or
-            np.isnan(atr_ma_6d_aligned[i]) or
-            np.isnan(ema_21[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(atr_6h[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_1w_34_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-        atr_ratio = atr_1d_aligned[i] / atr_ma_6d_aligned[i] if atr_ma_6d_aligned[i] > 0 else 1
         
-        # Volatility filter: only trade when current ATR > 1.2x 6-day average (high vol regime)
-        high_volatility = atr_ratio > 1.2
-        
-        # Volume confirmation: > 1.5x average volume
-        volume_confirmation = vol_ratio > 1.5
+        # Volume confirmation: > 2.0x average volume (stricter to reduce trades)
+        volume_confirmation = vol_ratio > 2.0
         
         if position == 0:
-            # Long: price > EMA21 + volatility + volume
-            if (high_volatility and volume_confirmation and 
-                price > ema_21[i]):
+            # Long: price touches or breaks above S3 with volume and weekly uptrend
+            if (volume_confirmation and 
+                price >= camarilla_s3_aligned[i] and 
+                close[i-1] < camarilla_s3_aligned[i] and  # just touched/broke
+                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):  # weekly uptrend
                 signals[i] = 0.25
                 position = 1
-            # Short: price < EMA21 + volatility + volume
-            elif (high_volatility and volume_confirmation and 
-                  price < ema_21[i]):
+            # Short: price touches or breaks below R3 with volume and weekly downtrend
+            elif (volume_confirmation and 
+                  price <= camarilla_r3_aligned[i] and 
+                  close[i-1] > camarilla_r3_aligned[i] and  # just touched/broke
+                  ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):  # weekly downtrend
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price < EMA21 or volatility drops
-            if (price < ema_21[i] or atr_ratio < 1.0):
+            # Long exit: price reaches R3 or weekly trend turns down
+            if (price >= camarilla_r3_aligned[i] or 
+                ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price > EMA21 or volatility drops
-            if (price > ema_21[i] or atr_ratio < 1.0):
+            # Short exit: price reaches S3 or weekly trend turns up
+            if (price <= camarilla_s3_aligned[i] or 
+                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Maintain position
     
     return signals
 
-name = "6h_ATR_Volatility_Volume_EMA21_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_S3R3_WeeklyEMA34_Trend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
