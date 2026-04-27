@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-#100897 - 4h_Donchian20_Breakout_1dTrend_Volume
-Hypothesis: Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-Trades breakouts in the direction of the daily trend to avoid counter-trend whipsaws.
-Designed for 4h timeframe with 1d trend filter to reduce false signals.
-Targets 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-Works in bull (breakouts with trend) and bear (trend-following on retracements).
+#100900 - 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Breakout at R1/S1 levels with volume confirmation and 1d EMA trend filter on 4h timeframe.
+Targets 20-50 trades/year (80-200 total) to minimize fee drag. Uses 4h primary timeframe with 1d EMA34 for trend
+and daily pivot for Camarilla levels. Works in bull (breakouts with trend) and bear (mean reversion to pivot).
 """
 
 import numpy as np
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,68 +20,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Calculate 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Donchian channels (20-period high/low)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day (to avoid look-ahead)
+    daily_pivot = (high_1d + low_1d + close_1d) / 3
+    daily_range = high_1d - low_1d
+    daily_r1 = close_1d + daily_range * 1.1 / 12
+    daily_s1 = close_1d - daily_range * 1.1 / 12
     
-    # Volume filter: volume > 1.8x 20-period average
+    # Align to 4h timeframe (previous day's levels for current period)
+    camarilla_r1 = align_htf_to_ltf(prices, df_1d, daily_r1)
+    camarilla_s1 = align_htf_to_ltf(prices, df_1d, daily_s1)
+    camarilla_pivot = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1[i]) or 
+            np.isnan(camarilla_s1[i]) or np.isnan(camarilla_pivot[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above 20-period high, above 1d EMA34, volume spike
-        if (close[i] > high_roll[i] and 
+        # Long condition: price breaks above R1, above 1d EMA34, volume spike
+        if (close[i] > camarilla_r1[i] and 
             close[i] > ema34_1d_aligned[i] and 
             volume_filter[i]):
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
-        # Short condition: price breaks below 20-period low, below 1d EMA34, volume spike
-        elif (close[i] < low_roll[i] and 
+        # Short condition: price breaks below S1, below 1d EMA34, volume spike
+        elif (close[i] < camarilla_s1[i] and 
               close[i] < ema34_1d_aligned[i] and 
               volume_filter[i]):
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
-        # Exit conditions: price returns to opposite Donchian level (trailing stop)
-        elif position == 1 and close[i] < low_roll[i]:
+        # Exit conditions: price returns to Camarilla Pivot (mean reversion)
+        elif position == 1 and close[i] < camarilla_pivot[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > high_roll[i]:
+        elif position == -1 and close[i] > camarilla_pivot[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
