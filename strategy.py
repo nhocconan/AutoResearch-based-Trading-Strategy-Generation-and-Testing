@@ -1,12 +1,11 @@
-# 6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Breakouts at Camarilla R4/S4 levels with 1d trend filter and volume spike capture strong momentum in both bull and bear markets. R4/S4 represent extreme levels where breakouts often signal new trends, while fading at these levels is less common. Volume confirms institutional participation. Trend filter ensures alignment with higher timeframe direction. Targets 15-30 trades/year to avoid fee drag.
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -14,7 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Get 1d data for pivot points
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -23,70 +32,69 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and Camarilla levels (R4, S4)
+    # Calculate pivot and Camarilla levels (R1, S1)
     pivot = (high_1d + low_1d + close_1d) / 3.0
-    r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align daily levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: volume > 2.5x 24-period average (48 hours)
-    vol_ma_24 = np.full(n, np.nan, dtype=np.float64)
-    for i in range(23, n):
-        vol_ma_24[i] = np.mean(volume[i-23:i+1])
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 1d EMA (34 periods), daily data, volume MA (24 periods)
-    start_idx = max(34, 24)
+    # Warmup: need 12h EMA (50 periods), daily data, volume MA (20 periods)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
-        ema_trend = ema_34_1d_aligned[i]
-        r4_level = r4_aligned[i]
-        s4_level = s4_aligned[i]
+        ema_trend = ema_50_12h_aligned[i]
+        pivot_level = pivot_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_24[i]
+        vol_avg = vol_ma_20[i]
         
-        # Volume filter: volume > 2.5x average
-        vol_filter = vol_now > 2.5 * vol_avg
+        # Volume filter: volume > 1.5x average
+        vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price breaks above R4 + bullish trend + volume spike
-            if price > r4_level and price > ema_trend and vol_filter:
+            # Long: price breaks above R1 + bullish trend + volume spike
+            if price > r1_level and price > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S4 + bearish trend + volume spike
-            elif price < s4_level and price < ema_trend and vol_filter:
+            # Short: price breaks below S1 + bearish trend + volume spike
+            elif price < s1_level and price < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to EMA trend or trend turns bearish
-            if price < ema_trend:
+            # Exit long: price returns to pivot (mean reversion) or trend turns bearish
+            if price <= pivot_level or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to EMA trend or trend turns bullish
-            if price > ema_trend:
+            # Exit short: price returns to pivot (mean reversion) or trend turns bullish
+            if price >= pivot_level or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
