@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Use 12h timeframe with 1d-derived Camarilla R3/S3 breakout, 1d EMA34 trend filter, and volume spike (>2x 20-period average). Target 12-37 trades/year to minimize fee drift. Designed to work in bull (breakouts with trend) and bear (mean reversion at extremes with trend filter). Focus on BTC/ETH performance.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
+Hypothesis: Use 1d-derived Camarilla R3/S3 levels as breakout triggers on 4h timeframe with 1d EMA34 trend filter and volume spike (>2x 20-period average). Take long when price > EMA34 and breakout above R3, short when price < EMA34 and breakdown below S3. Exit on opposite level touch. Designed to work in bull (breakouts with trend) and bear (mean reversion at extremes with trend filter). Target 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -32,7 +32,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
+    # Align Camarilla levels to 4h timeframe (wait for previous day's close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -89,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
