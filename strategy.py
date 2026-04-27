@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 4h strategy using Camarilla R3/S3 breakouts from previous 1d bar, with 1d EMA34 trend filter and volume confirmation. 
-R3/S3 levels represent stronger support/resistance than R1/S1, reducing false breakouts. 
-Trend filter ensures alignment with daily momentum. Volume spike confirms institutional participation. 
-Designed for BTC/ETH robustness in both bull and bear markets via trend filter. 
-Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position size. 
-Uses discrete levels to minimize fee drag.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h strategy using Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume confirmation. Uses discrete position sizing (0.25) to minimize fee drag. Targets 50-150 trades over 4 years (12-37/year). Designed for BTC/ETH robustness in both bull and bear markets via 1d trend filter. Volume spike confirms institutional participation. 12h timeframe reduces trade frequency vs lower TFs, improving cost efficiency.
 """
 
 import numpy as np
@@ -94,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
