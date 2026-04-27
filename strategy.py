@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -49,19 +49,19 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 6-hour Donchian channels (18-period for slightly more sensitivity)
-    highest_high = pd.Series(high).rolling(window=18, min_periods=18).max().values
-    lowest_low = pd.Series(low).rolling(window=18, min_periods=18).min().values
+    # 1h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.2x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.2)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -70,11 +70,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR > 0.4% of price (avoid choppy low-vol periods)
-        vol_filter = atr_1d_aligned[i] > (close[i] * 0.004)
+        # Volatility filter: ATR > 0.5% of price (avoid choppy low-vol periods)
+        vol_filter = atr_1d_aligned[i] > (close[i] * 0.005)
         
-        # Trend strength filter: ADX > 20 (slightly lower to capture more trends)
-        trend_filter = adx_aligned[i] > 20
+        # Trend strength filter: ADX > 25
+        trend_filter = adx_aligned[i] > 25
         
         # Long conditions: price breaks above upper Donchian + volatility + trend strength + volume
         long_breakout = (close[i] > highest_high[i-1] and vol_filter and trend_filter and volume_filter[i])
@@ -82,10 +82,10 @@ def generate_signals(prices):
         short_breakout = (close[i] < lowest_low[i-1] and vol_filter and trend_filter and volume_filter[i])
         
         if long_breakout:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_breakout:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         # Exit conditions: opposite Donchian breakout
         elif position == 1 and close[i] < lowest_low[i-1]:
@@ -97,14 +97,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian18_Breakout_Volume_ADX_TrendFilter"
-timeframe = "6h"
+name = "1h_Donchian20_Breakout_Volume_ADX_TrendFilter"
+timeframe = "1h"
 leverage = 1.0
