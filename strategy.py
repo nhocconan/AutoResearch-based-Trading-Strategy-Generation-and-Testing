@@ -1,9 +1,3 @@
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
-# Hypothesis: 4h breakout at Camarilla R1/S1 levels with 12h trend filter and volume confirmation.
-# Uses 12h EMA for trend direction, daily pivots for R1/S1 levels, and volume spike to avoid false breakouts.
-# Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets by aligning with higher timeframe structure.
-# Target: 75-200 total trades over 4 years = 19-50/year. HARD MAX: 400 total.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -37,37 +31,45 @@ def generate_signals(prices):
     R1 = pivot + (range_hl * 1.1 / 6)  # R1 level
     S1 = pivot - (range_hl * 1.1 / 6)  # S1 level
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 4h EMA(20) for trend filter
+    ema20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align to 4h timeframe
+    # Align to 1h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # 4h volume average (20-period)
+    # 1h volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need daily pivots, 12h EMA, and volume data
-    start_idx = max(2, 50, 20)
+    # Warmup: need daily pivots, 4h EMA, and volume data
+    start_idx = max(2, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema20_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema50_12h_aligned[i]
+        # Apply session filter: only trade 08-20 UTC
+        if hours[i] < 8 or hours[i] > 20:
+            signals[i] = 0.0
+            continue
+        
+        ema_trend = ema20_4h_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
@@ -75,25 +77,25 @@ def generate_signals(prices):
         vol_filter = vol_current > (vol_ma_val * 2.0)
         
         if position == 0:
-            # Long: price breaks above R1 with 12h uptrend and volume spike
+            # Long: price breaks above R1 with 4h uptrend and volume spike
             if close[i] > R1_aligned[i] and close[i] > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S1 with 12h downtrend and volume spike
+            # Short: price breaks below S1 with 4h downtrend and volume spike
             elif close[i] < S1_aligned[i] and close[i] < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below S1 or 12h trend turns down
+            # Exit long: price crosses below S1 or 4h trend turns down
             if close[i] < S1_aligned[i] or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above R1 or 12h trend turns up
+            # Exit short: price crosses above R1 or 4h trend turns up
             if close[i] > R1_aligned[i] or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
@@ -102,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
