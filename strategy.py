@@ -23,13 +23,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # Calculate 1d EMA 34 for trend direction
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d ATR (14-period) for volatility filter
+    # Calculate 1d ATR for volatility filter
     tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
                        np.abs(high_1d[1:] - close_1d[:-1]), 
                        np.abs(low_1d[1:] - close_1d[:-1]))
@@ -37,7 +35,7 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1d volume moving average (20-period)
+    # Calculate 1d volume moving average
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
@@ -49,12 +47,15 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
+        
+        # Trend filter: price above/below 1d EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
         # Volatility filter: only trade when volatility is reasonable
         vol_filter = atr_1d_aligned[i] > 0
@@ -62,13 +63,13 @@ def generate_signals(prices):
         # Volume filter: current volume above 1d average
         volume_filter = volume[i] > vol_ma_1d_aligned[i]
         
-        # Long condition: close above 1d Donchian high + volume + volatility
-        long_condition = (close[i] > donchian_high_aligned[i] and 
+        # Long conditions: price above EMA34 + volume + volatility
+        long_condition = (price_above_ema and 
                          volume_filter and 
                          vol_filter)
         
-        # Short condition: close below 1d Donchian low + volume + volatility
-        short_condition = (close[i] < donchian_low_aligned[i] and 
+        # Short conditions: price below EMA34 + volume + volatility
+        short_condition = (price_below_ema and 
                           volume_filter and 
                           vol_filter)
         
@@ -78,11 +79,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price crosses back through the Donchian channel
-        elif position == 1 and close[i] < donchian_low_aligned[i]:
+        # Exit conditions: trend reversal
+        elif position == 1 and not price_above_ema:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > donchian_high_aligned[i]:
+        elif position == -1 and not price_below_ema:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -96,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_VolumeFilter"
-timeframe = "4h"
+name = "12h_EMA34_VolumeFilter_1dTrend"
+timeframe = "12h"
 leverage = 1.0
