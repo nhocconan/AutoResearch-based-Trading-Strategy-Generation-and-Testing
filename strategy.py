@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_DynamicExit
-Hypothesis: 4h strategy using Camarilla R3/S3 from 1d for breakout entries with 1d EMA34 trend filter and volume spike confirmation. 
-Dynamic exit: close position when price reaches the opposite Camarilla level (S3/R3) or when 1d trend reverses (price crosses EMA34). 
-Designed for moderate trade frequency (~75-150/year) with discrete position sizing (0.25) to balance edge and fee drag.
-Works in both bull and bear markets by following the 1d trend while using Camarilla levels for precise breakout entries.
+1d_Camarilla_Pivot_Volume_Regime
+Hypothesis: Daily strategy using Camarilla R3/S3 from weekly pivot for breakout entries with volume confirmation and choppiness regime filter. 
+Only trade when weekly trend is established (price > weekly EMA50 for longs, < weekly EMA50 for shorts) to avoid whipsaws. 
+Designed for low trade frequency (~15-25/year) with discrete position sizing (0.25) to minimize fee drag in bear markets.
+Works in both bull and bear markets by following weekly trend while using daily Camarilla levels for precise entries.
 """
 
 import numpy as np
@@ -21,59 +21,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA trend
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter and Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d OHLC for Camarilla levels
-    o_1d = df_1d['open'].values
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Calculate weekly OHLC for Camarilla levels (using prior week's data)
+    o_1w = df_1w['open'].values
+    h_1w = df_1w['high'].values
+    l_1w = df_1w['low'].values
+    c_1w = df_1w['close'].values
     
-    # Camarilla levels: R3/S3 from 1d OHLC (wider than R1/S1 for fewer false breakouts)
+    # Camarilla levels: R3/S3 from weekly OHLC (wider bands for fewer false breakouts)
     # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = c_1d + (h_1d - l_1d) * 1.1 / 4
-    camarilla_s3 = c_1d - (h_1d - l_1d) * 1.1 / 4
+    camarilla_r3 = c_1w + (h_1w - l_1w) * 1.1 / 4
+    camarilla_s3 = c_1w - (h_1w - l_1w) * 1.1 / 4
     
-    # 1d EMA34 for trend filter
-    close_1d_series = pd.Series(c_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Weekly EMA50 for trend filter
+    close_1w_series = pd.Series(c_1w)
+    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d indicators to 4h timeframe (completed bars only)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align weekly indicators to daily timeframe (completed bars only)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (stricter for fewer trades)
+    # Volume confirmation: current volume > 1.5 * 20-day average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
+    
+    # Choppiness regime filter: CHOP(14) < 61.8 = trending (favor breakouts)
+    # Higher CHOP = more choppy, avoid breakouts in choppy markets
+    tr_range = pd.Series(high - low).rolling(window=14, min_periods=14).max().values - \
+               pd.Series(high - low).rolling(window=14, min_periods=14).min().values
+    atr_14 = pd.Series(tr_range).rolling(window=14, min_periods=14).mean().values
+    chop = 100 * np.log10(atr_14 / (pd.Series(tr_range).sum())) / np.log10(14)
+    chop = pd.Series(chop).rolling(window=14, min_periods=14).mean().values
+    chop_regime = chop < 61.8  # Trending regime favoring breakouts
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need 1d EMA34 (34) + volume avg (20)
-    start_idx = max(34, 20)
+    # Warmup: need weekly EMA50 (50) + volume avg (20) + chop (14)
+    start_idx = max(50, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i]) or 
+            np.isnan(chop_regime[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
-        ema_val = ema_34_aligned[i]
+        ema_val = ema_50_aligned[i]
         vol_conf = volume_confirm[i]
+        chop_reg = chop_regime[i]
         
         if position == 0:
-            # Look for entry: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-            # Long: price closes above R3 AND above EMA34 (1d uptrend)
-            long_condition = (close_val > r3_val) and (close_val > ema_val) and vol_conf
-            # Short: price closes below S3 AND below EMA34 (1d downtrend)
-            short_condition = (close_val < s3_val) and (close_val < ema_val) and vol_conf
+            # Look for entry: Camarilla R3/S3 breakout with weekly trend filter, volume spike, and trending regime
+            # Long: price closes above R3 AND above weekly EMA50 (weekly uptrend) AND volume spike AND trending regime
+            long_condition = (close_val > r3_val) and (close_val > ema_val) and vol_conf and chop_reg
+            # Short: price closes below S3 AND below weekly EMA50 (weekly downtrend) AND volume spike AND trending regime
+            short_condition = (close_val < s3_val) and (close_val < ema_val) and vol_conf and chop_reg
             
             if long_condition:
                 signals[i] = size
@@ -82,14 +93,14 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price touches S3 (opposite level) OR 1d EMA34 turns bearish (price below EMA)
+            # Exit long: price touches S3 (opposite level) OR weekly EMA50 turns bearish (price below EMA)
             if (close_val < s3_val) or (close_val < ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price touches R3 (opposite level) OR 1d EMA34 turns bullish (price above EMA)
+            # Exit short: price touches R3 (opposite level) OR weekly EMA50 turns bullish (price above EMA)
             if (close_val > r3_val) or (close_val > ema_val):
                 signals[i] = 0.0
                 position = 0
@@ -98,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_DynamicExit"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_Volume_Regime"
+timeframe = "1d"
 leverage = 1.0
