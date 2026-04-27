@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
-Long when price breaks above R1 with 1d EMA34 uptrend and volume > 1.5x average.
-Short when price breaks below S1 with 1d EMA34 downtrend and volume > 1.5x average.
-Exit when price crosses back through the pivot point.
-Uses Camarilla levels from daily timeframe for structure and EMA for trend filter.
-Target: 25-40 trades per year.
+1d_WilliamsAlligator_Jaw_Signal
+Williams Alligator crossover with volume confirmation and trend filter.
+Long when green line crosses above red line with price above blue line and volume > average.
+Short when green line crosses below red line with price below blue line and volume > average.
+Exit when green line crosses back through red line.
+Target: 20-30 trades per year on daily timeframe for low frequency and high win rate.
 """
 
 import numpy as np
@@ -22,38 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Pivot = (H+L+C)/3
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate pivot and Camarilla levels
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + range_1d * 1.1 / 12.0
-    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    # Calculate Williams Alligator on daily
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
     
-    # Calculate 1d EMA34 for trend filter
-    ema_period = 34
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
-                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
+    # Jaw (blue line) - 13-period SMMA shifted 8 bars forward
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Align 1d indicators to 4h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    jaw = smma(close, jaw_period)
+    teeth = smma(close, teeth_period)
+    lips = smma(close, lips_period)
+    
+    # Shift jaw forward by 8 bars, teeth by 5 bars, lips by 3 bars (standard Alligator)
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # Calculate weekly EMA50 for trend filter
+    ema_period = 50
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
+                         ema_1w[i - 1] * (1 - (2 / (ema_period + 1))))
+    
+    # Align weekly EMA to daily timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -64,14 +74,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need EMA1d, volume MA20
-    start_idx = max(ema_period - 1, 19)
+    # Warmup: need all Alligator lines, EMA1w, and volume MA20
+    start_idx = max(jaw_period + 8, teeth_period + 5, lips_period + 3, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(lips_shifted[i]) or np.isnan(teeth_shifted[i]) or 
+            np.isnan(jaw_shifted[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -80,31 +89,31 @@ def generate_signals(prices):
         vol_avg = vol_ma_20[i]
         
         # Volume filter: require volume above average
-        vol_filter = vol_now > 1.5 * vol_avg
+        vol_filter = vol_now > vol_avg
         
         if position == 0:
-            # Long: price breaks above R1 with 1d EMA34 uptrend and volume filter
-            if (price > r1_1d_aligned[i] and 
-                price > ema_1d_aligned[i] and vol_filter):
+            # Long: lips crosses above teeth with price above jaw and weekly uptrend and volume filter
+            if (lips_shifted[i] > teeth_shifted[i] and lips_shifted[i-1] <= teeth_shifted[i-1] and
+                price > jaw_shifted[i] and price > ema_1w_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S1 with 1d EMA34 downtrend and volume filter
-            elif (price < s1_1d_aligned[i] and 
-                  price < ema_1d_aligned[i] and vol_filter):
+            # Short: lips crosses below teeth with price below jaw and weekly downtrend and volume filter
+            elif (lips_shifted[i] < teeth_shifted[i] and lips_shifted[i-1] >= teeth_shifted[i-1] and
+                  price < jaw_shifted[i] and price < ema_1w_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back below pivot
-            if price < pivot_1d_aligned[i]:
+            # Exit long: lips crosses below teeth
+            if lips_shifted[i] < teeth_shifted[i] and lips_shifted[i-1] >= teeth_shifted[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses back above pivot
-            if price > pivot_1d_aligned[i]:
+            # Exit short: lips crosses above teeth
+            if lips_shifted[i] > teeth_shifted[i] and lips_shifted[i-1] <= teeth_shifted[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_Jaw_Signal"
+timeframe = "1d"
 leverage = 1.0
