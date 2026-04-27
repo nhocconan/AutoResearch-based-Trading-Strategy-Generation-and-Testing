@@ -1,3 +1,8 @@
+# 6h_WeeklyPivot_RangeBreakout_Volume
+# Hypothesis: Weekly pivot levels act as strong support/resistance zones. When price breaks above weekly R1 or below weekly S1 with volume confirmation and 1d trend alignment, it signals continuation of the breakout move. Works in both bull and bear markets as pivots adapt to price levels. Uses 6h timeframe to capture multi-day moves with lower frequency (target: 20-50 trades/year) to minimize fee drag.
+# Entry: Long when price breaks above weekly R1 with volume spike and price above 1d EMA50. Short when price breaks below weekly S1 with volume spike and price below 1d EMA50.
+# Exit: When price crosses back below/above weekly pivot point (PP) or 1d EMA50.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,107 +18,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations (called ONCE before loop)
+    # Get weekly data for pivot calculation (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # PP = (H + L + C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    pp = np.full(len(high_1w), np.nan)
+    r1 = np.full(len(high_1w), np.nan)
+    s1 = np.full(len(high_1w), np.nan)
+    
+    for i in range(len(high_1w)):
+        pp[i] = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
+        r1[i] = 2 * pp[i] - low_1w[i]
+        s1[i] = 2 * pp[i] - high_1w[i]
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d RSI(14) for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        alpha = 2 / (50 + 1)
+        ema_50_1d[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
+            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Wilder's smoothing for RSI
-    avg_gain = np.full(len(gain), np.nan)
-    avg_loss = np.full(len(loss), np.nan)
+    # Align weekly pivots and daily EMA to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[1:14])
-        avg_loss[13] = np.mean(loss[1:14])
-        for i in range(14, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Calculate 1d ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_shift = np.roll(close_1d, 1)
-    close_1d_shift[0] = close_1d[0]
-    
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - close_1d_shift)
-    tr3 = np.abs(low_1d - close_1d_shift)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_1d = np.full(len(tr), np.nan)
-    if len(tr) >= 14:
-        atr_1d[13] = np.mean(tr[1:14])
-        for i in range(14, len(tr)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    # Calculate 1-hour ATR(14) for entry trigger
-    tr_1h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_1h[0] = high[0] - low[0]
-    atr_1h = np.full(n, np.nan)
-    if n >= 14:
-        atr_1h[13] = np.mean(tr_1h[1:14])
-        for i in range(14, n):
-            atr_1h[i] = (atr_1h[i-1] * 13 + tr_1h[i]) / 14
-    
-    # Align 1d indicators to 1h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate 6-period volume average for spike detection
+    vol_ma = np.full(n, np.nan)
+    vol_period = 6
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0
-    size = 0.20
+    size = 0.25
     
-    # Warmup period
-    start_idx = max(14, 14) + 5
+    # Warmup period: need at least 1 weekly bar and 6 volume period
+    start_idx = max(vol_period, 1) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_1h[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        volatility_ratio = atr_1h[i] / atr_1d_aligned[i] if atr_1d_aligned[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volatility filter: current volatility > 1.5x daily average
-        vol_filter = volatility_ratio > 1.5
+        # Volume spike filter: at least 1.5x average volume
+        vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volatility expansion
-            if rsi_1d_aligned[i] < 30 and vol_filter:
+            # Long: Price breaks above weekly R1 with volume and above 1d EMA50
+            if price > r1_aligned[i] and vol_filter and price > ema_50_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: RSI > 70 (overbought) + volatility expansion
-            elif rsi_1d_aligned[i] > 70 and vol_filter:
+            # Short: Price breaks below weekly S1 with volume and below 1d EMA50
+            elif price < s1_aligned[i] and vol_filter and price < ema_50_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI > 50 or volatility contraction
-            if rsi_1d_aligned[i] > 50 or volatility_ratio < 0.8:
+            # Long exit: Price crosses below weekly PP or below 1d EMA50
+            if price < pp_aligned[i] or price < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: RSI < 50 or volatility contraction
-            if rsi_1d_aligned[i] < 50 or volatility_ratio < 0.8:
+            # Short exit: Price crosses above weekly PP or above 1d EMA50
+            if price > pp_aligned[i] or price > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI14_Volatility_Expansion"
-timeframe = "1h"
+name = "6h_WeeklyPivot_RangeBreakout_Volume"
+timeframe = "6h"
 leverage = 1.0
