@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d EMA trend filter and volume spike confirmation.
-# Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100 over 14 periods.
-# Long when %R < -80 (oversold) and price > 1d EMA34 (uptrend) and volume > 1.5x 20-period average.
-# Short when %R > -20 (overbought) and price < 1d EMA34 (downtrend) and volume > 1.5x average.
-# Williams %R identifies overbought/oversold conditions; 1d trend filter ensures higher timeframe alignment.
-# Volume spike confirms institutional participation. Designed for ~12-37 trades/year per symbol on 12h.
+# Hypothesis: 4h Choppiness Index + 1d EMA trend filter + volume spike.
+# Choppiness Index (14) > 61.8 indicates ranging market (mean-reversion opportunity).
+# In ranging market: long when price < BB lower band (20,2), short when price > BB upper band.
+# Trending market (CHOP < 38.2): follow 1d EMA trend (long if price > EMA, short if price < EMA).
+# Volume spike (>1.5x 20-period average) confirms participation.
+# Designed for ~20-30 trades/year per symbol, works in both bull and bear via regime adaptation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,10 +20,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams %R: 14-period
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    # Choppiness Index (14)
+    def true_range(h, l, c_prev):
+        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    
+    tr1 = np.zeros(n)
+    tr1[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr1[i] = true_range(high[i], low[i], close[i-1])
+    
+    atr14 = np.zeros(n)
+    for i in range(14, n):
+        atr14[i] = np.mean(tr1[i-13:i+1])
+    
+    sum_tr14 = np.zeros(n)
+    for i in range(14, n):
+        sum_tr14[i] = np.sum(tr1[i-13:i+1])
+    
+    max_high = np.zeros(n)
+    min_low = np.zeros(n)
+    for i in range(14, n):
+        max_high[i] = np.max(high[i-13:i+1])
+        min_low[i] = np.min(low[i-13:i+1])
+    
+    chop = np.full(n, 50.0)
+    for i in range(14, n):
+        if max_high[i] != min_low[i]:
+            chop[i] = 100 * np.log10(sum_tr14[i] / (max_high[i] - min_low[i])) / np.log10(14)
+    
+    # Bollinger Bands (20,2)
+    sma20 = np.zeros(n)
+    std20 = np.zeros(n)
+    for i in range(20, n):
+        sma20[i] = np.mean(close[i-19:i+1])
+        std20[i] = np.std(close[i-19:i+1])
+    bb_upper = sma20 + 2 * std20
+    bb_lower = sma20 - 2 * std20
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -36,44 +68,67 @@ def generate_signals(prices):
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = np.zeros(n)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(chop[i]) or np.isnan(sma20[i]) or np.isnan(std20[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: Williams %R < -80 (oversold), price > 1d EMA34 (uptrend), volume filter
-        if (williams_r[i] < -80 and 
-            close[i] > ema34_1d_aligned[i] and 
-            volume_filter[i]):
-            signals[i] = 0.25
-            position = 1
-        # Short conditions: Williams %R > -20 (overbought), price < 1d EMA34 (downtrend), volume filter
-        elif (williams_r[i] > -20 and 
-              close[i] < ema34_1d_aligned[i] and 
-              volume_filter[i]):
-            signals[i] = -0.25
-            position = -1
-        else:
-            # Hold current position or flat
-            if position == 1:
+        # Determine market regime
+        is_ranging = chop[i] > 61.8
+        is_trending = chop[i] < 38.2
+        
+        if is_ranging:
+            # Mean reversion in ranging market
+            if close[i] < bb_lower[i] and volume_filter[i]:
                 signals[i] = 0.25
-            elif position == -1:
+                position = 1
+            elif close[i] > bb_upper[i] and volume_filter[i]:
                 signals[i] = -0.25
+                position = -1
             else:
-                signals[i] = 0.0
+                # Hold position or flat
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+        elif is_trending:
+            # Follow trend in trending market
+            if close[i] > ema34_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            elif close[i] < ema34_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
+            else:
+                # Hold position or flat
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+        else:
+            # Neutral chop zone - stay flat
+            signals[i] = 0.0
+            position = 0
     
     return signals
 
-name = "12h_WilliamsR_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "4h_ChoppinessIndex_1dEMA34_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
