@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Mean Reversion with 4h Trend Filter and Volume Confirmation
-# In range-bound markets, price reverts to the 4h VWAP with high probability.
-# Uses 4h VWAP as mean reversion target and volume spike for entry confirmation.
-# Designed to work in both bull and bear markets by fading extremes.
-# Target: 20-40 trades/year to avoid fee drag.
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation.
+# Price breaking above/below 20-period Donchian channel indicates momentum.
+# Trend direction from 1d EMA50 filters breakouts to trade with higher timeframe trend.
+# Volume spike confirms genuine breakout with participation.
+# Designed to work in both bull (breakouts up in uptrend) and bear (breakouts down in downtrend).
+# Target: 15-30 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,35 +20,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for VWAP calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get daily data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate VWAP on 4h data
-    typical_price_4h = (df_4h['high'].values + df_4h['low'].values + df_4h['close'].values) / 3
-    vwap_4h = np.full(len(df_4h), np.nan)
-    cum_vol = 0.0
-    cum_price_vol = 0.0
-    for i in range(len(df_4h)):
-        tp = typical_price_4h[i]
-        vol = df_4h['volume'].values[i]
-        cum_price_vol += tp * vol
-        cum_vol += vol
-        if cum_vol > 0:
-            vwap_4h[i] = cum_price_vol / cum_vol
+    close_1d = df_1d['close'].values
+    # Calculate EMA(50) on daily close with proper initialization
+    ema_50_1d = np.full(len(df_1d), np.nan)
+    if len(close_1d) >= 50:
+        # Initialize with SMA for first 50 values
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = close_1d[i] * alpha + ema_50_1d[i-1] * (1 - alpha)
     
-    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR for volatility filter
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[high[0] - low[0]], tr])
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[:15])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -58,47 +53,59 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup
-    start_idx = 50
+    # Warmup: need enough data for all indicators
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_4h_aligned[i]) or 
-            np.isnan(atr[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Deviation from 4h VWAP in ATR units
-        deviation = (close[i] - vwap_4h_aligned[i]) / atr[i]
+        # Determine trend direction from daily EMA50 (using previous bar to avoid look-ahead)
+        if i > 0 and not np.isnan(ema_50_1d_aligned[i-1]):
+            trend_up = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            trend_down = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]
+        else:
+            trend_up = False
+            trend_down = False
         
         if position == 0:
-            # Long entry: price below VWAP + volume spike
-            if deviation < -1.5 and volume_spike[i]:
-                signals[i] = 0.20
+            # Long entry: price breaks above Donchian high + uptrend + volume spike
+            if (close[i] > donchian_high[i] and 
+                trend_up and 
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short entry: price above VWAP + volume spike
-            elif deviation > 1.5 and volume_spike[i]:
-                signals[i] = -0.20
+            # Short entry: price breaks below Donchian low + downtrend + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  trend_down and 
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to VWAP or opposite extreme
-            if deviation > -0.5 or deviation > 1.5:
+            # Long exit: price breaks below Donchian low or trend turns down
+            if (close[i] < donchian_low[i] or 
+                not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to VWAP or opposite extreme
-            if deviation < 0.5 or deviation < -1.5:
+            # Short exit: price breaks above Donchian high or trend turns up
+            if (close[i] > donchian_high[i] or 
+                not trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_MeanReversion_4hVWAP_VolumeSpike_v1"
-timeframe = "1h"
+name = "12h_Donchian20_1dEMA50_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
