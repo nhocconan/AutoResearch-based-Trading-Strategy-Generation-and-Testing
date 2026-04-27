@@ -1,12 +1,8 @@
-#!/usr/bin/env python3
-"""
-Hypothesis: 4h Donchian breakout with 1-day ADX trend filter and volume confirmation.
-Breakouts occur when price breaks Donchian(20) channels, filtered by daily ADX > 25
-to ensure trending conditions. Volume > 1.5x average confirms breakout strength.
-Uses discrete position sizes (±0.25) to minimize churn. Target: 20-40 trades/year.
-ATR-based trailing stop (3x ATR) limits drawdown. Works in bull/bear by capturing
-volatility expansion in trending markets.
-"""
+# 6h_RSI_Momentum_1dTrend_Volume
+# Hypothesis: 6h RSI momentum (RSI(14) > 60 for long, < 40 for short) filtered by 1-day EMA(50) trend
+# and volume > 1.5x average. Uses discrete position sizing (±0.25) to limit turnover.
+# Works in bull markets via momentum continuation and in bear via mean-reversion off extremes.
+# Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
@@ -22,98 +18,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA(50) on 1d close
     close_1d = df_1d['close'].values
+    ema_period = 50
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
+        multiplier = 2 / (ema_period + 1)
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # True Range
-    tr_1d = np.zeros(len(close_1d))
-    for i in range(1, len(close_1d)):
-        tr_1d[i] = max(high_1d[i] - low_1d[i], 
-                       abs(high_1d[i] - close_1d[i-1]), 
-                       abs(low_1d[i] - close_1d[i-1]))
+    # Align 1d EMA to 6h timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Directional Movement
-    plus_dm = np.zeros(len(close_1d))
-    minus_dm = np.zeros(len(close_1d))
-    for i in range(1, len(close_1d)):
-        up_move = high_1d[i] - high_1d[i-1]
-        down_move = low_1d[i-1] - low_1d[i]
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        else:
-            plus_dm[i] = 0
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-        else:
-            minus_dm[i] = 0
+    # Calculate RSI(14) on 6h data
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Smoothed TR, +DM, -DM (Wilder smoothing)
-    period = 14
-    tr_period = np.zeros(len(close_1d))
-    plus_dm_period = np.zeros(len(close_1d))
-    minus_dm_period = np.zeros(len(close_1d))
+    # Wilder's smoothing
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    if n >= rsi_period:
+        avg_gain[rsi_period-1] = np.mean(gain[1:rsi_period+1])
+        avg_loss[rsi_period-1] = np.mean(loss[1:rsi_period+1])
+        for i in range(rsi_period, n):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
     
-    if len(close_1d) >= period:
-        tr_period[period-1] = np.sum(tr_1d[1:period+1])
-        plus_dm_period[period-1] = np.sum(plus_dm[1:period+1])
-        minus_dm_period[period-1] = np.sum(minus_dm[1:period+1])  # Fixed bug
-        
-        for i in range(period, len(close_1d)):
-            tr_period[i] = tr_period[i-1] - (tr_period[i-1] / period) + tr_1d[i]
-            plus_dm_period[i] = plus_dm_period[i-1] - (plus_dm_period[i-1] / period) + plus_dm[i]
-            minus_dm_period[i] = minus_dm_period[i-1] - (minus_dm_period[i-1] / period) + minus_dm[i]
-    
-    # Directional Indicators
-    plus_di = np.zeros(len(close_1d))
-    minus_di = np.zeros(len(close_1d))
-    dx = np.zeros(len(close_1d))
-    
-    for i in range(period-1, len(close_1d)):
-        if tr_period[i] > 0:
-            plus_di[i] = 100 * (plus_dm_period[i] / tr_period[i])
-            minus_di[i] = 100 * (minus_dm_period[i] / tr_period[i])
-            if plus_di[i] + minus_di[i] > 0:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-    
-    # ADX = smoothed DX
-    adx_1d = np.zeros(len(close_1d))
-    if len(close_1d) >= 2 * period - 1:
-        adx_1d[2*period-2] = np.sum(dx[period-1:2*period-1]) / period
-        for i in range(2*period-1, len(close_1d)):
-            adx_1d[i] = (adx_1d[i-1] * (period - 1) + dx[i]) / period
-    
-    # Align 1d ADX to 4h timeframe (waits for 1d bar close)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate Donchian channels (20-period)
-    donch_len = 20
-    upper_donch = np.full(n, np.nan)
-    lower_donch = np.full(n, np.nan)
-    
-    for i in range(donch_len-1, n):
-        upper_donch[i] = np.max(high[i-donch_len+1:i+1])
-        lower_donch[i] = np.min(low[i-donch_len+1:i+1])
-    
-    # Calculate ATR(14) for stoploss
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
-    
-    atr = np.full(n, np.nan)
-    for i in range(period, n):
-        if i == period:
-            atr[i] = np.mean(tr[1:period+1])
-        else:
-            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    rsi = np.full(n, 50.0)  # neutral when undefined
+    for i in range(rsi_period, n):
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
     
     # Volume confirmation
     vol_ma_period = 20
@@ -125,48 +68,47 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup: need Donchian (20), ATR (14), ADX (28), volume MA (20)
-    start_idx = max(donch_len-1, period, 2*period-1, vol_ma_period)
+    # Warmup: need RSI (14), EMA (50), volume MA (20)
+    start_idx = max(rsi_period, ema_period, vol_ma_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_donch[i]) or
-            np.isnan(lower_donch[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(rsi[i]) or
+            np.isnan(ema_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Trend filter: price above/below 1d EMA(50)
+        uptrend = price > ema_aligned[i]
+        downtrend = price < ema_aligned[i]
         
         # Volume confirmation: > 1.5x average volume
         volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long entry: price breaks above upper Donchian in trending market with volume
-            if trending and price > upper_donch[i] and volume_confirmation:
+            # Long entry: RSI > 60 in uptrend with volume
+            if rsi[i] > 60 and uptrend and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short entry: price breaks below lower Donchian in trending market with volume
-            elif trending and price < lower_donch[i] and volume_confirmation:
+            # Short entry: RSI < 40 in downtrend with volume
+            elif rsi[i] < 40 and downtrend and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below lower Donchian or trend weakens or ATR stop
-            if price < lower_donch[i] or adx_aligned[i] < 20 or price < (high[i] - 3.0 * atr[i]):
+            # Long exit: RSI < 50 or trend reverses
+            if rsi[i] < 50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price crosses above upper Donchian or trend weakens or ATR stop
-            if price > upper_donch[i] or adx_aligned[i] < 20 or price > (low[i] + 3.0 * atr[i]):
+            # Short exit: RSI > 50 or trend reverses
+            if rsi[i] > 50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -174,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_ADXTrend_Volume"
-timeframe = "4h"
+name = "6h_RSI_Momentum_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
