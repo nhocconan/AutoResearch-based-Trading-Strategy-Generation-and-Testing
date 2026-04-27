@@ -13,48 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Weekly EMA34 for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema34 = np.full(len(weekly_close), np.nan)
-    for i in range(len(weekly_close)):
-        if i < 34:
-            weekly_ema34[i] = np.mean(weekly_close[:i+1])
-        else:
-            weekly_ema34[i] = weekly_ema34[i-1] * 0.94117647 + weekly_close[i] * 0.05882353  # EMA 34 alpha
-    
-    # Align weekly EMA34 to daily
-    weekly_ema34_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema34)
-    
-    # Get daily data for price action
+    # Get daily data for pivot calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Daily high/low for Donchian breakout
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Calculate daily classic pivot points: PP, R1, S1
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian(20) channels
-    donchian_high = np.full(len(daily_high), np.nan)
-    donchian_low = np.full(len(daily_low), np.nan)
-    for i in range(len(daily_high)):
-        if i >= 20:
-            donchian_high[i] = np.max(daily_high[i-20:i])
-            donchian_low[i] = np.min(daily_low[i-20:i])
-        else:
-            donchian_high[i] = np.max(daily_high[:i+1])
-            donchian_low[i] = np.min(daily_low[:i+1])
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
-    # Align Donchian channels to daily
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Daily ATR(14) for volatility filter
+    # Calculate ATR(14) for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -66,21 +40,26 @@ def generate_signals(prices):
         else:
             atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Daily volume average (20-period)
+    # Calculate volume average (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     
+    # Align daily pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
     signals = np.zeros(n)
     position = 0
     
-    # Start after all indicators are ready
-    start_idx = max(20, 20)  # Donchian needs 20, volume MA needs 20
+    # Warmup: need all indicators
+    start_idx = max(20, 14)  # volume MA needs 20, ATR needs 14
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(weekly_ema34_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -91,45 +70,42 @@ def generate_signals(prices):
         # Volume confirmation: > 2.0x average volume
         volume_confirmation = vol_ratio > 2.0
         
-        # Volatility filter: ATR above 50% of its 20-period average
-        if i >= 20:
-            atr_avg = np.mean(atr[max(0, i-20):i+1])
+        # ATR volatility filter: avoid low volatility periods
+        # Only trade when ATR is above 50% of its 50-period average
+        if i >= 50:
+            atr_avg = np.mean(atr[i-50:i+1])
             vol_filter = atr[i] > atr_avg * 0.5
         else:
-            vol_filter = True
-        
-        # Trend filter: price above/below weekly EMA34
-        uptrend = price > weekly_ema34_aligned[i]
-        downtrend = price < weekly_ema34_aligned[i]
+            vol_filter = True  # No filter during warmup
         
         if position == 0:
-            # Long: break above Donchian high with volume, volatility, and uptrend
-            if volume_confirmation and vol_filter and uptrend and price > donchian_high_aligned[i]:
+            # Long: break above daily R1 with volume and volatility
+            if volume_confirmation and vol_filter and price > r1_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume, volatility, and downtrend
-            elif volume_confirmation and vol_filter and downtrend and price < donchian_low_aligned[i]:
+            # Short: break below daily S1 with volume and volatility
+            elif volume_confirmation and vol_filter and price < s1_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price closes below Donchian low or trend changes
-            if price < donchian_low_aligned[i] or not uptrend:
+            # Long exit: price returns to daily pivot or volatility drops significantly
+            if price < pivot_aligned[i] or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price closes above Donchian high or trend changes
-            if price > donchian_high_aligned[i] or not downtrend:
+            # Short exit: price returns to daily pivot or volatility drops significantly
+            if price > pivot_aligned[i] or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Maintain position
     
     return signals
 
-name = "1d_Donchian20_WeeklyEMA34Trend_Volume"
-timeframe = "1d"
+name = "12h_1D_Pivot_R1_S1_Breakout_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
