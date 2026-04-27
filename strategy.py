@@ -1,3 +1,9 @@
+# 6h CCI Trend-Following with Volume Filter and Trend Confirmation
+# Hypothesis: CCI captures cyclical price extremes. In trending markets, CCI > +100 signals strong uptrend continuation,
+# CCI < -100 signals strong downtrend continuation. Combined with 1-day EMA trend filter and volume confirmation,
+# this should work in both bull (riding trends) and bear (catching sharp declines) markets.
+# Target: 20-50 trades/year on 6h timeframe to avoid fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,12 +11,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Get 1d data for calculations (called ONCE before loop)
@@ -27,21 +33,21 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema_34_1d[i] = (close_1d[i] * multiplier) + (ema_34_1d[i-1] * (1 - multiplier))
     
-    # Calculate 1-day Bollinger Bands (20, 2.0)
-    sma_20_1d = np.full(len(close_1d), np.nan)
-    std_20_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        for i in range(19, len(close_1d)):
-            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
-            std_20_1d[i] = np.std(close_1d[i-19:i+1])
-    
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
-    
-    # Align 1d indicators to 4h timeframe
+    # Align 1d EMA to 6h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    
+    # Calculate 20-period Commodity Channel Index (CCI) on 6h data
+    # CCI = (Typical Price - SMA(TP,20)) / (0.015 * Mean Deviation)
+    typical_price = (high + low + close) / 3.0
+    cci = np.full(n, np.nan)
+    
+    if n >= 20:
+        for i in range(19, n):
+            tp_slice = typical_price[i-19:i+1]
+            sma_tp = np.mean(tp_slice)
+            mean_dev = np.mean(np.abs(tp_slice - sma_tp))
+            if mean_dev > 0:
+                cci[i] = (typical_price[i] - sma_tp) / (0.015 * mean_dev)
     
     # Calculate 6-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
@@ -54,12 +60,11 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(34, vol_period) + 5
+    start_idx = max(20, vol_period) + 5
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(upper_bb_1d_aligned[i]) or 
-            np.isnan(lower_bb_1d_aligned[i]) or 
+            np.isnan(cci[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,30 +72,30 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.5x average volume
-        vol_filter = vol_ratio > 1.5
+        # Volume filter: at least 1.3x average volume to avoid low-volume false signals
+        vol_filter = vol_ratio > 1.3
         
         if position == 0:
-            # Long: Price above EMA34 and breaks above upper Bollinger Band with volume
-            if price > ema_34_1d_aligned[i] and price > upper_bb_1d_aligned[i] and vol_filter:
+            # Long: CCI > +100 (overbought/strong uptrend) AND price above 1-day EMA (uptrend filter)
+            if cci[i] > 100 and price > ema_34_1d_aligned[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price below EMA34 and breaks below lower Bollinger Band with volume
-            elif price < ema_34_1d_aligned[i] and price < lower_bb_1d_aligned[i] and vol_filter:
+            # Short: CCI < -100 (oversold/strong downtrend) AND price below 1-day EMA (downtrend filter)
+            elif cci[i] < -100 and price < ema_34_1d_aligned[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below EMA34 or volatility spike (potential reversal)
-            if price < ema_34_1d_aligned[i] or (vol_ratio > 2.5):
+            # Long exit: CCI falls below +50 (weakening momentum) OR price crosses below 1-day EMA
+            if cci[i] < 50 or price < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses above EMA34 or volatility spike (potential reversal)
-            if price > ema_34_1d_aligned[i] or (vol_ratio > 2.5):
+            # Short exit: CCI rises above -50 (weakening momentum) OR price crosses above 1-day EMA
+            if cci[i] > -50 or price > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_BB20_Volume"
-timeframe = "4h"
+name = "6h_CCI_Trend_Following_Volume"
+timeframe = "6h"
 leverage = 1.0
