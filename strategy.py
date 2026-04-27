@@ -1,3 +1,8 @@
+# Hypothesis: Price action around daily pivot points (S1/R1) with volume confirmation and ADX filter on 12h timeframe.
+# In both bull and bear markets, price often respects key daily support/resistance levels.
+# Volume confirms institutional interest, ADX ensures we trade in trending conditions to avoid chop.
+# Position size 0.25 to manage risk. Target: 15-30 trades/year.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -34,7 +39,7 @@ def generate_signals(prices):
     r1 = 2 * pivot - low_prev
     s1 = 2 * pivot - high_prev
     
-    # Align daily pivots to 6h
+    # Align daily pivots to 12h
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -43,7 +48,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 1.5 x 20-period average (6h)
+    # Volume filter: volume > 1.5 x 20-period average (12h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -93,7 +98,7 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) == 0, 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus))
     adx_1d = wilder_smooth(dx, 14)
     
-    # Align ADX to 6h
+    # Align ADX to 12h
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
@@ -153,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_S1R1_ADX25_Volume"
-timeframe = "6h"
+name = "12h_Pivot_S1R1_ADX25_Volume"
+timeframe = "12h"
 leverage = 1.0
