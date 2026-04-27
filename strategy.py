@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian(20) breakout with daily volume confirmation and 1-day ATR volatility filter.
-Enters long when price breaks above 20-period high with volume > 1.5x daily average and ATR(14) > 0.5 * ATR(50).
-Enters short when price breaks below 20-period low with volume > 1.5x daily average and ATR(14) > 0.5 * ATR(50).
-Uses ATR-based stoploss to limit drawdown. Designed to capture trending moves while avoiding choppy markets.
-Target: 20-40 trades/year per symbol to minimize fee drag.
+Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with 1-day trend filter and volume confirmation.
+Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+Enters long when Bull Power > 0, volume > 1.5x daily average, and 1-day close > EMA34 (uptrend).
+Enters short when Bear Power < 0, volume > 1.5x daily average, and 1-day close < EMA34 (downtrend).
+Uses EMA13 for power calculation and EMA34 for trend filter to reduce noise.
+Targets 15-30 trades/year per symbol to minimize fee drift while capturing institutional sentiment.
+Works in bull markets via Bull Power strength and in bear markets via Bear Power extremes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, length):
-    """Average True Range"""
+def ema(source, length):
+    """Exponential Moving Average with proper seed"""
     if length <= 0:
-        return np.full_like(high, np.nan)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First TR
-    atr = np.full_like(tr, np.nan, dtype=np.float64)
-    atr[length-1] = np.mean(tr[:length])
-    for i in range(length, len(tr)):
-        atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
-    return atr
+        return np.full_like(source, np.nan)
+    result = np.full_like(source, np.nan)
+    if len(source) < length:
+        return result
+    # Seed with SMA
+    result[length-1] = np.mean(source[:length])
+    # EMA formula
+    alpha = 2.0 / (length + 1.0)
+    for i in range(length, len(source)):
+        result[i] = alpha * source[i] + (1 - alpha) * result[i-1]
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,77 +38,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume filter and ATR
+    # Get daily data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 for Elder Ray (using 6h close)
+    ema13 = ema(close, 13)
     
-    # Calculate daily volume MA(20)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Elder Ray components
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Calculate ATR(14) and ATR(50) on 1d
-    atr_14_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_50_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 50)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Daily volume average (20-period)
+    vol_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.25   # 25% position
     
-    # Warmup: need Donchian (20), volume MA (20), ATR(50)
-    start_idx = max(20, 50)
+    # Warmup: need EMA13 (13) and daily EMA34 (34) and vol (20)
+    start_idx = max(13, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(atr_50_1d_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 4h price and volume
-        price_now = close[i]
+        # Current values
+        bull = bull_power[i]
+        bear = bear_power[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        atr_14 = atr_14_1d_aligned[i]
-        atr_50 = atr_50_1d_aligned[i]
-        
-        # Volatility filter: ATR(14) > 0.5 * ATR(50) (ensures sufficient volatility)
-        vol_filter = atr_14 > 0.5 * atr_50
+        vol_avg = vol_20_1d_aligned[i]
+        trend = ema34_1d_aligned[i]
         
         # Volume filter: volume > 1.5x daily average
-        volume_filter = vol_now > 1.5 * vol_ma
+        vol_filter = vol_now > 1.5 * vol_avg
         
         # Entry conditions
         if position == 0:
-            # Long: price breaks above 20-period high with volume + volatility
-            if price_now > high_20[i] and volume_filter and vol_filter:
+            # Long: Bull Power positive, volume confirmation, uptrend
+            if bull > 0 and vol_filter and close[i] > trend:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below 20-period low with volume + volatility
-            elif price_now < low_20[i] and volume_filter and vol_filter:
+            # Short: Bear Power negative, volume confirmation, downtrend
+            elif bear < 0 and vol_filter and close[i] < trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 20-period low or volatility drops
-            if price_now < low_20[i] or atr_14 < 0.3 * atr_50:
+            # Exit long: Bull Power turns negative or trend breaks
+            if bull <= 0 or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 20-period high or volatility drops
-            if price_now > high_20[i] or atr_14 < 0.3 * atr_50:
+            # Exit short: Bear Power turns positive or trend breaks
+            if bear >= 0 or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolume_ATRFilter"
-timeframe = "4h"
+name = "6h_ElderRay_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
