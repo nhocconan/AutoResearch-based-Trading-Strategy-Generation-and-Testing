@@ -1,13 +1,15 @@
+# Your Name: 
+# Your Unique Idea: 
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation.
-# Long when RSI(14) < 30 (oversold), price > 4h EMA50 (bullish trend), and volume > 1.5x average.
-# Short when RSI(14) > 70 (overbought), price < 4h EMA50 (bearish trend), and volume > 1.5x average.
-# Exit when RSI returns to neutral (40-60 range) or trend reverses.
-# Uses 4h for trend direction, 1h for entry timing and mean reversion signals.
+# Hypothesis: 4h Williams Alligator + Elder Ray + Volume Spike with 1d trend filter.
+# Williams Alligator identifies trend direction (Jaw/Teeth/Lips alignment).
+# Elder Ray measures bull/bear power via EMA13.
+# Volume spike confirms breakout strength.
+# 1d trend filter ensures alignment with higher timeframe momentum.
 # Designed for ~20-30 trades/year with strict entry conditions to avoid overtrading.
 
 def generate_signals(prices):
@@ -20,95 +22,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 1:
+    # Get daily data for Williams Alligator and Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI(14) on 1h closes
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Williams Alligator: SMAs of median price
+    # Jaw (13-period, shifted 8), Teeth (8-period, shifted 5), Lips (5-period, shifted 3)
+    median_price_1d = (high_1d + low_1d) / 2.0
+    jaw_1d = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_1d = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_1d = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Use exponential moving average for RSI calculation
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    rsi = np.zeros(n)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = ema13_1d - low_1d
     
-    # Initialize first values
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        
-        # Calculate subsequent values using EMA formula
-        for i in range(14, len(gain)):
-            avg_gain[i] = (gain[i] * 1 + avg_gain[i-1] * 13) / 14
-            avg_loss[i] = (loss[i] * 1 + avg_loss[i-1] * 13) / 14
-            
-            if avg_loss[i] != 0:
-                rs = avg_gain[i] / avg_loss[i]
-                rsi[i+1] = 100 - (100 / (1 + rs))
-            else:
-                rsi[i+1] = 100
+    # Align 1d indicators to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Calculate 4h EMA50 for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 2.0x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Warmup: need RSI and volume MA
-    start_idx = 34  # RSI needs 14+20 periods to stabilize
+    # Warmup: need enough data for Alligator (13+8=21 bars) + volume MA
+    start_idx = 25
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi_now = rsi[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
         # Volume filter
-        vol_filter = vol_now > 1.5 * vol_avg
+        vol_filter = vol_now > 2.0 * vol_avg
         
-        # Trend filters from 4h EMA50
-        bullish_trend = price > ema50_4h_aligned[i]
-        bearish_trend = price < ema50_4h_aligned[i]
+        # Williams Alligator: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        bullish_alligator = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        bearish_alligator = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        
+        # Elder Ray: Bull Power > 0 and Bear Power > 0 indicate strength
+        bullish_elder = bull_power_aligned[i] > 0
+        bearish_elder = bear_power_aligned[i] > 0
         
         if position == 0:
-            # Long: RSI oversold (<30) with volume and bullish trend
-            if rsi_now < 30 and vol_filter and bullish_trend:
+            # Long: Alligator aligned up + Elder Ray bullish + volume spike
+            if bullish_alligator and bullish_elder and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: RSI overbought (>70) with volume and bearish trend
-            elif rsi_now > 70 and vol_filter and bearish_trend:
+            # Short: Alligator aligned down + Elder Ray bearish + volume spike
+            elif bearish_alligator and bearish_elder and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral (>40) or trend turns bearish
-            if rsi_now > 40 or not bullish_trend:
+            # Exit long: Alligator alignment breaks or Elder Ray turns bearish
+            if not bullish_alligator or not bullish_elder:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI returns to neutral (<60) or trend turns bullish
-            if rsi_now < 60 or not bearish_trend:
+            # Exit short: Alligator alignment breaks or Elder Ray turns bullish
+            if not bearish_alligator or not bearish_elder:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI_MeanReversion_4hTrend_Volume"
-timeframe = "1h"
+name = "4h_WilliamsAlligator_ElderRay_Volume_1dTrend"
+timeframe = "4h"
 leverage = 1.0
