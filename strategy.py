@@ -1,6 +1,14 @@
-# 1d_WeeklyBreakout_Pullback_v2
-# Hypothesis: On 1d timeframe, take long positions when price breaks above weekly high with pullback to 20 EMA, and short positions when price breaks below weekly low with pullback to 20 EMA. Uses weekly trend filter (price above/below weekly 50 EMA) and volume confirmation (1.5x average). Designed to capture momentum with pullback entries for better risk-reward, working in both bull and bear markets by following the weekly trend.
-# Target: 15-25 trades/year to minimize fee drag while capturing significant moves.
+#!/usr/bin/env python3
+"""
+12h_1D_Camarilla_R3_S3_Breakout_VolumeSpike
+Hypothesis: Price breakout from daily Camarilla R3/S3 levels with volume confirmation and 12h momentum filter.
+Goes long when price breaks above daily R3 with volume > 2x average and 12h momentum positive.
+Goes short when price breaks below daily S3 with volume > 2x average and 12h momentum negative.
+Exits when price returns to daily central pivot (PP).
+Designed to capture strong intraday moves with confirmation, avoiding false breakouts.
+Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag while capturing major moves.
+Works in both bull and bear markets due to directional flexibility and volume confirmation.
+"""
 
 import numpy as np
 import pandas as pd
@@ -16,94 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend and breakout levels
-    df_weekly = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_weekly) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly 50 EMA for trend filter
-    close_weekly = df_weekly['close'].values
-    weekly_ema_period = 50
-    weekly_ema = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= weekly_ema_period:
-        weekly_ema[weekly_ema_period - 1] = np.mean(close_weekly[:weekly_ema_period])
-        multiplier = 2 / (weekly_ema_period + 1)
-        for i in range(weekly_ema_period, len(close_weekly)):
-            weekly_ema[i] = (close_weekly[i] * multiplier) + (weekly_ema[i-1] * (1 - multiplier))
+    # Calculate daily Camarilla levels: R3, S3, PP
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly high and low for breakout levels
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    # Camarilla formulas
+    R3 = high_1d + (high_1d - low_1d) * 1.1 / 2
+    S3 = low_1d - (high_1d - low_1d) * 1.1 / 2
+    PP = (high_1d + low_1d + close_1d) / 3
     
-    # Calculate daily 20 EMA for pullback entries
-    ema_period = 20
-    ema = np.full(n, np.nan)
-    if n >= ema_period:
-        ema[ema_period - 1] = np.mean(close[:ema_period])
-        multiplier = 2 / (ema_period + 1)
-        for i in range(ema_period, n):
-            ema[i] = (close[i] * multiplier) + (ema[i-1] * (1 - multiplier))
+    # Align daily levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
     
-    # Calculate daily volume average (20-period)
-    vol_ma = np.full(n, np.nan)
+    # Calculate 12h momentum (ROC 2-period)
+    roc_period = 2
+    roc = np.full(n, np.nan)
+    if n > roc_period:
+        roc[roc_period:] = (close[roc_period:] - close[:-roc_period]) / close[:-roc_period] * 100
+    
+    # Calculate volume average (20-period)
+    vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    
-    # Align weekly indicators to daily timeframe
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low)
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
     # Warmup: need all indicators
-    start_idx = max(20, 50)  # daily EMA needs 20, weekly EMA needs 50
+    start_idx = max(20, roc_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_high_aligned[i]) or
-            np.isnan(weekly_low_aligned[i]) or
-            np.isnan(weekly_ema_aligned[i]) or
-            np.isnan(ema[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(R3_aligned[i]) or
+            np.isnan(S3_aligned[i]) or
+            np.isnan(PP_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(roc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Weekly trend filter
-        weekly_uptrend = price > weekly_ema_aligned[i]
-        weekly_downtrend = price < weekly_ema_aligned[i]
+        # Momentum filter: positive for long, negative for short
+        mom_positive = roc[i] > 0
+        mom_negative = roc[i] < 0
         
-        # Volume confirmation: > 1.5x average volume
-        volume_confirmation = vol_ratio > 1.5
-        
-        # Pullback to daily 20 EMA (within 1%)
-        pullback_to_ema = abs(price - ema[i]) / ema[i] < 0.01
+        # Volume confirmation: > 2x average volume
+        volume_confirmation = vol_ratio > 2.0
         
         if position == 0:
-            # Long: break above weekly high with pullback to EMA, volume, and weekly uptrend
-            if weekly_uptrend and volume_confirmation and pullback_to_ema and price > weekly_high_aligned[i]:
+            # Long: break above daily R3 with volume and positive momentum
+            if mom_positive and volume_confirmation and price > R3_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly low with pullback to EMA, volume, and weekly downtrend
-            elif weekly_downtrend and volume_confirmation and pullback_to_ema and price < weekly_low_aligned[i]:
+            # Short: break below daily S3 with volume and negative momentum
+            elif mom_negative and volume_confirmation and price < S3_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below weekly low or weekly trend turns down
-            if price < weekly_low_aligned[i] or price <= weekly_ema_aligned[i]:
+            # Long exit: return to daily central pivot (PP)
+            if price < PP_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price breaks above weekly high or weekly trend turns up
-            if price > weekly_high_aligned[i] or price >= weekly_ema_aligned[i]:
+            # Short exit: return to daily central pivot (PP)
+            if price > PP_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyBreakout_Pullback_v2"
-timeframe = "1d"
+name = "12h_1D_Camarilla_R3_S3_Breakout_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
