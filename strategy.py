@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,66 +13,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for higher timeframe context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate daily ATR for volatility filter
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.abs(high_1d[1:] - close_1d[:-1]), 
-                       np.abs(low_1d[1:] - close_1d[:-1]))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate 1w EMA 34 for trend direction
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate daily volume moving average
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate 1w RSI for overbought/oversold conditions
+    delta_1w = pd.Series(close_1w).diff()
+    gain_1w = delta_1w.where(delta_1w > 0, 0)
+    loss_1w = -delta_1w.where(delta_1w < 0, 0)
+    avg_gain_1w = gain_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1w = loss_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1w = avg_gain_1w / avg_loss_1w
+    rsi_1w = 100 - (100 / (1 + rs_1w))
+    rsi_1w = rsi_1w.values
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Calculate 12-hour Donchian channels (20-period)
-    donchian_high = np.maximum.accumulate(high)
-    donchian_low = np.minimum.accumulate(low)
-    donchian_high = np.where(np.arange(len(high)) < 19, np.nan, donchian_high[19:])
-    donchian_high = np.concatenate([np.full(19, np.nan), donchian_high])
-    donchian_low = np.where(np.arange(len(low)) < 19, np.nan, donchian_low[19:])
-    donchian_low = np.concatenate([np.full(19, np.nan), donchian_low])
+    # Calculate 1w ATR for volatility filter
+    tr_1w = np.maximum(high_1w[1:] - low_1w[1:], 
+                       np.abs(high_1w[1:] - close_1w[:-1]), 
+                       np.abs(low_1w[1:] - close_1w[:-1]))
+    tr_1w = np.concatenate([[np.nan], tr_1w])
+    atr_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(atr_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Trend filter: price above/below 1w EMA34
+        price_above_ema = close[i] > ema_34_1w_aligned[i]
+        price_below_ema = close[i] < ema_34_1w_aligned[i]
+        
+        # RSI filter: avoid extreme overbought/oversold conditions
+        rsi_not_overbought = rsi_1w_aligned[i] < 70
+        rsi_not_oversold = rsi_1w_aligned[i] > 30
+        
         # Volatility filter: only trade when volatility is reasonable
-        vol_filter = atr_1d_aligned[i] > 0
+        vol_filter = atr_1w_aligned[i] > 0
         
-        # Volume filter: current volume above daily average
-        volume_filter = volume[i] > vol_ma_1d_aligned[i]
+        # Long conditions: price above EMA34 + RSI not overbought + volatility
+        long_condition = (price_above_ema and 
+                         rsi_not_overbought and 
+                         vol_filter)
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
-        
-        # Long conditions: upward breakout + volume + volatility
-        long_condition = breakout_up and volume_filter and vol_filter
-        
-        # Short conditions: downward breakout + volume + volatility
-        short_condition = breakout_down and volume_filter and vol_filter
+        # Short conditions: price below EMA34 + RSI not oversold + volatility
+        short_condition = (price_below_ema and 
+                          rsi_not_oversold and 
+                          vol_filter)
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -80,11 +86,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite breakout
-        elif position == 1 and breakout_down:
+        # Exit conditions: trend reversal
+        elif position == 1 and not price_above_ema:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and breakout_up:
+        elif position == -1 and not price_below_ema:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -98,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_VolumeFilter_1dTrend"
-timeframe = "12h"
+name = "1w_EMA34_RSI14_VolumeFilter_1dTrend"
+timeframe = "1d"
 leverage = 1.0
