@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h ADX trend + 12h VWAP mean reversion with volume confirmation
-# ADX identifies trending markets (ADX > 25), VWAP acts as dynamic support/resistance.
-# Long when price > VWAP in uptrend, short when price < VWAP in downtrend.
-# Volume filter ensures momentum behind moves. Works in bull/bear by following trend.
-# Target: 60-120 total trades over 4 years (~15-30/year) to avoid fee drag.
+# Hypothesis: 1d Bollinger Band squeeze breakout with 1w trend filter and volume confirmation
+# Bollinger Band squeeze (low volatility) precedes strong moves. Breakout from squeeze
+# with volume and higher timeframe trend captures momentum. Works in bull/bear by
+# filtering breakout direction with 1w EMA trend. Target: 30-100 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,75 +18,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for VWAP calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for Bollinger Bands and 1w data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate VWAP for each 12h bar (cumulative within day, reset at new day)
-    vwap_12h = np.full(len(df_12h), np.nan)
-    for i in range(len(df_12h)):
-        # Typical price * cumulative volume / cumulative volume
-        typ_price = (high_12h[i] + low_12h[i] + close_12h[i]) / 3.0
-        if i == 0:
-            vwap_12h[i] = typ_price
-        else:
-            # VWAP = (prev VWAP * prev vol + typ price * vol) / (prev vol + vol)
-            # Simplified: cumulative TP*V / cumulative V
-            cum_vol = np.sum(volume_12h[:i+1])
-            if cum_vol > 0:
-                cum_tpv = np.sum(((high_12h[:i+1] + low_12h[:i+1] + close_12h[:i+1]) / 3.0) * volume_12h[:i+1])
-                vwap_12h[i] = cum_tpv / cum_vol
+    # Bollinger Bands (20, 2) on 1d
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean()
+    std_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std()
+    bb_upper = (sma_20 + bb_std * std_20).values
+    bb_lower = (sma_20 - bb_std * std_20).values
+    bb_width = bb_upper - bb_lower
     
-    # Align VWAP to 4h timeframe (wait for 12h close)
-    vwap_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    # Bollinger Band squeeze: width below 20-period average of width
+    bb_width_ma = pd.Series(bb_width).rolling(window=bb_period, min_periods=bb_period).mean()
+    squeeze = bb_width < bb_width_ma.values
     
-    # 12h ADX trend filter (14-period)
-    # Calculate +DM, -DM, TR
-    plus_dm = np.zeros(len(df_12h))
-    minus_dm = np.zeros(len(df_12h))
-    tr = np.zeros(len(df_12h))
+    # 1w EMA trend filter (34-period)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    for i in range(1, len(df_12h)):
-        high_diff = high_12h[i] - high_12h[i-1]
-        low_diff = low_12h[i-1] - low_12h[i]
-        
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        
-        tr[i] = max(high_12h[i] - low_12h[i], 
-                    abs(high_12h[i] - close_12h[i-1]),
-                    abs(low_12h[i] - close_12h[i-1]))
-    
-    # Smoothed values (using Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[1:period])
-        # Subsequent values: prev * (period-1)/period + current/period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    plus_di = 100 * wilders_smoothing(plus_dm, period) / wilders_smoothing(tr, period)
-    minus_di = 100 * wilders_smoothing(minus_dm, period) / wilders_smoothing(tr, period)
-    dx = np.zeros(len(df_12h))
-    dx[:] = np.where((plus_di + minus_di) != 0, 
-                     100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx_12h = wilders_smoothing(dx, period)
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Volume filter: volume > 1.5 x 20-period average
+    # Volume filter: volume > 1.5 x 20-period average (20 days)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -96,12 +53,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 12h VWAP (1 bar), ADX (14+14=28), volume MA (20)
-    start_idx = max(1, 28, 20)
+    # Warmup: need 1d data (20 for BB, 20 for BB width MA, 20 for vol MA)
+    start_idx = max(20, 20, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(vwap_aligned[i]) or np.isnan(adx_aligned[i]) or 
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(squeeze[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -110,33 +69,36 @@ def generate_signals(prices):
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
-        # Volume filter: sufficient volume
+        # Volume filter: significant volume
         vol_filter = vol_now > 1.5 * vol_avg
         
-        # Trend filter from 12h ADX
-        trending = adx_aligned[i] > 25
+        # Trend filter from 1w EMA
+        bullish_trend = price > ema_34_1w_aligned[i]
+        bearish_trend = price < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: price above VWAP in uptrend with volume
-            if price > vwap_aligned[i] and trending and vol_filter:
+            # Long: break above upper BB with volume, bullish trend, and squeeze
+            if price > bb_upper[i] and vol_filter and bullish_trend and squeeze[i]:
                 signals[i] = size
                 position = 1
-            # Short: price below VWAP in downtrend with volume
-            elif price < vwap_aligned[i] and trending and vol_filter:
+            # Short: break below lower BB with volume, bearish trend, and squeeze
+            elif price < bb_lower[i] and vol_filter and bearish_trend and squeeze[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below VWAP or trend weakens
-            if price <= vwap_aligned[i] or adx_aligned[i] < 20:
+            # Exit long: price returns to middle BB or trend turns bearish
+            bb_middle = (bb_upper[i] + bb_lower[i]) / 2
+            if price <= bb_middle or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above VWAP or trend weakens
-            if price >= vwap_aligned[i] or adx_aligned[i] < 20:
+            # Exit short: price returns to middle BB or trend turns bullish
+            bb_middle = (bb_upper[i] + bb_lower[i]) / 2
+            if price >= bb_middle or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -144,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ADX_Trend_VWAP_MeanReversion_12h"
-timeframe = "4h"
+name = "1d_Bollinger_Squeeze_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
