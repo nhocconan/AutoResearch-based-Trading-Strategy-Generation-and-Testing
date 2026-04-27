@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,24 +13,24 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for Donchian channels and ADX
+    # Get daily data for calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (25-period) using previous day's data
-    prev_high_max = pd.Series(high_1d).rolling(window=25, min_periods=25).max().shift(1).values
-    prev_low_min = pd.Series(low_1d).rolling(window=25, min_periods=25).min().shift(1).values
+    # Calculate 20-period Donchian channels using previous day's data
+    high_ma = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    low_ma = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align Donchian levels to 4h timeframe
-    donch_high = align_htf_to_ltf(prices, df_1d, prev_high_max)
-    donch_low = align_htf_to_ltf(prices, df_1d, prev_low_min)
+    # Align Donchian levels to daily timeframe (no change needed)
+    donch_high = high_ma
+    donch_low = low_ma
     
-    # Calculate 1d ADX for trend strength (14-period)
+    # Calculate 14-period ADX for trend strength
     # True Range
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
@@ -53,35 +53,32 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: volume > 1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 80
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Long condition: price breaks above Donchian high, ADX > 25, volume spike
         if (close[i] > donch_high[i] and 
-            adx_aligned[i] > 25 and 
+            adx[i] > 25 and 
             volume_spike[i]):
             signals[i] = 0.25
             position = 1
         # Short condition: price breaks below Donchian low, ADX > 25, volume spike
         elif (close[i] < donch_low[i] and 
-              adx_aligned[i] > 25 and 
+              adx[i] > 25 and 
               volume_spike[i]):
             signals[i] = -0.25
             position = -1
@@ -103,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian25_Breakout_ADX25_VolumeSpike_1d_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_ADX25_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
