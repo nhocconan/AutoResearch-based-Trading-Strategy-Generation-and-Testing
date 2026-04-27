@@ -1,14 +1,7 @@
-# 4h Williams Fractal + Volume Spike + ADX Filter
-# Strategy: Long when bullish fractal forms above 50 EMA with volume spike in high ADX trend
-# Short when bearish fractal forms below 50 EMA with volume spike in high ADX trend
-# Uses fractals for reversal signals, ADX for trend strength, volume for confirmation
-# Timeframe: 4h (optimal balance of signal quality and trade frequency)
-# Expected trades: ~25-35/year per symbol (100-140 total over 4 years)
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,73 +13,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA and fractals
+    # Get daily data for ATR and volume (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get weekly data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate Williams Fractals on daily data
+    # Calculate weekly EMA(34) for trend
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate ADX(14) on 4h data for trend strength
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
+    # Calculate daily volume average for volume filter
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    tr[0] = high[0] - low[0]
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    
-    # Smooth DM values
-    plus_dm_smooth = np.zeros(n)
-    minus_dm_smooth = np.zeros(n)
-    
-    for i in range(1, n):
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * 13 + plus_dm[i]) / 14
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * 13 + minus_dm[i]) / 14
-    
-    for i in range(14, n):
-        if plus_dm_smooth[i] + minus_dm_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / (plus_dm_smooth[i] + minus_dm_smooth[i])
-            minus_di[i] = 100 * minus_dm_smooth[i] / (plus_dm_smooth[i] + minus_dm_smooth[i])
-            
-            if plus_di[i] + minus_di[i] > 0:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-    
-    # Calculate ADX as smoothed DX
-    adx = np.zeros(n)
-    adx[14] = dx[14]  # First ADX value
-    for i in range(15, n):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align daily indicators to 4h timeframe with proper delay for fractals
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align indicators to 1d timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -95,13 +54,13 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need EMA(50) and enough data for ADX
-    start_idx = max(50, 34)
+    # Warmup: need all indicators
+    start_idx = max(34, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -111,50 +70,43 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema_50_1d_aligned[i]
-        adx_val = adx_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
+        atr_val = atr_14_1d_aligned[i]
+        vol_avg = vol_avg_1d_aligned[i]
         vol_current = volume[i]
         
-        # Calculate 20-period volume average for spike detection
+        # Volatility filter: ATR > 20-period median (high volatility regime)
         if i >= 20:
-            vol_avg = np.mean(volume[max(0, i-19):i+1])
+            atr_ma = pd.Series(atr_14_1d_aligned[:i+1]).rolling(window=20, min_periods=20).median().iloc[-1]
         else:
-            vol_avg = vol_current
+            atr_ma = atr_val
+        vol_filter = atr_val > atr_ma
         
-        # Volume spike: current volume > 2x average
-        volume_spike = vol_current > (vol_avg * 2.0)
+        # Volume filter: current volume > 1.5x daily average
+        volume_filter = vol_current > (vol_avg * 1.5)
         
-        # ADX filter: trend strength > 25
-        strong_trend = adx_val > 25
-        
-        # Entry conditions
+        # Entry conditions: long only in bullish trend, short only in bearish trend
         if position == 0:
-            # Long: bullish fractal above EMA + volume spike + strong trend
-            if (bullish_fractal_aligned[i] and 
-                close[i] > ema_trend and 
-                volume_spike and 
-                strong_trend):
+            # Long: weekly trend up + volatility + volume
+            if close[i] > ema_trend and vol_filter and volume_filter:
                 signals[i] = size
                 position = 1
-            # Short: bearish fractal below EMA + volume spike + strong trend
-            elif (bearish_fractal_aligned[i] and 
-                  close[i] < ema_trend and 
-                  volume_spike and 
-                  strong_trend):
+            # Short: weekly trend down + volatility + volume
+            elif close[i] < ema_trend and vol_filter and volume_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bearish fractal forms or trend weakens
-            if bearish_fractal_aligned[i] or adx_val < 20:
+            # Exit long: trend reversal or volatility collapse
+            if close[i] < ema_trend or atr_val < (atr_ma * 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: bullish fractal forms or trend weakens
-            if bullish_fractal_aligned[i] or adx_val < 20:
+            # Exit short: trend reversal or volatility collapse
+            if close[i] > ema_trend or atr_val < (atr_ma * 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -162,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsFractal_VolumeSpike_ADXFilter"
-timeframe = "4h"
+name = "1d_WeeklyTrend_VolumeVolatilityFilter"
+timeframe = "1d"
 leverage = 1.0
