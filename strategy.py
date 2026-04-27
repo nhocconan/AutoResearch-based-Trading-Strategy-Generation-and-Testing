@@ -1,10 +1,13 @@
-# Hypothetical solution: 6h timeframe, novel concept – adaptive volatility breakout with regime filter (volatility regime + ATR breakout + 12h trend filter)
-# The idea: In low volatility regimes, a breakout of a volatility-adjusted Donchian channel (using ATR-scaled bands) combined with 12h trend alignment has edge.
-# This avoids the saturated pure price-channel breakouts by incorporating volatility regime detection.
-# We target 50-150 total trades over 4 years by using a volatility filter that reduces trades in chop.
-# The strategy should work in both bull and bear because it follows the 12h trend and only takes breakouts in the trend direction.
-
 #!/usr/bin/env python3
+"""
+4h_KAMA_Turn_With_Direction_Filter_v1
+Hypothesis: KAMA adapts to market noise - turning points signal trend changes. 
+Only take trades when aligned with 1d EMA34 trend and volume confirmation to avoid whipsaws.
+KAMA turning point defined as: price crosses above/below KAMA with confirmation candle.
+Designed for fewer trades (target 50-150/year) to reduce fee drag while capturing strong moves.
+Works in both bull (follows trend) and bear (avoids counter-trend) via 1d trend filter.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,111 +22,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter and volatility regime
-    df_12h = get_htf_data(prices, '12h')
+    # Calculate KAMA (adaptive moving average)
+    # ER = Efficiency Ratio = |net change| / sum(|changes|)
+    # Smoothing constant = [ER * (fastest - slowest) + slowest]^2
+    change = abs(np.diff(close, prepend=close[0]))
+    abs_change = change
+    er_num = abs(np.subtract(close, np.roll(close, 1)))
+    er_den = np.sum(np.lib.stride_tricks.sliding_window_view(change, 10), axis=1)
+    # Handle edge cases for ER calculation
+    er = np.zeros_like(close)
+    er[10:] = er_num[10:] / er_den
+    er = np.where(er_den == 0, 0, er)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # for EMA 2
+    slow_sc = 2 / (30 + 1)  # for EMA 30
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h ATR(20) for volatility regime (using 12h high/low/close)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    tr_12h = np.maximum(high_12h - low_12h,
-                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
-                                   np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr20_12h = pd.Series(tr_12h).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volatility regime: current 12h ATR relative to its 50-period average (expanding/contracting vol)
-    atr50_avg_12h = pd.Series(atr20_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    vol_ratio = atr20_12h / atr50_avg_12h  # >1 = expanding vol, <1 = contracting vol
-    # We want to trade breakouts when volatility is expanding (vol_ratio > 1.0) to catch real moves
-    vol_expanding = vol_ratio > 1.0
+    # Volume confirmation: current volume > 1.8 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.8 * vol_avg)
     
-    # Volatility-adjusted Donchian channel on 6h (using ATR to scale bands)
-    # We'll use a 20-period lookback for the channel, but scaled by ATR to normalize for volatility
-    # Instead, we compute a normalized channel: (price - rolling mean) / ATR, then breakout when normalized > threshold
-    # Simpler: compute ATR-scaled breakout bands: upper = rolling max(high) + k*ATR, lower = rolling min(low) - k*ATR
-    # Use k=0.5 to avoid too many breakouts.
-    lookback = 20
-    k = 0.5
-    # Rolling max/min of high/low
-    roll_max = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    roll_min = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    # Current 6h ATR(20) for scaling
-    tr = np.maximum(high - low,
-                    np.maximum(np.abs(high - np.roll(close, 1)),
-                               np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    upper_band = roll_max + k * atr
-    lower_band = roll_min - k * atr
-    
-    # Align all indicators to 6h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    vol_expanding_aligned = align_htf_to_ltf(prices, df_12h, vol_expanding)
-    upper_band_aligned = align_htf_to_ltf(prices, df_12h, upper_band)  # Note: upper_band is 6s? Actually computed on 6h, but we align anyway for consistency (though not needed)
-    lower_band_aligned = align_htf_to_ltf(prices, df_12h, lower_band)
-    
-    # However, upper_band and lower_band are computed on 6h data, so they are already LTF. 
-    # To follow the rule of using HTF data for filters, we instead compute the breakout bands on 12h and align to 6h.
-    # Let's recompute: use 12h data to build volatility-adjusted Donchian, then align to 6h.
-    # This ensures we are using HTF for the breakout levels.
-    roll_max_12h = pd.Series(high_12h).rolling(window=lookback, min_periods=lookback).max().values
-    roll_min_12h = pd.Series(low_12h).rolling(window=lookback, min_periods=lookback).min().values
-    upper_band_12h = roll_max_12h + k * atr20_12h
-    lower_band_12h = roll_min_12h - k * atr20_12h
-    upper_band_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_band_12h)
-    lower_band_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_band_12h)
+    # Align all indicators to primary timeframe (4h)
+    kama_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.25   # Position size: 25% of capital (discrete level to reduce turnover)
+    size = 0.25   # Position size: 25% of capital (reduces drawdown)
     
-    # Warmup: need EMA50 (50), ATR20 (20), vol_ratio (50 for EMA of ATR), Donchian (20)
-    start_idx = max(50, 50, 20, 20)  # at least 50
+    # Warmup: need KAMA calc (10), EMA34 (34), volume avg (20)
+    start_idx = max(10, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_expanding_aligned[i]) or 
-            np.isnan(upper_band_12h_aligned[i]) or np.isnan(lower_band_12h_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema50 = ema50_12h_aligned[i]
-        vol_exp = vol_expanding_aligned[i]
-        upper = upper_band_12h_aligned[i]
-        lower = lower_band_12h_aligned[i]
+        kama_val = kama_aligned[i]
+        ema34 = ema34_1d_aligned[i]
+        vol_conf = volume_confirm_aligned[i]
+        
+        # KAMA turn signals: price crosses KAMA with confirmation
+        kama_cross_up = close_val > kama_val and close >= kama_val and close[i-1] <= kama_aligned[i-1]
+        kama_cross_down = close_val < kama_val and close <= kama_val and close[i-1] >= kama_aligned[i-1]
         
         if position == 0:
-            # Determine trend: price vs 12h EMA50
-            uptrend = close_val > ema50
-            downtrend = close_val < ema50
+            # Determine trend alignment: price vs EMA34 (1d)
+            uptrend = close_val > ema34
+            downtrend = close_val < ema34
             
-            if uptrend and vol_exp:
-                # Long breakout: price above upper band
-                if close_val > upper:
-                    signals[i] = size
-                    position = 1
-                    entry_price = close_val
-            elif downtrend and vol_exp:
-                # Short breakdown: price below lower band
-                if close_val < lower:
-                    signals[i] = -size
-                    position = -1
-                    entry_price = close_val
+            if uptrend and vol_conf and kama_cross_up:
+                # Long: price crosses above KAMA in uptrend with volume
+                signals[i] = size
+                position = 1
+                entry_price = close_val
+            elif downtrend and vol_conf and kama_cross_down:
+                # Short: price crosses below KAMA in downtrend with volume
+                signals[i] = -size
+                position = -1
+                entry_price = close_val
         elif position == 1:
-            # Exit: reverse signal or volatility contraction (vol_expanding false) as risk management
-            if not vol_exp or close_val < ema50:  # trend change or vol contraction
+            # Exit: price crosses below KAMA or trend change
+            if close_val < kama_val or close_val < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            if not vol_exp or close_val > ema50:
+            # Exit: price crosses above KAMA or trend change
+            if close_val > kama_val or close_val > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VolRegime_Breakout_12hTrend"
-timeframe = "6h"
+name = "4h_KAMA_Turn_With_Direction_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
