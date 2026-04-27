@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for trend filter and pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3_1d = close_1d_arr + (high_1d - low_1d) * 1.1 / 4.0
     s3_1d = close_1d_arr - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align to 12h timeframe (previous day's levels available at open)
+    # Align to daily timeframe (previous day's levels available at open)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -43,7 +43,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (high activity period)
     hour = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hour >= 8) & (hour <= 20)
     
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Session"
-timeframe = "12h"
+name = "1d_Camarilla_R3_S3_Breakout_1dTrend_Volume_Session"
+timeframe = "1d"
 leverage = 1.0
