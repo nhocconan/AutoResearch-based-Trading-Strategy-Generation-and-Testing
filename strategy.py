@@ -13,55 +13,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for calculations
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for calculations (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (50-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 12h EMA34 for trend filter
+    close_12h = df_12h['close'].values
+    ema_34_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 34:
+        ema_34_12h[33] = np.mean(close_12h[:34])
+        for i in range(34, len(close_12h)):
+            ema_34_12h[i] = (close_12h[i] * 2 + ema_34_12h[i-1] * 32) / 34  # EMA34
     
-    upper = np.full(len(high_1w), np.nan)
-    lower = np.full(len(low_1w), np.nan)
-    
-    for i in range(50, len(high_1w)):
-        upper[i] = np.max(high_1w[i-50:i])
-        lower[i] = np.min(low_1w[i-50:i])
-    
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34  # EMA34
-    
-    # Align weekly and daily indicators to 6h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate 6h ATR(14) for volatility filter
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
+    # Calculate 12h ATR(14) for volatility filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    tr = np.maximum(high_12h[1:] - low_12h[1:], 
+                    np.maximum(np.abs(high_12h[1:] - close_12h[:-1]), 
+                               np.abs(low_12h[1:] - close_12h[:-1])))
     tr = np.concatenate([[np.nan], tr])
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
+    atr_12h = np.full(len(close_12h), np.nan)
+    for i in range(14, len(close_12h)):
         if i == 14:
-            atr[i] = np.mean(tr[1:15])
+            atr_12h[i] = np.mean(tr[1:15])
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            atr_12h[i] = (atr_12h[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 20-period volume average
+    # Calculate 12h ADX for trend strength
+    # +DM and -DM
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed +DM, -DM, TR
+    tr_12h = tr  # Already calculated above
+    period = 14
+    tr_sum = np.full(len(tr_12h), np.nan)
+    plus_dm_sum = np.full(len(plus_dm), np.nan)
+    minus_dm_sum = np.full(len(minus_dm), np.nan)
+    
+    if len(tr_12h) >= period:
+        tr_sum[period-1] = np.sum(tr_12h[1:period+1])
+        plus_dm_sum[period-1] = np.sum(plus_dm[1:period+1])
+        minus_dm_sum[period-1] = np.sum(minus_dm[1:period+1])
+        for i in range(period, len(tr_12h)):
+            tr_sum[i] = tr_sum[i-1] - (tr_sum[i-1] / period) + tr_12h[i]
+            plus_dm_sum[i] = plus_dm_sum[i-1] - (plus_dm_sum[i-1] / period) + plus_dm[i]
+            minus_dm_sum[i] = minus_dm_sum[i-1] - (minus_dm_sum[i-1] / period) + minus_dm[i]
+    
+    # Calculate +DI and -DI
+    plus_di = np.full(len(tr_12h), np.nan)
+    minus_di = np.full(len(tr_12h), np.nan)
+    dx = np.full(len(tr_12h), np.nan)
+    for i in range(period, len(tr_12h)):
+        if tr_sum[i] != 0:
+            plus_di[i] = 100 * (plus_dm_sum[i] / tr_sum[i])
+            minus_di[i] = 100 * (minus_dm_sum[i] / tr_sum[i])
+            if (plus_di[i] + minus_di[i]) != 0:
+                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    
+    # Calculate ADX (smoothed DX)
+    adx = np.full(len(tr_12h), np.nan)
+    if len(dx) >= period:
+        valid_dx = dx[period-1:]
+        if len(valid_dx) >= period:
+            adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
+            for i in range(2*period-1, len(dx)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    # Align 12h indicators to 6h timeframe
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # Calculate 6-period volume average for volume filter
     vol_ma = np.full(n, np.nan)
-    vol_period = 20
+    vol_period = 6
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -69,12 +100,12 @@ def generate_signals(prices):
     position = 0
     size = 0.25
     
-    # Warmup period
-    start_idx = max(50, vol_period, 14) + 5
+    # Warmup period - ensure all indicators are valid
+    start_idx = max(34, vol_period, 14) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -84,27 +115,30 @@ def generate_signals(prices):
         # Volume spike filter: at least 1.5x average volume
         vol_filter = vol_ratio > 1.5
         
+        # Trend strength filter: ADX > 25
+        trend_filter = adx_aligned[i] > 25
+        
         if position == 0:
-            # Long: Price breaks above weekly upper with volume and above daily EMA34
-            if price > upper_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
+            # Long: Price above EMA34 with volume and trend strength
+            if price > ema_34_12h_aligned[i] and vol_filter and trend_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below weekly lower with volume and below daily EMA34
-            elif price < lower_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
+            # Short: Price below EMA34 with volume and trend strength
+            elif price < ema_34_12h_aligned[i] and vol_filter and trend_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below weekly lower or trailing stop
-            if price < lower_aligned[i] or price < ema_34_1d_aligned[i] - 1.5 * atr[i]:
+            # Long exit: Price crosses below EMA34 or volatility drops
+            if price < ema_34_12h_aligned[i] or atr_12h_aligned[i] < (atr_12h_aligned[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above weekly upper or trailing stop
-            if price > upper_aligned[i] or price > ema_34_1d_aligned[i] + 1.5 * atr[i]:
+            # Short exit: Price crosses above EMA34 or volatility drops
+            if price > ema_34_12h_aligned[i] or atr_12h_aligned[i] < (atr_12h_aligned[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian50_1wUpperLower_1dEMA34_Volume"
+name = "6h_EMA34_ADX_Volume_Filter"
 timeframe = "6h"
 leverage = 1.0
