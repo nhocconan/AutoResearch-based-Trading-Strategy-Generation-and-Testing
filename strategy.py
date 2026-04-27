@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Overbought_Oversold_12hTrend_Volume
-Hypothesis: Combines RSI extremes (RSI<30 for long, RSI>70 for short) with 12h EMA50 trend and volume spike (>1.5x 20-period average) for high-probability mean reversion entries. Designed for low trade frequency (~20-30 trades/year) to minimize fee drift, effective in both bull and bear markets by fading extremes in the direction of higher timeframe trend.
+1h_Momentum_With_4hTrend_And_1dVolume
+Hypothesis: Uses 4h EMA for trend direction and 1d volume spike for momentum confirmation, with 1h for precise entry timing. Designed for low trade frequency (~20-30 trades/year) by requiring confluence of trend, volume, and price action. Works in bull markets via trend following and bear markets via mean reversion at extreme volume spikes.
 """
 
 import numpy as np
@@ -18,7 +18,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) calculation
+    # 4h EMA for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    ema40_4h = pd.Series(df_4h['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema40_4h_aligned = align_htf_to_ltf(prices, df_4h, ema40_4h)
+    
+    # 1d volume spike (volume > 2.5x 20-day average)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    vol_avg_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = df_1d['volume'].values > (2.5 * vol_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    
+    # 1h RSI for overbought/oversold conditions
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -27,53 +42,43 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # 12h EMA50 for trend confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need enough data for RSI and volume
-    start_idx = 30
+    # Warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(ema40_4h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
+        ema40 = ema40_4h_aligned[i]
+        vol_spike = vol_spike_1d_aligned[i] > 0.5  # boolean
         rsi_val = rsi[i]
-        ema50_val = ema50_12h_aligned[i]
-        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: RSI oversold (<30), above EMA50 trend, volume confirmation
-            if rsi_val < 30 and close[i] > ema50_val and vol_conf:
+            # Long: uptrend (price > EMA40), volume spike, RSI not overbought
+            if close[i] > ema40 and vol_spike and rsi_val < 70:
                 signals[i] = size
                 position = 1
-            # Short: RSI overbought (>70), below EMA50 trend, volume confirmation
-            elif rsi_val > 70 and close[i] < ema50_val and vol_conf:
+            # Short: downtrend (price < EMA40), volume spike, RSI not oversold
+            elif close[i] < ema40 and vol_spike and rsi_val > 30:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: RSI returns to neutral (>50) or price below EMA50
-            if rsi_val > 50 or close[i] < ema50_val:
+            # Exit long: trend reversal or overbought
+            if close[i] < ema40 or rsi_val > 80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI returns to neutral (<50) or price above EMA50
-            if rsi_val < 50 or close[i] > ema50_val:
+            # Exit short: trend reversal or oversold
+            if close[i] > ema40 or rsi_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Overbought_Oversold_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Momentum_With_4hTrend_And_1dVolume"
+timeframe = "1h"
 leverage = 1.0
