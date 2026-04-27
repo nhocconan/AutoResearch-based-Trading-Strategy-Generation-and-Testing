@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_200MA_Filter
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets. Combined with 200-period MA filter to avoid false signals during strong trends, this strategy captures sustained moves while minimizing whipsaws. Volume confirmation ensures institutional participation. Target: 20-30 trades/year per symbol.
+6H_Ichimoku_Cloud_Filter_MultiTF
+Hypothesis: Ichimoku Tenkan/Kijun cross with cloud filter from 1d timeframe captures trend changes with lower whipsaw. Works in bull/bear by only taking trades in direction of higher timeframe cloud color. Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -10,87 +10,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    # Get 1d data for Ichimoku components
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
+        return np.zeros(n)
     
-    # Proper ER calculation over 10 periods
-    er_period = 10
-    change = np.abs(np.diff(close, prepend=close[0]))
-    # Sum of absolute changes over er_period for numerator
-    change_sum = np.zeros(n)
-    for i in range(er_period, n):
-        change_sum[i] = np.sum(change[i-er_period+1:i+1])
+    # Calculate Ichimoku components on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Sum of absolute price changes over er_period for denominator (volatility)
-    volatility_sum = np.zeros(n)
-    for i in range(er_period, n):
-        volatility_sum[i] = np.sum(np.abs(np.diff(close[i-er_period:i+1], prepend=close[i-er_period])))
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Avoid division by zero
-    er = np.zeros(n)
-    er[volatility_sum > 0] = change_sum[volatility_sum > 0] / volatility_sum[volatility_sum > 0]
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # for EMA(2)
-    slow_sc = 2 / (30 + 1)  # for EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    # 200-period SMA for trend filter (avoid counter-trend in strong markets)
-    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
-    
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup period
-    start_idx = 200  # need 200 for SMA200
+    # Warmup period - need 52 for Senkou B calculation
+    start_idx = 52
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(sma200[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i])):
             signals[i] = 0.0
             continue
         
+        # Determine cloud color and boundaries
+        # Cloud top is the higher of Senkou A and Senkou B
+        # Cloud bottom is the lower of Senkou A and Senkou B
+        cloud_top = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
+        cloud_bottom = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
+        
+        # Cloud is bullish when Senkou A > Senkou B
+        cloud_bullish = senkou_a_6h[i] > senkou_b_6h[i]
+        
         if position == 0:
-            # Long: price above KAMA and above SMA200 with volume spike
-            if (close[i] > kama[i] and close[i] > sma200[i] and volume_spike[i]):
+            # Long: Tenkan crosses above Kijun AND price above cloud AND cloud is bullish
+            tenkan_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
+            price_above_cloud = close[i] > cloud_top
+            
+            if tenkan_cross_up and price_above_cloud and cloud_bullish:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and below SMA200 with volume spike
-            elif (close[i] < kama[i] and close[i] < sma200[i] and volume_spike[i]):
+            # Short: Tenkan crosses below Kijun AND price below cloud AND cloud is bearish
+            elif (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1] and
+                  close[i] < cloud_bottom and not cloud_bullish):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below KAMA
-            if close[i] < kama[i]:
+            # Long exit: Tenkan crosses below Kijun OR price drops below cloud bottom
+            tenkan_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
+            price_below_cloud = close[i] < cloud_bottom
+            
+            if tenkan_cross_down or price_below_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KAMA
-            if close[i] > kama[i]:
+            # Short exit: Tenkan crosses above Kijun OR price rises above cloud top
+            tenkan_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
+            price_above_cloud = close[i] > cloud_top
+            
+            if tenkan_cross_up or price_above_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_With_200MA_Filter"
-timeframe = "4h"
+name = "6H_Ichimoku_Cloud_Filter_MultiTF"
+timeframe = "6h"
 leverage = 1.0
