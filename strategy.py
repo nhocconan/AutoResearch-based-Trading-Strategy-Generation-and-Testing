@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_WilliamsAlligator_ElderRay_Trend_VolumeConfirm
-Hypothesis: Use Williams Alligator (JAW/TEETH/LIPS) for trend direction on 12h timeframe,
-combined with Elder Ray (Bull/Bear Power) from 1d for momentum confirmation.
-Add volume spike (>2x 20-period average) as entry filter.
-Go long when price > Alligator teeth (TEETH) AND Bull Power > 0 AND volume confirmation.
-Go short when price < Alligator teeth AND Bear Power < 0 AND volume confirmation.
-Exit on opposite Alligator TEETH crossover.
-Designed for low-frequency trading (target 12-30 trades/year) with strong trend/momentum alignment
-to work in both bull and bear markets by avoiding choppy conditions.
+4h_KAMA_Trend_With_1d_ADX_Filter_v2
+Hypothesis: Use 1d ADX > 25 as trend filter with KAMA direction on 4h for entries. Long when KAMA rising and price > KAMA, short when KAMA falling and price < KAMA. Exit when price crosses KAMA in opposite direction. Designed for fewer trades (target 20-40/year) with trend alignment to work in both bull and bear markets.
 """
 
 import numpy as np
@@ -23,92 +16,92 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Williams Alligator from 12h timeframe (SMMA = smoothed moving average)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
-        return np.zeros(n)
-    
-    # SMMA calculation (similar to Wilder's smoothing)
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT_VALUE) / N
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    close_12h = df_12h['close'].values
-    jaw = smma(close_12h, 13)  # BLUE line
-    teeth = smma(close_12h, 8)  # RED line
-    lips = smma(close_12h, 5)   # GREEN line
-    
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    
-    # Elder Ray from 1d timeframe
+    # Calculate ADX on 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # EMA13 for Elder Ray calculation
-    ema13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Bull Power = High - EMA13
-    bull_power = df_1d['high'].values - ema13_1d
-    # Bear Power = Low - EMA13
-    bear_power = df_1d['low'].values - ema13_1d
+    # Directional Movement
+    up = df_1d['high'] - df_1d['high'].shift(1)
+    down = df_1d['low'].shift(1) - df_1d['low']
+    plus_dm = np.where((up > down) & (up > 0), up, 0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0)
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    # Directional Indicators
+    plus_di14 = 100 * plus_dm14 / tr14
+    minus_di14 = 100 * minus_dm14 / tr14
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe (wait for previous day's close)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # KAMA on 4h
+    close_s = pd.Series(close)
+    # Efficiency Ratio
+    change = abs(close_s - close_s.shift(10))
+    volatility = abs(close_s - close_s.shift(1)).rolling(window=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for all indicators
-    start_idx = max(20, 13)
+    # Warmup
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(teeth_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(volume_confirm[i])):
+        if np.isnan(adx_aligned[i]) or np.isnan(kama[i]):
             signals[i] = 0.0
             continue
         
-        teeth_val = teeth_aligned[i]
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
-        vol_conf = volume_confirm[i]
+        adx_val = adx_aligned[i]
+        kama_val = kama[i]
         
         if position == 0:
-            # Long: price above TEETH (Alligator uptrend) AND Bull Power positive AND volume confirmation
-            if close[i] > teeth_val and bull_val > 0 and vol_conf:
+            # Long: ADX > 25 (trending) AND KAMA rising AND price > KAMA
+            if adx_val > 25 and kama[i] > kama[i-1] and close[i] > kama_val:
                 signals[i] = size
                 position = 1
-            # Short: price below TEETH (Alligator downtrend) AND Bear Power negative AND volume confirmation
-            elif close[i] < teeth_val and bear_val < 0 and vol_conf:
+            # Short: ADX > 25 (trending) AND KAMA falling AND price < KAMA
+            elif adx_val > 25 and kama[i] < kama[i-1] and close[i] < kama_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below TEETH (trend change)
-            if close[i] < teeth_val:
+            # Exit long: price crosses below KAMA
+            if close[i] < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above TEETH (trend change)
-            if close[i] > teeth_val:
+            # Exit short: price crosses above KAMA
+            if close[i] > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ElderRay_Trend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_1d_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
