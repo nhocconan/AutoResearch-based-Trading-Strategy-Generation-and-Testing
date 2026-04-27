@@ -1,5 +1,3 @@
-# [Experiment 99897] Hypothesis: 4h Camarilla R3/S3 breakout with 1-day trend filter (EMA34) and volume spike (2x 48h average). Works in bull/bear by requiring trend alignment and volatility expansion, reducing false breakouts. Targets 20-40 trades/year via strict 3-condition entry.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -15,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation and trend filter
+    # Get daily data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -25,66 +23,69 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla levels (R3 and S3)
-    range_hl = prev_high - prev_low
-    R3 = prev_close + range_hl * 1.1 / 4
-    S3 = prev_close - range_hl * 1.1 / 4
+    # Calculate weekly Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Align Camarilla levels to 4h timeframe
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    weekly_high = df_1w['high'].rolling(window=20, min_periods=20).max().values
+    weekly_low = df_1w['low'].rolling(window=20, min_periods=20).min().values
     
-    # Get daily EMA34 for trend filter
+    # Align weekly Donchian levels to daily timeframe
+    weekly_high_daily = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_daily = align_htf_to_ltf(prices, df_1w, weekly_low)
+    
+    # Calculate daily EMA200 for trend filter
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Volume spike: current volume > 2.0 * 24-period average (48h lookback)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    volume_spike = volume > (2.0 * vol_ma_24)
+    # Volume spike: current volume > 2.0 * 20-day average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup: need enough data for calculations
-    start_idx = max(34, 24) + 1
+    start_idx = max(200, 20) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(weekly_high_daily[i]) or np.isnan(weekly_low_daily[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 + 1-day uptrend + volume spike
-            if (close[i] > R3_4h[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]):
-                signals[i] = 0.30
+            # Long entry: price breaks above weekly high + daily uptrend + volume spike
+            if (close[i] > weekly_high_daily[i] and close[i] > ema200_1d_aligned[i] and volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 + 1-day downtrend + volume spike
-            elif (close[i] < S3_4h[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]):
-                signals[i] = -0.30
+            # Short entry: price breaks below weekly low + daily downtrend + volume spike
+            elif (close[i] < weekly_low_daily[i] and close[i] < ema200_1d_aligned[i] and volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below S3 (reversal) or trend changes
-            if (close[i] < S3_4h[i] or close[i] < ema34_1d_aligned[i]):
+            # Long exit: price breaks below weekly low (reversal) or trend changes
+            if (close[i] < weekly_low_daily[i] or close[i] < ema200_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 (reversal) or trend changes
-            if (close[i] > R3_4h[i] or close[i] > ema34_1d_aligned[i]):
+            # Short exit: price breaks above weekly high (reversal) or trend changes
+            if (close[i] > weekly_high_daily[i] or close[i] > ema200_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_200EMA_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
