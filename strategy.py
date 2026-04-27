@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_P1_P2_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels P1 (H5) and P2 (H6) from daily data act as strong resistance/support. Price breaking above P1 with 1d EMA34 uptrend and volume spike captures bullish moves; breaking below P2 with 1d EMA34 downtrend and volume spike captures bearish moves. Works in bull via P1 breakouts and bear via P2 breakdowns. Targets 15-25 trades/year on 12h to minimize fee drag.
+1d_Donchian20_WeeklyPivot_Direction_Volume
+Hypothesis: Use weekly pivot levels as trend filter and daily Donchian(20) breakout with volume confirmation. 
+Long when price breaks above 20-day high with price above weekly pivot (bullish bias). 
+Short when price breaks below 20-day low with price below weekly pivot (bearish bias). 
+Weekly pivot provides multi-day trend context to avoid counter-trend trades. 
+Volume spike confirms breakout strength. Targets ~15 trades/year on 1d to minimize fee drag.
+Works in bull via upside breakouts and bear via downside breakdowns.
 """
 
 import numpy as np
@@ -10,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,75 +23,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot: P = (H+L+C)/3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
     
-    # Camarilla: H5 = C + (H-L)*1.1/2, H6 = C + (H-L)*1.1
-    # These are the outer resistance/support levels (P1 and P2 in some naming)
-    camarilla_range = (high_1d - low_1d) * 1.1
-    p1_1d = close_1d + camarilla_range * 0.5  # H5 level
-    p2_1d = close_1d + camarilla_range        # H6 level
+    # Align weekly pivot to daily timeframe (use previous week's pivot)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Align P1/P2 to 12h timeframe (use previous day's levels)
-    p1_1d_aligned = align_htf_to_ltf(prices, df_1d, p1_1d)
-    p2_1d_aligned = align_htf_to_ltf(prices, df_1d, p2_1d)
+    # Calculate daily Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d data for trend filter (EMA34)
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: volume > 2.0 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and volume MA
-    start_idx = max(34, 30)
+    # Warmup: need enough data for Donchian and volume MA
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(p1_1d_aligned[i]) or np.isnan(p2_1d_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or 
+            np.isnan(high_20[i]) or np.isnan(low_20[i])):
             signals[i] = 0.0
             continue
         
-        p1 = p1_1d_aligned[i]
-        p2 = p2_1d_aligned[i]
-        ema_trend = ema34_1d_aligned[i]
+        pivot = weekly_pivot_aligned[i]
+        upper = high_20[i]
+        lower = low_20[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: price breaks above P1 with uptrend and volume spike
-            if close[i] > p1 and vol_spike_val and close[i] > ema_trend:
+            # Long: price breaks above 20-day high with bullish bias and volume spike
+            if close[i] > upper and close[i] > pivot and vol_spike_val:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below P2 with downtrend and volume spike
-            elif close[i] < p2 and vol_spike_val and close[i] < ema_trend:
+            # Short: price breaks below 20-day low with bearish bias and volume spike
+            elif close[i] < lower and close[i] < pivot and vol_spike_val:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls below P2 or trend turns down
-            if close[i] < p2 or close[i] < ema_trend:
+            # Exit long: price falls below 20-day low or crosses below weekly pivot
+            if close[i] < lower or close[i] < pivot:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price rises above P1 or trend turns up
-            if close[i] > p1 or close[i] > ema_trend:
+            # Exit short: price rises above 20-day high or crosses above weekly pivot
+            if close[i] > upper or close[i] > pivot:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_P1_P2_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Donchian20_WeeklyPivot_Direction_Volume"
+timeframe = "1d"
 leverage = 1.0
