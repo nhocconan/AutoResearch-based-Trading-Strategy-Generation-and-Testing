@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
-# Donchian breakouts capture momentum with clear entry/exit levels.
-# Weekly trend filter ensures trading with higher timeframe trend.
-# Volume confirmation reduces false breakouts.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+# Hypothesis: 6h ATR-based volatility breakout with 1d trend filter and volume confirmation
+# Uses ATR to dynamically size breakout thresholds, adapting to market volatility.
+# Combines with 1d EMA trend filter to avoid counter-trend breakouts in choppy markets.
+# Volume spike confirms institutional participation. Designed for 6h timeframe to
+# reduce trade frequency and avoid fee drag while capturing medium-term trends.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,74 +19,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
     
-    # Calculate daily Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(19, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
+    # Calculate ATR (14-period) on 6h data
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-13:i+1])
     
-    # Volume filter: volume > 1.5 x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Calculate dynamic breakout channels using ATR
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    for i in range(14, n):
+        upper_channel[i] = close[i-1] + 1.5 * atr[i-1]
+        lower_channel[i] = close[i-1] - 1.5 * atr[i-1]
+    
+    # 1d EMA trend filter (34-period)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: volume > 1.8 x 30-period average (7.5 hours of 6h bars)
+    vol_ma_30 = np.full(n, np.nan)
+    for i in range(29, n):
+        vol_ma_30[i] = np.mean(volume[i-29:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian (20), EMA (50), volume MA (20)
-    start_idx = max(19, 50, 20)
+    # Warmup: need ATR (14), EMA (34), volume MA (30)
+    start_idx = max(14, 34, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        vol_avg = vol_ma_30[i]
         
-        # Volume filter: significant volume
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Volume filter: significant volume spike
+        vol_filter = vol_now > 1.8 * vol_avg
         
-        # Trend filter from weekly EMA
-        bullish_trend = ema_50_1w_aligned[i] > 0  # valid EMA value
-        bearish_trend = ema_50_1w_aligned[i] > 0  # valid EMA value
+        # Trend filter from 1d EMA
+        bullish_trend = price > ema_34_aligned[i]
+        bearish_trend = price < ema_34_aligned[i]
         
         if position == 0:
-            # Long: break above Donchian high with volume and bullish weekly trend
-            if price > donchian_high[i] and vol_filter and ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]:
+            # Long: break above upper channel with volume and bullish trend
+            if price > upper_channel[i] and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: break below Donchian low with volume and bearish weekly trend
-            elif price < donchian_low[i] and vol_filter and ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]:
+            # Short: break below lower channel with volume and bearish trend
+            elif price < lower_channel[i] and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian low or weekly trend turns bearish
-            if price <= donchian_low[i] or ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]:
+            # Exit long: price returns to midpoint or trend turns bearish
+            midpoint = (upper_channel[i] + lower_channel[i]) / 2
+            if price <= midpoint or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to Donchian high or weekly trend turns bullish
-            if price >= donchian_high[i] or ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]:
+            # Exit short: price returns to midpoint or trend turns bullish
+            midpoint = (upper_channel[i] + lower_channel[i]) / 2
+            if price >= midpoint or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_20_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_ATR_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
