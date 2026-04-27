@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian channel breakout with daily volume confirmation and weekly trend filter.
-Enters long on breakout above 20-period high with volume > 1.5x daily average and weekly uptrend.
-Enters short on breakdown below 20-period low with volume > 1.5x daily average and weekly downtrend.
+Hypothesis: 4-hour price action above/below 1-day VWAP with volume confirmation and weekly trend filter.
+Enters long when price crosses above VWAP with above-average volume and weekly uptrend.
+Enters short when price crosses below VWAP with above-average volume and weekly downtrend.
 Uses weekly timeframe for trend structure to reduce noise and avoid false signals.
 Designed to work in both bull and bear markets by following the weekly trend while using
-Donchian breakouts for entry timing and volume for conviction. Target: 20-40 trades/year per
-symbol to minimize fee drag and avoid overtrading.
+VWAP for mean reversion and volume for conviction. Target: 25-35 trades/year per
+symbol to minimize fee drift and avoid overtrading.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume filter
+    # Get daily data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -33,13 +33,13 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channel (20-period)
-    # Upper band: highest high of last 20 periods
-    high_series = pd.Series(high)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    low_series = pd.Series(low)
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate daily VWAP: cumulative (price * volume) / cumulative volume
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    pv_1d = typical_price_1d * df_1d['volume'].values
+    cum_pv_1d = np.cumsum(pv_1d)
+    cum_vol_1d = np.cumsum(df_1d['volume'].values)
+    vwap_1d = np.divide(cum_pv_1d, cum_vol_1d, out=np.zeros_like(cum_pv_1d), where=cum_vol_1d!=0)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     # Calculate daily volume MA(20)
     vol_1d = df_1d['volume'].values
@@ -55,12 +55,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian components, volume MA, and weekly EMA
-    start_idx = max(20, 20, 20)
+    # Warmup: need VWAP, volume MA, and weekly EMA
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_1d_aligned[i-1]) or 
             np.isnan(vol_ma_20_1d_aligned[i]) or 
             np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0
@@ -69,38 +69,40 @@ def generate_signals(prices):
         # Current 4h price and volume
         price_now = close[i]
         vol_now = volume[i]
+        vwap_now = vwap_1d_aligned[i]
+        vwap_prev = vwap_1d_aligned[i-1]
         vol_ma = vol_ma_20_1d_aligned[i]
         trend_1w = ema_20_1w_aligned[i]
         
         # Volume filter: volume > 1.5x daily average
         vol_filter = vol_now > 1.5 * vol_ma
         
-        # Breakout conditions
-        breakout_up = price_now > donchian_upper[i-1]  # Break above previous period's upper band
-        breakdown_down = price_now < donchian_lower[i-1]  # Break below previous period's lower band
+        # Price/VWAP cross signals
+        price_cross_above_vwap = price_now > vwap_now and close[i-1] <= vwap_prev
+        price_cross_below_vwap = price_now < vwap_now and close[i-1] >= vwap_prev
         
         # Entry conditions
         if position == 0:
-            # Long: breakout above upper band with volume + weekly uptrend
-            if breakout_up and vol_filter and price_now > trend_1w:
+            # Long: price crosses above VWAP with volume + weekly uptrend
+            if price_cross_above_vwap and vol_filter and price_now > trend_1w:
                 signals[i] = size
                 position = 1
-            # Short: breakdown below lower band with volume + weekly downtrend
-            elif breakdown_down and vol_filter and price_now < trend_1w:
+            # Short: price crosses below VWAP with volume + weekly downtrend
+            elif price_cross_below_vwap and vol_filter and price_now < trend_1w:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: breakdown below lower band or weekly trend turns down
-            if breakdown_down or price_now < trend_1w:
+            # Exit long: price crosses below VWAP or weekly trend turns down
+            if price_cross_below_vwap or price_now < trend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: breakout above upper band or weekly trend turns up
-            if breakout_up or price_now > trend_1w:
+            # Exit short: price crosses above VWAP or weekly trend turns up
+            if price_cross_above_vwap or price_now > trend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dVolume_1wTrend"
+name = "4h_VWAP_Cross_1dVolume_1wTrend"
 timeframe = "4h"
 leverage = 1.0
