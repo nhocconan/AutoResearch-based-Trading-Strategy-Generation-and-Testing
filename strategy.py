@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_TRIX_12_Signal_Line_Cross_1wTrend_VolumeSpike
-Hypothesis: TRIX 12-period crossing its signal line captures momentum shifts. 
-Traded only when aligned with weekly trend (price > 1w EMA50 for long, < for short) 
-and volume > 2x 20-period average. Uses 12h timeframe to reduce trade frequency 
-and fee drag. Discrete sizing (0.25) balances return and risk. 
-Targets 50-150 total trades over 4 years (~12-37/year).
+4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeConfirm_v1
+Hypothesis: Camarilla R3/S3 breakouts aligned with 12h EMA21 trend and volume confirmation capture high-probability moves. 
+Works in both bull and bear markets: trend filter ensures we only trade in the direction of the 12h trend, 
+while volume confirmation and breakout logic capture momentum bursts. Discrete sizing (0.25) limits drawdown.
+Target: 15-35 trades/year (60-140 over 4 years) to avoid fee drag.
 """
 
 import numpy as np
@@ -22,79 +21,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate TRIX (12,9) on close prices
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) then % change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = 100 * (pd.Series(ema3).pct_change().values)
+    # Get 1d data for Camarilla levels (R3, S3)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.125 * range_1d
+    camarilla_s3 = close_1d - 1.125 * range_1d
     
-    # Signal line: 9-period EMA of TRIX
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
     
-    # Align indicators to 12h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    trix_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), trix)
-    trix_signal_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), trix_signal)
-    volume_confirm_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), volume_confirm)
+    # Align all indicators to 4h timeframe
+    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need EMA50 (50), TRIX calculation (12*3=36 + 9 for signal)
-    start_idx = max(50, 36 + 9, 20)
+    # Warmup: need EMA21 (21), Camarilla (1), volume avg (20)
+    start_idx = max(21, 1, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(trix_aligned[i]) or 
-            np.isnan(trix_signal_aligned[i]) or 
-            np.isnan(volume_confirm_aligned[i])):
+        if (np.isnan(ema21_12h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema50 = ema50_1w_aligned[i]
-        trix_val = trix_aligned[i]
-        trix_sig = trix_signal_aligned[i]
+        ema21 = ema21_12h_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
         vol_conf = volume_confirm_aligned[i]
         
-        # Detect TRIX crossover
-        trix_cross_up = trix_val > trix_sig and trix_aligned[i-1] <= trix_signal_aligned[i-1]
-        trix_cross_down = trix_val < trix_sig and trix_aligned[i-1] >= trix_signal_aligned[i-1]
-        
         if position == 0:
-            # Long when TRIX crosses up, price above weekly EMA50, and volume confirmation
-            if trix_cross_up and close_val > ema50 and vol_conf:
-                signals[i] = size
-                position = 1
-                entry_price = close_val
-            # Short when TRIX crosses down, price below weekly EMA50, and volume confirmation
-            elif trix_cross_down and close_val < ema50 and vol_conf:
-                signals[i] = -size
-                position = -1
-                entry_price = close_val
+            # Determine 12h trend: price vs EMA21
+            uptrend = close_val > ema21
+            downtrend = close_val < ema21
+            
+            if uptrend and vol_conf:
+                # Long bias: long when price breaks above R3 with volume
+                if close_val > r3:
+                    signals[i] = size
+                    position = 1
+                    entry_price = close_val
+            elif downtrend and vol_conf:
+                # Short bias: short when price breaks below S3 with volume
+                if close_val < s3:
+                    signals[i] = -size
+                    position = -1
+                    entry_price = close_val
         elif position == 1:
-            # Exit long when TRIX crosses down or price closes below weekly EMA50
-            if trix_cross_down or close_val < ema50:
+            # Exit conditions: price crosses below EMA21 (trend change) or touches S3
+            if close_val < ema21 or close_val < s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when TRIX crosses up or price closes above weekly EMA50
-            if trix_cross_up or close_val > ema50:
+            # Exit conditions: price crosses above EMA21 (trend change) or touches R3
+            if close_val > ema21 or close_val > r3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_TRIX_12_Signal_Line_Cross_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
