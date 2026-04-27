@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_VolumeSpike_ChopRegime
-Hypothesis: Uses 4h Donchian(20) breakout for entries, filtered by 1d EMA50 trend, volume spike (>1.5x average), and choppiness regime (CHOP > 61.8 = range -> mean revert, CHOP < 38.2 = trending -> trend follow). In trending regime, breakout in direction of 1d trend; in ranging regime, fade Donchian breaks. Uses 4h timeframe with tight entries to avoid fee drag: target 20-50 trades/year. Donchian breakouts capture momentum; 1d EMA50 filters higher-timeframe trend; volume confirmation avoids false breakouts; chop regime adapts to market conditions. Works in bull markets via trend-following breaks and in bear markets via mean-reversion fades in ranging regimes.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses Camarilla pivot levels (R3/S3) from 1d for breakout entries, filtered by 1d EMA34 trend and volume spike (>2.0x average). In uptrend (price > EMA34), long on break above R3; in downtrend (price < EMA34), short on break below S3. Volume confirmation avoids false breakouts. Uses 4h timeframe with tight entries to avoid fee drag: target 20-50 trades/year. Camarilla levels provide strong support/resistance; EMA34 filters higher-timeframe trend; volume confirmation ensures conviction. Works in bull markets via trend-following breaks and in bear markets via shorting breakdowns.
 """
 
 import numpy as np
@@ -18,108 +18,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and chop regime
+    # Get 1d data for Camarilla pivots, trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d_series = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d choppiness index (CHOP)
-    # CHOP = 100 * log10(sum(ATR(14)) / (max(high, n) - min(low, n))) / log10(n)
-    # Using ATR(14) and window=14 for chop calculation
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    # Camarilla: R4 = close + ((high-low) * 1.1/2), R3 = close + ((high-low) * 1.1/4)
+    #            S3 = close - ((high-low) * 1.1/4), S4 = close - ((high-low) * 1.1/2)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range for 1d
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[tr1[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    camarilla_factor = (high_1d - low_1d) * 1.1
+    r3_1d = close_1d + (camarilla_factor / 4)
+    s3_1d = close_1d - (camarilla_factor / 4)
     
-    # Chop calculation: sum of ATR over period / (max high - min low) over same period
-    chop_window = 14
-    sum_atr_1d = pd.Series(atr_1d).rolling(window=chop_window, min_periods=chop_window).sum().values
-    max_high_1d = pd.Series(high_1d).rolling(window=chop_window, min_periods=chop_window).max().values
-    min_low_1d = pd.Series(low_1d).rolling(window=chop_window, min_periods=chop_window).min().values
-    range_1d = max_high_1d - min_low_1d
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Avoid division by zero
-    chop_1d = np.where(range_1d > 0, 100 * np.log10(sum_atr_1d / range_1d) / np.log10(chop_window), 50)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Calculate 4h Donchian(20) channels
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need Donchian(20), 1d EMA50 (50), 1d ATR(14) for chop (14+14=28), volume avg (20)
-    start_idx = max(donchian_window, 50, 28, 20)
+    # Warmup: need 1d EMA34 (34), volume avg (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        donchian_high = highest_high[i]
-        donchian_low = lowest_low[i]
-        ema_1d_val = ema_50_1d_aligned[i]
-        chop_val = chop_1d_aligned[i]
+        ema_1d_val = ema_34_1d_aligned[i]
+        r3_val = r3_1d_aligned[i]
+        s3_val = s3_1d_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Determine regime: chop > 61.8 = ranging (mean revert), chop < 38.2 = trending (trend follow)
-            is_ranging = chop_val > 61.8
-            is_trending = chop_val < 38.2
+            # Determine trend: price > EMA34 = uptrend, price < EMA34 = downtrend
+            is_uptrend = close_val > ema_1d_val
+            is_downtrend = close_val < ema_1d_val
             
-            if is_trending:
-                # Trending regime: breakout in direction of 1d trend
-                # Long: price breaks above Donchian high AND 1d uptrend AND volume confirmation
-                long_condition = (high_val > donchian_high) and (close_val > ema_1d_val) and vol_conf
-                # Short: price breaks below Donchian low AND 1d downtrend AND volume confirmation
-                short_condition = (low_val < donchian_low) and (close_val < ema_1d_val) and vol_conf
-                
-                if long_condition:
+            if is_uptrend:
+                # Uptrend: long on break above R3 with volume confirmation
+                if (high_val > r3_val) and vol_conf:
                     signals[i] = size
                     position = 1
-                elif short_condition:
-                    signals[i] = -size
-                    position = -1
-            elif is_ranging:
-                # Ranging regime: fade Donchian breaks (mean reversion)
-                # Long: price breaks below Donchian low AND 1d uptrend (buy dips in uptrend) AND volume confirmation
-                long_condition = (low_val < donchian_low) and (close_val > ema_1d_val) and vol_conf
-                # Short: price breaks above Donchian high AND 1d downtrend (sell rallies in downtrend) AND volume confirmation
-                short_condition = (high_val > donchian_high) and (close_val < ema_1d_val) and vol_conf
-                
-                if long_condition:
-                    signals[i] = size
-                    position = 1
-                elif short_condition:
+            elif is_downtrend:
+                # Downtrend: short on break below S3 with volume confirmation
+                if (low_val < s3_val) and vol_conf:
                     signals[i] = -size
                     position = -1
         elif position == 1:
-            # Exit long: Donchian breakout failed or trend change
-            # Exit if price returns to Donchian mid-point or 1d trend breaks
-            donchian_mid = (donchian_high + donchian_low) / 2
-            exit_condition = (close_val < donchian_mid) or (close_val < ema_1d_val)
+            # Exit long: price returns to EMA34 or breaks below S3 (stoploss)
+            exit_condition = (close_val < ema_1d_val) or (low_val < s3_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -127,10 +91,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Donchian breakout failed or trend change
-            # Exit if price returns to Donchian mid-point or 1d trend breaks
-            donchian_mid = (donchian_high + donchian_low) / 2
-            exit_condition = (close_val > donchian_mid) or (close_val > ema_1d_val)
+            # Exit short: price returns to EMA34 or breaks above R3 (stoploss)
+            exit_condition = (close_val > ema_1d_val) or (high_val > r3_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -140,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_ChopRegime"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
