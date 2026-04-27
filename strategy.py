@@ -57,18 +57,18 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align ATR and RSI to 4h timeframe
+    # Align ATR and RSI to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate 4-hour EMA50 for trend filter
+    # Calculate 12-hour EMA50 for trend filter
     ema_period = 50
-    ema_4h = np.full(n, np.nan)
+    ema_12h = np.full(n, np.nan)
     if n >= ema_period:
-        ema_4h[ema_period - 1] = np.mean(close[:ema_period])
+        ema_12h[ema_period - 1] = np.mean(close[:ema_period])
         for i in range(ema_period, n):
-            ema_4h[i] = (close[i] * (2 / (ema_period + 1)) + 
-                         ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
+            ema_12h[i] = (close[i] * (2 / (ema_period + 1)) + 
+                          ema_12h[i-1] * (1 - (2 / (ema_period + 1))))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,14 +80,14 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema_4h[i])):
+            np.isnan(ema_12h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         atr = atr_1d_aligned[i]
         rsi = rsi_1d_aligned[i]
-        ema_trend = ema_4h[i]
+        ema_trend = ema_12h[i]
         
         if position == 0:
             # Long: Oversold RSI with price above EMA in uptrend
@@ -117,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_RSI_MeanReversion_1D_ATR_RSI_EMA50"
-timeframe = "4h"
+name = "12h_RSI_MeanReversion_1D_ATR_RSI_EMA50"
+timeframe = "12h"
 leverage = 1.0
