@@ -1,3 +1,8 @@
+# 12h_Camilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot breakout on 12h with 1d trend filter and volume confirmation
+# Works in bull/bear by following trend direction while using volatility-based entries
+# Target: 50-150 trades over 4 years (12-37/year) with low frequency to avoid fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -39,13 +44,27 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h Camarilla levels (based on previous 12h bar)
+    # Calculate pivot and levels from previous bar
+    shift_high = np.roll(high, 1)
+    shift_low = np.roll(low, 1)
+    shift_close = np.roll(close, 1)
+    shift_high[0] = np.nan
+    shift_low[0] = np.nan
+    shift_close[0] = np.nan
     
-    # Volume filter: volume > 1.5x 20-period average
+    pivot = (shift_high + shift_low + shift_close) / 3.0
+    range_val = shift_high - shift_low
+    
+    # Camarilla levels
+    R1 = pivot + (range_val * 1.0 / 12.0)
+    S1 = pivot - (range_val * 1.0 / 12.0)
+    R3 = pivot + (range_val * 1.1 / 12.0)
+    S3 = pivot - (range_val * 1.1 / 12.0)
+    
+    # Volume filter: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,8 +75,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_filter[i])):
+            np.isnan(vol_ma[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
+            np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
@@ -65,14 +84,14 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Volatility filter: current 4h ATR > 1.2x 1d ATR (avoid low volatility periods)
-        atr_4h = np.abs(high[i] - low[i])
-        vol_filter = atr_4h > (atr_1d_aligned[i] * 1.2)
+        # Volatility filter: current 12h ATR > 1.2x 1d ATR (avoid low volatility periods)
+        atr_12h = np.abs(high[i] - low[i])
+        vol_filter = atr_12h > (atr_1d_aligned[i] * 1.2)
         
-        # Long conditions: price breaks above upper Donchian + above 1d EMA + volume + volatility
-        long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_filter[i] and vol_filter)
-        # Short conditions: price breaks below lower Donchian + below 1d EMA + volume + volatility
-        short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_filter[i] and vol_filter)
+        # Long conditions: price breaks above R1 + above 1d EMA + volume + volatility
+        long_breakout = (close[i] > R1[i-1] and price_above_ema and volume_filter[i] and vol_filter)
+        # Short conditions: price breaks below S1 + below 1d EMA + volume + volatility
+        short_breakout = (close[i] < S1[i-1] and price_below_ema and volume_filter[i] and vol_filter)
         
         if long_breakout:
             signals[i] = 0.25
@@ -80,11 +99,11 @@ def generate_signals(prices):
         elif short_breakout:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite Donchian breakout
-        elif position == 1 and close[i] < lowest_low[i-1]:
+        # Exit conditions: opposite S3/R3 breakout (wider bands for exit)
+        elif position == 1 and close[i] < S3[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > highest_high[i-1]:
+        elif position == -1 and close[i] > R3[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -98,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolVolFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
