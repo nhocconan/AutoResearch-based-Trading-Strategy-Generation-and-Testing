@@ -25,8 +25,6 @@ def generate_signals(prices):
     # Calculate daily pivot points (using prior day OHLC)
     # Pivot = (H + L + C)/3
     # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
     high_prev = np.roll(high_1d, 1)
     low_prev = np.roll(low_1d, 1)
     close_prev = np.roll(close_1d, 1)
