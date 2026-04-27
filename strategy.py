@@ -13,7 +13,7 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for Elder Ray and trend
+    # Get 1d data for Choppiness Index and Donchian Channel
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -22,21 +22,28 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA for trend filter
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_6h = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    # Calculate 14-period Choppiness Index (CHOP)
+    # CHOP = 100 * log10(SUM(ATR1) / (HHV(HIGH,n) - LLV(LOW,n))) / log10(n)
+    tr1 = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr1 = np.concatenate([[np.nan], tr1])  # align length
+    atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    hh14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_atr1 / (hh14 - ll14)) / np.log10(14)
     
-    # Calculate Elder Ray components (Bull Power = High - EMA13, Bear Power = Low - EMA13)
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # Calculate 20-period Donchian Channel (upper/lower bands)
+    dc_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Elder Ray components to 6h timeframe
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Calculate volume spike (volume > 2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
+    
+    # Align HTF indicators to 12h timeframe
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
+    dc_upper_12h = align_htf_to_ltf(prices, df_1d, dc_upper)
+    dc_lower_12h = align_htf_to_ltf(prices, df_1d, dc_lower)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,35 +53,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or np.isnan(ema13_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(chop_12h[i]) or np.isnan(dc_upper_12h[i]) or np.isnan(dc_lower_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. Bull Power > 0 with price above EMA13 and volume spike
-        # 2. Bear Power < 0 turning up with price above EMA13 and volume spike (early reversal)
-        long_bull = (bull_power_6h[i] > 0 and close[i] > ema13_6h[i] and volume_spike[i])
-        long_reversal = (bear_power_6h[i] < 0 and bear_power_6h[i] > bear_power_6h[i-1] and 
-                         close[i] > ema13_6h[i] and volume_spike[i])
+        # 1. Choppy market (CHOP > 61.8) AND price breaks above Donchian upper band with volume spike
+        long_breakout = (chop_12h[i] > 61.8 and close[i] > dc_upper_12h[i] and volume_spike[i])
         
         # Short conditions:
-        # 1. Bear Power < 0 with price below EMA13 and volume spike
-        # 2. Bull Power > 0 turning down with price below EMA13 and volume spike (early reversal)
-        short_bear = (bear_power_6h[i] < 0 and close[i] < ema13_6h[i] and volume_spike[i])
-        short_reversal = (bull_power_6h[i] > 0 and bull_power_6h[i] < bull_power_6h[i-1] and 
-                          close[i] < ema13_6h[i] and volume_spike[i])
+        # 1. Choppy market (CHOP > 61.8) AND price breaks below Donchian lower band with volume spike
+        short_breakout = (chop_12h[i] > 61.8 and close[i] < dc_lower_12h[i] and volume_spike[i])
         
-        if long_bull or long_reversal:
+        if long_breakout:
             signals[i] = 0.25
             position = 1
-        elif short_bear or short_reversal:
+        elif short_breakout:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite power signal with volume confirmation
-        elif position == 1 and bear_power_6h[i] < 0 and volume_spike[i]:
+        # Exit conditions: opposite Donchian breakout with volume confirmation
+        elif position == 1 and close[i] < dc_lower_12h[i] and volume_spike[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and bull_power_6h[i] > 0 and volume_spike[i]:
+        elif position == -1 and close[i] > dc_upper_12h[i] and volume_spike[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -88,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_EMA13_Volume1.5x_1d"
-timeframe = "6h"
+name = "12h_Choppiness_DonchianBreakout_Volume2x_1d"
+timeframe = "12h"
 leverage = 1.0
