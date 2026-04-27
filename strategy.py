@@ -12,107 +12,160 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Precompute session filter (08-20 UTC)
-    dt = pd.to_datetime(open_time)
-    hours = dt.hour
-    session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h EMA50
-    ema_period = 50
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= ema_period:
-        ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
-        for i in range(ema_period, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * (2 / (ema_period + 1)) + 
-                         ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
-    
-    # Align 4h EMA to 1h
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Get daily data for volatility filter (ATR)
+    # Get 1d data for weekly pivot levels (using last full week)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14)
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.abs(high_1d[1:] - close_1d[:-1]),
-                    np.abs(low_1d[1:] - close_1d[:-1]))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate weekly pivot from last 5 daily bars (weekly lookback)
+    weekly_high = np.full(len(close_1d), np.nan)
+    weekly_low = np.full(len(close_1d), np.nan)
+    weekly_close = np.full(len(close_1d), np.nan)
+    for i in range(5, len(close_1d)):
+        weekly_high[i] = np.max(high_1d[i-5:i])
+        weekly_low[i] = np.min(low_1d[i-5:i])
+        weekly_close[i] = close_1d[i-1]  # previous day's close
     
-    atr_period = 14
-    atr_1d = np.full(len(close_1d), np.nan)
-    if len(tr) >= atr_period:
-        atr_1d[atr_period - 1] = np.nanmean(tr[:atr_period])
-        for i in range(atr_period, len(tr)):
-            atr_1d[i] = (tr[i] + (atr_period - 1) * atr_1d[i-1]) / atr_period
+    # Weekly pivot levels (standard formula)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    # Align daily ATR to 1h
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Get 12h data for trend filter (ADX)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate ADX(14) on 12h
+    def calculate_adx(high, low, close, period=14):
+        n = len(high)
+        if n < period * 2:
+            return np.full(n, np.nan)
+        
+        # True Range
+        tr = np.maximum(high[1:] - low[1:], 
+                       np.maximum(np.abs(high[1:] - close[:-1]), 
+                                 np.abs(low[1:] - close[:-1])))
+        tr = np.concatenate([[np.nan], tr])
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                          np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                           np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[np.nan], dm_plus])
+        dm_minus = np.concatenate([[np.nan], dm_minus])
+        
+        # Smoothed values
+        atr = np.full(n, np.nan)
+        dm_plus_smooth = np.full(n, np.nan)
+        dm_minus_smooth = np.full(n, np.nan)
+        
+        if n >= period:
+            # Initial average
+            atr[period-1] = np.nanmean(tr[1:period])
+            dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period])
+            dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period])
+            
+            # Wilder smoothing
+            for i in range(period, n):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+        
+        # Directional Indicators
+        di_plus = np.full(n, np.nan)
+        di_minus = np.full(n, np.nan)
+        dx = np.full(n, np.nan)
+        
+        for i in range(period, n):
+            if atr[i] > 0:
+                di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
+                di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
+                if di_plus[i] + di_minus[i] > 0:
+                    dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+        
+        # ADX
+        adx = np.full(n, np.nan)
+        for i in range(2*period-1, n):
+            valid_dx = dx[period:i+1]
+            valid_dx = valid_dx[~np.isnan(valid_dx)]
+            if len(valid_dx) >= period:
+                adx[i] = np.nanmean(valid_dx[-period:])
+        
+        return adx
+    
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    
+    # Volume filter: current volume > 1.5x 30-period average
     vol_ma = np.full(n, np.nan)
-    vol_period = 20
+    vol_period = 30
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
+    # Align indicators to 6h timeframe
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Warmup: need EMA, ATR, volume MA
-    start_idx = max(ema_period, vol_period, 100)
+    # Warmup: need weekly pivots, ADX, and volume MA
+    start_idx = max(5, vol_period, 28)  # 28 for ADX warmup
     
     for i in range(start_idx, n):
-        # Skip if not in trading session or data not ready
-        if not session[i] or np.isnan(ema_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        # Skip if any data not ready
+        if (np.isnan(weekly_r3_aligned[i]) or np.isnan(weekly_s3_aligned[i]) or 
+            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        atr = atr_1d_aligned[i]
+        adx = adx_12h_aligned[i]
         
         if position == 0:
-            # Long: Price above 4h EMA50 + volume spike + low volatility (mean reversion setup)
-            if (price > ema_4h_aligned[i] and 
-                vol_ratio > 1.5 and 
-                atr < np.nanpercentile(atr_1d_aligned[:i+1], 30)):  # Low volatility regime
+            # Long: Price breaks above weekly R3 + strong trend (ADX>25) + volume spike
+            if (price > weekly_r3_aligned[i] and 
+                adx > 25 and 
+                vol_ratio > 1.5):
                 signals[i] = size
                 position = 1
-            # Short: Price below 4h EMA50 + volume spike + low volatility
-            elif (price < ema_4h_aligned[i] and 
-                  vol_ratio > 1.5 and 
-                  atr < np.nanpercentile(atr_1d_aligned[:i+1], 30)):
+            # Short: Price breaks below weekly S3 + strong trend (ADX>25) + volume spike
+            elif (price < weekly_s3_aligned[i] and 
+                  adx > 25 and 
+                  vol_ratio > 1.5):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below 4h EMA50 OR volatility expands
-            if (price < ema_4h_aligned[i] or 
-                atr > np.nanpercentile(atr_1d_aligned[max(0, i-20):i+1], 80)):
+            # Long exit: Price drops below weekly S3 OR trend weakens (ADX<20)
+            if (price < weekly_s3_aligned[i] or 
+                adx < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses above 4h EMA50 OR volatility expands
-            if (price > ema_4h_aligned[i] or 
-                atr > np.nanpercentile(atr_1d_aligned[max(0, i-20):i+1], 80)):
+            # Short exit: Price rises above weekly R3 OR trend weakens (ADX<20)
+            if (price > weekly_r3_aligned[i] or 
+                adx < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +173,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMA50_Volume_Volatility_Filter"
-timeframe = "1h"
+name = "6H_WeeklyPivot_R3S3_ADX25_Volume"
+timeframe = "6h"
 leverage = 1.0
