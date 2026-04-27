@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike_v1
-Hypothesis: Trade 6h timeframe with daily CAMARILLA R4/S4 breakouts filtered by 12h EMA50 trend and volume spikes.
-Breakouts at R4/S4 indicate strong momentum continuation, filtered by 12h trend and volume confirmation.
-Designed for 12-30 trades/year to minimize fee drag. Works in bull via breakouts and bear via breakdowns.
+4h_KAMA_Trend_With_1d_RSI_Filter_v1
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on 4h for trend direction, filtered by 1d RSI to avoid extremes. Enter long when KAMA turns up and RSI < 70, short when KAMA turns down and RSI > 30. Designed for 20-40 trades/year to minimize fee drift. Works in bull via trend following and bear via mean-reversion filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_kama(close, er_len=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
+    # Avoid division by zero
+    volatility = np.where(volatility == 0, 1, volatility)
+    er = change / volatility
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,82 +30,57 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate CAMARILLA levels from 1d timeframe
+    # 1d RSI for filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
+    rsi_period = 14
+    delta = np.diff(df_1d['close'].values, prepend=df_1d['close'].values[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Previous day's OHLC for CAMARILLA calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # CAMARILLA R4 and S4 levels (breakout levels)
-    camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
-    
-    # Align CAMARILLA levels to 6h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    
-    # Volume confirmation: current volume > 2.0 * 24-period average (on 6h data, ~6 days)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    # 4h KAMA for trend
+    kama = calculate_kama(close, er_len=10, fast=2, slow=30)
+    kama_diff = np.diff(kama, prepend=kama[0])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for volume average and EMA
-    start_idx = max(24, 50)
-    
-    for i in range(start_idx, n):
-        bars_since_exit += 1
-        
-        # Skip if any data not ready
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i])):
+    for i in range(1, n):
+        if np.isnan(rsi_aligned[i]) or np.isnan(kama[i]):
             signals[i] = 0.0
             continue
         
-        camarilla_r4_val = camarilla_r4_aligned[i]
-        camarilla_s4_val = camarilla_s4_aligned[i]
-        ema_50_val = ema_50_aligned[i]
-        vol_conf = volume_confirm[i]
+        rsi_val = rsi_aligned[i]
+        kama_val = kama[i]
+        kama_prev = kama[i-1]
         
         if position == 0:
-            # Require minimum 12 bars since last exit to avoid churn (~3 days on 6h)
-            if bars_since_exit >= 12:
-                # Long: price breaks above R4 with volume confirmation AND above 12h EMA50 (uptrend)
-                if close[i] > camarilla_r4_val and vol_conf and close[i] > ema_50_val:
-                    signals[i] = size
-                    position = 1
-                    bars_since_exit = 0
-                # Short: price breaks below S4 with volume confirmation AND below 12h EMA50 (downtrend)
-                elif close[i] < camarilla_s4_val and vol_conf and close[i] < ema_50_val:
-                    signals[i] = -size
-                    position = -1
-                    bars_since_exit = 0
+            # Long: KAMA turning up AND RSI not overbought
+            if kama_val > kama_prev and rsi_val < 70:
+                signals[i] = size
+                position = 1
+            # Short: KAMA turning down AND RSI not oversold
+            elif kama_val < kama_prev and rsi_val > 30:
+                signals[i] = -size
+                position = -1
         elif position == 1:
-            # Exit long: price breaks below S4 (opposite level)
-            if close[i] < camarilla_s4_val:
+            # Exit long: KAMA turning down OR RSI overbought
+            if kama_val < kama_prev or rsi_val >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R4 (opposite level)
-            if close[i] > camarilla_r4_val:
+            # Exit short: KAMA turning up OR RSI oversold
+            if kama_val > kama_prev or rsi_val <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_KAMA_Trend_With_1d_RSI_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
