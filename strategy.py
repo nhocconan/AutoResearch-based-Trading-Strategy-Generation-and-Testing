@@ -3,132 +3,104 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Keltner Channel breakout with volume confirmation and monthly trend filter.
-# Long when price breaks above upper KC (EMA20 + 2*ATR) with volume > 1.5x average and monthly trend up.
-# Short when price breaks below lower KC (EMA20 - 2*ATR) with volume > 1.5x average and monthly trend down.
-# Exit when price crosses back below/above EMA20.
-# Uses weekly KC for breakout signals, volume for confirmation, monthly EMA50 for trend filter.
-# Target: 10-25 trades/year to avoid fee drag. Works in bull/bear via trend-filtered breakouts.
+# Hypothesis: 12h strategy using 1-day Relative Strength Index (RSI) with 12-hour trend filter.
+# Long when RSI < 30 (oversold) and 12h price > 20-period EMA (uptrend).
+# Short when RSI > 70 (overbought) and 12h price < 20-period EMA (downtrend).
+# Exit when RSI returns to neutral zone (40-60).
+# Uses RSI for mean reversion in ranging markets, EMA for trend filter to avoid counter-trend trades.
+# Target: 12-37 trades/year to avoid fee drag. Works in bull/bear via trend-filtered mean reversion.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for Keltner Channel
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
+    # Calculate 12h EMA(20) for trend filter
+    ema_period = 20
+    ema = np.full(n, np.nan)
+    if n >= ema_period:
+        ema[ema_period-1] = np.mean(close[:ema_period])
+        for i in range(ema_period, n):
+            ema[i] = (close[i] * 2 + ema[i-1] * (ema_period-1)) / (ema_period+1)
+    
+    # Get 1d data for RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    close_1d = df_1d['close'].values
     
-    # Get monthly data for trend filter (EMA50)
-    df_monthly = get_htf_data(prices, '1M')
-    if len(df_monthly) < 50:
-        return np.zeros(n)
+    # Calculate 14-period RSI
+    def calculate_rsi(data, period=14):
+        if len(data) < period + 1:
+            return np.full(len(data), np.nan)
+        delta = np.diff(data)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full(len(data), np.nan)
+        avg_loss = np.full(len(data), np.nan)
+        
+        # First average is simple mean
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        # Subsequent values: Wilder's smoothing
+        for i in range(period+1, len(data)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    close_monthly = df_monthly['close'].values
+    rsi_1d = calculate_rsi(close_1d, 14)
     
-    # Calculate ATR(14) for weekly data
-    def calculate_atr(high, low, close, period):
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        atr = np.full_like(tr, np.nan, dtype=float)
-        for i in range(period, len(tr)):
-            if i == period:
-                atr[i] = np.nanmean(tr[1:period+1])
-            else:
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
-    
-    atr_weekly = calculate_atr(high_weekly, low_weekly, close_weekly, 14)
-    
-    # Calculate EMA(20) for weekly data
-    def calculate_ema(data, period):
-        ema = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return ema
-        multiplier = 2 / (period + 1)
-        ema[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            ema[i] = (data[i] * multiplier) + (ema[i-1] * (1 - multiplier))
-        return ema
-    
-    ema20_weekly = calculate_ema(close_weekly, 20)
-    
-    # Calculate Keltner Channel: EMA20 ± 2*ATR
-    kc_upper = ema20_weekly + 2 * atr_weekly
-    kc_lower = ema20_weekly - 2 * atr_weekly
-    
-    # Calculate EMA(50) for monthly trend filter
-    ema50_monthly = calculate_ema(close_monthly, 50)
-    
-    # Get volume MA(20) for daily data
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    
-    # Align indicators to daily timeframe
-    kc_upper_aligned = align_htf_to_ltf(prices, df_weekly, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_weekly, kc_lower)
-    ema50_aligned = align_htf_to_ltf(prices, df_monthly, ema50_monthly)
+    # Align RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 30-period weekly data and 20-period volume MA
-    start_idx = max(30, 19)
+    # Warmup: need RSI and EMA
+    start_idx = max(14, ema_period)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(ema[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
-        
-        # Volume filter
-        vol_filter = vol_now > 1.5 * vol_avg
-        
-        # Trend filter: monthly EMA50 slope
-        trend_up = ema50_aligned[i] > ema50_aligned[i-1] if i > 0 else False
-        trend_down = ema50_aligned[i] < ema50_aligned[i-1] if i > 0 else False
+        rsi = rsi_aligned[i]
+        ema_val = ema[i]
         
         if position == 0:
-            # Long: price breaks above KC upper with volume and trend up
-            if price > kc_upper_aligned[i] and vol_filter and trend_up:
+            # Long: RSI oversold (<30) and price above EMA (uptrend)
+            if rsi < 30 and price > ema_val:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below KC lower with volume and trend down
-            elif price < kc_lower_aligned[i] and vol_filter and trend_down:
+            # Short: RSI overbought (>70) and price below EMA (downtrend)
+            elif rsi > 70 and price < ema_val:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA20 (using KC middle as proxy)
-            if price < kc_upper_aligned[i] - atr_weekly[i]:  # EMA20 ≈ KC middle
+            # Exit long: RSI returns to neutral (>40) or trend breaks
+            if rsi > 40 or price < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA20
-            if price > kc_lower_aligned[i] + atr_weekly[i]:  # EMA20 ≈ KC middle
+            # Exit short: RSI returns to neutral (<60) or trend breaks
+            if rsi < 60 or price > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KeltnerChannel_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "12h_RSI_OversoldOverbought_EMAFilter"
+timeframe = "12h"
 leverage = 1.0
