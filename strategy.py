@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,43 +13,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volatility filter
+    # Get 1d data for trend filter and momentum
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
+    # 1d EMA34 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 1d ATR20 for volatility filter (only trade in high volatility)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # 1d RSI for momentum filter
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # ATR20
-    atr20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr20_aligned = align_htf_to_ltf(prices, df_1d, atr20)
-    
-    # Current 12h ATR for dynamic sizing
-    tr_12h1 = high - low
-    tr_12h2 = np.abs(high - np.roll(close, 1))
-    tr_12h3 = np.abs(low - np.roll(close, 1))
-    tr_12h = np.maximum(tr_12h1, np.maximum(tr_12h2, tr_12h3))
-    tr_12h[0] = tr_12h1[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    
-    # Volatility filter: only trade when 1d ATR20 > its 50-period average (high vol regime)
-    atr20_ma = pd.Series(atr20_aligned).rolling(window=50, min_periods=50).mean().values
-    high_vol_regime = atr20_aligned > atr20_ma
+    # Volume filter: require volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     # Session filter: 08-20 UTC (active trading hours)
     hour = pd.DatetimeIndex(prices['open_time']).hour
@@ -59,40 +45,42 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup period
-    start_idx = 50  # need 50 for EMA50 and ATR calculations
+    start_idx = 34  # need 34 for EMA34 and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr20_aligned[i]) or 
-            np.isnan(atr_12h[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Uptrend + high volatility + session
-            if (close[i] > ema50_1d_aligned[i] and 
-                high_vol_regime[i] and 
+            # Long: Uptrend (price > EMA34) + bullish momentum (RSI > 50) + volume + session
+            if (close[i] > ema34_1d_aligned[i] and 
+                rsi_aligned[i] > 50 and 
+                volume_filter[i] and 
                 session_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Downtrend + high volatility + session
-            elif (close[i] < ema50_1d_aligned[i] and 
-                  high_vol_regime[i] and 
+            # Short: Downtrend (price < EMA34) + bearish momentum (RSI < 50) + volume + session
+            elif (close[i] < ema34_1d_aligned[i] and 
+                  rsi_aligned[i] < 50 and 
+                  volume_filter[i] and 
                   session_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: trend reversal or low volatility
-            if (close[i] < ema50_1d_aligned[i] or not high_vol_regime[i]):
+            # Long exit: Downtrend (price < EMA34) OR bearish momentum (RSI < 40)
+            if (close[i] < ema34_1d_aligned[i] or rsi_aligned[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend reversal or low volatility
-            if (close[i] > ema50_1d_aligned[i] or not high_vol_regime[i]):
+            # Short exit: Uptrend (price > EMA34) OR bullish momentum (RSI > 60)
+            if (close[i] > ema34_1d_aligned[i] or rsi_aligned[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA50_Trend_HighVol_Session"
-timeframe = "12h"
+name = "4h_EMA34_RSI_Momentum_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
