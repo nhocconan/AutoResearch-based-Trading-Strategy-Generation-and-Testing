@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout + 1d EMA trend filter + volume spike
-# Donchian(20) breakout provides clear entry/exit signals
-# 1d EMA(34) filter ensures we only trade in the direction of the daily trend
-# Volume spike (>1.5x 20-period average) confirms institutional participation
-# Designed for ~25-35 trades/year per symbol (100-140 total over 4 years)
+# Hypothesis: 4h Williams %R with 1d EMA trend filter and volume spike.
+# Williams %R measures overbought/oversold levels: > -20 = overbought, < -80 = oversold.
+# Strategy: In trending markets (price > 1d EMA), buy on pullbacks when Williams %R < -80 (oversold).
+# In counter-trend markets (price < 1d EMA), sell on rallies when Williams %R > -20 (overbought).
+# Volume spike confirms institutional participation. Designed for ~20-30 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,9 +19,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams %R calculation (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    denominator = np.where(denominator == 0, 1e-10, denominator)
+    
+    williams_r = -100 * (highest_high - close) / denominator
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -41,45 +47,51 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 40  # Need 20 for Donchian + buffer
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price breaks above Donchian upper band + uptrend + volume
-        if (close[i] > highest_high[i] and 
-            close[i] > ema34_1d_aligned[i] and 
-            volume_filter[i]):
-            signals[i] = 0.30
-            position = 1
-        
-        # Short entry: price breaks below Donchian lower band + downtrend + volume
-        elif (close[i] < lowest_low[i] and 
-              close[i] < ema34_1d_aligned[i] and 
-              volume_filter[i]):
-            signals[i] = -0.30
-            position = -1
-        
-        # Exit conditions: reverse signal or trend change
-        elif position == 1 and (close[i] < ema34_1d_aligned[i] or 
-                                close[i] < lowest_low[i]):
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and (close[i] > ema34_1d_aligned[i] or 
-                                 close[i] > highest_high[i]):
-            signals[i] = 0.0
-            position = 0
-        
-        # Hold position
+        # Trending market logic
+        if close[i] > ema34_1d_aligned[i]:  # Uptrend
+            # Buy on pullback when oversold
+            if williams_r[i] < -80 and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            elif williams_r[i] > -50:  # Exit when momentum fades
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                if position == 1:
+                    signals[i] = 0.25
+                else:
+                    signals[i] = 0.0
+        elif close[i] < ema34_1d_aligned[i]:  # Downtrend
+            # Sell on rally when overbought
+            if williams_r[i] > -20 and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
+            elif williams_r[i] < -50:  # Exit when momentum fades
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                if position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
         else:
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            # No clear trend - stay flat
+            signals[i] = 0.0
+            position = 0
     
     return signals
 
-name = "4h_DonchianBreakout_1dEMA34_VolumeFilter"
+name = "4h_WilliamsR_1dEMA34_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
