@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d weekly pivot reversion with volume confirmation and weekly trend filter.
-# Long when price touches S1/S2 pivot from previous week with weekly uptrend and volume spike.
-# Short when price touches R1/R2 pivot with weekly downtrend and volume spike.
-# Uses mean-reversion at weekly pivot levels, which works in both bull and bear markets.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h Elder Ray power with 1d trend filter and volume confirmation.
+# Uses daily Bull Power (high - EMA13) and Bear Power (EMA13 - low) to detect institutional buying/selling pressure.
+# Long when Bull Power > 0 and Bear Power < 0 (bullish bias) with 1d uptrend and volume spike.
+# Short when Bear Power > 0 and Bull Power < 0 (bearish bias) with 1d downtrend and volume spike.
+# Designed for 12-30 trades/year per symbol (48-120 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by following the 1d trend and requiring volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,34 +20,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation and trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points and support/resistance levels
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    pivot = (high_weekly + low_weekly + close_weekly) / 3.0
-    r1 = 2 * pivot - low_weekly
-    s1 = 2 * pivot - high_weekly
-    r2 = pivot + (high_weekly - low_weekly)
-    s2 = pivot - (high_weekly - low_weekly)
+    # Calculate EMA13 on daily close for Elder Ray
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align weekly levels to daily timeframe (wait for weekly bar to close)
-    r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    r2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    s2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    # Elder Ray: Bull Power = high - EMA13, Bear Power = EMA13 - low
+    bull_power = high_1d - ema13_1d
+    bear_power = ema13_1d - low_1d
     
-    # Weekly trend filter: 20-period EMA on weekly close
-    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
+    # Align Elder Ray components to 6h timeframe (wait for daily bar to close)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # 50-period EMA on 1d close for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,32 +52,27 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 20
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_weekly_aligned[i]) or np.isnan(r2_weekly_aligned[i]) or
-            np.isnan(s1_weekly_aligned[i]) or np.isnan(s2_weekly_aligned[i]) or
-            np.isnan(ema20_weekly_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price touches S1 or S2 AND weekly uptrend AND volume spike
-        long_condition = ((abs(close[i] - s1_weekly_aligned[i]) < 0.001 * close[i] or
-                          abs(close[i] - s2_weekly_aligned[i]) < 0.001 * close[i]) and
-                         close[i] > ema20_weekly_aligned[i] and
-                         volume_filter[i])
-        
-        # Short conditions: price touches R1 or R2 AND weekly downtrend AND volume spike
-        short_condition = ((abs(close[i] - r1_weekly_aligned[i]) < 0.001 * close[i] or
-                           abs(close[i] - r2_weekly_aligned[i]) < 0.001 * close[i]) and
-                          close[i] < ema20_weekly_aligned[i] and
-                          volume_filter[i])
-        
-        if long_condition:
+        # Long conditions: Bull Power > 0 AND Bear Power < 0 (bullish bias) AND 1d uptrend AND volume spike
+        if (bull_power_aligned[i] > 0 and 
+            bear_power_aligned[i] < 0 and 
+            close[i] > ema50_1d_aligned[i] and 
+            volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        elif short_condition:
+        # Short conditions: Bear Power > 0 AND Bull Power < 0 (bearish bias) AND 1d downtrend AND volume spike
+        elif (bear_power_aligned[i] > 0 and 
+              bull_power_aligned[i] < 0 and 
+              close[i] < ema50_1d_aligned[i] and 
+              volume_filter[i]):
             signals[i] = -0.25
             position = -1
         else:
@@ -95,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivotReversion_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
