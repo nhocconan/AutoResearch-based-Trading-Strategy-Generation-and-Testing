@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversal with 1d trend filter and volume spike
-# Uses 1d EMA34 for trend direction (long when price > EMA34, short when price < EMA34)
-# and Camarilla pivot levels (R1/S1) from 1d OHLC for reversal entries.
-# Volume > 2.0x 24-period average confirms institutional interest at pivot levels.
-# Camarilla reversals work well in ranging markets while trend filter avoids counter-trend trades.
-# Target: 20-30 trades/year to minimize fee decay while capturing high-probability reversals.
-# Focus on BTC/ETH as primary assets with proven Camarilla edge from DB.
+# Hypothesis: 12h Choppiness Index regime filter + Donchian breakout
+# Uses Choppiness Index (14) to detect trending (CHOP < 38.2) vs ranging (CHOP > 61.8) markets
+# In trending markets: break above Donchian upper (20) = long, break below Donchian lower (20) = short
+# In ranging markets: mean reversion at Donchian channels (touch upper = short, touch lower = long)
+# Volume confirmation: volume > 1.5x 24-period average (2 days of 12h bars)
+# Designed for 12h timeframe to work in both bull (trend follow) and bear (mean revert) markets
+# Target: 15-25 trades/year to minimize fee decay while capturing high-probability moves
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,31 +21,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend and Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get 1w data for higher timeframe context (trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate Camarilla pivot levels from 1d OHLC
+    # Calculate Donchian channels (20-period) on 1d timeframe for structure
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_for_pivot = df_1d['close'].values
     
-    # Camarilla: Range = (H - L), then levels = C ± (Range * multiplier)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_multiplier = 1.1 / 12
-    r1 = close_1d_for_pivot + (high_1d - low_1d) * camarilla_multiplier
-    s1 = close_1d_for_pivot - (high_1d - low_1d) * camarilla_multiplier
+    # Donchian upper/lower (20-period)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # 24-period average volume for spike detection (4h bars in 1d = 6, so 24 = 4d)
+    # Calculate Choppiness Index (14) on 1d timeframe for regime detection
+    # CHOP = 100 * log10(sum(ATR(1)) / (n * ATR(n))) / log10(n)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], 
+                     np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                                np.abs(low_1d[1:] - close_1d[:-1])))
+    tr1 = np.concatenate([[np.nan], tr1])  # align with index 0
+    
+    atr1 = tr1
+    sum_atr1 = np.nancumsum(atr1)  # cumulative sum ignoring NaN
+    
+    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    
+    chop = np.full(len(high_1d), np.nan)
+    for i in range(14, len(high_1d)):
+        if not np.isnan(sum_atr1[i]) and atr14[i] > 0:
+            chop[i] = 100 * np.log10(sum_atr1[i] / (14 * atr14[i])) / np.log10(14)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # 24-period average volume for spike detection (2 days of 12h bars)
     vol_ma = np.full(n, np.nan)
     vol_period = 24
     for i in range(vol_period, n):
@@ -56,12 +76,13 @@ def generate_signals(prices):
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(vol_period, 1)
+    start_idx = max(vol_period, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+        if (np.isnan(ema_20_1w_aligned[i]) or
+            np.isnan(donch_high_aligned[i]) or
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(chop_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -69,41 +90,63 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from 1d EMA34
-        uptrend = price > ema_34_1d_aligned[i]
-        downtrend = price < ema_34_1d_aligned[i]
+        # Determine regime from Choppiness Index
+        ranging = chop_aligned[i] > 61.8
+        trending = chop_aligned[i] < 38.2
         
-        # Volume confirmation: spike > 2.0x average
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long reversal at S1: price bounces up from support in uptrend
-            if uptrend and price <= s1_aligned[i] * 1.001 and volume_confirmation:  # 0.1% buffer
-                signals[i] = size
-                position = 1
-            # Short reversal at R1: price rejects down from resistance in downtrend
-            elif downtrend and price >= r1_aligned[i] * 0.999 and volume_confirmation:  # 0.1% buffer
-                signals[i] = -size
-                position = -1
+            if ranging and volume_confirmation:
+                # In ranging market: mean reversion at Donchian channels
+                if price <= donch_low_aligned[i] * 1.001:  # touch lower band -> long
+                    signals[i] = size
+                    position = 1
+                elif price >= donch_high_aligned[i] * 0.999:  # touch upper band -> short
+                    signals[i] = -size
+                    position = -1
+            elif trending and volume_confirmation:
+                # In trending market: breakout direction
+                if price > donch_high_aligned[i]:  # break above upper -> long
+                    signals[i] = size
+                    position = 1
+                elif price < donch_low_aligned[i]:  # break below lower -> short
+                    signals[i] = -size
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price reaches R1 or breaks below EMA34
-            if price >= r1_aligned[i] * 0.999 or price < ema_34_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = size
+            # Long exit: opposite Donchian touch or trend change
+            if ranging:
+                if price >= donch_high_aligned[i] * 0.999:  # touch upper band -> exit
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = size
+            else:  # trending
+                if price < donch_low_aligned[i]:  # break below lower -> exit
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = size
         elif position == -1:
-            # Short exit: price reaches S1 or breaks above EMA34
-            if price <= s1_aligned[i] * 1.001 or price > ema_34_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -size
+            # Short exit: opposite Donchian touch or trend change
+            if ranging:
+                if price <= donch_low_aligned[i] * 1.001:  # touch lower band -> exit
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -size
+            else:  # trending
+                if price > donch_high_aligned[i]:  # break above upper -> exit
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -size
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "12h_ChopRegime_Donchian20_Volume"
+timeframe = "12h"
 leverage = 1.0
