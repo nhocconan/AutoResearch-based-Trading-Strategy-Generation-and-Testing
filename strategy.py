@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour ATR breakout with volume confirmation and 1-day trend filter.
-Trades only during high-momentum breakouts in the direction of the daily trend.
-Designed to work in both bull and bear markets by using the daily trend as filter.
-Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag.
+Hypothesis: 4-hour Williams %R reversal with volume confirmation and 1-day trend filter.
+Enters on extreme oversold/overbought conditions during low volatility periods.
+Designed to work in both bull and bear markets by using 1-day trend as filter.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -29,29 +29,30 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 4-hour data for ATR and volume filter
+    # Get 4-hour data for Williams %R and ATR
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 14:
         return np.zeros(n)
     
-    # Calculate 4-hour ATR(14)
+    # Calculate 4-hour Williams %R (14)
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4-hour volume MA(20)
-    vol_4h = df_4h['volume'].values
-    vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_4h) / (highest_high - lowest_low)
+    
+    # Calculate 4-hour ATR(14) for volatility filter
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.concatenate([close_4h[0:1], close_4h[:-1]]))
+    tr3 = np.abs(low_4h - np.concatenate([close_4h[0:1], close_4h[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Align all 4h indicators
-    atr_14_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,12 +61,12 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need ATR, volume MA, and 1d EMA
-    start_idx = max(14, 20, 50)  # max of lookbacks
+    # Warmup: need Williams %R, ATR, and 1d EMA
+    start_idx = max(14, 14, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(vol_ma_20_4h_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -76,36 +77,35 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        atr = atr_14_aligned[i]
-        vol_now = volume[i]
-        vol_ma = vol_ma_20_4h_aligned[i]
+        wr = williams_r_aligned[i]
+        atr_val = atr_aligned[i]
         trend_1d = ema_50_1d_aligned[i]
         
-        # Volume filter: volume > 1.5x 4h average (moderate to balance trades)
-        vol_filter = vol_now > 1.5 * vol_ma
+        # Volatility filter: ATR < 0.02 * price (low volatility environment)
+        vol_filter = atr_val < 0.02 * close[i]
         
-        # Entry conditions: ATR breakout with volume and daily trend alignment
+        # Entry conditions: Williams %R reversal with volume and 1d trend alignment
         if position == 0:
-            # Long: break above close + 1*ATR + volume + daily uptrend
-            if close[i] > close[i-1] + atr and vol_filter and close[i] > trend_1d:
+            # Long: Williams %R oversold (< -80) + low vol + price above 1d EMA
+            if wr < -80 and vol_filter and close[i] > trend_1d:
                 signals[i] = size
                 position = 1
-            # Short: break below close - 1*ATR + volume + daily downtrend
-            elif close[i] < close[i-1] - atr and vol_filter and close[i] < trend_1d:
+            # Short: Williams %R overbought (> -20) + low vol + price below 1d EMA
+            elif wr > -20 and vol_filter and close[i] < trend_1d:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below daily EMA or ATR-based stop
-            if close[i] < trend_1d or close[i] < high[i-1] - atr:
+            # Exit long: Williams %R returns to neutral (> -50) or trend reversal
+            if wr > -50 or close[i] < trend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above daily EMA or ATR-based stop
-            if close[i] > trend_1d or close[i] > low[i-1] + atr:
+            # Exit short: Williams %R returns to neutral (< -50) or trend reversal
+            if wr < -50 or close[i] > trend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATRBreakout_Volume_1dTrendFilter"
+name = "4h_WilliamsR_Reversal_VolumeFilter_1dTrend"
 timeframe = "4h"
 leverage = 1.0
