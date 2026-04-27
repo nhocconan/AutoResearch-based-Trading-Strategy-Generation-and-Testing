@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_MultiTF_Trend_With_Volume_Filter
-Hypothesis: Use 4h EMA trend and 1d RSI filter for direction, enter on 1h EMA cross with volume confirmation. 
-Works in bull via 4h uptrend + 1h golden crosses, in bear via 4h downtrend + 1h death crosses.
-Volume filter ensures momentum behind moves. Target 15-30 trades/year to avoid fee drag.
+6h_WeeklyPivot_R3S3_Breakout_1wTrend_Volume
+Hypothesis: Trade weekly pivot breakouts at R3/S3 levels with 1-week trend filter (EMA50) and volume confirmation.
+Works in bull markets via buying R3 breakouts in uptrend and bear markets via selling S3 breakdowns in downtrend.
+Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -20,84 +20,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate WEEKLY pivot points (using previous week's OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get 1d data for RSI filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Previous week's OHLC for pivot calculation
+    prev_week_close = df_1w['close'].shift(1).values
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
     
-    # 4h EMA50 for trend direction
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Weekly pivot point (P) and support/resistance levels
+    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
+    # R3 and S3 levels (more extreme levels for breakouts)
+    r3 = pivot + 2 * (prev_week_high - prev_week_low)
+    s3 = pivot - 2 * (prev_week_high - prev_week_low)
     
-    # 1d RSI for overbought/oversold filter
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_vals = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_vals)
+    # Align weekly levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
-    # 1h EMA cross for entry timing (fast=12, slow=26)
-    ema_fast = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_slow = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    ema_cross = ema_fast - ema_slow
+    # 1-week EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    # Volume confirmation: current volume > 2.0 * 24-period average (approx 6 days on 6h)
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # Position size: 20% of capital
+    size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for all indicators
-    start_idx = max(50, 26, 20)
+    # Warmup: need enough data for weekly data and averages
+    start_idx = max(50, 24)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema_cross[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        ema_4h_val = ema_4h_aligned[i]
-        rsi_1d_val = rsi_1d_aligned[i]
-        cross_val = ema_cross[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        pivot_val = pivot_aligned[i]
+        ema_50_val = ema_50_1w_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: 4h uptrend, 1h golden cross, not overbought, volume confirmation
-            if (close[i] > ema_4h_val and 
-                cross_val > 0 and 
-                rsi_1d_val < 70 and 
-                vol_conf):
+            # Long: price breaks above R3 with volume confirmation AND above weekly EMA50 (uptrend)
+            if close[i] > r3_val and vol_conf and close[i] > ema_50_val:
                 signals[i] = size
                 position = 1
-            # Short: 4h downtrend, 1h death cross, not oversold, volume confirmation
-            elif (close[i] < ema_4h_val and 
-                  cross_val < 0 and 
-                  rsi_1d_val > 30 and 
-                  vol_conf):
+            # Short: price breaks below S3 with volume confirmation AND below weekly EMA50 (downtrend)
+            elif close[i] < s3_val and vol_conf and close[i] < ema_50_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: 4h trend turns down OR 1h death cross
-            if (close[i] < ema_4h_val or cross_val < 0):
+            # Exit long: price breaks below weekly pivot (mean reversion) or below EMA50
+            if close[i] < pivot_val or close[i] < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: 4h trend turns up OR 1h golden cross
-            if (close[i] > ema_4h_val or cross_val > 0):
+            # Exit short: price breaks above weekly pivot or above EMA50
+            if close[i] > pivot_val or close[i] > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_MultiTF_Trend_With_Volume_Filter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R3S3_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
