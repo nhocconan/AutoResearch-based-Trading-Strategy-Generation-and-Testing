@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Uses daily Camarilla pivot levels (R3/S3) for breakout entries on 12h chart,
-filtered by daily trend (price above/below EMA34) and volume spikes. Designed to capture
-strong intraday moves with low trade frequency for robustness in both bull and bear markets.
-Targets 12-37 trades per year to minimize fee drag.
+6h_ElderRay_ZeroLag_MA_Crossover_v1
+Hypothesis: Combines Elder Ray (Bull/Bear Power) with Zero-Lag Moving Average crossovers
+on 6h timeframe, filtered by 1w trend direction and volume confirmation.
+Elder Ray identifies bullish/bearish power via EMA13, while Zero-Lag MA reduces lag
+for timely entries. Weekly trend filter ensures alignment with higher timeframe momentum.
+Designed for low trade frequency (15-35 trades/year) to minimize fee drag and work
+in both bull and bear markets by capturing momentum shifts with confirmation.
 """
 
 import numpy as np
@@ -21,79 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
-        return np.zeros(n)
+    # EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Camarilla levels from previous day
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    # Using previous day's OHLC to avoid look-ahead
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Elder Ray components
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Shift by 1 to use previous day's data
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    # First day will have invalid data (rolled from last) - will be filtered by warmup
+    # Zero-Lag Moving Average (ZLMA) to reduce lag
+    # EMA of EMA to cancel lag
+    ema1 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema2 = pd.Series(ema1).ewm(span=21, adjust=False, min_periods=21).mean().values
+    zlma = 2 * ema1 - ema2
     
-    # Calculate Camarilla R3 and S3 levels
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Signal line (EMA of ZLMA)
+    signal_line = pd.Series(zlma).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Daily trend filter: EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1-week trend filter (EMA34 on weekly)
+    df_1w = get_htf_data(prices, '1w')
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Align HTF levels to 12h timeframe (waits for daily close)
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: current volume > 2.0 * 24-period average (2 days)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_avg)
+    # Volume confirmation: current volume > 1.3 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.3 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for all indicators
-    start_idx = 34  # EMA34 period
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
-            np.isnan(ema34_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(zlma[i]) or np.isnan(signal_line[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        r3_val = R3_12h[i]
-        s3_val = S3_12h[i]
-        ema34_val = ema34_12h[i]
-        vol_spike = volume_spike[i]
+        zlma_val = zlma[i]
+        signal_val = signal_line[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long conditions: price breaks above R3, above daily EMA34 (uptrend), volume spike
-            if close_val > r3_val and close_val > ema34_val and vol_spike:
+            # Long conditions: Bull Power > 0 (bullish pressure), ZLMA crosses above signal line,
+            # weekly uptrend, volume confirmation
+            if (bull_power[i] > 0 and zlma_val > signal_val and 
+                zlma[i-1] <= signal_line[i-1] and  # crossover
+                close[i] > ema34_1w_val and vol_conf):
                 signals[i] = size
                 position = 1
-            # Short conditions: price breaks below S3, below daily EMA34 (downtrend), volume spike
-            elif close_val < s3_val and close_val < ema34_val and vol_spike:
+            # Short conditions: Bear Power < 0 (bearish pressure), ZLMA crosses below signal line,
+            # weekly downtrend, volume confirmation
+            elif (bear_power[i] < 0 and zlma_val < signal_val and 
+                  zlma[i-1] >= signal_line[i-1] and  # crossover
+                  close[i] < ema34_1w_val and vol_conf):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below R3 or below daily EMA34
-            if close_val < r3_val or close_val < ema34_val:
+            # Exit long: Bear Power < 0 (loss of bullish pressure) or ZLMA crosses below signal
+            if bear_power[i] < 0 or (zlma_val < signal_val and zlma[i-1] >= signal_line[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses back above S3 or above daily EMA34
-            if close_val > s3_val or close_val > ema34_val:
+            # Exit short: Bull Power > 0 (loss of bearish pressure) or ZLMA crosses above signal
+            if bull_power[i] > 0 or (zlma_val > signal_val and zlma[i-1] <= signal_line[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_ElderRay_ZeroLag_MA_Crossover_v1"
+timeframe = "6h"
 leverage = 1.0
