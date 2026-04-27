@@ -1,123 +1,128 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-hour momentum with 4-hour trend filter and volume confirmation.
-In bull market (price > 4-hour EMA50): long when RSI crosses above 50 and volume > 1.5x average.
-In bear market (price < 4-hour EMA50): short when RSI crosses below 50 and volume > 1.5x average.
-Uses 4-hour trend for direction and 1-hour RSI for timing to avoid false signals.
-Target: 15-30 trades/year per symbol.
+Hypothesis: 6-hour Volume-Weighted Average Price (VWAP) deviation with 1-week trend filter and volume confirmation.
+In bull market (price > 1-week EMA50): long when price deviates below VWAP by >1.5 standard deviations and volume > 1.3x average.
+In bear market (price < 1-week EMA50): short when price deviates above VWAP by >1.5 standard deviations and volume > 1.3x average.
+VWAP acts as dynamic support/resistance, weekly trend filters direction, volume confirms institutional participation.
+Target: 12-35 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index"""
-    if len(close) < period + 1:
-        return np.full_like(close, np.nan, dtype=np.float64)
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4-hour data for trend filter and volume average
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4-hour EMA50 for trend
-    close_4h = df_4h['close'].values
-    ema_50_4h = np.empty_like(close_4h, dtype=np.float64)
-    ema_50_4h.fill(np.nan)
-    if len(close_4h) >= 50:
+    # Calculate weekly EMA50 for trend
+    weekly_close = df_1w['close'].values
+    ema_50_1w = np.empty_like(weekly_close, dtype=np.float64)
+    ema_50_1w.fill(np.nan)
+    if len(weekly_close) >= 50:
         alpha = 2.0 / (50 + 1)
-        ema_50_4h[49] = np.mean(close_4h[:50])
-        for i in range(50, len(close_4h)):
-            ema_50_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema_50_4h[i-1]
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+        ema_50_1w[49] = np.mean(weekly_close[:50])
+        for i in range(50, len(weekly_close)):
+            ema_50_1w[i] = alpha * weekly_close[i] + (1 - alpha) * ema_50_1w[i-1]
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 4-hour volume moving average (20-period)
-    volume_4h = df_4h['volume'].values
-    vol_ma_20_4h = np.empty_like(volume_4h, dtype=np.float64)
-    vol_ma_20_4h.fill(np.nan)
-    for i in range(19, len(volume_4h)):
-        vol_ma_20_4h[i] = np.mean(volume_4h[i-19:i+1])
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # Get weekly data for volume confirmation
+    vol_1w = df_1w['volume'].values
+    vol_ma_20_1w = np.empty_like(vol_1w, dtype=np.float64)
+    vol_ma_20_1w.fill(np.nan)
+    for i in range(19, len(vol_1w)):
+        vol_ma_20_1w[i] = np.mean(vol_1w[i-19:i+1])
+    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
     
-    # Calculate 1-hour RSI
-    rsi = calculate_rsi(close, 14)
+    # Calculate 6-hour VWAP and standard deviation
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(typical_price, np.nan), where=vwap_den!=0)
+    
+    # Calculate rolling standard deviation of price-VWAP deviation
+    price_dev = typical_price - vwap
+    vwap_std = np.full_like(price_dev, np.nan)
+    for i in range(19, len(price_dev)):  # 20-period std
+        if not np.isnan(price_dev[i-19:i+1]).any():
+            vwap_std[i] = np.std(price_dev[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Warmup: need RSI (14+1=15), EMA50 (50), volume MA (20)
-    start_idx = max(15, 50, 20)
+    # Warmup: need VWAP std (20), weekly EMA50 (50), weekly volume MA20 (20)
+    start_idx = max(20, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20_4h_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(vwap_std[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current values
+        # Current price and volume
         price_now = close[i]
-        volume_now = volume[i]
-        rsi_now = rsi[i]
-        rsi_prev = rsi[i-1]
-        ema_trend = ema_50_4h_aligned[i]
-        vol_ma = vol_ma_20_4h_aligned[i]
+        vol_now = volume[i]
+        tp_now = typical_price[i]
+        vol_ma = vol_ma_20_1w_aligned[i]
         
-        # Volume filter: volume > 1.5x 4-hour average
-        vol_filter = volume_now > 1.5 * vol_ma
+        # Current indicators
+        vwap_val = vwap[i]
+        vwap_std_val = vwap_std[i]
+        ema_trend = ema_50_1w_aligned[i]
         
-        # RSI crossing conditions
-        rsi_cross_up = rsi_prev < 50 and rsi_now >= 50
-        rsi_cross_down = rsi_prev > 50 and rsi_now <= 50
+        # Weekly close price for trend comparison
+        weekly_close_price = df_1w['close'].values
+        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close_price)
+        if np.isnan(weekly_close_aligned[i]):
+            signals[i] = 0.0
+            continue
+        weekly_close_val = weekly_close_aligned[i]
+        
+        # Volume filter: volume > 1.3x weekly average
+        vol_filter = vol_now > 1.3 * vol_ma
+        
+        # VWAP deviation signals
+        if vwap_std_val > 0:
+            dev_below = (vwap_val - tp_now) > (1.5 * vwap_std_val)  # Price below VWAP
+            dev_above = (tp_now - vwap_val) > (1.5 * vwap_std_val)  # Price above VWAP
+        else:
+            dev_below = False
+            dev_above = False
         
         if position == 0:
-            # Bull market (price > 4-hour EMA50): look for long
-            if price_now > ema_trend and rsi_cross_up and vol_filter:
+            # Bull market (price > weekly EMA50): look for long when price deviates below VWAP
+            if weekly_close_val > ema_trend and dev_below and vol_filter:
                 signals[i] = size
                 position = 1
-            # Bear market (price < 4-hour EMA50): look for short
-            elif price_now < ema_trend and rsi_cross_down and vol_filter:
+            # Bear market (price < weekly EMA50): look for short when price deviates above VWAP
+            elif weekly_close_val < ema_trend and dev_above and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI crosses below 50 or trend change to bear
-            if rsi_cross_down or price_now < ema_trend:
+            # Exit long: price returns to VWAP or trend changes to bear
+            if tp_now >= vwap_val or weekly_close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI crosses above 50 or trend change to bull
-            if rsi_cross_up or price_now > ema_trend:
+            # Exit short: price returns to VWAP or trend changes to bull
+            if tp_now <= vwap_val or weekly_close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI_4hTrend_VolumeFilter"
-timeframe = "1h"
+name = "6h_VWAP_Deviation_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
