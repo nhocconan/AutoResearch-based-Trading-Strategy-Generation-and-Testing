@@ -1,9 +1,3 @@
-# 6h CCI Trend-Following with Volume Filter and Trend Confirmation
-# Hypothesis: CCI captures cyclical price extremes. In trending markets, CCI > +100 signals strong uptrend continuation,
-# CCI < -100 signals strong downtrend continuation. Combined with 1-day EMA trend filter and volume confirmation,
-# this should work in both bull (riding trends) and bear (catching sharp declines) markets.
-# Target: 20-50 trades/year on 6h timeframe to avoid fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -11,47 +5,44 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations (called ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for calculations (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1-day Exponential Moving Average (34-period) for trend
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        multiplier = 2 / (34 + 1)
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * multiplier) + (ema_34_1d[i-1] * (1 - multiplier))
+    # Calculate weekly Exponential Moving Average (10-period) for trend
+    close_1w = df_1w['close'].values
+    ema_10_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 10:
+        multiplier = 2 / (10 + 1)
+        ema_10_1w[9] = np.mean(close_1w[:10])
+        for i in range(10, len(close_1w)):
+            ema_10_1w[i] = (close_1w[i] * multiplier) + (ema_10_1w[i-1] * (1 - multiplier))
     
-    # Align 1d EMA to 6h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly Donchian Channel (20-period)
+    high_20_1w = np.full(len(close_1w), np.nan)
+    low_20_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        for i in range(19, len(close_1w)):
+            high_20_1w[i] = np.max(high[i-19:i+1]) if i < len(high) else np.nan
+            low_20_1w[i] = np.min(low[i-19:i+1]) if i < len(low) else np.nan
     
-    # Calculate 20-period Commodity Channel Index (CCI) on 6h data
-    # CCI = (Typical Price - SMA(TP,20)) / (0.015 * Mean Deviation)
-    typical_price = (high + low + close) / 3.0
-    cci = np.full(n, np.nan)
+    # Align weekly indicators to daily timeframe
+    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
+    high_20_1w_aligned = align_htf_to_ltf(prices, df_1w, high_20_1w)
+    low_20_1w_aligned = align_htf_to_ltf(prices, df_1w, low_20_1w)
     
-    if n >= 20:
-        for i in range(19, n):
-            tp_slice = typical_price[i-19:i+1]
-            sma_tp = np.mean(tp_slice)
-            mean_dev = np.mean(np.abs(tp_slice - sma_tp))
-            if mean_dev > 0:
-                cci[i] = (typical_price[i] - sma_tp) / (0.015 * mean_dev)
-    
-    # Calculate 6-period volume average for spike detection
+    # Calculate daily volume average (20-period) for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 6
+    vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -60,11 +51,12 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(20, vol_period) + 5
+    start_idx = max(10, 20, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(cci[i]) or 
+        if (np.isnan(ema_10_1w_aligned[i]) or 
+            np.isnan(high_20_1w_aligned[i]) or 
+            np.isnan(low_20_1w_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -72,30 +64,30 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume filter: at least 1.3x average volume to avoid low-volume false signals
-        vol_filter = vol_ratio > 1.3
+        # Volume spike filter: at least 1.8x average volume
+        vol_filter = vol_ratio > 1.8
         
         if position == 0:
-            # Long: CCI > +100 (overbought/strong uptrend) AND price above 1-day EMA (uptrend filter)
-            if cci[i] > 100 and price > ema_34_1d_aligned[i] and vol_filter:
+            # Long: Price above weekly EMA10 and breaks above weekly Donchian high with volume
+            if price > ema_10_1w_aligned[i] and price > high_20_1w_aligned[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: CCI < -100 (oversold/strong downtrend) AND price below 1-day EMA (downtrend filter)
-            elif cci[i] < -100 and price < ema_34_1d_aligned[i] and vol_filter:
+            # Short: Price below weekly EMA10 and breaks below weekly Donchian low with volume
+            elif price < ema_10_1w_aligned[i] and price < low_20_1w_aligned[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: CCI falls below +50 (weakening momentum) OR price crosses below 1-day EMA
-            if cci[i] < 50 or price < ema_34_1d_aligned[i]:
+            # Long exit: Price crosses below weekly EMA10 or volatility spike (potential reversal)
+            if price < ema_10_1w_aligned[i] or (vol_ratio > 3.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: CCI rises above -50 (weakening momentum) OR price crosses above 1-day EMA
-            if cci[i] > -50 or price > ema_34_1d_aligned[i]:
+            # Short exit: Price crosses above weekly EMA10 or volatility spike (potential reversal)
+            if price > ema_10_1w_aligned[i] or (vol_ratio > 3.0):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_CCI_Trend_Following_Volume"
-timeframe = "6h"
+name = "1d_EMA10_Donchian20_Volume"
+timeframe = "1d"
 leverage = 1.0
