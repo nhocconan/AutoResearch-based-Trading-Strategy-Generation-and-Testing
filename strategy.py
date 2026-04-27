@@ -13,66 +13,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Daily ATR (14-period) for volatility filter
-    tr1 = pd.Series(df_1d['high'] - df_1d['low'])
-    tr2 = pd.Series(np.abs(df_1d['high'] - df_1d['close'].shift(1)))
-    tr3 = pd.Series(np.abs(df_1d['low'] - df_1d['close'].shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr.iloc[0] = 0
-    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Daily Donchian(20) breakout levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Donchian high and low (20-period)
+    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    
+    # Daily volume spike: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for volume MA and EMA34
-    start_idx = max(34, 20)
+    # Warmup: need enough data for all indicators
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_14_aligned[i]):
+        if np.isnan(ema50_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
+        weekly_trend = ema50_1w_aligned[i]
+        upper_band = donch_high_aligned[i]
+        lower_band = donch_low_aligned[i]
         vol_spike_val = vol_spike[i]
-        atr_val = atr_14_aligned[i]
         
         if position == 0:
-            # Long: price above EMA34 + volume spike + close near low (pullback in uptrend)
-            if close[i] > ema_trend and vol_spike_val and close[i] <= low[i] + 0.3 * (high[i] - low[i]):
+            # Long: price breaks above Donchian high + volume spike + weekly uptrend
+            if close[i] > upper_band and vol_spike_val and close[i] > weekly_trend:
                 signals[i] = size
                 position = 1
-            # Short: price below EMA34 + volume spike + close near high (pullback in downtrend)
-            elif close[i] < ema_trend and vol_spike_val and close[i] >= high[i] - 0.3 * (high[i] - low[i]):
+            # Short: price breaks below Donchian low + volume spike + weekly downtrend
+            elif close[i] < lower_band and vol_spike_val and close[i] < weekly_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA34 or ATR-based stop
-            if close[i] < ema_trend or close[i] < high[max(0, i-3):i+1].max() - 2.0 * atr_val:
+            # Exit long: price breaks below Donchian low or weekly trend turns down
+            if close[i] < lower_band or close[i] < weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA34 or ATR-based stop
-            if close[i] > ema_trend or close[i] > low[max(0, i-3):i+1].min() + 2.0 * atr_val:
+            # Exit short: price breaks above Donchian high or weekly trend turns up
+            if close[i] > upper_band or close[i] > weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_Pullback_Volume_Spike_v1"
-timeframe = "12h"
+name = "1d_Donchian_WeeklyTrend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
