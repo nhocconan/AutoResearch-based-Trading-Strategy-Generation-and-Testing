@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_1w_Momentum_Breakout_v1
-Hypothesis: Weekly momentum combined with daily breakout captures major trends while filtering noise.
-Uses 1w EMA trend filter and 20-day Donchian breakout with volume confirmation.
-Designed for very low trade frequency (target 10-20/year) to minimize fee drag in all market regimes.
+4h_Bollinger_Width_Regime_Adaptive_V1
+Hypothesis: Market regime detection using Bollinger Band width percentile (low = range, high = trend) 
+combined with mean-reversion in range and trend-following in trending regimes. 
+Uses Bollinger Bands for entries and exits with volume confirmation. Designed for low trade frequency 
+(20-40/year) to minimize fee drag and work in both bull and bear markets via regime adaptation.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,78 +21,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2.0)
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma20 + (2.0 * std20)
+    lower_bb = ma20 - (2.0 * std20)
+    bb_width = (upper_bb - lower_bb) / ma20  # Normalized width
     
-    # Weekly trend filter: EMA20 on weekly closes
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Bollinger Width Percentile (50-period) for regime detection
+    bb_width_series = pd.Series(bb_width)
+    bw_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Volume confirmation: current volume > 2.0 * 20-day average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
-    
-    # Align weekly indicators to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1w, volume_confirm)
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need Donchian (20), EMA20 (20), volume avg (20)
-    start_idx = max(20, 20, 20)
+    # Warmup: need BB (20), BW percentile (50), volume avg (20)
+    start_idx = max(20, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
+        if (np.isnan(ma20[i]) or np.isnan(std20[i]) or np.isnan(bw_percentile[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        ema20 = ema20_1w_aligned[i]
-        vol_conf = volume_confirm_aligned[i]
+        bw = bw_percentile[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Determine trend: price vs weekly EMA20
-            uptrend = close_val > ema20
-            downtrend = close_val < ema20
-            
-            if uptrend and vol_conf:
-                # Long: break above Donchian high with volume
-                if close_val > upper:
-                    signals[i] = size
+            # Regime detection: bw < 30 = range, bw > 70 = trend
+            if bw < 30:  # Range regime - mean reversion
+                if close_val <= lower_bb and vol_conf:
+                    signals[i] = size  # Long at lower band
                     position = 1
-                    entry_price = close_val
-            elif downtrend and vol_conf:
-                # Short: break below Donchian low with volume
-                if close_val < lower:
-                    signals[i] = -size
+                elif close_val >= upper_bb and vol_conf:
+                    signals[i] = -size  # Short at upper band
                     position = -1
-                    entry_price = close_val
+            elif bw > 70:  # Trend regime - trend following
+                # Simple trend: price above/below MA20
+                if close_val > ma20[i] and vol_conf:
+                    signals[i] = size  # Long in uptrend
+                    position = 1
+                elif close_val < ma20[i] and vol_conf:
+                    signals[i] = -size  # Short in downtrend
+                    position = -1
         elif position == 1:
-            # Exit: price re-enters channel or trend reversal
-            if close_val < upper:  # Re-enter channel
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Exit conditions
+            if bw < 30:  # Range: exit at opposite band or middle
+                if close_val >= ma20[i]:
+                    signals[i] = 0.0
+                    position = 0
+            else:  # Trend: exit on trend reversal or volatility contraction
+                if close_val < ma20[i] or bw < 50:
+                    signals[i] = 0.0
+                    position = 0
+            if position == 1:
                 signals[i] = size
         elif position == -1:
-            # Exit: price re-enters channel or trend reversal
-            if close_val > lower:  # Re-enter channel
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Exit conditions
+            if bw < 30:  # Range: exit at opposite band or middle
+                if close_val <= ma20[i]:
+                    signals[i] = 0.0
+                    position = 0
+            else:  # Trend: exit on trend reversal or volatility contraction
+                if close_val > ma20[i] or bw < 50:
+                    signals[i] = 0.0
+                    position = 0
+            if position == -1:
                 signals[i] = -size
     
     return signals
 
-name = "1d_1w_Momentum_Breakout_v1"
-timeframe = "1d"
+name = "4h_Bollinger_Width_Regime_Adaptive_V1"
+timeframe = "4h"
 leverage = 1.0
