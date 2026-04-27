@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Volume-Weighted Average Price (VWAP) with 1d Bollinger Band width regime filter.
-# In expanding volatility regimes (BB width rising), price tends to revert to VWAP.
-# In contracting regimes (BB width falling), price trends away from VWAP.
-# Long when price < VWAP and BB width expanding; short when price > VWAP and BB width expanding.
-# Flat when BB width contracting (trending regime). Uses volume confirmation to avoid false signals.
-# Works in both bull (buy dips to VWAP in expansion) and bear (sell rallies to VWAP in expansion).
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA34) and volume spike.
+# Breakouts above 20-bar high with uptrend (price > EMA34) and volume > 2x average
+# signal long; breakdown below 20-bar low with downtrend and volume spike signal short.
+# Exit on opposite Donchian breakout or trend reversal. Designed for trending and
+# ranging markets with low trade frequency (<25/year) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,90 +19,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP for 6h data
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
-    
-    # Get daily data for Bollinger Band width calculation
+    # Get daily data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate Bollinger Bands (20, 2)
-    bb_middle = np.full(len(close_1d), np.nan)
-    bb_std = np.full(len(close_1d), np.nan)
+    # Calculate EMA(34) on daily close
+    ema_34_1d = np.full(len(df_1d), np.nan)
+    alpha = 2 / (34 + 1)
+    for i in range(len(close_1d)):
+        if i < 33:
+            ema_34_1d[i] = np.mean(close_1d[:i+1]) if i > 0 else close_1d[i]
+        else:
+            if np.isnan(ema_34_1d[i-1]):
+                ema_34_1d[i] = np.mean(close_1d[i-33:i+1])
+            else:
+                ema_34_1d[i] = close_1d[i] * alpha + ema_34_1d[i-1] * (1 - alpha)
     
-    for i in range(19, len(close_1d)):
-        bb_middle[i] = np.mean(close_1d[i-19:i+1])
-        bb_std[i] = np.std(close_1d[i-19:i+1])
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower  # Absolute width
+    # Donchian channels (20-period) on 12h data
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    # BB width expansion/contraction: current width vs 10-period average
-    bb_width_ma10 = np.full(len(bb_width), np.nan)
-    for i in range(9, len(bb_width)):
-        bb_width_ma10[i] = np.mean(bb_width[i-9:i+1])
-    
-    bb_width_ratio = bb_width / bb_width_ma10  # >1 = expanding, <1 = contracting
-    bb_width_ratio_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ratio)
-    
-    # VWAP deviation: how far price is from VWAP (as % of price)
-    vwap_deviation = (close - vwap) / vwap  # Positive = above VWAP, negative = below VWAP
-    
-    # Volume confirmation: current volume > 1.3 * 20-period average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    volume_confirmed = volume > (1.3 * vol_ma_20)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough data for all indicators
-    start_idx = max(30, 20)  # VWAP needs some data, BB needs 20, vol needs 20
+    # Warmup: need enough data for indicators
+    start_idx = max(20, 35)
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap[i]) or 
-            np.isnan(bb_width_ratio_aligned[i]) or
-            np.isnan(vwap_deviation[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when BB width is expanding (>1.05)
-        volatility_expanding = bb_width_ratio_aligned[i] > 1.05
+        # Determine trend direction from daily EMA34
+        # Use previous bar's EMA to avoid look-ahead
+        if i > 0 and not np.isnan(ema_34_1d_aligned[i-1]):
+            trend_up = close[i] > ema_34_1d_aligned[i-1]
+            trend_down = close[i] < ema_34_1d_aligned[i-1]
+        else:
+            trend_up = False
+            trend_down = False
         
         if position == 0:
-            # Long entry: price below VWAP, volatility expanding, volume confirmed
-            if (vwap_deviation[i] < -0.005 and  # 0.5% below VWAP
-                volatility_expanding and
-                volume_confirmed[i]):
+            # Long entry: price breaks above Donchian high + uptrend + volume spike
+            if (close[i] > donchian_high[i] and 
+                trend_up and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price above VWAP, volatility expanding, volume confirmed
-            elif (vwap_deviation[i] > 0.005 and   # 0.5% above VWAP
-                  volatility_expanding and
-                  volume_confirmed[i]):
+            # Short entry: price breaks below Donchian low + downtrend + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  trend_down and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses above VWAP or volatility contracts
-            if (vwap_deviation[i] > 0 or  # Price at or above VWAP
-                bb_width_ratio_aligned[i] <= 1.02):  # Volatility contracting
+            # Long exit: price breaks below Donchian low or trend turns down
+            if (close[i] < donchian_low[i] or 
+                not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses below VWAP or volatility contracts
-            if (vwap_deviation[i] < 0 or   # Price at or below VWAP
-                bb_width_ratio_aligned[i] <= 1.02):  # Volatility contracting
+            # Short exit: price breaks above Donchian high or trend turns up
+            if (close[i] > donchian_high[i] or 
+                not trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VWAP_BBWidth_Expansion_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
