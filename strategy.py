@@ -13,30 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for higher timeframe context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA(20) for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Get daily data for volume and volatility
+    # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate daily average volume (20-period)
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_volume_20_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_20)
+    # Calculate daily RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)
+    
+    # Calculate daily SMA(50) for trend filter
+    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
     # Calculate daily ATR(14) for volatility
     tr1 = high_1d - low_1d
@@ -44,14 +42,16 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily Donchian channels (20-period)
-    donchian_high_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    # Align daily indicators to 15-minute timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # Calculate RSI moving average for smoothing
+    rsi_ma = pd.Series(rsi).rolling(window=3, min_periods=3).mean().values
+    rsi_ma_aligned = align_htf_to_ltf(prices, df_1d, rsi_ma)
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -61,15 +61,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(avg_volume_20_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(donchian_high_20_aligned[i]) or 
-            np.isnan(donchian_low_20_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(sma_50_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or 
+            np.isnan(rsi_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -78,30 +77,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter: price above weekly EMA20 for long, below for short
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: price above SMA50 for long, below for short
+        uptrend = close[i] > sma_50_aligned[i]
+        downtrend = close[i] < sma_50_aligned[i]
         
-        # Volume filter: current volume > 1.5x average volume
-        volume_ok = volume[i] > (avg_volume_20_aligned[i] * 1.5)
+        # RSI conditions: oversold/overbought with confirmation
+        rsi_oversold = rsi_aligned[i] < 30
+        rsi_overbought = rsi_aligned[i] > 70
+        rsi_rising = rsi_ma_aligned[i] > rsi_aligned[i-1] if i > 0 else False
+        rsi_falling = rsi_ma_aligned[i] < rsi_aligned[i-1] if i > 0 else False
         
-        # Volatility filter: ATR not too low (avoid choppy markets)
-        atr_ma_20 = pd.Series(atr_14_1d).rolling(window=20, min_periods=20).mean().values
-        atr_ma_20_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
-        if np.isnan(atr_ma_20_aligned[i]):
+        # Volatility filter: avoid extremely low volatility
+        atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+        if np.isnan(atr_ma_aligned[i]):
             signals[i] = 0.0
             continue
-        vol_ok = atr_14_1d_aligned[i] > (atr_ma_20_aligned[i] * 0.5)
+        vol_ok = atr_aligned[i] > (atr_ma_aligned[i] * 0.3)
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high_20_aligned[i]
-        short_breakout = close[i] < donchian_low_20_aligned[i]
+        # Long conditions: uptrend + RSI oversold + rising RSI + volatility ok
+        long_condition = uptrend and rsi_oversold and rsi_rising and vol_ok
         
-        # Long conditions: weekly uptrend + volume ok + volatility ok + long breakout
-        long_condition = weekly_uptrend and volume_ok and vol_ok and long_breakout
-        
-        # Short conditions: weekly downtrend + volume ok + volatility ok + short breakout
-        short_condition = weekly_downtrend and volume_ok and vol_ok and short_breakout
+        # Short conditions: downtrend + RSI overbought + falling RSI + volatility ok
+        short_condition = downtrend and rsi_overbought and rsi_falling and vol_ok
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -109,11 +107,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite breakout
-        elif position == 1 and short_breakout:
+        # Exit conditions: opposite RSI extreme
+        elif position == 1 and rsi_aligned[i] > 50:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and long_breakout:
+        elif position == -1 and rsi_aligned[i] < 50:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -127,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyEMA20_VolumeFilter_DonchianBreakout"
-timeframe = "12h"
+name = "15m_RSI_SMA50_Trend_Filter"
+timeframe = "15m"
 leverage = 1.0
