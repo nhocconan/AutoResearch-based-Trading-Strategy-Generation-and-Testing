@@ -1,44 +1,43 @@
 #!/usr/bin/env python3
 """
-6h Camarilla Pivot R3/S3 Reversal with 1d Trend Filter
-- Long at S3 bounce when 1d EMA34 is bullish
-- Short at R3 rejection when 1d EMA34 is bearish
-- Uses volume confirmation to avoid false breaks
-- Target: 15-30 trades/year per symbol
+Hypothesis: 12-hour Williams Alligator with 1-day trend filter and volume confirmation.
+In bull market (price > 1-day EMA50): long when Alligator lines are bullish aligned (jaw < teeth < lips) and volume > 1.5x average.
+In bear market (price < 1-day EMA50): short when Alligator lines are bearish aligned (jaw > teeth > lips) and volume > 1.5x average.
+Alligator identifies trend, daily trend filters direction, volume confirms participation.
+Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ema(values, period):
-    """Calculate EMA with proper handling of NaN"""
-    ema = np.full_like(values, np.nan, dtype=np.float64)
-    if len(values) < period:
-        return ema
-    alpha = 2.0 / (period + 1)
-    ema[period-1] = np.mean(values[:period])
-    for i in range(period, len(values)):
-        ema[i] = alpha * values[i] + (1 - alpha) * ema[i-1]
-    return ema
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for the period"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close
-    c = close
-    h = high
-    l = low
-    r4 = c + (range_val * 1.500)
-    r3 = c + (range_val * 1.250)
-    r2 = c + (range_val * 1.166)
-    r1 = c + (range_val * 1.083)
-    s1 = c - (range_val * 1.083)
-    s2 = c - (range_val * 1.166)
-    s3 = c - (range_val * 1.250)
-    s4 = c - (range_val * 1.500)
-    return r3, r2, r1, c, s1, s2, s3, s4
+def calculate_alligator(high, low, jaw_period=13, teeth_period=8, lips_period=5):
+    """Williams Alligator: three smoothed moving averages (SMMA)"""
+    if len(high) < jaw_period + 8 or len(low) < jaw_period + 8:
+        return np.full_like(high, np.nan, dtype=np.float64), \
+               np.full_like(high, np.nan, dtype=np.float64), \
+               np.full_like(high, np.nan, dtype=np.float64)
+    
+    # Median price
+    median_price = (high + low) / 2.0
+    
+    # Smoothed Moving Average (SMMA) - similar to EMA but with different smoothing
+    def smma(data, period):
+        if len(data) < period:
+            return np.full_like(data, np.nan, dtype=np.float64)
+        result = np.full_like(data, np.nan, dtype=np.float64)
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (Prev SMMA * (Period-1) + Current Price) / Period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period - 1) + data[i]) / period
+        return result
+    
+    jaw = smma(median_price, jaw_period)   # Blue line (13-period)
+    teeth = smma(median_price, teeth_period)  # Red line (8-period)
+    lips = smma(median_price, lips_period)    # Green line (5-period)
+    
+    return jaw, teeth, lips
 
 def generate_signals(prices):
     n = len(prices)
@@ -50,92 +49,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA50 for trend
     daily_close = df_1d['close'].values
-    ema_34_1d = calculate_ema(daily_close, 34)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = np.empty_like(daily_close, dtype=np.float64)
+    ema_50_1d.fill(np.nan)
+    if len(daily_close) >= 50:
+        alpha = 2.0 / (50 + 1)
+        ema_50_1d[49] = np.mean(daily_close[:50])
+        for i in range(50, len(daily_close)):
+            ema_50_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema_50_1d[i-1]
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily Camarilla levels from previous day
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close_prev = df_1d['close'].values
+    # Get daily data for volume confirmation
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = np.empty_like(vol_1d, dtype=np.float64)
+    vol_ma_20_1d.fill(np.nan)
+    for i in range(19, len(vol_1d)):
+        vol_ma_20_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Initialize Camarilla arrays
-    r3 = np.full_like(daily_close, np.nan)
-    s3 = np.full_like(daily_close, np.nan)
-    
-    # Calculate Camarilla for each day (using previous day's data)
-    for i in range(1, len(daily_close)):
-        r3_i, _, _, _, _, _, s3_i, _ = calculate_camarilla(
-            daily_high[i-1], daily_low[i-1], daily_close_prev[i-1]
-        )
-        r3[i] = r3_i
-        s3[i] = s3_i
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate daily volume average for confirmation
-    daily_volume = df_1d['volume'].values
-    vol_ma_20 = np.full_like(daily_volume, np.nan, dtype=np.float64)
-    for i in range(19, len(daily_volume)):
-        vol_ma_20[i] = np.mean(daily_volume[i-19:i+1])
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Calculate 12-hour Alligator
+    jaw, teeth, lips = calculate_alligator(high, low, 13, 8, 5)
+    jaw_aligned = jaw  # Same timeframe, no alignment needed
+    teeth_aligned = teeth
+    lips_aligned = lips
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Camarilla (1d), EMA34 (1d), volume MA (1d)
-    start_idx = 1  # Need previous day for Camarilla
+    # Warmup: need Alligator (13+8=21 bars), daily EMA50 (50), daily volume MA20 (20)
+    start_idx = max(21, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price and volume
         price_now = close[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_aligned[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
         
-        # Current levels
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
-        ema_trend = ema_34_1d_aligned[i]
+        # Current indicators
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
         
-        # Volume filter: volume > 1.2x daily average
-        vol_filter = vol_now > 1.2 * vol_ma
+        # Daily close price for trend comparison
+        daily_close_price = df_1d['close'].values
+        daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_price)
+        if np.isnan(daily_close_aligned[i]):
+            signals[i] = 0.0
+            continue
+        daily_close_val = daily_close_aligned[i]
+        
+        # Volume filter: volume > 1.5x daily average
+        vol_filter = vol_now > 1.5 * vol_ma
+        
+        # Alligator alignment conditions
+        bullish_aligned = jaw_val < teeth_val < lips_val  # Jaw < Teeth < Lips
+        bearish_aligned = jaw_val > teeth_val > lips_val  # Jaw > Teeth > Lips
         
         if position == 0:
-            # Long setup: price at S3 with bullish trend and volume
-            if abs(price_now - s3_level) < 0.001 * s3_level and ema_trend > s3_level and vol_filter:
+            # Bull market (price > daily EMA50): look for long
+            if daily_close_val > ema_trend and bullish_aligned and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short setup: price at R3 with bearish trend and volume
-            elif abs(price_now - r3_level) < 0.001 * r3_level and ema_trend < r3_level and vol_filter:
+            # Bear market (price < daily EMA50): look for short
+            elif daily_close_val < ema_trend and bearish_aligned and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches R3 or trend turns bearish
-            if price_now >= r3_level or ema_trend < r3_level:
+            # Exit long: bearish alignment or trend change to bear
+            if bearish_aligned or daily_close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price reaches S3 or trend turns bullish
-            if price_now <= s3_level or ema_trend > s3_level:
+            # Exit short: bullish alignment or trend change to bull
+            if bullish_aligned or daily_close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -143,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_DailyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
