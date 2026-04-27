@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume confirmation.
-Designed for 12h timeframe with target 50-150 trades over 4 years. Uses discrete position sizing (0.25) to minimize fee churn.
-R1/S1 levels are tighter breakout points, increasing trade frequency while volume and trend filters maintain quality.
-In bull markets: longs on R1 breakouts with uptrend. In bear markets: shorts on S1 breakdowns with downtrend.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
+R1/S1 levels provide tighter entry points for more frequent but still selective trades.
+Trading only in direction of 1d trend avoids counter-trend whipsaws in both bull and bear markets.
+Volume spike confirms breakout authenticity. Designed for 4h timeframe with target 75-200 trades over 4 years.
+Uses discrete position sizing (0.25) to minimize fee churn while maintaining adequate exposure.
+Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns.
 """
 
 import numpy as np
@@ -28,7 +30,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Camarilla levels from previous 12h bar's OHLC
+    # Calculate Camarilla levels from previous 4h bar's OHLC
     prev_close = np.concatenate([[close[0]], close[:-1]])
     prev_high = np.concatenate([[high[0]], high[:-1]])
     prev_low = np.concatenate([[low[0]], low[:-1]])
@@ -106,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
