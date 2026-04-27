@@ -1,8 +1,5 @@
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Use 1d-derived Camarilla R3/S3 levels as breakout triggers on 12h timeframe with 1d EMA34 trend filter and volume spike (>2x 20-period average). Long when price > EMA34 and breaks above R3; short when price < EMA34 and breaks below S3. Exit on opposite level touch. Designed for 12h timeframe to reduce trade frequency and work in both bull (breakouts with trend) and bear (mean reversion at extremes with trend filter). Target 12-37 trades/year to minimize fee drag.
-"""
+# 4h_KAMA_Trend_RSI_Pullback_12hTrend_Filter
+# Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) as adaptive trend filter on 4h, enter on RSI pullbacks in trend direction, with 12h trend filter to avoid counter-trend trades. Designed for low trade frequency (~20-40/year) with high win rate in both bull and bear markets by avoiding whipsaws. KAMA adapts to market noise, reducing false signals during chop.
 
 import numpy as np
 import pandas as pd
@@ -18,70 +15,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from 1d timeframe
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # KAMA parameters
+    fast_sc = 0.666  # 2/(2+1)
+    slow_sc = 0.0645  # 2/(30+1)
+    
+    # Calculate KAMA on 4h close
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly
+    
+    # Proper ER calculation
+    er = np.zeros(n)
+    for i in range(10, n):  # ER needs lookback
+        if i >= 10:
+            direction = np.abs(close[i] - close[i-10])
+            volatility = np.sum(np.abs(np.diff(close[i-10:i+1])))
+            er[i] = direction / volatility if volatility != 0 else 0
+    
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss != 0, avg_loss, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 12h trend filter: EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # 1d EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: above average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > vol_avg
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for volume average and EMA
-    start_idx = max(20, 34)
+    # Warmup
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        ema_34_val = ema_34_aligned[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        ema_12h_val = ema_50_12h_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume confirmation AND above 1d EMA34 (uptrend)
-            if close[i] > camarilla_r3_val and vol_conf and close[i] > ema_34_val:
+            # Long: price > KAMA (uptrend), RSI pulled back to 40-50, 12h trend up, volume confirmation
+            if close[i] > kama_val and 40 <= rsi_val <= 50 and close[i] > ema_12h_val and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3 with volume confirmation AND below 1d EMA34 (downtrend)
-            elif close[i] < camarilla_s3_val and vol_conf and close[i] < ema_34_val:
+            # Short: price < KAMA (downtrend), RSI bounced to 50-60, 12h trend down, volume confirmation
+            elif close[i] < kama_val and 50 <= rsi_val <= 60 and close[i] < ema_12h_val and vol_conf:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 (opposite level)
-            if close[i] < camarilla_s3_val:
+            # Exit long: RSI > 60 (overbought) or price < KAMA (trend change)
+            if rsi_val > 60 or close[i] < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R3 (opposite level)
-            if close[i] > camarilla_r3_val:
+            # Exit short: RSI < 40 (oversold) or price > KAMA (trend change)
+            if rsi_val < 40 or close[i] > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_Trend_RSI_Pullback_12hTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
