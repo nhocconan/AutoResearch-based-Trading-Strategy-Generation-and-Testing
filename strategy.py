@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-In both bull and bear markets, breakouts aligned with higher timeframe trend (1d EMA34) tend to continue.
-Volume > 1.5x average confirms breakout strength. Target: 15-30 trades/year (60-120 over 4 years).
+Hypothesis: 1d strategy using 1-day Donchian(20) breakout with 1-week EMA200 trend filter and volume confirmation.
+In both bull and bear markets, breakouts aligned with higher timeframe trend (1-week EMA200) tend to continue.
+Volume > 1.5x average confirms breakout strength. Target: 7-25 trades/year (30-100 over 4 years).
 Position size: 0.25. Uses discrete levels to minimize fee churn.
 """
 
@@ -20,24 +20,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1-week data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close
-    close_1d = df_1d['close'].values
-    ema_34 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34[33] = np.mean(close_1d[:34])  # SMA seed
-        multiplier = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema_34[i] = (close_1d[i] * multiplier) + (ema_34[i-1] * (1 - multiplier))
+    # Calculate EMA200 on 1-week close
+    close_1w = df_1w['close'].values
+    ema_200 = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 200:
+        ema_200[199] = np.mean(close_1w[:200])  # SMA seed
+        multiplier = 2 / (200 + 1)
+        for i in range(200, len(close_1w)):
+            ema_200[i] = (close_1w[i] * multiplier) + (ema_200[i-1] * (1 - multiplier))
     
-    # Align 1d EMA34 to 4h timeframe (waits for 1d bar close)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align 1-week EMA200 to daily timeframe (waits for 1-week bar close)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
-    # Calculate 20-period Donchian channels on 4h data
+    # Calculate 20-period Donchian channels on daily data
     lookback = 20
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
@@ -56,13 +56,13 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup: need 20 for Donchian, 20 for volume, 34 for EMA34 seed
-    start_idx = max(lookback, vol_period, 34)
+    # Warmup: need 20 for Donchian, 20 for volume, 200 for EMA200 seed
+    start_idx = max(lookback, vol_period, 200)
     
     for i in range(start_idx, n):
         if (np.isnan(highest_high[i]) or
             np.isnan(lowest_low[i]) or
-            np.isnan(ema_34_aligned[i]) or
+            np.isnan(ema_200_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -70,9 +70,9 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from 1d EMA34
-        bullish = price > ema_34_aligned[i]
-        bearish = price < ema_34_aligned[i]
+        # Determine trend from 1-week EMA200
+        bullish = price > ema_200_aligned[i]
+        bearish = price < ema_200_aligned[i]
         
         # Volume confirmation: > 1.5x average volume
         volume_confirmation = vol_ratio > 1.5
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA200_Volume"
+timeframe = "1d"
 leverage = 1.0
