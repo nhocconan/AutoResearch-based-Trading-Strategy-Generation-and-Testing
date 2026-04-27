@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Breakout_1wTrend_Volume_v1
-Hypothesis: Uses 1-day Keltner Channel breakout with 1-week trend filter and volume confirmation.
-Keltner Channels (ATR-based) capture volatility breakouts, while weekly trend ensures alignment with higher timeframe momentum.
-Volume confirmation filters out weak breakouts. Designed for low trade frequency (10-25 trades/year) to minimize fee drag.
-Works in both bull and bear markets by following the weekly trend direction.
+4h_KAMA_Direction_RSI_Range_200MA_V1
+Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) for trend direction,
+combined with RSI range filtering and 200-period moving average to avoid whipsaws.
+Designed for low trade frequency (20-50 trades/year) with strong trend confirmation
+to work in both bull and bear markets by filtering counter-trend noise.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,88 +21,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1-week ATR for Keltner Channels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) for trend
+    def kama(close, length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # True Range and ATR(20) for 1-week
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Calculate 200-period SMA for long-term trend filter
+    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
-    # Keltner Channels: 20-period EMA ± 2.0 * ATR
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema20_1w + 2.0 * atr_1w
-    lower_keltner = ema20_1w - 2.0 * atr_1w
+    # Calculate RSI (14-period)
+    def rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).rolling(window=length, min_periods=length).mean().values
+        avg_loss = pd.Series(loss).rolling(window=length, min_periods=length).mean().values
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # 1-week trend: EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    rsi_vals = rsi(close, 14)
     
-    # Volume confirmation: current volume > 1.5 * 20-day average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    # Get daily data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
+        return np.zeros(n)
     
-    # Align all 1w indicators to 1d timeframe
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1w, volume_confirm)
+    # Calculate daily volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = vol_1d > (1.5 * vol_avg_1d)
+    
+    # Align 1d indicators to 4h timeframe
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    
+    # Calculate indicators
+    kama_vals = kama(close, 10, 2, 30)
+    sma200_vals = sma200
+    rsi_vals = rsi_vals
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for calculations
-    start_idx = 50  # EMA50 needs 50 periods
+    # Warmup: need enough data for all indicators
+    start_idx = 200  # SMA200 needs 200 periods
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
+        if (np.isnan(kama_vals[i]) or np.isnan(sma200_vals[i]) or 
+            np.isnan(rsi_vals[i]) or np.isnan(volume_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper = upper_keltner_aligned[i]
-        lower = lower_keltner_aligned[i]
-        ema50 = ema50_1w_aligned[i]
-        vol_conf = volume_confirm_aligned[i]
+        kama_val = kama_vals[i]
+        sma200_val = sma200_vals[i]
+        rsi_val = rsi_vals[i]
+        vol_spike = volume_spike_1d_aligned[i]
         
         if position == 0:
-            # Determine trend: price vs EMA50 (1w)
-            uptrend = close_val > ema50
-            downtrend = close_val < ema50
-            
-            if uptrend and vol_conf:
-                # Long: break above upper Keltner with volume
-                if close_val > upper:
-                    signals[i] = size
-                    position = 1
-                    entry_price = close_val
-            elif downtrend and vol_conf:
-                # Short: break below lower Keltner with volume
-                if close_val < lower:
-                    signals[i] = -size
-                    position = -1
-                    entry_price = close_val
+            # Long conditions: price above KAMA (uptrend), above SMA200, RSI not overbought, volume spike
+            if (close_val > kama_val and 
+                close_val > sma200_val and 
+                rsi_val < 70 and 
+                vol_spike):
+                signals[i] = size
+                position = 1
+            # Short conditions: price below KAMA (downtrend), below SMA200, RSI not oversold, volume spike
+            elif (close_val < kama_val and 
+                  close_val < sma200_val and 
+                  rsi_val > 30 and 
+                  vol_spike):
+                signals[i] = -size
+                position = -1
         elif position == 1:
-            # Exit: price re-enters below upper Keltner or trend reversal
-            if close_val < upper:  # Re-enter below upper Keltner
+            # Exit long: price crosses below KAMA or RSI overbought
+            if close_val < kama_val or rsi_val > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: price re-enters above lower Keltner or trend reversal
-            if close_val > lower:  # Re-enter above lower Keltner
+            # Exit short: price crosses above KAMA or RSI oversold
+            if close_val > kama_val or rsi_val < 25:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_Breakout_1wTrend_Volume_v1"
-timeframe = "1d"
+name = "4h_KAMA_Direction_RSI_Range_200MA_V1"
+timeframe = "4h"
 leverage = 1.0
