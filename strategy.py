@@ -1,3 +1,9 @@
+# 4h_Polarized_Fractal_Efficiency_PFE_EMA34_Breakout_Volume
+# Hypothesis: Polarized Fractal Efficiency (PFE) > 60 indicates strong trending markets.
+# Combine with EMA34 trend filter and volume confirmation for high-probability breakouts.
+# Works in bull/bear by following the trend direction, avoiding counter-trend trades.
+# Target: 20-40 trades/year on 4H timeframe to minimize fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,7 +24,7 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter (vectorized)
+    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 34:
@@ -27,7 +33,7 @@ def generate_signals(prices):
         for i in range(1, len(close_1d)):
             ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
     
-    # Calculate previous day's OHLC for Camarilla (avoid look-ahead)
+    # Calculate previous day's OHLC for reference (avoid look-ahead)
     prev_close = np.roll(close_1d, 1)
     prev_high = np.roll(df_1d['high'].values, 1)
     prev_low = np.roll(df_1d['low'].values, 1)
@@ -35,63 +41,73 @@ def generate_signals(prices):
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     
-    # Camarilla R3 and S3 calculation
-    range_hl = prev_high - prev_low
-    camarilla_factor = range_hl * 1.1 / 4
-    r3 = prev_close + camarilla_factor
-    s3 = prev_close - camarilla_factor
-    
-    # Align daily indicators to 6h timeframe
+    # Align daily EMA34 to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate 6-period volume average for spike detection (6h x 1 = 1 day)
+    # Calculate 4-period volume average for spike detection (4h x 4 = 16h ~ 2/3 day)
     vol_ma = np.full(n, np.nan)
-    vol_period = 6
+    vol_period = 4
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
+    # Calculate PFE (Polarized Fractal Efficiency) on close prices
+    pfe_period = 10
+    pfe = np.full(n, np.nan)
+    for i in range(pfe_period - 1, n):
+        # Net price change (numerator)
+        num = close[i] - close[i - pfe_period + 1]
+        # Sum of absolute price changes (denominator)
+        den = 0.0
+        for j in range(i - pfe_period + 2, i + 1):
+            den += abs(close[j] - close[j-1])
+        if den != 0:
+            pfe[i] = (num / den) * 100
+        else:
+            pfe[i] = 0.0
+    
     signals = np.zeros(n)
     position = 0
-    size = 0.25
+    size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(34, vol_period) + 5
+    start_idx = max(34, vol_period, pfe_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(pfe[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.5x average volume
-        vol_filter = vol_ratio > 1.5
+        # Volume spike filter: at least 1.8x average volume
+        vol_filter = vol_ratio > 1.8
+        
+        # PFE filter: > 60 for strong uptrend, < -60 for strong downtrend
+        pfe_long = pfe[i] > 60
+        pfe_short = pfe[i] < -60
         
         if position == 0:
-            # Long: Price breaks above R3 with volume and above daily EMA34
-            if price > r3_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
+            # Long: Strong uptrend (PFE > 60), price above daily EMA34, volume spike
+            if pfe_long and price > ema_34_1d_aligned[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below S3 with volume and below daily EMA34
-            elif price < s3_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
+            # Short: Strong downtrend (PFE < -60), price below daily EMA34, volume spike
+            elif pfe_short and price < ema_34_1d_aligned[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below S3 or below daily EMA34
-            if price < s3_aligned[i] or price < ema_34_1d_aligned[i]:
+            # Long exit: Trend weakening (PFE < 40) or price below EMA34
+            if pfe[i] < 40 or price < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above R3 or above daily EMA34
-            if price > r3_aligned[i] or price > ema_34_1d_aligned[i]:
+            # Short exit: Trend weakening (PFE > -40) or price above EMA34
+            if pfe[i] > -40 or price > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
-timeframe = "6h"
+name = "4h_Polarized_Fractal_Efficiency_PFE_EMA34_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
