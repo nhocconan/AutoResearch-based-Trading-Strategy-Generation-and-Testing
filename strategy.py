@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_HTF
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3
 Hypothesis: Camarilla R1/S1 breakout on 4h with 1d trend filter (price > EMA34) and volume spike.
 Breakouts at R1/S1 levels with 1d trend alignment and volume confirmation capture strong moves
 while avoiding false breakouts in choppy or counter-trend conditions. Works in both bull and bear
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_HTF"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
