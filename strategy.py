@@ -1,16 +1,11 @@
-# USL Strategy: 12h_1D_Camarilla_R3_S3_Breakout_VolumeSpike_v1
-# Hypothesis: Breakout above/below daily Camarilla R3/S3 with volume > 2x average and volatility filter.
-# Works in bull markets by capturing strong momentum moves and in bear markets by catching sharp reversals.
-# Uses 12h timeframe to reduce trade frequency and focus on significant moves.
-# Target: 15-25 trades/year to minimize fee drag while capturing significant moves.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,51 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Get daily data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily Bollinger Bands (20, 2.5)
     close_1d = df_1d['close'].values
+    sma_20 = np.full(len(close_1d), np.nan)
+    std_20 = np.full(len(close_1d), np.nan)
     
-    # Camarilla: Range = (H-L), R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    for i in range(20, len(close_1d)):
+        sma_20[i] = np.mean(close_1d[i-20:i])
+        std_20[i] = np.std(close_1d[i-20:i])
     
-    # Calculate ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    for i in range(n):
-        if i < 14:
-            atr[i] = np.mean(tr[:i+1]) if i > 0 else tr[0]
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    upper_band = sma_20 + (std_20 * 2.5)
+    lower_band = sma_20 - (std_20 * 2.5)
     
-    # Calculate volume average (20-period)
+    # Align Bollinger Bands to 4h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
+    
+    # Calculate 4h Bollinger Bands for entry timing
+    sma_20_4h = np.full(n, np.nan)
+    std_20_4h = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        sma_20_4h[i] = np.mean(close[i-20:i])
+        std_20_4h[i] = np.std(close[i-20:i])
+    
+    upper_band_4h = sma_20_4h + (std_20_4h * 2.0)
+    lower_band_4h = sma_20_4h - (std_20_4h * 2.0)
+    
+    # Volume filter
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
     signals = np.zeros(n)
     position = 0
     
-    # Warmup: need all indicators
-    start_idx = max(20, 14)  # volume MA needs 20, ATR needs 14
+    # Warmup
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
+        if (np.isnan(upper_band_aligned[i]) or
+            np.isnan(lower_band_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -70,47 +68,37 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Volume confirmation: > 2x average volume
+        # Volume confirmation: > 2.0x average volume
         volume_confirmation = vol_ratio > 2.0
         
-        # ATR volatility filter: avoid low volatility periods
-        # Only trade when ATR is above 50% of its 50-period average
-        if i >= 50:
-            atr_avg = np.mean(atr[i-50:i+1])
-            vol_filter = atr[i] > atr_avg * 0.5
-        else:
-            vol_filter = True  # No filter during warmup
-        
         if position == 0:
-            # Long: break above daily R3 with volume and volatility
-            if volume_confirmation and vol_filter and price > camarilla_r3_aligned[i]:
+            # Long: price touches daily lower Bollinger Band with volume confirmation
+            if volume_confirmation and price <= lower_band_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below daily S3 with volume and volatility
-            elif volume_confirmation and vol_filter and price < camarilla_s3_aligned[i]:
+            # Short: price touches daily upper Bollinger Band with volume confirmation
+            elif volume_confirmation and price >= upper_band_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to daily midpoint or volatility drops significantly
-            daily_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
-            if price < daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
+            # Long exit: price returns to daily SMA or opposite band touched
+            if price >= sma_20_aligned[i] or price >= upper_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # Maintain position
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to daily midpoint or volatility drops significantly
-            daily_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
-            if price > daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
+            # Short exit: price returns to daily SMA or opposite band touched
+            if price <= sma_20_aligned[i] or price <= lower_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # Maintain position
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_1D_Camarilla_R3_S3_Breakout_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_1D_Bollinger_Bands_Touch_Reversion"
+timeframe = "4h"
 leverage = 1.0
