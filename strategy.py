@@ -1,101 +1,136 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation.
-In bull markets: long on upper band breakout with 12h uptrend.
-In bear markets: short on lower band breakout with 12h downtrend.
-Volume confirms breakout strength. Target: 25-40 trades/year per symbol.
+Hypothesis: 6-hour RSI(14) with 1-week RSI(49) trend filter and 1-day volume confirmation.
+In oversold conditions (RSI<30) with weekly uptrend: long.
+In overbought conditions (RSI>70) with weekly downtrend: short.
+Weekly RSI provides robust trend filter less prone to whipsaw than moving averages,
+while daily volume confirms participation. Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_rsi(close, length=14):
+    """Relative Strength Index with proper smoothing"""
+    if len(close) < length + 1:
+        return np.full_like(close, np.nan, dtype=np.float64)
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(close, np.nan, dtype=np.float64)
+    avg_loss = np.full_like(close, np.nan, dtype=np.float64)
+    
+    # First average
+    avg_gain[length] = np.mean(gain[:length])
+    avg_loss[length] = np.mean(loss[:length])
+    
+    # Smooth subsequent values
+    for i in range(length + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (length - 1) + gain[i-1]) / length
+        avg_loss[i] = (avg_loss[i-1] * (length - 1) + loss[i-1]) / length
+    
+    rs = np.full_like(close, np.nan, dtype=np.float64)
+    for i in range(length, len(close)):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+        else:
+            rs[i] = np.inf
+    
+    rsi = np.full_like(close, np.nan, dtype=np.float64)
+    for i in range(length, len(close)):
+        if rs[i] == np.inf:
+            rsi[i] = 100.0
+        else:
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+    
+    return rsi
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 49:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate weekly RSI49 for trend
+    wk_close = df_1w['close'].values
+    rsi_49_1w = calculate_rsi(wk_close, 49)
+    rsi_49_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_49_1w)
     
-    # Calculate 12h close for trend comparison
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    # Get daily volume for confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 4h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h RSI14
+    rsi_14_6h = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian (20) + EMA (50) + volume avg (20)
-    start_idx = max(20, 50, 20)
+    # Warmup: need RSI14 (14), weekly RSI49 (49), volume MA (20)
+    start_idx = max(14, 49, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(close_12h_aligned[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(rsi_14_6h[i]) or np.isnan(rsi_49_1w_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current values
+        # Current 6h price and volume
         price_now = close[i]
         vol_now = volume[i]
-        vol_avg = vol_avg_20[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
         
-        # Donchian levels
-        upper_band = high_20[i]
-        lower_band = low_20[i]
+        # Current indicators
+        rsi_now = rsi_14_6h[i]
+        weekly_rsi = rsi_49_1w_aligned[i]
         
-        # Trend filter: 12h price vs EMA
-        price_12h = close_12h_aligned[i]
-        ema_12h = ema_50_12h_aligned[i]
-        is_uptrend = price_12h > ema_12h
-        is_downtrend = price_12h < ema_12h
+        # Volume filter: volume > 1.3x daily average
+        vol_filter = vol_now > 1.3 * vol_ma
         
-        # Volume filter: volume > 1.5x average
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Trend filter: weekly RSI > 50 = uptrend, < 50 = downtrend
+        weekly_uptrend = weekly_rsi > 50
+        weekly_downtrend = weekly_rsi < 50
         
         if position == 0:
-            # Long: breakout above upper band with uptrend and volume
-            if price_now > upper_band and is_uptrend and vol_filter:
+            # Oversold with weekly uptrend: long
+            if rsi_now < 30 and weekly_uptrend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: breakout below lower band with downtrend and volume
-            elif price_now < lower_band and is_downtrend and vol_filter:
+            # Overbought with weekly downtrend: short
+            elif rsi_now > 70 and weekly_downtrend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below midpoint or trend changes
-            midpoint = (upper_band + lower_band) / 2
-            if price_now < midpoint or not is_uptrend:
+            # Exit long: overbought or trend change
+            if rsi_now > 70 or weekly_rsi < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above midpoint or trend changes
-            midpoint = (upper_band + lower_band) / 2
-            if price_now > midpoint or not is_downtrend:
+            # Exit short: oversold or trend change
+            if rsi_now < 30 or weekly_rsi > 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_12hTrend_Volume"
-timeframe = "4h"
+name = "6h_RSI14_WeeklyRSI49_Volume"
+timeframe = "6h"
 leverage = 1.0
