@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-#100804 - 1d_WeeklyDonchian20_1wEMA50_Trend_VolumeFilter
-Hypothesis: Daily Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation. Works in bull (breakouts with trend) and bear (mean reversion to mid-band). Targets 20-30 trades/year to minimize fee drag. Uses 1d primary timeframe with 1w HTF for trend filter.
+#100810 - 4h_Price_Action_Mean_Reversion_with_Volume_Confirmation
+Hypothesis: Mean reversion strategy using price action at key levels with volume confirmation.
+Buys when price rejects support with volume, sells when price rejects resistance with volume.
+Works in both bull (buying dips) and bear (selling rallies) markets by fading extremes.
+Uses 4h timeframe with 1d support/resistance levels and volume spike confirmation.
+Target: 20-40 trades/year to minimize fee drag while maintaining edge.
 """
 
 import numpy as np
@@ -10,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,70 +22,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for support/resistance levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    # Calculate 1d high/low for support/resistance (using previous day to avoid look-ahead)
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # Calculate weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate key levels: previous day high/low and midpoint
+    resistance = prev_high
+    support = prev_low
+    midpoint = (prev_high + prev_low) / 2
     
-    # Calculate daily Donchian channels (20-period) - using previous 20 days to avoid look-ahead
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    donchian_mid = (high_20 + low_20) / 2
+    # Align to 4h timeframe
+    resistance_4h = align_htf_to_ltf(prices, df_1d, resistance)
+    support_4h = align_htf_to_ltf(prices, df_1d, support)
+    midpoint_4h = align_htf_to_ltf(prices, df_1d, midpoint)
     
-    # Volume filter: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Volume confirmation: volume > 1.8x 24-period average (6 hours)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (vol_ma * 1.8)
     
+    # Price action signals: rejection of levels with volume
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 20
+    # Start after warmup
+    start_idx = 30
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(donchian_mid[i]) or 
-            np.isnan(vol_ma[i])):
+        # Skip if data not ready
+        if (np.isnan(resistance_4h[i]) or np.isnan(support_4h[i]) or 
+            np.isnan(midpoint_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
+            
+        # Buy signal: price near support AND volume spike AND rejection (close > open)
+        near_support = close[i] <= support_4h[i] * 1.005  # Within 0.5% of support
+        rejection_up = close[i] > prices['open'].iloc[i]  # Bullish candle
         
-        # Long condition: price breaks above upper Donchian, above weekly EMA50, volume spike
-        if (close[i] > high_20[i] and 
-            close[i] > ema50_1w_aligned[i] and 
-            volume_filter[i]):
+        if near_support and volume_spike[i] and rejection_up:
             signals[i] = 0.25
-            position = 1
-        # Short condition: price breaks below lower Donchian, below weekly EMA50, volume spike
-        elif (close[i] < low_20[i] and 
-              close[i] < ema50_1w_aligned[i] and 
-              volume_filter[i]):
-            signals[i] = -0.25
-            position = -1
-        # Exit conditions: price returns to Donchian mid-line (mean reversion)
-        elif position == 1 and close[i] < donchian_mid[i]:
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and close[i] > donchian_mid[i]:
-            signals[i] = 0.0
-            position = 0
-        # Hold position
-        else:
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
+            
+        # Sell signal: price near resistance AND volume spike AND rejection (close < open)
+        elif close[i] >= resistance_4h[i] * 0.995:  # Within 0.5% of resistance
+            near_resistance = True
+            rejection_down = close[i] < prices['open'].iloc[i]  # Bearish candle
+            
+            if near_resistance and volume_spike[i] and rejection_down:
                 signals[i] = -0.25
-            else:
+                
+        # Exit when price reaches midpoint (mean reversion target)
+        elif i > start_idx:
+            if signals[i-1] > 0 and close[i] >= midpoint_4h[i]:
                 signals[i] = 0.0
+            elif signals[i-1] < 0 and close[i] <= midpoint_4h[i]:
+                signals[i] = 0.0
+            else:
+                signals[i] = signals[i-1]  # Hold position
     
     return signals
 
-name = "1d_WeeklyDonchian20_1wEMA50_Trend_VolumeFilter"
-timeframe = "1d"
+name = "4h_Price_Action_Mean_Reversion_with_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
