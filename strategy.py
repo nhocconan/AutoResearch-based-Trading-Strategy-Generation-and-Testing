@@ -1,4 +1,3 @@
-# 14:53
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,7 +18,7 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period high/low)
+    # Calculate 1-day Donchian channels (20-period high/low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
@@ -40,7 +39,7 @@ def generate_signals(prices):
         for i in range(1, len(close_1d)):
             ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
     
-    # Align 1d indicators to 6h timeframe
+    # Align 1d indicators to 4h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
@@ -98,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_20_1dEMA34_Volume"
-timeframe = "6h"
+name = "4h_Donchian_20_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
