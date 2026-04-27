@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_HTFTrend
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above 20-period high AND 1d EMA50 up AND volume spike.
-Short when price breaks below 20-period low AND 1d EMA50 down AND volume spike.
-ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR.
-Designed for 20-50 trades/year on 4h to minimize fee drag while capturing strong trends.
-Works in bull markets via breakouts and bear markets via breakdowns with trend alignment.
+1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: Daily Camarilla R3/S3 breakout with weekly trend filter and volume confirmation. 
+In strong weekly trends (price above/below weekly EMA34), breakouts at R3 (long) or S3 (short) 
+have higher follow-through. Volume spike confirms institutional participation. 
+Designed for 1d timeframe to target 30-100 trades over 4 years (7-25/year), minimizing fee drag 
+while capturing multi-day momentum in both bull and bear markets.
 """
 
 import numpy as np
@@ -23,26 +22,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for daily timeframe (using previous day's range)
+    # Camarilla: R4 = close + 1.1*(high-low)/2, R3 = close + 1.1*(high-low)/4, 
+    #            S3 = close - 1.1*(high-low)/4, S4 = close - 1.1*(high-low)/2
+    # We use previous day's high/low to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    daily_range = prev_high - prev_low
+    R3 = prev_close + 1.1 * daily_range / 4
+    S3 = prev_close - 1.1 * daily_range / 4
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Volume spike: current volume > 2.0 * 20-day average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_avg)
     
@@ -51,29 +52,26 @@ def generate_signals(prices):
     entry_price = 0.0
     size = 0.25  # 25% position size
     
-    # Warmup: need enough for Donchian, ATR, EMA50, volume average
-    start_idx = max(20, 14, 50, 20)
+    # Warmup: need enough for weekly EMA34, volume average, and Camarilla calculation
+    start_idx = max(35, 20, 1)  # 35 for weekly EMA34, 20 for volume, 1 for Camarilla (needs prev day)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
-        atr_val = atr[i]
-        ema_trend = ema_50_1d_aligned[i]
+        weekly_trend = ema_34_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Flat - look for entry: Donchian breakout with 1d trend alignment and volume spike
-            # Long: price > Donchian high AND 1d EMA50 up (close > EMA50) AND volume spike
-            # Short: price < Donchian low AND 1d EMA50 down (close < EMA50) AND volume spike
-            long_condition = close_val > donch_high and close_val > ema_trend and vol_spike
-            short_condition = close_val < donch_low and close_val < ema_trend and vol_spike
+            # Flat - look for entry: Camarilla breakout in direction of weekly trend with volume spike
+            # Long: Close > R3 AND weekly trend up (close > weekly EMA34) AND volume spike
+            # Short: Close < S3 AND weekly trend down (close < weekly EMA34) AND volume spike
+            long_condition = close_val > R3[i] and close_val > weekly_trend and vol_spike
+            short_condition = close_val < S3[i] and close_val < weekly_trend and vol_spike
             
             if long_condition:
                 signals[i] = size
@@ -84,18 +82,16 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Long - exit when price breaks below Donchian low OR ATR stoploss hit
-            exit_price = entry_price - 2.0 * atr_val
-            if close_val < donch_low or close_val < exit_price:
+            # Long - exit when price breaks below S3 (reversion to mean) OR weekly trend turns down
+            if close_val < S3[i] or close_val < weekly_trend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price breaks above Donchian high OR ATR stoploss hit
-            exit_price = entry_price + 2.0 * atr_val
-            if close_val > donch_high or close_val > exit_price:
+            # Short - exit when price breaks above R3 (reversion to mean) OR weekly trend turns up
+            if close_val > R3[i] or close_val > weekly_trend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -104,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_HTFTrend"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
