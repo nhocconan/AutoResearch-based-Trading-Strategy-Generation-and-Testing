@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike
-Hypothesis: 1h strategy using Camarilla R1/S1 breakouts with 4h EMA20 trend filter and volume confirmation. R1/S1 levels provide tighter entries than R3/S3, while 4h EMA20 filters for intermediate-term trend alignment. Volume spike confirms institutional participation. Designed for BTC/ETH robustness via trend filter and session restriction (08-20 UTC). Targets 60-150 total trades over 4 years (15-37/year) with 0.20 position size. Uses discrete levels to minimize fee drag.
+6h_ElderRay_ZeroLag_MACD_Confluence
+Hypothesis: 6h strategy combining Elder Ray (Bull/Bear Power) with ZeroLag MACD and 1w trend filter. 
+Elder Ray measures bull/bear power relative to EMA13. ZeroLag MACD reduces lag for timely entries. 
+1w EMA50 trend filter ensures alignment with weekly momentum. Designed for BTC/ETH robustness 
+in both bull and bear markets via trend filter and momentum confirmation. Targets 50-150 trades 
+over 4 years (12-37/year) with 0.25 position size. Uses discrete levels to minimize fee drag.
 """
 
 import numpy as np
@@ -18,58 +22,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 4h data for EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    ema_20 = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20)
+    # Calculate EMA13 for Elder Ray (on 6h data)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 4h data for Camarilla R1/S1 levels (from previous completed 4h bar)
-    prev_high = df_4h['high'].shift(1).values
-    prev_low = df_4h['low'].shift(1).values
-    prev_close = df_4h['close'].shift(1).values
-    rng = prev_high - prev_low
-    r1 = prev_close + (rng * 1.0833)  # R1 level
-    s1 = prev_close - (rng * 1.0833)  # S1 level
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    # ZeroLag MACD: reduces lag by adding the difference between price and EMA
+    # EMA calculations
+    ema_fast = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_slow = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema_fast - ema_slow
+    # ZeroLag: add (price - EMA) to reduce lag
+    zero_lag_macd = macd_line + (close - ema_fast)
+    signal_line = pd.Series(zero_lag_macd).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = zero_lag_macd - signal_line
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # Fixed position size to minimize churn
+    size = 0.25   # Fixed position size to minimize churn
     
-    # Warmup: need 4h EMA20 (20), 4h shift(1) for Camarilla, vol avg (20)
-    start_idx = max(20 + 1, 1 + 1, 20)
+    # Warmup: need 1w EMA50 (50), EMA13 (13), ZeroLag MACD (max(12,26,9)=26)
+    start_idx = max(50, 13, 26)
     
     for i in range(start_idx, n):
-        # Skip if outside session or any data not ready
-        if not in_session[i] or \
-           (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_20_aligned[i]) or np.isnan(volume_confirm[i])):
+        # Skip if any data not ready
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(zero_lag_macd[i]) or np.isnan(signal_line[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_val = ema_20_aligned[i]
-        vol_conf = volume_confirm[i]
+        ema_1w_val = ema_50_1w_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
+        zl_macd = zero_lag_macd[i]
+        zl_signal = signal_line[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with 4h EMA20 alignment and volume confirmation
-            long_condition = (close_val > r1_val and 
-                            close_val > ema_val and 
-                            vol_conf)
-            short_condition = (close_val < s1_val and 
-                             close_val < ema_val and 
-                             vol_conf)
+            # Look for entry: Elder Ray + ZeroLag MACD confluence with 1w trend filter
+            long_condition = (bull_val > 0 and  # Bull power positive
+                            zl_macd > zl_signal and  # MACD bullish crossover
+                            close[i] > ema_1w_val)   # Above weekly EMA (uptrend)
+            
+            short_condition = (bear_val < 0 and   # Bear power negative
+                             zl_macd < zl_signal and  # MACD bearish crossover
+                             close[i] < ema_1w_val)   # Below weekly EMA (downtrend)
             
             if long_condition:
                 signals[i] = size
@@ -78,15 +82,15 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 4h EMA20 (trend reversal)
-            if close_val < ema_val:
+            # Exit long: bear power turns negative OR MACD histogram turns negative
+            if bear_val < 0 or zl_macd < zl_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 4h EMA20 (trend reversal)
-            if close_val > ema_val:
+            # Exit short: bull power turns positive OR MACD histogram turns positive
+            if bull_val > 0 or zl_macd > zl_signal:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike"
-timeframe = "1h"
+name = "6h_ElderRay_ZeroLag_MACD_Confluence"
+timeframe = "6h"
 leverage = 1.0
