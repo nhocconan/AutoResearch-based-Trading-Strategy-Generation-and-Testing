@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_Breakout_1dTrend_VolumeSpike_Regime
-Hypothesis: Uses 12h timeframe with Donchian(20) breakouts filtered by 1d EMA50 trend, volume confirmation, and chop regime filter. Designed for BTC/ETH to work in both bull and bear markets by only taking breakouts in the direction of the 1d trend. Target 12-37 trades/year to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_ChopFilter
+Hypothesis: Uses 4h timeframe with Camarilla R1/S1 breakouts filtered by 12h EMA50 trend, volume confirmation, and chop regime filter. Designed for BTC/ETH to work in both bull and bear markets by only taking breakouts in the direction of the 12h trend. Target 20-50 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,20 +18,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter and Donchian channels
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    
+    # 12h EMA50 trend filter
+    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 trend filter
-    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Camarilla levels from previous completed 1d bar
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    rng = prev_high - prev_low
+    r1 = prev_close + (rng * 1.1 / 12)
+    s1 = prev_close - (rng * 1.1 / 12)
     
-    # Donchian channels from previous completed 1d bar (20-period)
-    donch_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
-    donch_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (strict threshold)
+    # Volume confirmation: current volume > 2.0 * 20-period average (strict threshold to reduce trades)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
@@ -43,38 +52,39 @@ def generate_signals(prices):
         np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))
     ), index=prices.index).rolling(window=14, min_periods=14).sum().values
     chop = 100 * np.log10(hl_range / true_range) / np.log10(14)
-    chop_filter = chop < 38.2  # trending regime
+    chop_aligned = chop  # already LTF
+    chop_filter = chop_aligned < 38.2  # trending regime
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     size = 0.25  # Discrete size to minimize fee churn
     
-    # Warmup: need 1d EMA50 (50), Donchian (20+1 shift), vol avg (20), chop (14)
-    start_idx = max(50 + 1, 20 + 1 + 1, 20, 14)  # ~72 bars for 1d EMA50 warmup
+    # Warmup: need 12h EMA50 (50), 1d shift(1) for Camarilla, vol avg (20), chop (14)
+    start_idx = max(50 + 2*6, 1 + 2*6, 20, 14)  # ~112 bars for 12h EMA50 warmup (12h bars per day = 2)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i]) or
             np.isnan(chop_filter[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         ema_val = ema_50_aligned[i]
         vol_conf = volume_confirm[i]
         chop_regime = chop_filter[i]
         
         if position == 0:
-            # Look for entry: Donchian breakout with 1d EMA50 alignment, volume confirmation, and trending regime
-            long_condition = (close_val > donch_high_val and 
+            # Look for entry: Camarilla R1/S1 breakout with 12h EMA50 alignment, volume confirmation, and trending regime
+            long_condition = (close_val > r1_val and 
                             close_val > ema_val and 
                             vol_conf and 
                             chop_regime)
-            short_condition = (close_val < donch_low_val and 
+            short_condition = (close_val < s1_val and 
                              close_val < ema_val and 
                              vol_conf and 
                              chop_regime)
@@ -88,7 +98,7 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Exit long: price crosses below 1d EMA50 (trend reversal)
+            # Exit long: price crosses below 12h EMA50 (trend reversal)
             if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -96,7 +106,7 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA50 (trend reversal)
+            # Exit short: price crosses above 12h EMA50 (trend reversal)
             if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -106,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_Regime"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
