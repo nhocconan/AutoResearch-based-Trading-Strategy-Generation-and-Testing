@@ -1,3 +1,4 @@
+# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,88 +14,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend, volatility, and price channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Daily EMA(34) for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Daily ATR(14) for volatility
-    tr1_d = df_1d['high'].values - df_1d['low'].values
-    tr2_d = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-    tr3_d = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
-    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
-    tr_d[0] = tr1_d[0]
-    atr_1d_raw = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
+    # 12h EMA(50) for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # 12h ATR(14) for volatility filter
-    tr1_h = high - low
-    tr2_h = np.abs(high - np.roll(close, 1))
-    tr3_h = np.abs(low - np.roll(close, 1))
-    tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
-    tr_h[0] = tr1_h[0]
-    atr_12h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
+    # 1d Camarilla levels (based on previous day)
+    # Using high, low, close from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # 12h RSI(14) for momentum confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Resistance and Support levels
+    R1 = pivot + (range_hl * 1.1 / 12)
+    S1 = pivot - (range_hl * 1.1 / 12)
+    R3 = pivot + (range_hl * 1.1 / 4)
+    S3 = pivot - (range_hl * 1.1 / 4)
+    
+    # Align to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # 4h volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
     # Warmup
-    start_idx = max(34, 14)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_12h[i]) or 
-            i >= len(atr_1d_aligned) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
-        atr_12h_val = atr_12h[i]
-        atr_1d_val = atr_1d_aligned[i]
-        rsi_val = rsi[i]
+        ema_trend = ema50_12h_aligned[i]
+        vol_ma_val = vol_ma[i]
+        vol_current = volume[i]
         
-        # Volatility filter: 12h ATR > 0.5 * daily ATR (higher volatility regime)
-        vol_filter = atr_12h_val > (atr_1d_val * 0.5)
-        
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_filter = (rsi_val > 30) & (rsi_val < 70)
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_filter = vol_current > (vol_ma_val * 1.5)
         
         if position == 0:
-            # Long: price above EMA with volatility and RSI filter
-            if close[i] > ema_trend and vol_filter and rsi_filter:
+            # Long: price breaks above R1 with trend and volume
+            if close[i] > R1_aligned[i] and close[i] > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price below EMA with volatility and RSI filter
-            elif close[i] < ema_trend and vol_filter and rsi_filter:
+            # Short: price breaks below S1 with trend and volume
+            elif close[i] < S1_aligned[i] and close[i] < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA
-            if close[i] < ema_trend:
+            # Exit long: price crosses below S1 or trend reversal
+            if close[i] < S1_aligned[i] or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA
-            if close[i] > ema_trend:
+            # Exit short: price crosses above R1 or trend reversal
+            if close[i] > R1_aligned[i] or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_Trend_VolumeRSIFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
