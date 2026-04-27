@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-1d_KAMA_Direction_RSI_Chop
-Hypothesis: Use daily KAMA to establish trend, RSI(2) for mean-reversion entries, and Choppiness Index to filter ranging vs trending markets. Enter long in uptrend when RSI(2) < 10, short in downtrend when RSI(2) > 90. Exit when RSI(2) crosses 50. Designed to work in both bull and bear markets by adapting to regime.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,83 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly KAMA for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    # Efficiency Ratio
-    change = abs(close_1w.diff(10))
-    volatility = close_1w.diff().abs().rolling(10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    # KAMA calculation
-    kama = [close_1w.iloc[0]]
-    for i in range(1, len(close_1w)):
-        kama.append(kama[-1] + sc.iloc[i] * (close_1w.iloc[i] - kama[-1]))
-    kama_1w = np.array(kama)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # 1d EMA34 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Daily RSI(2) for entry signals
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=2, min_periods=2).mean()
-    avg_loss = loss.rolling(window=2, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Calculate Camarilla pivot levels for each day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Choppiness Index (14) for regime filter
-    atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1))))
-    atr_sum = atr.rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    chop = chop.fillna(50).values
+    # Pivot = (H + L + C) / 3
+    # R3 = C + (H - L) * 1.1/4
+    # S3 = C - (H - L) * 1.1/4
+    pivot_1d = (high_1d + low_1d + close_1d_arr) / 3.0
+    r3_1d = close_1d_arr + (high_1d - low_1d) * 1.1 / 4.0
+    s3_1d = close_1d_arr - (high_1d - low_1d) * 1.1 / 4.0
+    
+    # Align to 6h timeframe (previous day's levels available at open)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Volume filter: require volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup period
-    start_idx = 30  # need 30 for weekly KAMA
+    start_idx = 34  # need 34 for EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: uptrend (price > weekly KAMA) and oversold RSI(2) in trending market
-            if (close[i] > kama_1w_aligned[i] and 
-                rsi[i] < 10 and 
-                chop[i] < 61.8):  # trending market
+            # Long: price breaks above R3 in uptrend with volume confirmation
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend (price < weekly KAMA) and overbought RSI(2) in trending market
-            elif (close[i] < kama_1w_aligned[i] and 
-                  rsi[i] > 90 and 
-                  chop[i] < 61.8):  # trending market
+            # Short: price breaks below S3 in downtrend with volume confirmation
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI(2) crosses above 50 or trend changes
-            if rsi[i] > 50 or close[i] < kama_1w_aligned[i]:
+            # Long exit: price closes below EMA34 (trend change)
+            if close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI(2) crosses below 50 or trend changes
-            if rsi[i] < 50 or close[i] > kama_1w_aligned[i]:
+            # Short exit: price closes above EMA34 (trend change)
+            if close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Direction_RSI_Chop"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
