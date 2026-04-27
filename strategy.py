@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF_v2
-Hypothesis: Tighten entry conditions from previous version to reduce trade count and improve Sharpe.
-Uses 1d Camarilla pivot levels (R3/S3) for breakout entries with 12h EMA50 trend filter and volume confirmation.
-Requires BOTH close breakout AND high/low penetration for stronger signal confirmation.
-Long when: high > R3 AND close > R3 AND 12h close > EMA50 AND volume > 2.0 * 20-period average.
-Short when: low < S3 AND close < S3 AND 12h close < EMA50 AND volume > 2.0 * 20-period average.
-Exit when price returns to the pivot level (R3 for longs, S3 for shorts) OR trend reverses.
-Designed for 4h timeframe to achieve 75-200 total trades over 4 years with low fee drag.
-Works in both bull and bear markets by following 12h trend while using Camarilla levels for precise breakout entries.
+6h_WilliamsVixFix_Reversion_1wTrend_VolumeSpike
+Hypothesis: Williams Vix Fix identifies volatility spikes (fear/greed extremes) on 6h. 
+Enter mean-reversion trades when Vix Fix > 0.8 (extreme fear) in 1w uptrend (long) or 
+Vix Fix > 0.8 in 1w downtrend (short), with volume confirmation. 
+Exit when Vix Fix < 0.5 (normalized volatility). 
+Works in bull/bear markets by using 1w trend for direction and Vix Fix for timing mean reversion spikes.
+Target: 50-150 trades over 4 years (12-37/year) with low fee drag.
 """
 
 import numpy as np
@@ -25,62 +23,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 6h data for Williams Vix Fix calculation (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
     
-    # Get 1d data for Camarilla pivots (R3, S3 levels)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # 12h EMA50 for trend filter
-    close_12h_series = pd.Series(df_12h['close'].values)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Williams Vix Fix on 6h: measures volatility spikes
+    # Vix Fix = (Highest Close in lookback - Low) / (Highest Close in lookback - Lowest Low in lookback) * 100
+    lookback = 22  # ~1 month of 6h bars (22*6h = 132h ~ 5.5 days)
+    highest_close = pd.Series(df_6h['close'].values).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(df_6h['low'].values).rolling(window=lookback, min_periods=lookback).min().values
+    vix_fix = (highest_close - df_6h['low'].values) / (highest_close - lowest_low) * 100
+    # Normalize to 0-1 range for easier thresholds
+    vix_fix = vix_fix / 100.0
     
-    # Calculate 1d Camarilla pivot levels: R3, S3
-    # Camarilla formulas: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4
+    # Align Vix Fix to 6h timeframe (already on 6h, but using align for consistency)
+    vix_fix_aligned = align_htf_to_ltf(prices, df_6h, vix_fix)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # 1w EMA34 for trend filter (slower, more reliable trend)
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need 12h EMA50 (50), volume avg (20)
-    start_idx = max(50, 20)
+    # Warmup: need Vix Fix lookback (22), 1w EMA34 (34), volume avg (20)
+    start_idx = max(34, 22, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(vix_fix_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        ema_val = ema_50_aligned[i]
-        r3_level = camarilla_r3_aligned[i]
-        s3_level = camarilla_s3_aligned[i]
+        vix_val = vix_fix_aligned[i]
+        ema_val = ema_34_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: breakout of Camarilla R3/S3 with 12h trend filter AND volume
-            # Require BOTH close AND high/low penetration for stronger confirmation
-            # Long: high breaks above R3 AND close > R3 (strong resistance) AND 12h uptrend AND volume
-            long_condition = (high_val > r3_level) and (close_val > r3_level) and (close_val > ema_val) and vol_conf
-            # Short: low breaks below S3 AND close < S3 (strong support) AND 12h downtrend AND volume
-            short_condition = (low_val < s3_level) and (close_val < s3_level) and (close_val < ema_val) and vol_conf
+            # Look for entry: extreme Vix Fix (volatility spike) with 1w trend filter AND volume
+            # Long: Vix Fix > 0.8 (extreme fear) AND 1w uptrend AND volume confirmation
+            long_condition = (vix_val > 0.8) and (close_val > ema_val) and vol_conf
+            # Short: Vix Fix > 0.8 (extreme fear/greed) AND 1w downtrend AND volume confirmation
+            short_condition = (vix_val > 0.8) and (close_val < ema_val) and vol_conf
             
             if long_condition:
                 signals[i] = size
@@ -89,8 +83,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price returns to R3 level OR trend breaks
-            exit_condition = (close_val <= r3_level) or (close_val < ema_val)
+            # Exit long when Vix Fix normalizes (< 0.5) OR trend breaks
+            exit_condition = (vix_val < 0.5) or (close_val < ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -98,8 +92,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price returns to S3 level OR trend breaks
-            exit_condition = (close_val >= s3_level) or (close_val > ema_val)
+            # Exit short when Vix Fix normalizes (< 0.5) OR trend breaks
+            exit_condition = (vix_val < 0.5) or (close_val > ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -109,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF_v2"
-timeframe = "4h"
+name = "6h_WilliamsVixFix_Reversion_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
