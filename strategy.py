@@ -1,93 +1,101 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
-Hypothesis: Camarilla pivot breakouts with volume spike and 1d EMA trend filter
-provides high-probability entries in both bull and bear markets. The 1d EMA34
-filters for trend direction, while Camarilla R1/S1 levels provide institutional
-support/resistance. Volume spike confirms institutional participation.
-Target: 20-30 trades/year on 4h to minimize fee drag.
+4H_1D_HullTrend_PriceAction_12HVol
+Hypothesis: Price action aligned with Hull MA trend (1D) and confirmed by 12h volume spikes.
+Works in both bull and bear: long when price > Hull MA + volume spike, short when price < Hull MA + volume spike.
+Target: 30-40 trades/year on 4h to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def wma(values, window):
+    """Weighted Moving Average."""
+    if len(values) < window:
+        return np.full_like(values, np.nan, dtype=float)
+    weights = np.arange(1, window + 1)
+    return np.convolve(values, weights[::-1], mode='full')[:len(values)] / weights.sum()
+
+def hull_moving_average(close, period):
+    """Hull Moving Average."""
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    wma_half = wma(close, half_period)
+    wma_full = wma(close, period)
+    
+    raw_hull = 2 * wma_half - wma_full
+    hull = wma(raw_hull, sqrt_period)
+    
+    return hull
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Get 1d data for Camarilla pivots and trend
+    # Get 1D data for Hull MA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d trend: EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1D Hull MA (16-period)
+    hull_ma_1d = hull_moving_average(df_1d['close'].values, 16)
+    hull_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, hull_ma_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Get 12H data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume confirmation: volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # 12H volume average (20-period)
+    vol_ma_12h = pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and volume MA
-    start_idx = max(34, 20)
+    # Warmup: need enough data for Hull MA and volume MA
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
+        if np.isnan(hull_ma_1d_aligned[i]) or np.isnan(vol_ma_12h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1d_aligned[i]
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
-        vol_spike_val = vol_spike[i]
+        hull_trend = hull_ma_1d_aligned[i]
+        vol_ma = vol_ma_12h_aligned[i]
+        vol_spike = volume[i] > (vol_ma * 2.0)  # Volume spike: 2x average
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and uptrend
-            if close[i] > camarilla_r1_val and vol_spike_val and close[i] > ema_trend:
+            # Long: price > Hull MA + volume spike
+            if close[i] > hull_trend and vol_spike:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S1 with volume spike and downtrend
-            elif close[i] < camarilla_s1_val and vol_spike_val and close[i] < ema_trend:
+            # Short: price < Hull MA + volume spike
+            elif close[i] < hull_trend and vol_spike:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S1 or trend turns down
-            if close[i] < camarilla_s1_val or close[i] < ema_trend:
+            # Exit long: price crosses below Hull MA
+            if close[i] < hull_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R1 or trend turns up
-            if close[i] > camarilla_r1_val or close[i] > ema_trend:
+            # Exit short: price crosses above Hull MA
+            if close[i] > hull_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+name = "4H_1D_HullTrend_PriceAction_12HVol"
 timeframe = "4h"
 leverage = 1.0
