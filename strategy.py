@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_Mean_Reversion_with_Volume_and_Trend_Filter
-Hypothesis: Mean reversion at daily pivot support/resistance levels during low volatility regimes. 
-Goes long when price touches S1 in uptrend (price > 200 EMA) with volume spike, short when touches R1 in downtrend (price < 200 EMA) with volume spike.
-Uses 1d pivot levels, 4h EMA200 trend filter, and volume > 2x 20-period average. 
-Designed for low-frequency, high-probability trades (target: 20-40/year) that work in both bull and bear markets.
+6h_Daily_Engulfing_with_Weekly_Trend_and_Volume
+Hypothesis: On 6h timeframe, enter long when a bullish engulfing candle forms above the 200-period EMA, 
+and short when a bearish engulfing candle forms below the 200-period EMA, only when the weekly trend 
+agrees (price above/below weekly EMA20) and volume confirms (>1.5x 20-period average). 
+Exit on opposite engulfing signal or trend failure. 
+This captures momentum continuation in trending markets while avoiding counter-trend noise. 
+Designed for 6-12 trades per year per symbol, suitable for 6h timeframe.
 """
 
 import numpy as np
@@ -17,77 +19,92 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot levels and trend filter
+    # Get daily data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 200:
         return np.zeros(n)
     
-    # 1d EMA200 for trend filter
+    # Daily EMA200 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
     ema200_1d = close_1d.ewm(span=200, adjust=False, min_periods=200).mean().values
     ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate daily pivot points: P = (H+L+C)/3, S1 = 2P - H, R1 = 2P - L
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend direction
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    s1 = 2 * pivot - high_1d    # Support 1
-    r1 = 2 * pivot - low_1d     # Resistance 1
+    # Weekly EMA20 for trend
+    close_1w = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Align pivot levels to 4h timeframe (previous day's levels available at open)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # Volume filter: require volume > 2x 20-period average to avoid low-volatility false signals
+    # Volume filter: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.5)
+    
+    # Bullish engulfing: current bullish candle engulfs previous bearish candle
+    bullish_engulfing = (close > open_price) & (open_price < close) & \
+                        (close > open_price) & (open_price < close) & \
+                        (close > open_price.shift(1)) & (open_price < close.shift(1)) & \
+                        (close > open_price.shift(1)) & (open_price < close.shift(1))
+    # Simplified: current candle bullish and engulfs previous candle's body
+    bullish_engulfing = (close > open_price) & (open_price <= close.shift(1)) & (close >= open_price.shift(1)) & \
+                        ((close - open_price) > (open_price.shift(1) - close.shift(1)))
+    
+    # Bearish engulfing: current bearish candle engulfs previous bullish candle
+    bearish_engulfing = (close < open_price) & (open_price >= close.shift(1)) & (close <= open_price.shift(1)) & \
+                        ((open_price - close) > (close.shift(1) - open_price.shift(1)))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup period
-    start_idx = 20  # need 20 for volume MA
+    # Start after warmup for indicators
+    start_idx = 200  # need 200 for daily EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price touches S1 support in uptrend (price > EMA200) with volume spike
-            if (close[i] <= s1_aligned[i] * 1.002 and  # allow small slippage
+            # Long: bullish engulfing above daily EMA200, weekly uptrend, volume confirmation
+            if (bullish_engulfing[i] and 
                 close[i] > ema200_1d_aligned[i] and 
+                close[i] > ema20_1w_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches R1 resistance in downtrend (price < EMA200) with volume spike
-            elif (close[i] >= r1_aligned[i] * 0.998 and  # allow small slippage
+            # Short: bearish engulfing below daily EMA200, weekly downtrend, volume confirmation
+            elif (bearish_engulfing[i] and 
                   close[i] < ema200_1d_aligned[i] and 
+                  close[i] < ema20_1w_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price reaches pivot point or trend fails
-            if (close[i] >= pivot[i] or 
-                close[i] <= ema200_1d_aligned[i]):
+            # Long exit: bearish engulfing or price below daily EMA200 or weekly downtrend
+            if (bearish_engulfing[i] or 
+                close[i] < ema200_1d_aligned[i] or 
+                close[i] < ema20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches pivot point or trend fails
-            if (close[i] <= pivot[i] or 
-                close[i] >= ema200_1d_aligned[i]):
+            # Short exit: bullish engulfing or price above daily EMA200 or weekly uptrend
+            if (bullish_engulfing[i] or 
+                close[i] > ema200_1d_aligned[i] or 
+                close[i] > ema20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_Mean_Reversion_with_Volume_and_Trend_Filter"
-timeframe = "4h"
+name = "6h_Daily_Engulfing_with_Weekly_Trend_and_Volume"
+timeframe = "6h"
 leverage = 1.0
