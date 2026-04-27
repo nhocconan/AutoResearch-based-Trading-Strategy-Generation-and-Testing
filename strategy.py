@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,71 +13,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and pivot calculation
+    # Get 1d data for Donchian channels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA20 for trend filter
+    # 1d Donchian channels (20-period)
+    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    
+    # 1d EMA50 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema20_1d = close_1d.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 1d True Range for volatility filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr10_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr10_1d)
-    
-    # Volume filter: require volume > 1.3x 20-period average
+    # Volume filter: require volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
-    
-    # Session filter: 00-23 UTC (all hours for 12h timeframe)
-    hour = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hour >= 0) & (hour <= 23)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup period
-    start_idx = 20  # need 20 for EMA20 and ATR
+    start_idx = 50  # need 50 for EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(atr10_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price > EMA20 + volume + low volatility (ATR below median)
-            if (close[i] > ema20_1d_aligned[i] and 
-                volume_filter[i] and 
-                atr10_1d_aligned[i] < np.nanmedian(atr10_1d_aligned[:i+1]) and 
-                session_filter[i]):
+            # Long: price breaks above Donchian high + above EMA50 + volume
+            if (close[i] > donch_high_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < EMA20 + volume + low volatility
-            elif (close[i] < ema20_1d_aligned[i] and 
-                  volume_filter[i] and 
-                  atr10_1d_aligned[i] < np.nanmedian(atr10_1d_aligned[:i+1]) and 
-                  session_filter[i]):
+            # Short: price breaks below Donchian low + below EMA50 + volume
+            elif (close[i] < donch_low_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price < EMA20 (trend change)
-            if close[i] < ema20_1d_aligned[i]:
+            # Long exit: price breaks below Donchian low
+            if close[i] < donch_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price > EMA20 (trend change)
-            if close[i] > ema20_1d_aligned[i]:
+            # Short exit: price breaks above Donchian high
+            if close[i] > donch_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA20_Vol_LowVol_Filter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_EMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
