@@ -1,6 +1,3 @@
-# 4h_1W_HighLow_Breakout_VolumeFilter_v1
-# Hypothesis: Breakouts above weekly high or below weekly low on 4h timeframe with volume confirmation and volatility filter capture institutional breakout moves. Works in bull (upside breakouts) and bear (downside breakouts) markets. Weekly levels provide structural support/resistance. Volume confirms conviction. Volatility filter avoids chop.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,10 +16,10 @@ def generate_signals(prices):
     # Get daily data for weekly high/low
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily high and low for weekly calculation
+    # Calculate daily high and low
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
@@ -34,7 +31,7 @@ def generate_signals(prices):
         weekly_high[i] = np.max(high_1d[i-5:i])
         weekly_low[i] = np.min(low_1d[i-5:i])
     
-    # Align weekly high/low to 4h timeframe
+    # Align weekly high/low to 12h timeframe
     weekly_high_aligned = align_htf_to_ltf(prices, df_1d, weekly_high)
     weekly_low_aligned = align_htf_to_ltf(prices, df_1d, weekly_low)
     
@@ -71,47 +68,47 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Volume confirmation: > 2.5x average volume
-        volume_confirmation = vol_ratio > 2.5
+        # Volume confirmation: > 2.0x average volume (reduced from 2.5 for more signals)
+        volume_confirmation = vol_ratio > 2.0
         
         # ATR volatility filter: avoid low volatility periods
-        # Only trade when ATR is above 50% of its 50-period average
+        # Only trade when ATR is above 40% of its 50-period average
         if i >= 50:
             atr_avg = np.mean(atr[i-50:i+1])
-            vol_filter = atr[i] > atr_avg * 0.5
+            vol_filter = atr[i] > atr_avg * 0.4
         else:
             vol_filter = True  # No filter during warmup
         
         if position == 0:
             # Long: break above weekly high with volume and volatility
             if volume_confirmation and vol_filter and price > weekly_high_aligned[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: break below weekly low with volume and volatility
             elif volume_confirmation and vol_filter and price < weekly_low_aligned[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long exit: price returns to weekly midpoint or volatility drops significantly
             weekly_mid = (weekly_high_aligned[i] + weekly_low_aligned[i]) / 2
-            if price < weekly_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.4:
+            if price < weekly_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # Maintain position
+                signals[i] = 0.30  # Maintain position
         elif position == -1:
             # Short exit: price returns to weekly midpoint or volatility drops significantly
             weekly_mid = (weekly_high_aligned[i] + weekly_low_aligned[i]) / 2
-            if price > weekly_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.4:
+            if price > weekly_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # Maintain position
+                signals[i] = -0.30  # Maintain position
     
     return signals
 
-name = "4h_1W_HighLow_Breakout_VolumeFilter_v1"
-timeframe = "4h"
+name = "12h_1W_HighLow_Breakout_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
