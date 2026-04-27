@@ -21,7 +21,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate daily EMA(34) for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -65,19 +64,11 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely high volatility periods
         vol_filter = atr_14_1d_aligned[i] > 0 and atr_14_1d_aligned[i] < np.median(atr_14_1d_aligned[:i+1]) * 3
         
-        # Volume filter: above average volume
-        vol_ma_14_1d = pd.Series(volume_1d).rolling(window=14, min_periods=14).mean().values
-        vol_ma_14_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_14_1d)
-        if np.isnan(vol_ma_14_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
-        vol_spike = volume[i] > vol_ma_14_1d_aligned[i]
+        # Long conditions: bullish trend + volatility filter
+        long_condition = (price_above_ema and vol_filter)
         
-        # Long conditions: bullish trend + volatility filter + volume spike
-        long_condition = (price_above_ema and vol_filter and vol_spike)
-        
-        # Short conditions: bearish trend + volatility filter + volume spike
-        short_condition = (price_below_ema and vol_filter and vol_spike)
+        # Short conditions: bearish trend + volatility filter
+        short_condition = (price_below_ema and vol_filter)
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -103,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyEMA34_VolumeFilter_Session"
-timeframe = "12h"
+name = "6h_DailyEMA34_VolumeFilter_Session"
+timeframe = "6h"
 leverage = 1.0
