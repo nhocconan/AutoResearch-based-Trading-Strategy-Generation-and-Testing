@@ -13,48 +13,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34  # EMA34
+    # Calculate weekly ATR(14) for volatility
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr_1w = np.maximum(high_1w[1:] - low_1w[1:], 
+                       np.maximum(np.abs(high_1w[1:] - close_1w[:-1]), 
+                                  np.abs(low_1w[1:] - close_1w[:-1])))
+    tr_1w = np.concatenate([[np.nan], tr_1w])
+    atr_1w = np.full(len(close_1w), np.nan)
+    for i in range(14, len(close_1w)):
+        if i == 14:
+            atr_1w[i] = np.mean(tr_1w[1:15])
+        else:
+            atr_1w[i] = (atr_1w[i-1] * 13 + tr_1w[i]) / 14
     
-    # Calculate previous day's OHLC for Camarilla (avoid look-ahead)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate weekly Donchian channels (20-period)
+    upper_20 = np.full(len(close_1w), np.nan)
+    lower_20 = np.full(len(close_1w), np.nan)
+    for i in range(20, len(close_1w)):
+        upper_20[i] = np.max(high_1w[i-20:i])
+        lower_20[i] = np.min(low_1w[i-20:i])
     
-    # Camarilla R3 and S3 calculation
-    camarilla_factor = 1.1 * (prev_high - prev_low) * 1.1 / 4
-    r3 = prev_close + camarilla_factor
-    s3 = prev_close - camarilla_factor
+    # Calculate weekly EMA(50) for trend filter
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 48) / 50  # EMA50
     
-    # Align daily indicators to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align weekly indicators to daily timeframe
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 4h ATR(14) for volatility filter
+    # Calculate daily ATR(10) for stoploss
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
     tr = np.concatenate([[np.nan], tr])
     atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
+    for i in range(10, n):
+        if i == 10:
+            atr[i] = np.mean(tr[1:11])
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            atr[i] = (atr[i-1] * 9 + tr[i]) / 10
     
     # Calculate 20-period volume average
     vol_ma = np.full(n, np.nan)
@@ -67,11 +76,12 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(34, vol_period, 14) + 5
+    start_idx = max(50, 20, 10, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_1w_aligned[i]) or np.isnan(upper_20_aligned[i]) or 
+            np.isnan(lower_20_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -82,26 +92,26 @@ def generate_signals(prices):
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price breaks above R3 with volume and above daily EMA34
-            if price > r3_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
+            # Long: Price breaks above weekly upper Donchian with volume and above weekly EMA50
+            if price > upper_20_aligned[i] and vol_filter and price > ema_50_1w_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below S3 with volume and below daily EMA34
-            elif price < s3_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
+            # Short: Price breaks below weekly lower Donchian with volume and below weekly EMA50
+            elif price < lower_20_aligned[i] and vol_filter and price < ema_50_1w_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below S3 or trailing stop
-            if price < s3_aligned[i] or price < ema_34_1d_aligned[i] - 1.5 * atr[i]:
+            # Long exit: Price closes below weekly lower Donchian or trailing stop
+            if price < lower_20_aligned[i] or price < ema_50_1w_aligned[i] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above R3 or trailing stop
-            if price > r3_aligned[i] or price > ema_34_1d_aligned[i] + 1.5 * atr[i]:
+            # Short exit: Price closes above weekly upper Donchian or trailing stop
+            if price > upper_20_aligned[i] or price > ema_50_1w_aligned[i] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
