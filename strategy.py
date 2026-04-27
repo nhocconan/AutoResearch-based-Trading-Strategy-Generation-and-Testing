@@ -18,55 +18,45 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on daily close
-    close_1d = df_1d['close'].values
-    ema_34 = np.full(len(close_1d), np.nan)
-    alpha = 2 / (34 + 1)
-    for i in range(len(close_1d)):
-        if i == 0:
-            ema_34[i] = close_1d[i]
-        elif np.isnan(ema_34[i-1]):
-            ema_34[i] = close_1d[i]
-        else:
-            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
+    # Calculate 34-period EMA on daily close using pandas for correct min_periods
+    close_1d_series = pd.Series(df_1d['close'])
+    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily EMA to 4h
+    # Align daily EMA to 1h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 14-period ATR for volatility and stop
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr = np.full(len(tr), np.nan)
-    for i in range(14, len(tr)):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Calculate 14-period ATR
+    high_low = high - low
+    high_close = np.abs(high - np.concatenate([[np.nan], close[:-1]]))
+    low_close = np.abs(low - np.concatenate([[np.nan], close[:-1]]))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr = np.concatenate([[np.nan], tr[1:]])  # First element is NaN
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate 20-period volume average
-    vol_ma = np.full(n, np.nan)
-    vol_period = 20
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Calculate 20-period high/low for Donchian breakout
-    high_max = np.full(n, np.nan)
-    low_min = np.full(n, np.nan)
-    period = 20
-    for i in range(period, n):
-        high_max[i] = np.max(high[i-period:i])
-        low_min[i] = np.min(low[i-period:i])
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0
-    size = 0.30
+    size = 0.20
     
     # Warmup period
-    start_idx = max(14, vol_period, period) + 5
+    start_idx = max(34, 14, 20, 20) + 5
+    
+    # Pre-compute session hours for filtering (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     for i in range(start_idx, n):
+        # Skip if outside trading session (08-20 UTC)
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+            
         if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
             signals[i] = 0.0
@@ -103,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA34_Trend_Volume_ATRStop_v1"
-timeframe = "4h"
+name = "1h_Donchian20_EMA34_Trend_Volume_ATRStop_Session_v1"
+timeframe = "1h"
 leverage = 1.0
