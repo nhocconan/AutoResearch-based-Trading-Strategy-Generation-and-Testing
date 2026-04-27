@@ -13,50 +13,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 4h SMA50 for trend filter
-    close_4h = pd.Series(df_4h['close'].values)
-    sma50_4h = close_4h.rolling(window=50, min_periods=50).mean().values
-    sma50_4h_aligned = align_htf_to_ltf(prices, df_4h, sma50_4h)
-    
-    # Get 1d data for Choppiness index (range detection)
+    # Get 1d data for trend filter and volume context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Choppiness Index (CHOP)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # 1d EMA34 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Sum of True Range over 14 periods
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum(tr14) / (hh14 - ll14)) / log10(14)
-    chop_raw = 100 * np.log10(atr14 / (hh14 - ll14 + 1e-10)) / np.log10(14)
-    chop = pd.Series(chop_raw).fillna(50).values
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume filter: require volume > 1.5x 20-period average
+    # Volume filter: require volume > 1.5x 20-period average (more selective than previous)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
-    # Session filter: 08-20 UTC (active trading hours)
+    # Session filter: 08-20 UTC (active trading hours) - reduced from previous version
     hour = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hour >= 8) & (hour <= 20)
     
@@ -64,49 +35,46 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup period
-    start_idx = 50  # need 50 for SMA50
+    start_idx = 34  # need 34 for EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma50_4h_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: CHOP > 55 (ranging) + price > SMA50 (bullish bias) + volume + session
-            if (chop_aligned[i] > 55 and 
-                close[i] > sma50_4h_aligned[i] and 
+            # Long: price > EMA34 (bullish bias) + volume + session
+            if (close[i] > ema34_1d_aligned[i] and 
                 volume_filter[i] and 
                 session_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: CHOP > 55 (ranging) + price < SMA50 (bearish bias) + volume + session
-            elif (chop_aligned[i] > 55 and 
-                  close[i] < sma50_4h_aligned[i] and 
+            # Short: price < EMA34 (bearish bias) + volume + session
+            elif (close[i] < ema34_1d_aligned[i] and 
                   volume_filter[i] and 
                   session_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: CHOP < 40 (trending) OR price < SMA50 (trend change)
-            if (chop_aligned[i] < 40 or close[i] < sma50_4h_aligned[i]):
+            # Long exit: price < EMA34 (trend change)
+            if close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: CHOP < 40 (trending) OR price > SMA50 (trend change)
-            if (chop_aligned[i] < 40 or close[i] > sma50_4h_aligned[i]):
+            # Short exit: price > EMA34 (trend change)
+            if close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_SMA50_1d_CHOP_Range_Volume_Session"
-timeframe = "1h"
+name = "6h_EMA34_Bias_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
