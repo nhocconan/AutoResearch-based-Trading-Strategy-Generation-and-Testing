@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_KeltnerChannel_Breakout_1dTrend_ADXFilter
-Hypothesis: Combines Keltner Channel breakouts with 1d EMA50 trend filter and ADX(14) > 25 for trend strength.
-Enters long when price breaks above upper KC AND 1d close > EMA50 AND ADX > 25.
-Enters short when price breaks below lower KC AND 1d close < EMA50 AND ADX > 25.
-Exits when price returns to middle line (EMA20 of typical price) OR trend weakens (ADX < 20).
-Designed for 6h timeframe to achieve 50-150 total trades over 4 years with controlled risk.
-Works in both bull and bear markets by requiring strong trend (ADX>25) and following 1d trend direction.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses daily Camarilla pivot R1/S1 levels for breakout entries in the direction of 1d EMA34 trend.
+Enter long when price breaks above R1 AND 1d close > EMA34 (uptrend) AND volume > 2.0x 20-period average.
+Enter short when price breaks below S1 AND 1d close < EMA34 (downtrend) AND volume > 2.0x 20-period average.
+Exit when price returns to the pivot level (PP) or trend reverses.
+Designed for 4h timeframe to achieve 75-200 total trades over 4 years.
+Camarilla levels provide institutional support/resistance; volume spike confirms institutional participation.
+Works in both bull and bear markets by following 1d trend while using Camarilla for precise breakout entries.
 """
 
 import numpy as np
@@ -23,81 +24,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 for trend filter
+    # Calculate daily Camarilla pivot levels
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    pp = typical_price.values
+    r1 = df_1d['close'].values + (df_1d['high'].values - df_1d['low'].values) * 1.1 / 12
+    s1 = df_1d['close'].values - (df_1d['high'].values - df_1d['low'].values) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1d EMA34 for trend filter
     close_1d_series = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Keltner Channel (20, ATR=10) on 6h data
-    typical_price = (high + low + close) / 3
-    tp_series = pd.Series(typical_price)
-    ema_20_tp = tp_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # ATR(10)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr_series = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    kc_upper = ema_20_tp + (2 * atr_series)
-    kc_lower = ema_20_tp - (2 * atr_series)
-    kc_middle = ema_20_tp  # Middle line is EMA20 of typical price
-    
-    # ADX(14) for trend strength filter
-    # +DM, -DM, TR
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm[0] = 0.0
-    minus_dm[0] = 0.0
-    
-    # Smoothed values
-    tr_series = pd.Series(tr)
-    atr_14 = tr_series.ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    plus_dm_series = pd.Series(plus_dm)
-    minus_dm_series = pd.Series(minus_dm)
-    
-    plus_di_14 = 100 * (plus_dm_series.ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14)
-    minus_di_14 = 100 * (minus_dm_series.ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need EMA20(20), ATR(10), ADX(14+14=28), 1d EMA50(50)
-    start_idx = max(20, 10, 28, 50)
+    # Warmup: need 1d EMA34 (34), volume avg (20), and daily data
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(kc_middle[i]) or np.isnan(adx[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_val = ema_50_aligned[i]
-        kc_up = kc_upper[i]
-        kc_low = kc_lower[i]
-        kc_mid = kc_middle[i]
-        adx_val = adx[i]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_val = ema_34_aligned[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: breakout of KC with 1d trend filter AND strong trend (ADX>25)
-            # Long: price breaks above upper KC AND 1d uptrend AND ADX > 25
-            long_condition = (close_val > kc_up) and (close_val > ema_val) and (adx_val > 25)
-            # Short: price breaks below lower KC AND 1d downtrend AND ADX > 25
-            short_condition = (close_val < kc_low) and (close_val < ema_val) and (adx_val > 25)
+            # Look for entry: breakout of Camarilla R1/S1 with 1d trend filter AND volume spike
+            # Long: price breaks above R1 AND 1d uptrend AND volume confirmation
+            long_condition = (close_val > r1_val) and (close_val > ema_val) and vol_conf
+            # Short: price breaks below S1 AND 1d downtrend AND volume confirmation
+            short_condition = (close_val < s1_val) and (close_val < ema_val) and vol_conf
             
             if long_condition:
                 signals[i] = size
@@ -106,8 +85,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price returns to middle line OR trend weakens (ADX<20) OR trend breaks
-            exit_condition = (close_val <= kc_mid) or (adx_val < 20) or (close_val < ema_val)
+            # Exit long when price returns to pivot point OR trend breaks
+            exit_condition = (close_val <= pp_val) or (close_val < ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -115,8 +94,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price returns to middle line OR trend weakens (ADX<20) OR trend breaks
-            exit_condition = (close_val >= kc_mid) or (adx_val < 20) or (close_val > ema_val)
+            # Exit short when price returns to pivot point OR trend breaks
+            exit_condition = (close_val >= pp_val) or (close_val > ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -126,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_KeltnerChannel_Breakout_1dTrend_ADXFilter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
