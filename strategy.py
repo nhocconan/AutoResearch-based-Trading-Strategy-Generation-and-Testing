@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + Volume Spike + 1d ADX Trend Filter
-Hypothesis: Donchian(20) breakouts on 12h capture strong momentum moves.
-Volume spike (2x avg volume) confirms institutional participation.
-1d ADX > 25 filters for trending markets only, avoiding chop.
-Works in bull (breakouts up) and bear (breakouts down) by trading both directions.
-Targets 15-35 trades/year to avoid fee drag.
+4h_KAMA_Trend_Filter_Based_on_12h_Trend
+Long when KAMA(10) crosses above its 10-period SMA on 4h with 12h EMA50 uptrend and volume > 1.3x average.
+Short when KAMA(10) crosses below its 10-period SMA on 4h with 12h EMA50 downtrend and volume > 1.3x average.
+Exit when KAMA(10) crosses back through its 10-period SMA.
+Uses KAMA for adaptive trend strength, targeting 20-40 trades per year.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,128 +21,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 14-period ADX
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[0.0], plus_dm])
-        minus_dm = np.concatenate([[0.0], minus_dm])
-        
-        # Smoothed values
-        atr = np.full_like(tr, np.nan)
-        plus_di = np.full_like(tr, np.nan)
-        minus_di = np.full_like(tr, np.nan)
-        
-        if len(tr) >= period:
-            # Initial average
-            atr[period] = np.nanmean(tr[1:period+1])
-            plus_dm_avg = np.nanmean(plus_dm[1:period+1])
-            minus_dm_avg = np.nanmean(minus_dm[1:period+1])
-            
-            # Wilder's smoothing
-            for i in range(period+1, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                plus_dm_avg = (plus_dm_avg * (period-1) + plus_dm[i]) / period
-                minus_dm_avg = (minus_dm_avg * (period-1) + minus_dm[i]) / period
-                
-                if atr[i] != 0:
-                    plus_di[i] = 100 * plus_dm_avg / atr[i]
-                    minus_di[i] = 100 * minus_dm_avg / atr[i]
-            
-            # DX and ADX
-            dx = np.full_like(tr, np.nan)
-            for i in range(period+1, len(tr)):
-                if plus_di[i] + minus_di[i] != 0:
-                    dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-            
-            adx = np.full_like(tr, np.nan)
-            if len(tr) >= 2*period:
-                adx[2*period] = np.nanmean(dx[period+1:2*period+1])
-                for i in range(2*period+1, len(tr)):
-                    adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Calculate 12h EMA50 for trend filter
+    ema_period = 50
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= ema_period:
+        ema_12h[ema_period - 1] = np.mean(close_12h[:ema_period])
+        for i in range(ema_period, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * (2 / (ema_period + 1)) + 
+                         ema_12h[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate KAMA on 4h
+    kama_period = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    # Donchian Channel (20-period)
-    donchian_period = 20
-    upper_channel = np.full(n, np.nan)
-    lower_channel = np.full(n, np.nan)
+    # Direction
+    diff = np.abs(np.diff(close, prepend=close[0]))
+    # Volatility
+    volatility = np.abs(np.diff(close))
+    volatility_sum = np.zeros(n)
+    for i in range(kama_period, n):
+        volatility_sum[i] = np.sum(volatility[i - kama_period + 1:i + 1])
     
-    for i in range(donchian_period - 1, n):
-        upper_channel[i] = np.max(high[i - donchian_period + 1:i + 1])
-        lower_channel[i] = np.min(low[i - donchian_period + 1:i + 1])
+    # ER (Efficiency Ratio)
+    er = np.zeros(n)
+    for i in range(kama_period, n):
+        if volatility_sum[i] > 0:
+            er[i] = diff[i] / volatility_sum[i]
+        else:
+            er[i] = 0
     
-    # Volume spike detection (2x 20-period average)
+    # SSC (Smoothing Constant)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA
+    kama = np.full(n, np.nan)
+    if n >= kama_period:
+        kama[kama_period - 1] = np.mean(close[:kama_period])
+        for i in range(kama_period, n):
+            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    # KAMA SMA for crossover
+    kama_sma = np.full(n, np.nan)
+    sma_period = 10
+    for i in range(sma_period - 1, n):
+        kama_sma[i] = np.mean(kama[i - sma_period + 1:i + 1])
+    
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
-    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian, ADX, volume MA
-    start_idx = max(donchian_period - 1, 28, 19)  # ADX needs ~28 bars
+    # Warmup: need KAMA, KAMA SMA, EMA12h, and volume MA20
+    start_idx = max(kama_period, sma_period - 1, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama_sma[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_1d_aligned[i]
+        vol_now = volume[i]
+        vol_avg = vol_ma_20[i]
         
-        # ADX filter: only trade when trending (ADX > 25)
-        trend_filter = adx_val > 25
+        # Volume filter: require volume above average
+        vol_filter = vol_now > 1.3 * vol_avg
         
         if position == 0:
-            # Long: break above upper Donchian with volume spike and trend
-            if (price > upper_channel[i] and volume_spike[i] and trend_filter):
+            # Long: KAMA crosses above its SMA with 12h EMA50 uptrend and volume filter
+            if (kama[i] > kama_sma[i] and kama[i - 1] <= kama_sma[i - 1] and 
+                price > ema_12h_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: break below lower Donchian with volume spike and trend
-            elif (price < lower_channel[i] and volume_spike[i] and trend_filter):
+            # Short: KAMA crosses below its SMA with 12h EMA50 downtrend and volume filter
+            elif (kama[i] < kama_sma[i] and kama[i - 1] >= kama_sma[i - 1] and 
+                  price < ema_12h_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price re-enters Donchian channel (below midpoint)
-            midpoint = (upper_channel[i] + lower_channel[i]) / 2
-            if price < midpoint:
+            # Exit long: KAMA crosses below its SMA
+            if kama[i] < kama_sma[i] and kama[i - 1] >= kama_sma[i - 1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price re-enters Donchian channel (above midpoint)
-            midpoint = (upper_channel[i] + lower_channel[i]) / 2
-            if price > midpoint:
+            # Exit short: KAMA crosses above its SMA
+            if kama[i] > kama_sma[i] and kama[i - 1] <= kama_sma[i - 1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -151,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_VolumeSpike_ADX25"
-timeframe = "12h"
+name = "4h_KAMA_Trend_Filter_Based_on_12h_Trend"
+timeframe = "4h"
 leverage = 1.0
