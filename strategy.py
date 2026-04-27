@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h CAMARILLA R1/S1 BREAKOUT + 12H EMA50 TREND + VOLUME CONFIRMATION
-# Uses 12h EMA50 for trend direction (long when price > EMA50, short when price < EMA50)
-# and Camarilla R1/S1 breakouts for entries. Volume > 1.8x 20-period average confirms strength.
-# Trend filter avoids counter-trend trades, Camarilla provides clear reversal levels.
-# Target: 20-30 trades/year to minimize fee decay while capturing strong momentum.
-# Focus on BTC/ETH as primary assets with proven Camarilla edge from DB.
+# Hypothesis: 12h KAMA trend + 1d RSI mean reversion + volume confirmation
+# Uses 12h Kaufman Adaptive Moving Average for trend direction (long when price > KAMA, short when price < KAMA)
+# and 1d RSI for mean reversion entries (long when RSI < 30, short when RSI > 70)
+# Volume > 1.5x 20-period average confirms momentum. Trend filter avoids counter-trend trades.
+# Target: 15-25 trades/year to minimize fee decay while capturing strong momentum with mean reversion entries.
+# Focus on BTC/ETH as primary assets with proven KAMA and RSI edge.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,36 +20,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend
+    # Get 12h data for KAMA trend
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
+    # Calculate 12h KAMA for trend filter
     close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_12h, n=10))
+    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)
+    # Handle volatility calculation for ER
+    volatility_series = []
+    for i in range(len(close_12h)):
+        if i < 10:
+            volatility_series.append(np.nan)
+        else:
+            vol_sum = np.sum(np.abs(np.diff(close_12h[i-9:i+1])))
+            volatility_series.append(vol_sum if vol_sum > 0 else 1)
+    volatility = np.array(volatility_series)
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close_12h, np.nan)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    kama_12h = kama
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels (R1, S1) from 1d data
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 14-period RSI for mean reversion
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Calculate average gain and loss
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Initial average gain/loss
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        
+        # Wilder's smoothing
+        for i in range(14, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
     
-    # 20-period average volume for spike detection (4h bars in 1d = 6, so 20 = 3.33d)
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_14_1d = rsi
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    
+    # 20-period average volume for spike detection
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
@@ -60,12 +94,11 @@ def generate_signals(prices):
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(50, vol_period, 1)
+    start_idx = max(20, vol_period, 14)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
+        if (np.isnan(kama_12h_aligned[i]) or
+            np.isnan(rsi_14_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -73,34 +106,34 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from 12h EMA50
-        uptrend = price > ema_50_12h_aligned[i]
-        downtrend = price < ema_50_12h_aligned[i]
+        # Determine trend from 12h KAMA
+        uptrend = price > kama_12h_aligned[i]
+        downtrend = price < kama_12h_aligned[i]
         
-        # Volume confirmation: spike > 1.8x average
-        volume_confirmation = vol_ratio > 1.8
+        # Volume confirmation: spike > 1.5x average
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long breakout: price breaks above Camarilla R1 in uptrend
-            if uptrend and price > camarilla_r1_aligned[i] and volume_confirmation:
+            # Long entry: price above KAMA (uptrend) AND RSI < 30 (oversold) with volume confirmation
+            if uptrend and rsi_14_1d_aligned[i] < 30 and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short breakdown: price breaks below Camarilla S1 in downtrend
-            elif downtrend and price < camarilla_s1_aligned[i] and volume_confirmation:
+            # Short entry: price below KAMA (downtrend) AND RSI > 70 (overbought) with volume confirmation
+            elif downtrend and rsi_14_1d_aligned[i] > 70 and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Camarilla S1 or trend reverses
-            if price < camarilla_s1_aligned[i] or price < ema_50_12h_aligned[i]:
+            # Long exit: price below KAMA or RSI > 70 (overbought)
+            if price < kama_12h_aligned[i] or rsi_14_1d_aligned[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above Camarilla R1 or trend reverses
-            if price > camarilla_r1_aligned[i] or price > ema_50_12h_aligned[i]:
+            # Short exit: price above KAMA or RSI < 30 (oversold)
+            if price > kama_12h_aligned[i] or rsi_14_1d_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "12h_KAMA_RSI_MeanReversion_Volume"
+timeframe = "12h"
 leverage = 1.0
