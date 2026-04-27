@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA direction + RSI filter + chop regime filter
-# Uses 12h KAMA for trend direction (long when price > KAMA, short when price < KAMA)
-# RSI(14) > 50 for long, < 50 for short to ensure momentum alignment
-# Choppiness Index(14) > 61.8 for ranging market (mean reversion at extremes)
-# Target: 15-25 trades/year to minimize fee decay while capturing high-probability trends
-# Focus on BTC/ETH as primary assets with proven KAMA edge from DB
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation
+# Uses 12h EMA50 for trend direction (long when price > EMA50, short when price < EMA50)
+# and Donchian channel (20-period high/low) for breakout entries.
+# Volume > 1.8x 24-period average confirms institutional interest at breakout.
+# Donchian breakouts capture strong momentum moves while trend filter avoids counter-trend trades.
+# Target: 20-30 trades/year to minimize fee decay while capturing high-probability breakouts.
+# Focus on BTC/ETH as primary assets with proven breakout edge from DB.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,104 +21,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for KAMA calculation
+    # Get 12h data for EMA trend
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    # Calculate 12h KAMA
+    # Calculate 12h EMA50 for trend filter
     close_12h = df_12h['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_12h, k=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_12h)), axis=1)  # 10-period volatility
-    er = np.where(volatility > 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.full_like(close_12h, np.nan)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    kama_12h = kama
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    # Calculate Donchian channel (20-period)
+    donchian_period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    for i in range(donchian_period - 1, n):
+        upper[i] = np.max(high[i-donchian_period+1:i+1])
+        lower[i] = np.min(low[i-donchian_period+1:i+1])
     
-    # Calculate 12h RSI(14)
-    delta = np.diff(close_12h)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    
-    # Calculate 12h Choppiness Index(14)
-    atr_12h = np.zeros_like(close_12h)
-    for i in range(1, len(close_12h)):
-        tr = max(high_12h[i] - low_12h[i],
-                 abs(high_12h[i] - close_12h[i-1]),
-                 abs(low_12h[i] - close_12h[i-1]))
-        atr_12h[i] = tr
-    # Smooth ATR
-    atr_ma = pd.Series(atr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    # Chop calculation
-    sum_atr = pd.Series(atr_ma).rolling(window=14, min_periods=14).sum().values
-    max_range = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values - \
-                pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    chop = np.where(max_range > 0, 100 * np.log10(sum_atr / max_range) / np.log10(14), 50)
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # 24-period average volume for spike detection (4h bars in 2d = 12, so 24 = 4d)
+    vol_ma = np.full(n, np.nan)
+    vol_period = 24
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = 30  # enough for KAMA, RSI, Chop
+    start_idx = max(donchian_period, vol_period, 1)
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_12h_aligned[i]) or
-            np.isnan(rsi_12h_aligned[i]) or
-            np.isnan(chop_12h_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(upper[i]) or
+            np.isnan(lower[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from 12h KAMA
-        uptrend = price > kama_12h_aligned[i]
-        downtrend = price < kama_12h_aligned[i]
+        # Determine trend from 12h EMA50
+        uptrend = price > ema_50_12h_aligned[i]
+        downtrend = price < ema_50_12h_aligned[i]
         
-        # RSI filter: >50 for long, <50 for short
-        rsi_long = rsi_12h_aligned[i] > 50
-        rsi_short = rsi_12h_aligned[i] < 50
-        
-        # Chop filter: >61.8 for ranging market
-        chop_high = chop_12h_aligned[i] > 61.8
+        # Volume confirmation: spike > 1.8x average
+        volume_confirmation = vol_ratio > 1.8
         
         if position == 0:
-            # Long: uptrend + RSI>50 + chop>61.8 (fading in range)
-            if uptrend and rsi_long and chop_high:
+            # Long breakout: price breaks above upper Donchian in uptrend
+            if uptrend and price > upper[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: downtrend + RSI<50 + chop>61.8 (fading in range)
-            elif downtrend and rsi_short and chop_high:
+            # Short breakdown: price breaks below lower Donchian in downtrend
+            elif downtrend and price < lower[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price below KAMA or RSI<40
-            if price < kama_12h_aligned[i] or rsi_12h_aligned[i] < 40:
+            # Long exit: price breaks below lower Donchian or trend reverses
+            if price < lower[i] or price < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price above KAMA or RSI>60
-            if price > kama_12h_aligned[i] or rsi_12h_aligned[i] > 60:
+            # Short exit: price breaks above upper Donchian or trend reverses
+            if price > upper[i] or price > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_ChopFilter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
