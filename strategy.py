@@ -3,29 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d EMA trend filter and volume spike.
+# Hypothesis: 6h Williams %R with 1d EMA trend filter and volume spike.
 # Williams %R measures overbought/oversold levels: -20 to 0 = overbought, -80 to -100 = oversold.
-# Strategy: In ranging markets (Williams %R between -80 and -20), fade extremes with mean reversion.
-# In trending markets, follow 1d EMA direction on pullbacks to %R extremes.
-# Volume spike confirms institutional participation. Designed for ~20-30 trades/year per symbol.
+# Strategy: In uptrend (price > 1d EMA34), buy when Williams %R crosses above -80 from below (oversold bounce).
+# In downtrend (price < 1d EMA34), sell when Williams %R crosses below -20 from above (overbought reversal).
+# Volume spike confirms institutional participation. Designed for ~15-25 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Williams %R calculation (14-period)
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     # Avoid division by zero
-    denom = highest_high - lowest_low
-    denom = np.where(denom == 0, 1e-10, denom)
-    willr = -100 * (highest_high - close) / denom  # -100 to 0
+    hl_range = highest_high - lowest_low
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
+    williams_r = -100 * (highest_high - close) / hl_range
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -49,22 +49,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(willr[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R zones: oversold < -80, overbought > -20
-        if willr[i] < -80:  # Oversold - potential long
-            if close[i] > ema34_1d_aligned[i] and volume_filter[i]:  # Only long in uptrend
+        # Uptrend: price > 1d EMA34
+        if close[i] > ema34_1d_aligned[i] and volume_filter[i]:
+            # Buy when Williams %R crosses above -80 from below (oversold bounce)
+            if williams_r[i] > -80 and williams_r[i-1] <= -80:
                 signals[i] = 0.25
                 position = 1
-        elif willr[i] > -20:  # Overbought - potential short
-            if close[i] < ema34_1d_aligned[i] and volume_filter[i]:  # Only short in downtrend
+            # Exit long when Williams %R crosses below -20 from above (overbought)
+            elif position == 1 and williams_r[i] < -20 and williams_r[i-1] >= -20:
+                signals[i] = 0.0
+                position = 0
+        # Downtrend: price < 1d EMA34
+        elif close[i] < ema34_1d_aligned[i] and volume_filter[i]:
+            # Sell when Williams %R crosses below -20 from above (overbought reversal)
+            if williams_r[i] < -20 and williams_r[i-1] >= -20:
                 signals[i] = -0.25
                 position = -1
+            # Exit short when Williams %R crosses above -80 from below (oversold)
+            elif position == -1 and williams_r[i] > -80 and williams_r[i-1] <= -80:
+                signals[i] = 0.0
+                position = 0
         else:
-            # Neutral zone - hold current position if any
+            # Hold current position or flat
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -74,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "6h_WilliamsR_1dEMA34_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
