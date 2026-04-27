@@ -23,11 +23,11 @@ def generate_signals(prices):
     ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: require volume > 1.5x 20-period average (more selective than previous)
+    # Volume filter: require volume > 1.8x 20-period average (more selective than previous)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.8)
     
-    # Session filter: 08-20 UTC (active trading hours) - reduced from previous version
+    # Session filter: 08-20 UTC (active trading hours)
     hour = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hour >= 8) & (hour <= 20)
     
@@ -75,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_Bias_Volume_Session"
+name = "12h_EMA34_Bias_Volume_Session_Strict"
 timeframe = "12h"
 leverage = 1.0
