@@ -1,10 +1,7 @@
-# [EXPERIMENT #98581]
-# Hypothesis: 4h RSI mean reversion with 1D ATR and EMA trend filter.
-# In both bull and bear markets, RSI extremes (oversold/overbought) tend to revert when aligned with the higher timeframe trend.
-# The 1D ATR provides dynamic volatility scaling for entries, and EMA50 on 4h filters for trend direction.
-# This strategy aims for low trade frequency (target: 20-50 trades/year) by requiring both RSI extreme and trend alignment.
-# Position size is fixed at 0.25 to manage drawdown, with exits on RSI mean reversion or trend failure.
-# Uses discrete signal levels to minimize fee churn.
+# 12h_Wallace_Momentum_RSI_Trend
+# Hypothesis: Use 12h RSI trend with 4h momentum confirmation and volume filter
+# Works in bull markets via momentum continuation, works in bear via mean reversion at extremes
+# Target: 15-30 trades/year on 12h timeframe with strong risk-adjusted returns
 
 #!/usr/bin/env python3
 import numpy as np
@@ -21,33 +18,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 12h data for primary calculations
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 14-day ATR
-    tr = np.zeros(len(high_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(high_1d)):
-        hl = high_1d[i] - low_1d[i]
-        hc = abs(high_1d[i] - close_1d[i-1])
-        lc = abs(low_1d[i] - close_1d[i-1])
-        tr[i] = max(hl, hc, lc)
-    
-    atr_1d = np.full(len(tr), np.nan)
-    for i in range(13, len(tr)):
-        if i == 13:
-            atr_1d[i] = np.mean(tr[:14])
-        else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    # Calculate 14-day RSI
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # Calculate 14-period RSI on 12h
+    delta = np.diff(close_12h, prepend=close_12h[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
@@ -63,61 +45,96 @@ def generate_signals(prices):
             avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
     rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_12h = 100 - (100 / (1 + rs))
     
-    # Align ATR and RSI to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 20-period SMA for trend on 12h
+    sma_20_12h = np.full(len(close_12h), np.nan)
+    for i in range(19, len(close_12h)):
+        sma_20_12h[i] = np.mean(close_12h[i-19:i+1])
     
-    # Calculate 4-hour EMA50 for trend filter
-    ema_period = 50
-    ema_4h = np.full(n, np.nan)
-    if n >= ema_period:
-        ema_4h[ema_period - 1] = np.mean(close[:ema_period])
-        for i in range(ema_period, n):
-            ema_4h[i] = (close[i] * (2 / (ema_period + 1)) + 
-                         ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
+    # Calculate volume ratio (current vs 20-period average) on 12h
+    vol_ma_20_12h = np.full(len(volume_12h), np.nan)
+    for i in range(19, len(volume_12h)):
+        vol_ma_20_12h[i] = np.mean(volume_12h[i-19:i+1])
+    vol_ratio_12h = np.divide(volume_12h, vol_ma_20_12h, out=np.full_like(volume_12h, np.nan), where=vol_ma_20_12h!=0)
+    
+    # Get 4h data for entry timing confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h RSI for momentum confirmation
+    delta_4h = np.diff(close_4h, prepend=close_4h[0])
+    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
+    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
+    
+    avg_gain_4h = np.full(len(gain_4h), np.nan)
+    avg_loss_4h = np.full(len(loss_4h), np.nan)
+    
+    for i in range(14, len(gain_4h)):
+        if i == 14:
+            avg_gain_4h[i] = np.mean(gain_4h[:14])
+            avg_loss_4h[i] = np.mean(loss_4h[:14])
+        else:
+            avg_gain_4h[i] = (avg_gain_4h[i-1] * 13 + gain_4h[i]) / 14
+            avg_loss_4h[i] = (avg_loss_4h[i-1] * 13 + loss_4h[i]) / 14
+    
+    rs_4h = np.divide(avg_gain_4h, avg_loss_4h, out=np.full_like(avg_gain_4h, np.nan), where=avg_loss_4h!=0)
+    rsi_4h = 100 - (100 / (1 + rs_4h))
+    
+    # Align all indicators to 12h timeframe
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_20_12h)
+    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ATR, RSI, and EMA
-    start_idx = max(14, ema_period - 1)
+    # Warmup period
+    start_idx = max(19, 14)  # Need SMA(20) and RSI(14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema_4h[i])):
+        if (np.isnan(rsi_12h_aligned[i]) or np.isnan(sma_20_12h_aligned[i]) or 
+            np.isnan(vol_ratio_12h_aligned[i]) or np.isnan(rsi_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_1d_aligned[i]
-        rsi = rsi_1d_aligned[i]
-        ema_trend = ema_4h[i]
+        rsi_12h = rsi_12h_aligned[i]
+        sma_20 = sma_20_12h_aligned[i]
+        vol_ratio = vol_ratio_12h_aligned[i]
+        rsi_4h = rsi_4h_aligned[i]
         
         if position == 0:
-            # Long: Oversold RSI with price above EMA in uptrend
-            if (rsi < 30 and price > ema_trend):
+            # Long: RSI oversold but recovering with volume confirmation and 4h momentum
+            if (rsi_12h < 35 and rsi_12h > rsi_12h_aligned[i-1] and  # RSI rising from oversold
+                vol_ratio > 1.5 and                                  # Volume confirmation
+                rsi_4h > 50):                                        # 4h momentum bullish
                 signals[i] = size
                 position = 1
-            # Short: Overbought RSI with price below EMA in downtrend
-            elif (rsi > 70 and price < ema_trend):
+            # Short: RSI overbought but weakening with volume confirmation and 4h momentum
+            elif (rsi_12h > 65 and rsi_12h < rsi_12h_aligned[i-1] and  # RSI falling from overbought
+                  vol_ratio > 1.5 and                                  # Volume confirmation
+                  rsi_4h < 50):                                        # 4h momentum bearish
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral or trend fails
-            if rsi > 50 or price < ema_trend:
+            # Exit long: RSI overbought or momentum fails
+            if rsi_12h > 70 or rsi_4h < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI returns to neutral or trend fails
-            if rsi < 50 or price > ema_trend:
+            # Exit short: RSI oversold or momentum fails
+            if rsi_12h < 30 or rsi_4h > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_RSI_MeanReversion_1D_ATR_RSI_EMA50"
-timeframe = "4h"
+name = "12h_Wallace_Momentum_RSI_Trend"
+timeframe = "12h"
 leverage = 1.0
