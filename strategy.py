@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,10 +13,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily ATR and volume (HTF)
+    # Get 1d data for ATR and volume (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    
+    # Get 1w data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA(34) for trend
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
@@ -29,11 +38,12 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily volume average
+    # Calculate daily volume average for volume filter
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 6h timeframe
+    # Align indicators to 4h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
@@ -45,11 +55,12 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     # Warmup: need all indicators
-    start_idx = max(20, 20)
+    start_idx = max(34, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -59,6 +70,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        ema_trend = ema_34_1w_aligned[i]
         atr_val = atr_14_1d_aligned[i]
         vol_avg = vol_avg_1d_aligned[i]
         vol_current = volume[i]
@@ -73,40 +85,28 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x daily average
         volume_filter = vol_current > (vol_avg * 1.5)
         
-        # Calculate daily high/low for price action
-        # Map 6h index to daily index (4 6h bars per day)
-        daily_idx = i // 4
-        if daily_idx >= len(high_1d):
-            signals[i] = 0.0
-            continue
-            
-        daily_high = high_1d[daily_idx]
-        daily_low = low_1d[daily_idx]
-        daily_range = daily_high - daily_low
-        
+        # Entry conditions: long only in bullish trend, short only in bearish trend
         if position == 0:
-            # Long: price breaks above daily high with volume and volatility
-            if close[i] > daily_high and vol_filter and volume_filter:
+            # Long: weekly trend up + volatility + volume
+            if close[i] > ema_trend and vol_filter and volume_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below daily low with volume and volatility
-            elif close[i] < daily_low and vol_filter and volume_filter:
+            # Short: weekly trend down + volatility + volume
+            elif close[i] < ema_trend and vol_filter and volume_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns below daily close or volatility drops
-            daily_close = close_1d[daily_idx]
-            if close[i] < daily_close or not vol_filter:
+            # Exit long: trend reversal or volatility collapse
+            if close[i] < ema_trend or atr_val < (atr_ma * 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns above daily close or volatility drops
-            daily_close = close_1d[daily_idx]
-            if close[i] > daily_close or not vol_filter:
+            # Exit short: trend reversal or volatility collapse
+            if close[i] > ema_trend or atr_val < (atr_ma * 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyBreakout_VolumeVolatilityFilter"
-timeframe = "6h"
+name = "4h_WeeklyTrend_VolumeVolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
