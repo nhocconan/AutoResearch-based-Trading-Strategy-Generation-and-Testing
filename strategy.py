@@ -12,8 +12,10 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = pd.to_datetime(prices['open_time'])  # already datetime64[ms]
+    hours = open_time.dt.hour.values  # pre-compute hour for session filter
     
-    # Get daily data for trend filter and volatility
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -23,7 +25,7 @@ def generate_signals(prices):
     # Calculate EMA34 on daily close for trend filter
     ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align daily EMA to 4h (primary timeframe)
+    # Align daily EMA to 1h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate 14-period ATR for volatility filter and stoploss
@@ -54,7 +56,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    size = 0.25
+    size = 0.20  # Reduced size to manage drawdown
     
     # Warmup period
     start_idx = max(34, 14, vol_period, period) + 5
@@ -62,6 +64,11 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC only
+        if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
@@ -96,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA34_VolumeFilter_v1"
-timeframe = "4h"
+name = "1h_Donchian20_EMA34_VolumeFilter_Session_v1"
+timeframe = "1h"
 leverage = 1.0
