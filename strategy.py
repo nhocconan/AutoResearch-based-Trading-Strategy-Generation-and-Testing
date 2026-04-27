@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-#100766 - 4h_RSI_30_70_1dTrend_VolumeFilter
-Hypothesis: Mean reversion using RSI 30/70 levels with 1d EMA50 trend filter and volume spike filter.
-Works in bull markets (RSI bounce off 30 in uptrend) and bear markets (RSI rejection at 70 in downtrend).
-Targets ~30 trades/year to minimize fee drag. Uses 4h RSI with 1d trend filter for multi-timeframe alignment.
+#100768 - 12h_Donchian20_1wEMA50_Trend_VolumeS
+Hypothesis: 12h Donchian(20) breakout with 1-week EMA50 trend filter and volume spike. Designed to work in bull markets (trend-following breakouts) and bear markets (short breakdowns with trend filter). Uses weekly EMA50 to capture major trend direction, avoiding whipsaws. Targets 15-30 trades/year to minimize fee drag on 12h timeframe.
 """
 
 import numpy as np
@@ -12,68 +10,64 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate RSI(14) on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 1w EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Donchian channels (20-period) on 12h timeframe
+    # Use rolling window on high/low
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 2x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: RSI < 30 (oversold), above 1d EMA50 (uptrend), volume spike
-        if (rsi[i] < 30 and 
-            close[i] > ema50_1d_aligned[i] and 
+        # Long condition: price breaks above 20-period high, above 1w EMA50, volume spike
+        if (close[i] > high_max[i] and 
+            close[i] > ema50_1w_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: RSI > 70 (overbought), below 1d EMA50 (downtrend), volume spike
-        elif (rsi[i] > 70 and 
-              close[i] < ema50_1d_aligned[i] and 
+        # Short condition: price breaks below 20-period low, below 1w EMA50, volume spike
+        elif (close[i] < low_min[i] and 
+              close[i] < ema50_1w_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: RSI returns to neutral zone (50)
-        elif position == 1 and rsi[i] > 50:
+        # Exit conditions: price returns to opposite Donchian level (trailing exit)
+        elif position == 1 and close[i] < low_min[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and rsi[i] < 50:
+        elif position == -1 and close[i] > high_max[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -87,7 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_30_70_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "12h_Donchian20_1wEMA50_Trend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
-EOF
