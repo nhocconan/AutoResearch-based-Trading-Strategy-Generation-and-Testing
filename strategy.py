@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 12h trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; entries occur on reversals from extremes
-# with volume confirmation and higher timeframe trend alignment. Works in bull/bear by filtering
-# trade direction with 12h EMA trend. Target: 50-150 total trades over 4 years (~12-37/year).
+# Hypothesis: 1h mean reversion using Bollinger Bands with 4h trend filter and volume confirmation
+# In ranging markets (common in 2025+), price reverts to mean at Bollinger Band extremes.
+# 4h trend filter ensures we only take mean-reversion trades in the direction of higher timeframe momentum.
+# Volume spike confirms institutional interest at the reversal point.
+# Target: 60-150 total trades over 4 years (~15-37/year) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,49 +19,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams %R calculation and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 4h EMA trend filter (20-period)
+    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Calculate Williams %R (14-period) on 12h data
-    williams_r = np.full(len(df_12h), np.nan)
-    for i in range(13, len(df_12h)):
-        highest_high = np.max(high_12h[i-13:i+1])
-        lowest_low = np.min(low_12h[i-13:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_12h[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50  # neutral when range is zero
+    # Bollinger Bands (20, 2) on 1h
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = sma_20 + bb_std * std_20
+    bb_lower = sma_20 - bb_std * std_20
     
-    # Align Williams %R to 4h timeframe (wait for 12h bar close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
-    
-    # 12h EMA trend filter (50-period)
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume filter: volume > 1.5 x 20-period average (approx 10 hours of 4h bars)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Volume filter: volume > 1.5 x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
-    # Warmup: need 12h data (13 bars for Williams %R), EMA (50), volume MA (20)
-    start_idx = max(13, 50, 19)
+    # Warmup: need BB (20), volume MA (20), 4h EMA (20)
+    start_idx = max(bb_period, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,36 +60,31 @@ def generate_signals(prices):
         # Volume filter: significant volume spike
         vol_filter = vol_now > 1.5 * vol_avg
         
-        # Williams %R levels
-        wr = williams_r_aligned[i]
-        oversold = wr < -80
-        overbought = wr > -20
-        
-        # Trend filter from 12h EMA
-        bullish_trend = price > ema_50_aligned[i]
-        bearish_trend = price < ema_50_aligned[i]
+        # Trend filter from 4h EMA
+        bullish_trend = ema_20_4h_aligned[i] > sma_20[i]  # 4h trend vs 1h mean
+        bearish_trend = ema_20_4h_aligned[i] < sma_20[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -80 from oversold with volume and bullish trend
-            if wr > -80 and williams_r_aligned[i-1] <= -80 and vol_filter and bullish_trend:
+            # Long: price at lower BB with volume and bullish 4h trend
+            if price <= bb_lower[i] and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: Williams %R crosses below -20 from overbought with volume and bearish trend
-            elif wr < -20 and williams_r_aligned[i-1] >= -20 and vol_filter and bearish_trend:
+            # Short: price at upper BB with volume and bearish 4h trend
+            elif price >= bb_upper[i] and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R reaches overbought or trend turns bearish
-            if wr >= -20 or not bullish_trend:
+            # Exit long: price returns to middle (mean reversion) or 4h trend turns bearish
+            if price >= sma_20[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Williams %R reaches oversold or trend turns bullish
-            if wr <= -80 or not bearish_trend:
+            # Exit short: price returns to middle (mean reversion) or 4h trend turns bullish
+            if price <= sma_20[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_14_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Bollinger_MeanReversion_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
