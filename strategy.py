@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,19 +13,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (HTF)
+    # Get 1d data for daily ATR and volume (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
-    
-    # Get 12h data for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA(34) for trend
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
@@ -38,12 +29,11 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily volume average for volume filter
+    # Calculate daily volume average
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align indicators to 6h timeframe
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
@@ -55,12 +45,11 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     # Warmup: need all indicators
-    start_idx = max(34, 20, 20)
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,7 +59,6 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema_34_12h_aligned[i]
         atr_val = atr_14_1d_aligned[i]
         vol_avg = vol_avg_1d_aligned[i]
         vol_current = volume[i]
@@ -85,45 +73,40 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x daily average
         volume_filter = vol_current > (vol_avg * 1.5)
         
-        # Calculate Camarilla pivot levels from daily data
-        # Camarilla: H4 = C + ((H-L)*1.1/2), L4 = C - ((H-L)*1.1/2)
-        # But we use simpler R3/S3 and R4/S4 as in the strategy
-        daily_idx = i // 4  # 6h bars per day = 4
-        if daily_idx >= len(df_1d):
+        # Calculate daily high/low for price action
+        # Map 6h index to daily index (4 6h bars per day)
+        daily_idx = i // 4
+        if daily_idx >= len(high_1d):
             signals[i] = 0.0
             continue
-        high_1d_i = high_1d[daily_idx]
-        low_1d_i = low_1d[daily_idx]
-        close_1d_i = close_1d[daily_idx]
-        
-        # Calculate Camarilla levels
-        range_1d = high_1d_i - low_1d_i
-        r4 = close_1d_i + (range_1d * 1.1 / 2) * 2  # R4
-        s4 = close_1d_i - (range_1d * 1.1 / 2) * 2  # S4
-        r3 = close_1d_i + (range_1d * 1.1 / 2) * 1.5  # R3
-        s3 = close_1d_i - (range_1d * 1.1 / 2) * 1.5  # S3
+            
+        daily_high = high_1d[daily_idx]
+        daily_low = low_1d[daily_idx]
+        daily_range = daily_high - daily_low
         
         if position == 0:
-            # Long: breakout above R3 with trend and filters
-            if close[i] > r3 and close[i] > ema_trend and vol_filter and volume_filter:
+            # Long: price breaks above daily high with volume and volatility
+            if close[i] > daily_high and vol_filter and volume_filter:
                 signals[i] = size
                 position = 1
-            # Short: breakdown below S3 with trend and filters
-            elif close[i] < s3 and close[i] < ema_trend and vol_filter and volume_filter:
+            # Short: price breaks below daily low with volume and volatility
+            elif close[i] < daily_low and vol_filter and volume_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below S3 or trend reverses
-            if close[i] < s3 or close[i] < ema_trend:
+            # Exit long: price returns below daily close or volatility drops
+            daily_close = close_1d[daily_idx]
+            if close[i] < daily_close or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above R3 or trend reverses
-            if close[i] > r3 or close[i] > ema_trend:
+            # Exit short: price returns above daily close or volatility drops
+            daily_close = close_1d[daily_idx]
+            if close[i] > daily_close or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_12hEMA34_Volume_Filter"
+name = "6h_DailyBreakout_VolumeVolatilityFilter"
 timeframe = "6h"
 leverage = 1.0
