@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Williams %R with weekly trend filter and volume confirmation.
-Williams %R > -20 (overbought) or < -80 (oversold) signals reversals.
-Weekly EMA(34) determines trend direction: only take Williams %R signals in trend direction.
-Volume > 1.5x 20-period average confirms participation.
-Designed to capture overextended moves in both bull and bear markets with controlled frequency.
+12-hour Donchian Breakout with 1-Day Trend Filter and Volume Confirmation
+Long when price breaks above Donchian(20) high on 1-day timeframe (trend up),
+short when price breaks below Donchian(20) low (trend down), with volume filter.
+Trades only on 12h closes to limit frequency. Target: 20-40 trades/year.
+Works in bull/bear via trend filter.
 """
 
 import numpy as np
@@ -16,96 +16,81 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA(34) for trend
-    wk_close = df_1w['close'].values
-    wk_ema_34 = pd.Series(wk_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    wk_ema_34_aligned = align_htf_to_ltf(prices, df_1w, wk_ema_34)
-    
-    # Calculate Williams %R (14-period)
-    lookback = 14
-    highest_high = np.zeros_like(high)
-    lowest_low = np.zeros_like(low)
-    
-    for i in range(n):
-        if i < lookback - 1:
-            highest_high[i] = np.nan
-            lowest_low[i] = np.nan
-        else:
-            start_idx = i - lookback + 1
-            highest_high[i] = np.max(high[start_idx:i+1])
-            lowest_low[i] = np.min(low[start_idx:i+1])
-    
-    williams_r = np.full_like(close, np.nan, dtype=np.float64)
-    for i in range(n):
-        if highest_high[i] == lowest_low[i] or np.isnan(highest_high[i]):
-            williams_r[i] = -50.0  # neutral when no range
-        else:
-            williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
-    
-    # Get daily volume for confirmation
+    # Get daily data for trend and Donchian channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Daily Donchian channels (20-period)
+    donch_high = np.full_like(close_1d, np.nan)
+    donch_low = np.full_like(close_1d, np.nan)
+    for i in range(19, len(high_1d)):
+        donch_high[i] = np.max(high_1d[i-19:i+1])
+        donch_low[i] = np.min(low_1d[i-19:i+1])
+    
+    # Daily trend: EMA(50) slope
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_slope = np.zeros_like(ema_50)
+    ema_slope[1:] = ema_50[1:] - ema_50[:-1]
+    
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align to 12h timeframe
+    donch_high_12h = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_12h = align_htf_to_ltf(prices, df_1d, donch_low)
+    ema_slope_12h = align_htf_to_ltf(prices, df_1d, ema_slope)
+    vol_ma_20_12h = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.25   # 25% position
     
-    # Warmup: need Williams %R (14) + weekly EMA (34) + volume MA (20)
-    start_idx = max(lookback, 34, 20)
+    # Warmup
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(wk_ema_34_aligned[i]) or 
-            np.isnan(wk_close[-1]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(donch_high_12h[i]) or np.isnan(donch_low_12h[i]) or 
+            np.isnan(ema_slope_12h[i]) or np.isnan(vol_ma_20_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Current values
-        wr = williams_r[i]
         price_now = close[i]
         vol_now = volume[i]
-        wk_ema = wk_ema_34_aligned[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
+        vol_ma = vol_ma_20_12h[i]
         
-        # Volume filter: volume > 1.5x daily average
-        vol_filter = vol_now > 1.5 * vol_ma
+        # Volume filter: current volume > 1.3x daily average
+        vol_filter = vol_now > 1.3 * vol_ma
         
         if position == 0:
-            # Long setup: Williams %R oversold (< -80) + price above weekly EMA (uptrend) + volume
-            if wr < -80 and price_now > wk_ema and vol_filter:
+            # Long: price breaks above Donchian high + uptrend + volume
+            if price_now > donch_high_12h[i] and ema_slope_12h[i] > 0 and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short setup: Williams %R overbought (> -20) + price below weekly EMA (downtrend) + volume
-            elif wr > -20 and price_now < wk_ema and vol_filter:
+            # Short: price breaks below Donchian low + downtrend + volume
+            elif price_now < donch_low_12h[i] and ema_slope_12h[i] < 0 and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or trend changes
-            if wr > -50 or price_now < wk_ema:
+            # Exit long: price breaks below Donchian low or trend turns down
+            if price_now < donch_low_12h[i] or ema_slope_12h[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or trend changes
-            if wr < -50 or price_now > wk_ema:
+            # Exit short: price breaks above Donchian high or trend turns up
+            if price_now > donch_high_12h[i] or ema_slope_12h[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
