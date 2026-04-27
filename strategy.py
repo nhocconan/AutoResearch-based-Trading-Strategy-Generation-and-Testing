@@ -1,9 +1,4 @@
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: 12h Camarilla R1/S1 breakout with daily EMA trend filter and volume confirmation.
-# Uses daily Camarilla levels (R1/S1) for entry, daily EMA50 for trend direction, and volume spike for confirmation.
-# Designed for 12h timeframe: expects 15-35 trades/year per symbol.
-# Works in bull/bear: EMA trend adapts to daily structure; volume avoids false breaks.
-# Stops when price crosses back through the opposite Camarilla level (S1 for long, R1 for short).
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,69 +13,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and EMA
+    # Get daily data for trend and volatility filters
     df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 10:
+    if len(df_d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
+    # Calculate 50-period EMA on daily close for trend filter
     close_d = df_d['close'].values
-    R1_d = close_d + (high_d - low_d) * 1.1 / 12
-    S1_d = close_d - (high_d - low_d) * 1.1 / 12
+    ema50_d = np.full(len(close_d), np.nan)
+    alpha = 2 / (50 + 1)
+    for i in range(len(close_d)):
+        if i < 50:
+            ema50_d[i] = np.nan
+        elif i == 50:
+            ema50_d[i] = np.mean(close_d[:50])
+        else:
+            ema50_d[i] = alpha * close_d[i] + (1 - alpha) * ema50_d[i-1]
     
-    # Align daily Camarilla to 12h
-    R1_d_aligned = align_htf_to_ltf(prices, df_d, R1_d)
-    S1_d_aligned = align_htf_to_ltf(prices, df_d, S1_d)
-    
-    # Calculate daily EMA50 for trend filter
-    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align daily EMA50 to 6h
     ema50_d_aligned = align_htf_to_ltf(prices, df_d, ema50_d)
     
-    # Calculate 20-period volume average
-    vol_ma = np.full(n, np.nan)
-    vol_period = 20
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    # Calculate 14-period ATR on daily for volatility filter
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
+    close_d_arr = df_d['close'].values
+    tr_d = np.maximum(high_d[1:] - low_d[1:], 
+                      np.maximum(np.abs(high_d[1:] - close_d_arr[:-1]), 
+                                 np.abs(low_d[1:] - close_d_arr[:-1])))
+    tr_d = np.concatenate([[np.nan], tr_d])
+    atr_d = np.full(len(tr_d), np.nan)
+    for i in range(14, len(tr_d)):
+        if i == 14:
+            atr_d[i] = np.mean(tr_d[1:15])
+        else:
+            atr_d[i] = (atr_d[i-1] * 13 + tr_d[i]) / 14
+    
+    # Align daily ATR14 to 6h
+    atr_d_aligned = align_htf_to_ltf(prices, df_d, atr_d)
+    
+    # Calculate 6-period RSI on 6h for entry timing
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(6, n):
+        if i == 6:
+            avg_gain[i] = np.mean(gain[1:7])
+            avg_loss[i] = np.mean(loss[1:7])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 5 + gain[i]) / 6
+            avg_loss[i] = (avg_loss[i-1] * 5 + loss[i]) / 6
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
     # Warmup period
-    start_idx = max(vol_period, 50) + 5
+    start_idx = max(50, 14, 6) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or 
-            np.isnan(ema50_d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        ema50 = ema50_d_aligned[i]
+        atr = atr_d_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R1 with volume AND above daily EMA50
-            if price > R1_d_aligned[i] and vol_ratio > 2.0 and price > ema50_d_aligned[i]:
+            # Long: Price above daily EMA50 AND RSI oversold (<30)
+            if price > ema50 and rsi[i] < 30:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below S1 with volume AND below daily EMA50
-            elif price < S1_d_aligned[i] and vol_ratio > 2.0 and price < ema50_d_aligned[i]:
+            # Short: Price below daily EMA50 AND RSI overbought (>70)
+            elif price < ema50 and rsi[i] > 70:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below S1 (opposite level)
-            if price < S1_d_aligned[i]:
+            # Long exit: Price crosses below daily EMA50 OR RSI overbought (>70)
+            if price < ema50 or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses above R1 (opposite level)
-            if price > R1_d_aligned[i]:
+            # Short exit: Price crosses above daily EMA50 OR RSI oversold (<30)
+            if price > ema50 or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "6h_EMA50_RSI_Filter"
+timeframe = "6h"
 leverage = 1.0
