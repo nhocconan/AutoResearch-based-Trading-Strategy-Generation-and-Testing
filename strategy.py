@@ -1,3 +1,9 @@
+# US1DC5_MacroTrend_Refined
+# Hypothesis: Daily MACD crossover with 1-week EMA filter and volume confirmation captures major trend shifts
+# Works in bull/bear by requiring both momentum (MACD) and trend (weekly EMA) alignment
+# Target: 20-40 trades/year to minimize fee drag while capturing sustained moves
+# Uses daily timeframe with weekly trend filter for institutional-grade signals
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,34 +19,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for higher timeframe trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily Donchian channels (20-period) - using close for consistency
-    donchian_high_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    # Calculate weekly EMA(21) for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Calculate daily ATR(14) for volatility
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate daily MACD (12,26,9)
+    close_series = pd.Series(close)
+    ema_12 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema_26 = close_series.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd_line = ema_12 - ema_26
+    signal_line = macd_line.ewm(span=9, adjust=False, min_periods=9).mean()
+    macd_hist = macd_line - signal_line
     
-    # Calculate daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    macd_line_vals = macd_line.values
+    signal_line_vals = signal_line.values
+    macd_hist_vals = macd_hist.values
+    
+    # Calculate daily volume moving average for confirmation
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -54,10 +57,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_20_aligned[i]) or 
-            np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(macd_line_vals[i]) or 
+            np.isnan(signal_line_vals[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -66,27 +69,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above EMA50 for long, below for short
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Weekly trend filter: price above/below weekly EMA21
+        above_weekly_ema = close[i] > ema_21_1w_aligned[i]
+        below_weekly_ema = close[i] < ema_21_1w_aligned[i]
         
-        # Volatility filter: ATR not too low (avoid choppy markets)
-        atr_ma_20 = pd.Series(atr_14_1d).rolling(window=20, min_periods=20).mean().values
-        atr_ma_20_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
-        if np.isnan(atr_ma_20_aligned[i]):
-            signals[i] = 0.0
-            continue
-        vol_ok = atr_14_1d_aligned[i] > (atr_ma_20_aligned[i] * 0.6)
+        # MACD conditions: bullish/bearish crossover
+        macd_bullish = macd_line_vals[i] > signal_line_vals[i] and macd_line_vals[i-1] <= signal_line_vals[i-1]
+        macd_bearish = macd_line_vals[i] < signal_line_vals[i] and macd_line_vals[i-1] >= signal_line_vals[i-1]
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high_20_aligned[i]
-        short_breakout = close[i] < donchian_low_20_aligned[i]
+        # Volume confirmation: above average volume
+        vol_confirm = volume[i] > volume_ma_20[i]
         
-        # Long conditions: uptrend + volatility ok + long breakout
-        long_condition = uptrend and vol_ok and long_breakout
+        # Long conditions: above weekly EMA + MACD bullish crossover + volume
+        long_condition = above_weekly_ema and macd_bullish and vol_confirm
         
-        # Short conditions: downtrend + volatility ok + short breakout
-        short_condition = downtrend and vol_ok and short_breakout
+        # Short conditions: below weekly EMA + MACD bearish crossover + volume
+        short_condition = below_weekly_ema and macd_bearish and vol_confirm
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -94,11 +92,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite breakout
-        elif position == 1 and short_breakout:
+        # Exit conditions: opposite MACD crossover
+        elif position == 1 and macd_bearish:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and long_breakout:
+        elif position == -1 and macd_bullish:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -112,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA50_VolumeFilter_Session"
-timeframe = "4h"
+name = "US1DC5_MacroTrend_Refined"
+timeframe = "1d"
 leverage = 1.0
