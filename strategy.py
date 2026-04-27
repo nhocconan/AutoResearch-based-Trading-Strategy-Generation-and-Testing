@@ -5,35 +5,23 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute hours for session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Get 1d data for calculations (called ONCE before loop)
+    # Get daily data for calculations (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day EMA (34-period) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        alpha = 2 / (34 + 1)
-        ema_34_1d[0] = close_1d[0]
-        for i in range(1, len(close_1d)):
-            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
-    
-    # Calculate 1-day ATR (14-period) for volatility filter
+    # Calculate daily ATR (14-period) for volatility
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     close_1d_prev = np.roll(close_1d, 1)
     close_1d_prev[0] = close_1d[0]
     
@@ -48,22 +36,15 @@ def generate_signals(prices):
         for i in range(14, len(tr)):
             atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 1-day Bollinger Bands (20, 2.0)
-    sma_20_1d = np.full(len(close_1d), np.nan)
-    std_20_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        for i in range(19, len(close_1d)):
-            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
-            std_20_1d[i] = np.std(close_1d[i-19:i+1])
+    # Calculate 1-day moving average (50-period) for trend filter
+    ma_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        for i in range(49, len(close_1d)):
+            ma_50_1d[i] = np.mean(close_1d[i-49:i+1])
     
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
-    
-    # Align 1d indicators to 1h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align daily indicators to 6h timeframe
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    ma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ma_50_1d)
     
     # Calculate 6-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
@@ -73,20 +54,13 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    size = 0.20
+    size = 0.25
     
     # Warmup period
-    start_idx = max(34, vol_period) + 5
+    start_idx = max(14, vol_period) + 5
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(upper_bb_1d_aligned[i]) or np.isnan(lower_bb_1d_aligned[i]) or 
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ma_50_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -94,30 +68,34 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.5x average volume
-        vol_filter = vol_ratio > 1.5
+        # Volume spike filter: at least 1.8x average volume
+        vol_filter = vol_ratio > 1.8
+        
+        # Trend filter: price above/below 50-day MA
+        uptrend = price > ma_50_1d_aligned[i]
+        downtrend = price < ma_50_1d_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above upper Bollinger Band with volume and above EMA34 trend
-            if price > upper_bb_1d_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
+            # Long: Volatility expansion + uptrend + volume spike
+            if atr_14_1d_aligned[i] > atr_14_1d_aligned[i-1] * 1.1 and uptrend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below lower Bollinger Band with volume and below EMA34 trend
-            elif price < lower_bb_1d_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
+            # Short: Volatility expansion + downtrend + volume spike
+            elif atr_14_1d_aligned[i] > atr_14_1d_aligned[i-1] * 1.1 and downtrend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below lower Bollinger Band or volatility spike (potential reversal)
-            if price < lower_bb_1d_aligned[i] or (vol_ratio > 2.5):
+            # Long exit: Volatility contraction or trend reversal
+            if atr_14_1d_aligned[i] < atr_14_1d_aligned[i-1] * 0.9 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above upper Bollinger Band or volatility spike (potential reversal)
-            if price > upper_bb_1d_aligned[i] or (vol_ratio > 2.5):
+            # Short exit: Volatility contraction or trend reversal
+            if atr_14_1d_aligned[i] < atr_14_1d_aligned[i-1] * 0.9 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Bollinger_20_1dEMA34_Volume_Session"
-timeframe = "1h"
+name = "6h_Volatility_Expansion_Trend"
+timeframe = "6h"
 leverage = 1.0
