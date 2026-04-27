@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime
-Hypothesis: Uses Camarilla pivot levels (R1, S1) from 1d timeframe for breakout entries, filtered by 1d EMA34 trend and volume spike (>1.5x average). Enters long when price breaks above 1d R1 AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x average. Enters short when price breaks below 1d S1 AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x average. Exits when price reverts to 1d close (mean reversion) OR trend breaks. Uses 4h timeframe with tight entries to avoid fee drag: target 20-50 trades/year. Camarilla R1/S1 levels represent stronger breakout points than R3/S3, reducing false breakouts. Works in both bull and bear markets via 1d trend filter and volume confirmation.
+Hypothesis: Uses Camarilla pivot levels (R1, S1) from 1d timeframe for breakout entries, filtered by 1d EMA34 trend and volume spike (>1.5x average). Enters long when price breaks above 1d R1 AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x average. Enters short when price breaks below 1d S1 AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x average. Exits when price reverts to 1d close (mean reversion) OR trend breaks. Uses 4h timeframe with tight entries to avoid fee drag: target 20-50 trades/year. Camarilla R1/S1 levels represent moderate breakout points, balancing sensitivity and specificity. Works in both bull and bear markets via 1d trend filter and volume confirmation.
 """
 
 import numpy as np
