@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,109 +13,134 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and ATR
+    # Get daily data for RSI and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels
-    upper_20 = np.full(len(df_1d), np.nan)
-    lower_20 = np.full(len(df_1d), np.nan)
-    for i in range(len(high_1d)):
-        if i >= 19:
-            upper_20[i] = np.max(high_1d[i-19:i+1])
-            lower_20[i] = np.min(low_1d[i-19:i+1])
-        else:
-            upper_20[i] = np.max(high_1d[:i+1])
-            lower_20[i] = np.min(low_1d[:i+1])
+    # Calculate daily RSI(14)
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[13] = np.mean(gain[:13]) if len(gain) >= 13 else np.nan
+    avg_loss[13] = np.mean(loss[:13]) if len(loss) >= 13 else np.nan
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = np.concatenate([[np.nan], rsi_1d])  # align with close_1d index
     
-    # Align Donchian channels to 6h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate daily ATR(14)
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr_1d = np.full(len(df_1d), np.nan)
+    atr_1d = np.zeros(len(tr_1d))
     for i in range(len(tr_1d)):
         if i < 13:
             atr_1d[i] = np.mean(tr_1d[:i+1]) if i > 0 else tr_1d[i]
         else:
             atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
     
+    # Align daily RSI and ATR to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 6h ATR(14) for breakout strength
-    tr1_6h = high[1:] - low[1:]
-    tr2_6h = np.abs(high[1:] - close[:-1])
-    tr3_6h = np.abs(low[1:] - close[:-1])
-    tr_6h = np.concatenate([[high[0] - low[0]], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
+    # Get weekly data for trend filter (EMA20)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    atr_6h = np.zeros(n)
-    for i in range(n):
-        if i < 13:
-            atr_6h[i] = np.mean(tr_6h[:i+1]) if i > 0 else tr_6h[i]
-        else:
-            atr_6h[i] = (atr_6h[i-1] * 13 + tr_6h[i]) / 14
+    close_1w = df_1w['close'].values
+    # Calculate weekly EMA(20)
+    ema_1w_20 = np.zeros(len(close_1w))
+    alpha = 2 / (20 + 1)
+    ema_1w_20[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        ema_1w_20[i] = close_1w[i] * alpha + ema_1w_20[i-1] * (1 - alpha)
     
-    # Calculate volume average (20-period)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
+    # Align weekly EMA20 to 12h timeframe
+    ema_1w_20_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_20)
+    
+    # Calculate 12h RSI(14) for momentum filter
+    delta_12h = np.diff(close)
+    gain_12h = np.where(delta_12h > 0, delta_12h, 0.0)
+    loss_12h = np.where(delta_12h < 0, -delta_12h, 0.0)
+    avg_gain_12h = np.zeros(n)
+    avg_loss_12h = np.zeros(n)
+    avg_gain_12h[13] = np.mean(gain_12h[:13]) if n >= 13 else np.nan
+    avg_loss_12h[13] = np.mean(loss_12h[:13]) if n >= 13 else np.nan
+    for i in range(14, n):
+        avg_gain_12h[i] = (avg_gain_12h[i-1] * 13 + gain_12h[i-1]) / 14
+        avg_loss_12h[i] = (avg_loss_12h[i-1] * 13 + loss_12h[i-1]) / 14
+    rs_12h = np.where(avg_loss_12h != 0, avg_gain_12h / avg_loss_12h, 0)
+    rsi_12h = 100 - (100 / (1 + rs_12h))
+    
+    # Calculate volume average (10-period)
+    vol_ma_10 = np.full(n, np.nan)
+    for i in range(10, n):
+        vol_ma_10[i] = np.mean(volume[i-10:i])
     
     signals = np.zeros(n)
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(20, 20)  # Donchian needs 20, ATR needs 14, volume MA needs 20
+    start_idx = max(14, 10)  # RSI needs 14, volume MA needs 10
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_20_aligned[i]) or
-            np.isnan(lower_20_aligned[i]) or
+        if (np.isnan(rsi_1d_aligned[i]) or
             np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(ema_1w_20_aligned[i]) or
+            np.isnan(rsi_12h[i]) or
+            np.isnan(vol_ma_10[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma_10[i] if vol_ma_10[i] > 0 else 0
         
-        # Volume confirmation: > 1.8x average volume
-        volume_confirmation = vol_ratio > 1.8
+        # Volume confirmation: > 1.5x average volume
+        volume_confirmation = vol_ratio > 1.5
         
-        # ATR volatility filter: only trade when 6h ATR is above 40% of daily ATR
-        vol_filter = atr_6h[i] > atr_1d_aligned[i] * 0.4
+        # RSI filter: avoid overbought/oversold extremes
+        rsi_filter = (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume and volatility
-            if volume_confirmation and vol_filter and price > upper_20_aligned[i]:
+            # Long: price above weekly EMA20, RSI neutral, volume confirmation
+            if (price > ema_1w_20_aligned[i] and 
+                rsi_filter and 
+                volume_confirmation and 
+                rsi_12h[i] > 50):  # additional momentum filter
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with volume and volatility
-            elif volume_confirmation and vol_filter and price < lower_20_aligned[i]:
+            # Short: price below weekly EMA20, RSI neutral, volume confirmation
+            elif (price < ema_1w_20_aligned[i] and 
+                  rsi_filter and 
+                  volume_confirmation and 
+                  rsi_12h[i] < 50):  # additional momentum filter
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below midpoint or volatility drops
-            midpoint = (upper_20_aligned[i] + lower_20_aligned[i]) / 2
-            if price < midpoint or atr_6h[i] < atr_1d_aligned[i] * 0.2:
+            # Long exit: price crosses below weekly EMA20 or RSI overbought
+            if (price < ema_1w_20_aligned[i] or 
+                rsi_1d_aligned[i] >= 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price crosses above midpoint or volatility drops
-            midpoint = (upper_20_aligned[i] + lower_20_aligned[i]) / 2
-            if price > midpoint or atr_6h[i] < atr_1d_aligned[i] * 0.2:
+            # Short exit: price crosses above weekly EMA20 or RSI oversold
+            if (price > ema_1w_20_aligned[i] or 
+                rsi_1d_aligned[i] <= 30):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_VolumeVolFilter_v1"
-timeframe = "6h"
+name = "12h_weekly_EMA20_dailyRSI_volume_filter_v1"
+timeframe = "12h"
 leverage = 1.0
