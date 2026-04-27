@@ -18,10 +18,20 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day ATR (14-period) for volatility
+    # Calculate 1-day CLOSE (for Donchian channel)
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1-day Donchian channel (20-period)
+    upper = np.full(len(close_1d), np.nan)
+    lower = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        for i in range(20-1, len(close_1d)):
+            upper[i] = np.max(close_1d[i-20+1:i+1])
+            lower[i] = np.min(close_1d[i-20+1:i+1])
+    
+    # Calculate 1-day ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     close_1d_prev = np.roll(close_1d, 1)
     close_1d_prev[0] = close_1d[0]
     
@@ -36,34 +46,23 @@ def generate_signals(prices):
         for i in range(14, len(tr)):
             atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 1-day EMA (200-period) for long-term trend
-    ema_200_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 200:
-        alpha = 2 / (200 + 1)
-        ema_200_1d[0] = close_1d[0]
+    # Calculate 1-day EMA (50-period) for trend filter
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        alpha = 2 / (50 + 1)
+        ema_50_1d[0] = close_1d[0]
         for i in range(1, len(close_1d)):
-            ema_200_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_200_1d[i-1]
+            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Calculate 1-day Williams %R (14-period)
-    highest_high_14 = np.full(len(high_1d), np.nan)
-    lowest_low_14 = np.full(len(low_1d), np.nan)
-    for i in range(13, len(high_1d)):
-        highest_high_14[i] = np.max(high_1d[i-13:i+1])
-        lowest_low_14[i] = np.min(low_1d[i-13:i+1])
-    
-    williams_r = np.full(len(close_1d), np.nan)
-    for i in range(13, len(close_1d)):
-        if highest_high_14[i] != lowest_low_14[i]:
-            williams_r[i] = (highest_high_14[i] - close_1d[i]) / (highest_high_14[i] - lowest_low_14[i]) * -100
-    
-    # Align 1d indicators to 6h timeframe
+    # Align 1d indicators to 12h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 2-period volume average for spike detection
+    # Calculate 4-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 2
+    vol_period = 4
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -72,11 +71,12 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(14, vol_period) + 5
+    start_idx = max(20, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -87,26 +87,26 @@ def generate_signals(prices):
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + above EMA200 trend + volume spike
-            if williams_r_aligned[i] < -80 and price > ema_200_1d_aligned[i] and vol_filter:
+            # Long: Price breaks above upper Donchian with volume and above EMA50 trend
+            if price > upper_1d_aligned[i] and vol_filter and price > ema_50_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Williams %R overbought (> -20) + below EMA200 trend + volume spike
-            elif williams_r_aligned[i] > -20 and price < ema_200_1d_aligned[i] and vol_filter:
+            # Short: Price breaks below lower Donchian with volume and below EMA50 trend
+            elif price < lower_1d_aligned[i] and vol_filter and price < ema_50_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Williams %R overbought (> -20) or volatility spike (potential reversal)
-            if williams_r_aligned[i] > -20 or (vol_ratio > 2.5):
+            # Long exit: Price closes below lower Donchian or volatility spike (potential reversal)
+            if price < lower_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Williams %R oversold (< -80) or volatility spike (potential reversal)
-            if williams_r_aligned[i] < -80 or (vol_ratio > 2.5):
+            # Short exit: Price closes above upper Donchian or volatility spike (potential reversal)
+            if price > upper_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_200EMA_Volume"
-timeframe = "6h"
+name = "12h_Donchian_20_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
