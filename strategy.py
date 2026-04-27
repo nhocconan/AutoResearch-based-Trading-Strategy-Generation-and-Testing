@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian channel breakout with 1-day volume confirmation and 1-week trend filter.
-Trades breakouts above/below the 4-hour Donchian(20) when volume exceeds the 1-day average and the weekly trend aligns.
+Hypothesis: 12-hour Donchian channel breakout with 1-day volume confirmation and 1-week trend filter.
+Trades breakouts above/below the 12-hour Donchian(20) when volume exceeds the 1-day average and the weekly trend aligns.
 Designed to work in both bull and bear markets by using weekly trend as filter and volume to confirm breakout strength.
-Target: 25-40 trades/year per symbol (100-160 total over 4 years) to minimize fee drag.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -19,20 +19,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4-hour data for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 12-hour data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 4-hour Donchian(20) channels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 12-hour Donchian(20) channels
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 4-hour timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align Donchian levels to 12-hour timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
     # Get daily data for volume filter
     df_1d = get_htf_data(prices, '1d')
@@ -79,16 +79,16 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Current 4-hour price and volume
-        high_4h_now = high_4h[i // 16] if i // 16 < len(high_4h) else high_4h[-1]
-        low_4h_now = low_4h[i // 16] if i // 16 < len(low_4h) else low_4h[-1]
+        # Current 12-hour price and volume
+        high_12h_now = high_12h[i // 2] if i // 2 < len(high_12h) else high_12h[-1]
+        low_12h_now = low_12h[i // 2] if i // 2 < len(low_12h) else low_12h[-1]
         vol_now = volume[i]
         vol_ma = vol_ma_20_1d_aligned[i]
         trend_1w = ema_50_1w_aligned[i]
         
         # Donchian breakout conditions
-        upper_break = high_4h_now > donchian_high_aligned[i]
-        lower_break = low_4h_now < donchian_low_aligned[i]
+        upper_break = high_12h_now > donchian_high_aligned[i]
+        lower_break = low_12h_now < donchian_low_aligned[i]
         
         # Volume filter: volume > 1.5x 1-day average
         vol_filter = vol_now > 1.5 * vol_ma
@@ -124,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_1dTrendFilter_1wTrend"
-timeframe = "4h"
+name = "12h_Donchian20_Volume_1dTrendFilter_1wTrend"
+timeframe = "12h"
 leverage = 1.0
