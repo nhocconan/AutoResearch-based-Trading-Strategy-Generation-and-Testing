@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Choppiness Index regime + weekly EMA200 trend filter + volume spike.
-# Long when CHOP > 61.8 (ranging market) + price > weekly EMA200 + volume spike.
-# Short when CHOP > 61.8 (ranging market) + price < weekly EMA200 + volume spike.
-# Exit when CHOP < 38.2 (trending market) or opposite signal.
-# Uses weekly timeframe for trend filter to capture long-term bias and reduce noise.
-# Target: 20-50 trades/year (80-200 over 4 years) to minimize fee decay while capturing mean reversion in ranges.
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel with bullish 1d trend and volume spike.
+# Short when price breaks below lower Donchian channel with bearish 1d trend and volume spike.
+# Exit when price crosses midline (mean reversion).
+# Uses 1d timeframe for trend filter to reduce noise and improve win rate.
+# Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag while capturing strong moves.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,70 +20,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA200 for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate 1-day EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate daily Choppiness Index (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Set first TR to high-low since no previous close
-    tr[0] = high[0] - low[0]
+    # Calculate Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max + low_min) / 2
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    chop_raw = 100 * np.log10(atr * 14 / (max_high - min_low)) / np.log10(14)
-    chop = np.where((max_high - min_low) > 0, chop_raw, 50.0)  # default to middle when range=0
-    
-    # Volume filter: volume > 2x 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(chop[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(donchian_mid[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: choppy market (CHOP > 61.8) + above weekly EMA200 + volume spike
-        if (chop[i] > 61.8 and 
-            close[i] > ema200_1w_aligned[i] and 
+        # Long condition: price breaks above upper Donchian, above 1d EMA50, volume spike
+        if (close[i] > high_max[i] and 
+            close[i] > ema50_1d_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: choppy market (CHOP > 61.8) + below weekly EMA200 + volume spike
-        elif (chop[i] > 61.8 and 
-              close[i] < ema200_1w_aligned[i] and 
+        # Short condition: price breaks below lower Donchian, below 1d EMA50, volume spike
+        elif (close[i] < low_min[i] and 
+              close[i] < ema50_1d_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trending market (CHOP < 38.2) or opposite signal
-        elif chop[i] < 38.2:
+        # Exit conditions: price crosses midline (mean reversion)
+        elif position == 1 and close[i] < donchian_mid[i]:
             signals[i] = 0.0
             position = 0
-        elif position == 1 and close[i] < ema200_1w_aligned[i]:
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and close[i] > ema200_1w_aligned[i]:
+        elif position == -1 and close[i] > donchian_mid[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -97,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ChoppinessIndex_WeeklyEMA200_Trend_VolumeFilter"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA50_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
