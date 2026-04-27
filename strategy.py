@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-hour EMA(20) pullback strategy with 4-hour trend filter and volume confirmation.
-In uptrends (price > 4h EMA(50)), enter long on pullbacks to 1h EMA(20) with volume > 1.5x 20-bar average.
-In downtrends (price < 4h EMA(50)), enter short on pullbacks to 1h EMA(20) with volume > 1.5x 20-bar average.
-Uses 4h for trend direction, 1h only for entry timing. Session filter 08-20 UTC to avoid low-volume periods.
-Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
+Hypothesis: 6-hour Ichimoku Cloud with Tenkan/Kijun cross and Senkou Span filters.
+- Uses daily Senkou Span A/B for cloud (support/resistance)
+- Tenkan (9) and Kijun (26) cross for momentum signals
+- Filters trades to occur only when price is above/below cloud appropriately
+- Works in bull/bear markets by using cloud as dynamic support/resistance
+- Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag
 """
 import numpy as np
 import pandas as pd
@@ -12,84 +13,104 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:  # need at least 26*2 for Ichimoku
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4-hour data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get daily data for Ichimoku components
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 26:
         return np.zeros(n)
     
-    # Calculate 4-hour EMA(50) for trend
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1-hour EMA(20) for entry
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate 1-hour volume MA(20)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # Warmup: need 4h EMA, 1h EMA, and volume MA
-    start_idx = max(50, 20, 20)  # max of lookbacks
+    # Warmup: need all Ichimoku components
+    start_idx = 52  # max lookback for Senkou B
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_20[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        tenkan_val = tenkan_6h[i]
+        kijun_val = kijun_6h[i]
+        senkou_a_val = senkou_a_6h[i]
+        senkou_b_val = senkou_b_6h[i]
         
-        trend_4h = ema_50_4h_aligned[i]
-        ema_20_val = ema_20[i]
-        vol_now = volume[i]
-        vol_ma = vol_ma_20[i]
+        # Determine cloud boundaries (Senkou Span A and B form the cloud)
+        upper_cloud = max(senkou_a_val, senkou_b_val)
+        lower_cloud = min(senkou_a_val, senkou_b_val)
         
-        # Volume filter: volume > 1.5x 1h average
-        vol_filter = vol_now > 1.5 * vol_ma
+        # Ichimoku signal: Tenkan/Kijun cross
+        # Bullish cross: Tenkan crosses above Kijun
+        # Bearish cross: Tenkan crosses below Kijun
+        if i > start_idx:
+            tenkan_prev = tenkan_6h[i-1]
+            kijun_prev = kijun_6h[i-1]
+            bullish_cross = tenkan_prev <= kijun_prev and tenkan_val > kijun_val
+            bearish_cross = tenkan_prev >= kijun_prev and tenkan_val < kijun_val
+        else:
+            bullish_cross = False
+            bearish_cross = False
         
-        # Entry conditions: EMA(20) pullback with volume and 4h trend alignment
+        # Entry conditions
         if position == 0:
-            # Long: pullback to EMA(20) in 4h uptrend
-            if close[i] > ema_20_val and close[i] > trend_4h and vol_filter:
+            # Long: bullish cross AND price above cloud
+            if bullish_cross and close[i] > upper_cloud:
                 signals[i] = size
                 position = 1
-            # Short: pullback to EMA(20) in 4h downtrend
-            elif close[i] < ema_20_val and close[i] < trend_4h and vol_filter:
+            # Short: bearish cross AND price below cloud
+            elif bearish_cross and close[i] < lower_cloud:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below EMA(20) or trend reversal
-            if close[i] < ema_20_val or close[i] < trend_4h:
+            # Exit long: bearish cross OR price drops below cloud
+            if bearish_cross or close[i] < lower_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above EMA(20) or trend reversal
-            if close[i] > ema_20_val or close[i] > trend_4h:
+            # Exit short: bullish cross OR price rises above cloud
+            if bullish_cross or close[i] > upper_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMA20_Pullback_4hTrend_VolumeFilter"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Cross_Filter"
+timeframe = "6h"
 leverage = 1.0
