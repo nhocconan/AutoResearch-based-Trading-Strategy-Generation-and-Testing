@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,49 +13,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for higher timeframe context
+    # Get 1d and 1w data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 30 or len(df_1w) < 10:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA 34 for trend direction
+    # 1d EMA 34 for medium-term trend
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h Donchian channels (20-period for structure)
+    # 1w EMA 8 for long-term trend
+    ema_8_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
+    
+    # 6h Donchian channels (20-period for structure)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.8x 30-period average (strong filter to reduce trades)
+    # Volume filter: volume > 1.8x 30-period average
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 80
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_8_1w_aligned[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend alignment: both 1d and 1w EMAs agree
+        bullish_trend = (ema_34_1d_aligned[i] > ema_8_1w_aligned[i])
+        bearish_trend = (ema_34_1d_aligned[i] < ema_8_1w_aligned[i])
         
-        # Long conditions: price breaks above upper Donchian + above 1d EMA + volume
-        long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_filter[i])
-        # Short conditions: price breaks below lower Donchian + below 1d EMA + volume
-        short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_filter[i])
+        # Long: breakout above upper Donchian + bullish multi-timeframe trend + volume
+        long_breakout = (close[i] > highest_high[i-1] and bullish_trend and volume_filter[i])
+        # Short: breakout below lower Donchian + bearish multi-timeframe trend + volume
+        short_breakout = (close[i] < lowest_low[i-1] and bearish_trend and volume_filter[i])
         
         if long_breakout:
             signals[i] = 0.25
@@ -63,7 +67,7 @@ def generate_signals(prices):
         elif short_breakout:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite Donchian breakout
+        # Exit: opposite Donchian breakout
         elif position == 1 and close[i] < lowest_low[i-1]:
             signals[i] = 0.0
             position = 0
@@ -81,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "6h_Donchian20_Breakout_1d1wEMA_TrendAlign_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
