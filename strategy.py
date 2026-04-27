@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_3BarReversal_LiquidityCave_Momentum
-Hypothesis: Three-bar reversal patterns at liquidity caves (equal highs/lows) with momentum confirmation capture reversals in both trending and ranging markets.
-Works in bull/bear by requiring momentum confirmation and avoiding counter-trend entries. Targets 20-30 trades/year on 4h.
+12h_Alligator_Trend_Filter_SmallSignal
+Hypothesis: Williams Alligator with strict thresholds and small position size reduces whipsaw in chop.
+Uses 1d Alligator (JAWS/TEETH/LIPS) for trend direction and 12h price action for entry.
+Small position (0.15) and strict trend filter aim for <30 trades/year to avoid fee drag.
+Works in bull by catching trends, in bear by avoiding false signals via strict Alligator alignment.
 """
 
 import numpy as np
@@ -11,83 +13,72 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate 1d EMA20 for trend filter
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Williams Alligator: SMAs of median price
+    median_price = (df_1d['high'] + df_1d['low']) / 2
+    close_median = median_price.values
     
-    # Calculate ATR(14) for stop loss
-    high_low = high - low
-    high_close_prev = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    low_close_prev = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(high_low, np.maximum(high_close_prev, low_close_prev))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # JAWS (13-period, 8-bar shift), TEETH (8-period, 5-bar shift), LIPS (5-period, 3-bar shift)
+    jaws = pd.Series(close_median).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close_median).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close_median).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Align to 12h timeframe
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.15   # Small position size to reduce drawdown and trade frequency
     
-    # Warmup
-    start_idx = max(20, 14)
+    # Warmup: need enough data for Alligator (max shift 8)
+    start_idx = 13 + 8  # 21
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema20_1d_aligned[i]) or np.isnan(atr[i]):
+        if np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema20_1d_aligned[i]
+        jaws_val = jaws_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         
-        # Three-bar reversal pattern
-        # Bullish: three consecutive higher lows
-        bullish_3br = (low[i] > low[i-1]) and (low[i-1] > low[i-2])
-        # Bearish: three consecutive lower highs
-        bearish_3br = (high[i] < high[i-1]) and (high[i-1] < high[i-2])
-        
-        # Liquidity cave: equal highs/lows within 0.1% tolerance
-        equal_high = abs(high[i] - high[i-1]) / high[i] < 0.001
-        equal_low = abs(low[i] - low[i-1]) / low[i] < 0.001
-        liquidity_cave = equal_high or equal_low
-        
-        # Momentum confirmation: price > VWAP for long, price < VWAP for short
-        vwap_num = (high + low + close) * volume
-        vwap_den = volume
-        vwap = np.nancumsum(vwap_num) / np.nancumsum(vwap_den)
-        price_above_vwap = close[i] > vwap[i]
-        price_below_vwap = close[i] < vwap[i]
+        # Trend conditions: Alligator alignment
+        bullish = lips_val > teeth_val > jaws_val  # Green alignment
+        bearish = lips_val < teeth_val < jaws_val  # Red alignment
         
         if position == 0:
-            # Long: bullish 3-bar reversal at liquidity cave with momentum and uptrend
-            if bullish_3br and liquidity_cave and price_above_vwap and close[i] > ema_trend:
+            # Enter long only on strong bullish alignment with price above LIPS
+            if bullish and close[i] > lips_val:
                 signals[i] = size
                 position = 1
-            # Short: bearish 3-bar reversal at liquidity cave with momentum and downtrend
-            elif bearish_3br and liquidity_cave and price_below_vwap and close[i] < ema_trend:
+            # Enter short only on strong bearish alignment with price below LIPS
+            elif bearish and close[i] < lips_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: bearish reversal or stop loss
-            if bearish_3br or close[i] < (high[i-1] - 1.5 * atr[i]):
+            # Exit long: bearish alignment or price crosses below TEETH
+            if bearish or close[i] < teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: bullish reversal or stop loss
-            if bullish_3br or close[i] > (low[i-1] + 1.5 * atr[i]):
+            # Exit short: bullish alignment or price crosses above TEETH
+            if bullish or close[i] > teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_3BarReversal_LiquidityCave_Momentum"
-timeframe = "4h"
+name = "12h_Alligator_Trend_Filter_SmallSignal"
+timeframe = "12h"
 leverage = 1.0
