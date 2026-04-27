@@ -1,4 +1,3 @@
-#3o3 - 12h_Camarilla_R3S3_R4S4_FadeBreakout_1dEMA34_VolumeSpike_v3
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -23,10 +22,9 @@ def generate_signals(prices):
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate weekly EMA(34) for stronger trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate daily EMA(10) for momentum filter (fast EMA for momentum)
+    ema10_1d = pd.Series(df_1d['close']).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_1d_aligned = align_htf_to_ltf(prices, df_1d, ema10_1d)
     
     # Calculate Camarilla pivot levels from previous day
     high_prev = df_1d['high'].shift(1).values
@@ -36,23 +34,23 @@ def generate_signals(prices):
     pivot = (high_prev + low_prev + close_prev * 2) / 4
     range_ = high_prev - low_prev
     
-    # Resistance and Support levels (focus on R3/S3 for fading, R4/S4 for breakout)
+    # Focus on R1/S1 for mean reversion, R3/S3 for breakout (balance of frequency and accuracy)
+    r1 = pivot + range_ * 1.0833  # 1.0833 = (1.1 - 1) * 0.5 * 4
+    s1 = pivot - range_ * 1.0833
     r3 = pivot + range_ * 1.25
     s3 = pivot - range_ * 1.25
-    r4 = pivot + range_ * 1.5
-    s4 = pivot - range_ * 1.5
     
-    # Align levels to 12h timeframe
+    # Align levels to 4h timeframe
     ema34_aligned = ema34_1d_aligned
-    ema34_1w_aligned = ema34_1w_aligned
+    ema10_aligned = ema10_1d_aligned
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Volume confirmation: volume > 1.8 * 20-period average (balanced frequency)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,50 +61,51 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_aligned[i]) or np.isnan(ema10_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_aligned[i]
-        ema_trend_1w = ema34_1w_aligned[i]
+        ema_momentum = ema10_aligned[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Fade at R3/S3: price touches level and reverses
-            # Long: touch S3, close above it, in uptrend (daily & weekly), volume spike
-            if (low[i] <= s3_aligned[i] and close[i] > s3_aligned[i] and 
-                close[i] > ema_trend and close[i] > ema_trend_1w and vol_spike_val):
+            # Mean reversion at S1/R1: price touches level and reverses
+            # Long: touch S1, close above it, with momentum alignment and volume spike
+            if (low[i] <= s1_aligned[i] and close[i] > s1_aligned[i] and 
+                ema_momentum > ema_trend and vol_spike_val):
                 signals[i] = size
                 position = 1
-            # Short: touch R3, close below it, in downtrend (daily & weekly), volume spike
-            elif (high[i] >= r3_aligned[i] and close[i] < r3_aligned[i] and 
-                  close[i] < ema_trend and close[i] < ema_trend_1w and vol_spike_val):
+            # Short: touch R1, close below it, with momentum alignment and volume spike
+            elif (high[i] >= r1_aligned[i] and close[i] < r1_aligned[i] and 
+                  ema_momentum < ema_trend and vol_spike_val):
                 signals[i] = -size
                 position = -1
-            # Breakout continuation at R4/S4: strong break of extreme levels
-            # Long: break above R4 with volume spike and uptrend (daily & weekly)
-            elif (high[i] > r4_aligned[i] and close[i] > r4_aligned[i] and 
-                  close[i] > ema_trend and close[i] > ema_trend_1w and vol_spike_val):
+            # Breakout at R3/S3: strong break with momentum and volume
+            # Long: break above R3 with momentum and volume spike
+            elif (high[i] > r3_aligned[i] and close[i] > r3_aligned[i] and 
+                  ema_momentum > ema_trend and vol_spike_val):
                 signals[i] = size
                 position = 1
-            # Short: break below S4 with volume spike and downtrend (daily & weekly)
-            elif (low[i] < s4_aligned[i] and close[i] < s4_aligned[i] and 
-                  close[i] < ema_trend and close[i] < ema_trend_1w and vol_spike_val):
+            # Short: break below S3 with momentum and volume spike
+            elif (low[i] < s3_aligned[i] and close[i] < s3_aligned[i] and 
+                  ema_momentum < ema_trend and vol_spike_val):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches S3 (mean reversion) or trend reverses (daily or weekly)
-            if low[i] <= s3_aligned[i] or close[i] < ema_trend or close[i] < ema_trend_1w:
+            # Exit long: price reaches R1 (profit target) or momentum reverses
+            if high[i] >= r1_aligned[i] or ema_momentum < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price reaches R3 (mean reversion) or trend reverses (daily or weekly)
-            if high[i] >= r3_aligned[i] or close[i] > ema_trend or close[i] > ema_trend_1w:
+            # Exit short: price reaches S1 (profit target) or momentum reverses
+            if low[i] <= s1_aligned[i] or ema_momentum > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_R4S4_FadeBreakout_1dEMA34_1wEMA34_VolumeSpike_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_R3S3_MeanRev_Breakout_1dEMA34_EMA10_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
