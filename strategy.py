@@ -1,7 +1,3 @@
-# Test: 12h EMA34 + 4h Donchian breakout + volume filter
-# Hypothesis: 12h EMA provides robust trend filter for 4h breakouts, reducing false signals in chop. Works in bull (trend + breakout) and bear (counter-trend reversion when price far from EMA).
-# Target: 20-40 trades/year per symbol.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -9,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,35 +13,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get weekly data for higher timeframe context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA(34) for trend direction
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate weekly SMA(20) for trend direction
+    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
-    # Get 4h data for entry timing
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get daily data for entry timing (price channel)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    vol_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
+    # Calculate daily Donchian channels (20-period) for breakout signals
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
-    # Calculate 4h volume moving average for confirmation
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Get 6h data for volume confirmation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    volume_6h = df_6h['volume'].values
+    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -55,14 +55,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or 
+        if (np.isnan(sma_20_1w_aligned[i]) or 
             np.isnan(donchian_high_aligned[i]) or 
             np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_4h_aligned[i])):
+            np.isnan(vol_ma_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,24 +71,24 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA34
-        price_above_ema = close[i] > ema_34_12h_aligned[i]
-        price_below_ema = close[i] < ema_34_12h_aligned[i]
+        # Trend filter: price above/below weekly SMA20
+        price_above_trend = close[i] > sma_20_1w_aligned[i]
+        price_below_trend = close[i] < sma_20_1w_aligned[i]
         
-        # Volume filter: current 4h volume above average
-        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 1.5
+        # Volume filter: current 6h volume above average
+        volume_filter = vol_ma_6h_aligned[i] > 0 and volume[i] > vol_ma_6h_aligned[i] * 1.5
         
-        # Breakout signals: price breaks 4h Donchian channels
+        # Breakout signals: price breaks daily Donchian channels
         breakout_up = close[i] > donchian_high_aligned[i]
         breakout_down = close[i] < donchian_low_aligned[i]
         
         # Long conditions: bullish trend + volume + upward breakout
-        long_condition = (price_above_ema and 
+        long_condition = (price_above_trend and 
                          volume_filter and 
                          breakout_up)
         
         # Short conditions: bearish trend + volume + downward breakout
-        short_condition = (price_below_ema and 
+        short_condition = (price_below_trend and 
                           volume_filter and 
                           breakout_down)
         
@@ -99,10 +99,10 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         # Exit conditions: trend reversal
-        elif position == 1 and not price_above_ema:
+        elif position == 1 and not price_above_trend:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not price_below_ema:
+        elif position == -1 and not price_below_trend:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -116,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_4hDonchianBreakout_VolumeFilter"
-timeframe = "4h"
+name = "1w_SMA20_1dDonchianBreakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
