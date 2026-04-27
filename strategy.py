@@ -1,4 +1,3 @@
-# Your task: implement strategy.py based on the instructions.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -49,26 +48,26 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for weekly EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA50
+    # Calculate weekly EMA50
     ema_period = 50
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= ema_period:
-        ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
-        for i in range(ema_period, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * (2 / (ema_period + 1)) + 
-                        ema_4h[i-1] * (1 - (2 / (ema_period + 1))))
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
+                        ema_1w[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Align indicators to 4h timeframe
+    # Align indicators to 1d timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume filter: current volume > 2.0x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -86,7 +85,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -95,16 +94,16 @@ def generate_signals(prices):
         atr = atr_1d_aligned[i]
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volume spike + price > 4h EMA50
+            # Long: RSI < 30 (oversold) + volume spike + price > weekly EMA50
             if (rsi_1d_aligned[i] < 30 and 
                 vol_ratio > 2.0 and 
-                price > ema_4h_aligned[i]):
+                price > ema_1w_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: RSI > 70 (overbought) + volume spike + price < 4h EMA50
+            # Short: RSI > 70 (overbought) + volume spike + price < weekly EMA50
             elif (rsi_1d_aligned[i] > 70 and 
                   vol_ratio > 2.0 and 
-                  price < ema_4h_aligned[i]):
+                  price < ema_1w_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
@@ -128,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_MeanReversion_VolumeSpike_EMA50"
-timeframe = "4h"
+name = "1d_RSI_MeanReversion_VolumeSpike_WeeklyEMA50"
+timeframe = "1d"
 leverage = 1.0
