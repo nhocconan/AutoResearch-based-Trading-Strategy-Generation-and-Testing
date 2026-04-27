@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,17 +13,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly high/low
+    # Get daily data for weekly calculations
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 2:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate daily high and low for weekly calculation
+    # Calculate weekly high/low from daily data (max of last 5 daily highs, min of last 5 daily lows)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate weekly high (max of last 5 daily highs) and low (min of last 5 daily lows)
     weekly_high = np.full(len(df_1d), np.nan)
     weekly_low = np.full(len(df_1d), np.nan)
     
@@ -31,9 +29,16 @@ def generate_signals(prices):
         weekly_high[i] = np.max(high_1d[i-5:i])
         weekly_low[i] = np.min(low_1d[i-5:i])
     
-    # Align weekly high/low to 4h timeframe
+    # Align weekly high/low to daily timeframe
     weekly_high_aligned = align_htf_to_ltf(prices, df_1d, weekly_high)
     weekly_low_aligned = align_htf_to_ltf(prices, df_1d, weekly_low)
+    
+    # Calculate 100-period SMA for trend filter (on daily close)
+    close_1d = df_1d['close'].values
+    sma_100 = np.full(len(df_1d), np.nan)
+    for i in range(100, len(df_1d)):
+        sma_100[i] = np.mean(close_1d[i-100:i])
+    sma_100_aligned = align_htf_to_ltf(prices, df_1d, sma_100)
     
     # Calculate ATR(14) for volatility filter
     tr1 = high[1:] - low[1:]
@@ -56,11 +61,12 @@ def generate_signals(prices):
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(20, 14, 5)  # volume MA needs 20, ATR needs 14, weekly needs 5
+    start_idx = max(100, 20, 14, 5)  # SMA needs 100, volume MA needs 20, ATR needs 14, weekly needs 5
     
     for i in range(start_idx, n):
         if (np.isnan(weekly_high_aligned[i]) or
             np.isnan(weekly_low_aligned[i]) or
+            np.isnan(sma_100_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -68,40 +74,43 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Volume confirmation: > 2.5x average volume
-        volume_confirmation = vol_ratio > 2.5
+        # Volume confirmation: > 2.0x average volume
+        volume_confirmation = vol_ratio > 2.0
         
-        # ATR volatility filter: avoid low volatility periods
-        # Only trade when ATR is above 50% of its 50-period average
+        # Trend filter: price above/below 100-day SMA
+        uptrend = price > sma_100_aligned[i]
+        downtrend = price < sma_100_aligned[i]
+        
+        # Volatility filter: avoid low volatility periods
         if i >= 50:
             atr_avg = np.mean(atr[i-50:i+1])
-            vol_filter = atr[i] > atr_avg * 0.5
+            vol_filter = atr[i] > atr_avg * 0.3
         else:
-            vol_filter = True  # No filter during warmup
+            vol_filter = True
         
         if position == 0:
-            # Long: break above weekly high with volume and volatility
-            if volume_confirmation and vol_filter and price > weekly_high_aligned[i]:
+            # Long: break above weekly high in uptrend with volume
+            if volume_confirmation and vol_filter and uptrend and price > weekly_high_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly low with volume and volatility
-            elif volume_confirmation and vol_filter and price < weekly_low_aligned[i]:
+            # Short: break below weekly low in downtrend with volume
+            elif volume_confirmation and vol_filter and downtrend and price < weekly_low_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to weekly midpoint or volatility drops significantly
+            # Long exit: price returns to weekly midpoint or trend changes
             weekly_mid = (weekly_high_aligned[i] + weekly_low_aligned[i]) / 2
-            if price < weekly_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.4:
+            if price < weekly_mid or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price returns to weekly midpoint or volatility drops significantly
+            # Short exit: price returns to weekly midpoint or trend changes
             weekly_mid = (weekly_high_aligned[i] + weekly_low_aligned[i]) / 2
-            if price > weekly_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.4:
+            if price > weekly_mid or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1W_HighLow_Breakout_VolumeFilter_v1"
-timeframe = "4h"
+name = "1d_1W_WeeklyBreakout_TrendFilter_Volume"
+timeframe = "1d"
 leverage = 1.0
