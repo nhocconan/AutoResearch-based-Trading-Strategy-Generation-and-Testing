@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+# 1d_VolatilityExpansion_RSI4_WeeklyEMA34_v2
+# Hypothesis: Volatility expansion (ATR ratio > 1.3) combined with RSI(4) extremes and weekly EMA34 trend filter captures mean-reversion bursts in both bull and bear markets. Weekly trend ensures alignment with higher timeframe momentum, reducing false signals. Designed for low trade frequency (~15-25/year) to avoid fee drag.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -143,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolatilityExpansion_RSI4_WeeklyEMA34_v1"
-timeframe = "4h"
+name = "1d_VolatilityExpansion_RSI4_WeeklyEMA34_v2"
+timeframe = "1d"
 leverage = 1.0
