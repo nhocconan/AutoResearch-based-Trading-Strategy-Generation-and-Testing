@@ -97,10 +97,10 @@ def generate_signals(prices):
         short_condition = strong_trend and (close[i] < np.roll(close, 1)[i]) and rsi_not_extreme and vol_spike
         
         if long_condition and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_condition and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         # Exit conditions: loss of momentum or trend weakness
         elif position == 1 and (rsi_14_1d_aligned[i] >= 70 or adx_14_1d_aligned[i] < 20):
@@ -112,14 +112,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_ADX25_RSI14_VolumeFilter_Session"
-timeframe = "1h"
+name = "12h_ADX25_RSI14_VolumeFilter_Session"
+timeframe = "12h"
 leverage = 1.0
