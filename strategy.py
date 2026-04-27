@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour strategy using 1-day Choppiness Index (CHOP) regime filter with
-# Donchian channel breakout and volume confirmation. CHOP > 61.8 indicates ranging market
-# (mean-reversion), CHOP < 38.2 indicates trending (breakout continuation).
-# Long when: price > Donchian Upper(20) + CHOP < 38.2 + volume > 1.5x average
-# Short when: price < Donchian Lower(20) + CHOP < 38.2 + volume > 1.5x average
-# Exit when: price crosses Donchian midline or CHOP > 61.8 (range regime)
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
-# Works in bull markets (breakout continuations) and bear markets (breakdown continuations).
+# Hypothesis: 4h strategy using 1-week Exponential Moving Average (EMA50) as primary trend filter
+# and 1-day Average True Range (ATR14) for volatility-based position sizing and stop management.
+# Long when price > weekly EMA50 and ATR contraction (low volatility) precedes expansion.
+# Short when price < weekly EMA50 and ATR contraction precedes expansion.
+# Uses volume confirmation (volume > 1.3x 20-period average) to filter breakouts.
+# Designed for low trade frequency (<50 trades/year) to minimize fee drag in 4h timeframe.
+# Weekly EMA50 provides strong trend filter that works in both bull and bear markets.
+# ATR-based sizing reduces exposure during high volatility, protecting against large drawdowns.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,80 +22,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Choppiness Index calculation
+    # Get 1w data for weekly EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Get 1d data for ATR14 calculation (volatility filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1-day Choppiness Index (CHOP) with period 14
-    # TR = max(high-low, abs(high-previous_close), abs(low-previous_close))
+    # Calculate 1-day ATR14 for volatility assessment
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Sum of true ranges over period
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over period
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(atr_sum / (hh - ll)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh - ll
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
-    
-    # Align Choppiness Index to 12h timeframe (wait for 1d bar to close)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Donchian channels (20-period) on 12h data
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
+    
+    # ATR contraction/expansion signal: current ATR < 0.8 * ATR 5 periods ago
+    # Indicates low volatility period likely to expand (breakout setup)
+    atr_ratio = atr14_1d_aligned / np.roll(atr14_1d_aligned, 5)
+    atr_ratio[0:5] = 1.0  # Avoid division by zero/NaN for first 5 periods
+    volatility_contraction = atr_ratio < 0.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(chop_aligned[i]) or np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or 
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trending regime: CHOP < 38.2
-        trending = chop_aligned[i] < 38.2
-        
-        # Long breakout: price breaks above Donchian High with volume in trending regime
-        if trending and close[i] > donch_high[i] and volume_filter[i]:
+        # Long entry: price above weekly EMA50, volatility contraction, and volume confirmation
+        if (close[i] > ema50_1w_aligned[i] and 
+            volatility_contraction[i] and 
+            volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short breakdown: price breaks below Donchian Low with volume in trending regime
-        elif trending and close[i] < donch_low[i] and volume_filter[i]:
+        # Short entry: price below weekly EMA50, volatility contraction, and volume confirmation
+        elif (close[i] < ema50_1w_aligned[i] and 
+              volatility_contraction[i] and 
+              volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions
-        elif position == 1 and (close[i] <= donch_mid[i] or chop_aligned[i] > 61.8):
+        # Exit conditions: trend reversal or volatility expansion
+        elif position == 1 and close[i] <= ema50_1w_aligned[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] >= donch_mid[i] or chop_aligned[i] > 61.8):
+        elif position == -1 and close[i] >= ema50_1w_aligned[i]:
             signals[i] = 0.0
             position = 0
+        # Volatility expansion exit: reduce position during high volatility
+        elif position == 1 and atr_ratio[i] > 1.2:
+            signals[i] = 0.125  # Reduce to half position
+        elif position == -1 and atr_ratio[i] > 1.2:
+            signals[i] = -0.125  # Reduce to half position
         # Hold position
         else:
             if position == 1:
@@ -107,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_CHOP14_VolumeFilter"
-timeframe = "12h"
+name = "4h_WeeklyEMA50_ATRVolatility_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
