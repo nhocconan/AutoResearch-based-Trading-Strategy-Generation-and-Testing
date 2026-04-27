@@ -1,55 +1,72 @@
-# 4h_ChoppinessIndex_VolatilityBreakout_Filter
+#!/usr/bin/env python3
+"""
+Hypothesis: 6-hour Williams Fractal breakout with daily trend filter and volume confirmation.
+Uses daily Williams Fractals as potential reversal points, entering on breakouts
+in the direction of the daily EMA trend. Volume filter ensures only significant
+breakouts are traded. Designed to work in both bull and bear markets by using
+the daily trend as filter.
+Target: 12-37 trades/year per symbol (48-148 total over 4 years) to minimize fee drag.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Williams Fractals and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 1-day EMA(50) for trend
+    # Calculate daily EMA(34) for trend
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 4-hour data for Choppiness Index and volatility
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate daily Williams Fractals
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Williams Fractal: bearish = high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
+    #             bullish  = low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
+    n1d = len(high_1d)
+    bearish_fractal = np.full(n1d, np.nan)
+    bullish_fractal = np.full(n1d, np.nan)
+    
+    for i in range(2, n1d - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] < high_1d[i-1] and
+            high_1d[i-3] < high_1d[i-1] and
+            high_1d[i+1] < high_1d[i-1]):
+            bearish_fractal[i] = high_1d[i]
+        
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] > low_1d[i-1] and
+            low_1d[i-3] > low_1d[i-1] and
+            low_1d[i+1] > low_1d[i-1]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Williams Fractals need 2 extra daily bars for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
+    # Get 6-hour data for volume filter
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate 4-hour ATR(14) for volatility
-    tr1 = df_4h['high'] - df_4h['low']
-    tr2 = np.abs(df_4h['high'] - df_4h['close'].shift(1))
-    tr3 = np.abs(df_4h['low'] - df_4h['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 4-hour Choppiness Index(14)
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    hh = df_4h['high'].rolling(window=14, min_periods=14).max().values
-    ll = df_4h['low'].rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    
-    # Calculate 4-hour volume MA(20)
-    vol_4h = df_4h['volume'].values
-    vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
-    chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # Calculate 6-hour volume MA(20)
+    vol_6h = df_6h['volume'].values
+    vol_ma_20_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,13 +75,13 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need ATR, chop, volume MA, and 1d EMA
-    start_idx = max(14, 14, 20, 50)  # max of lookbacks
+    # Warmup: need Williams Fractals, volume MA, and daily EMA
+    start_idx = max(34, 20)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(vol_ma_20_6h_aligned[i]) or np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,40 +91,37 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        atr_val = atr_aligned[i]
-        chop_val = chop_aligned[i]
+        bearish_fractal_level = bearish_fractal_aligned[i]
+        bullish_fractal_level = bullish_fractal_aligned[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_4h_aligned[i]
-        trend_1d = ema_50_1d_aligned[i]
+        vol_ma = vol_ma_20_6h_aligned[i]
+        trend_1d = ema_34_1d_aligned[i]
         
-        # Volatility filter: ATR > 1.2x 4h average (normal to high volatility)
-        vol_filter = atr_val > 1.2 * np.nanmedian(atr_aligned[max(0, i-50):i+1])
+        # Volume filter: volume > 2.0x 6h average (strict to reduce trades)
+        vol_filter = vol_now > 2.0 * vol_ma
         
-        # Chop filter: chop > 61.8 (ranging market) for mean reversion
-        chop_filter = chop_val > 61.8
-        
-        # Entry conditions: volatility breakout in ranging market with trend alignment
+        # Entry conditions: Williams Fractal breakout with volume and daily trend alignment
         if position == 0:
-            # Long: price above trend + volatility + chop
-            if close[i] > trend_1d and vol_filter and chop_filter:
+            # Long: break above bullish fractal + volume + daily uptrend
+            if not np.isnan(bullish_fractal_level) and close[i] > bullish_fractal_level and vol_filter and close[i] > trend_1d:
                 signals[i] = size
                 position = 1
-            # Short: price below trend + volatility + chop
-            elif close[i] < trend_1d and vol_filter and chop_filter:
+            # Short: break below bearish fractal + volume + daily downtrend
+            elif not np.isnan(bearish_fractal_level) and close[i] < bearish_fractal_level and vol_filter and close[i] < trend_1d:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: chop drops below 38.2 (trending) or price crosses trend
-            if chop_val < 38.2 or close[i] < trend_1d:
+            # Exit long: close below daily EMA
+            if close[i] < trend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: chop drops below 38.2 or price crosses trend
-            if chop_val < 38.2 or close[i] > trend_1d:
+            # Exit short: close above daily EMA
+            if close[i] > trend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ChoppinessIndex_VolatilityBreakout_Filter"
-timeframe = "4h"
+name = "6h_WilliamsFractal_Breakout_DailyTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
