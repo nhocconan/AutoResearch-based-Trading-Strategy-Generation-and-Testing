@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF_v2
-Hypothesis: Uses daily Camarilla pivot levels (R3/S3) for breakout entries on 6h timeframe.
-Enter long when price breaks above daily R3 AND 1d close > EMA34 (uptrend) AND volume > 2.0 * 20-period average.
-Enter short when price breaks below daily S3 AND 1d close < EMA34 (downtrend) AND volume > 2.0 * 20-period average.
-Exit when price returns to daily pivot (PP) level OR trend reverses.
-Camarilla R3/S3 represent strong breakout levels; daily trend filter ensures alignment with higher timeframe structure.
-High volume threshold (2.0x) filters weak breakouts. Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position size.
-Designed to work in both bull and bear markets via trend filter and breakout logic.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF_v2
+Hypothesis: Refined Camarilla breakout on 12h with stricter volume confirmation and trend alignment.
+Enter long when price closes above daily R3 AND 1d EMA34 uptrend AND volume > 2.5x 20-period average.
+Enter short when price closes below daily S3 AND 1d EMA34 downtrend AND volume > 2.5x 20-period average.
+Exit when price returns to daily pivot (PP) level.
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
+Designed for BTC/ETH/USD with focus on avoiding SOL-only bias through multi-timeframe trend filter.
 """
 
 import numpy as np
@@ -33,8 +32,6 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla pivots on 1d data (using previous day's OHLC)
-    # Camarilla levels: R3 = C + ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/4), PP = (H+L+C)/3
-    # We need previous day's data to calculate today's levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -54,14 +51,14 @@ def generate_signals(prices):
     camarilla_r3 = camarilla_pp + (camarilla_range * 1.1 / 4.0)
     camarilla_s3 = camarilla_pp - (camarilla_range * 1.1 / 4.0)
     
-    # Align 1d Camarilla levels to 6h timeframe
+    # Align 1d Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 2.5 * 20-period average (stricter)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (2.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -99,8 +96,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price returns to pivot level OR trend breaks
-            exit_condition = (close_val <= pp_level) or (close_val < ema_val)
+            # Exit long when price returns to pivot level
+            exit_condition = (close_val <= pp_level)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -108,8 +105,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price returns to pivot level OR trend breaks
-            exit_condition = (close_val >= pp_level) or (close_val > ema_val)
+            # Exit short when price returns to pivot level
+            exit_condition = (close_val >= pp_level)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -119,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF_v2"
+timeframe = "12h"
 leverage = 1.0
