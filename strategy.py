@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_WeeklyTrend_VolumeSpike
-Hypothesis: Donchian(20) breakout on 6h with weekly EMA50 trend filter and volume confirmation.
-Designed for 6h timeframe targeting 80-180 total trades over 4 years.
+12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_HT
+Hypothesis: Camarilla R3/S3 breakout on 12h with 1-week EMA50 trend filter and volume confirmation.
+Designed for 12h timeframe targeting 50-150 total trades over 4 years.
 Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets:
 In trending regimes (price > weekly EMA50 for longs, < weekly EMA50 for shorts),
-Donchian breakouts with volume spike capture strong momentum continuations.
-Exit on opposite Donchian breakout or trend reversal.
+breakouts at R3/S3 with volume spike capture strong momentum continuations.
+Exit on trend reversal (close crosses weekly EMA50).
 """
 
 import numpy as np
@@ -23,16 +23,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get 1w data for trend filter and 1d for Camarilla
     df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA50 trend filter
+    # Camarilla levels from previous 1d bar (completed)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    rng = prev_high - prev_low
+    r3 = prev_close + (rng * 1.1 / 4)
+    s3 = prev_close - (rng * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 1-week EMA50 trend filter
     ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    
-    # Donchian channels (20-period) on 6h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -40,57 +49,61 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Discrete size to reduce fee churn
+    entry_price = 0.0
+    size = 0.25  # Discrete size to reduce fee churn
     
-    # Warmup: need weekly EMA50, Donchian(20), vol avg
-    start_idx = max(50, 20, 20)
+    # Warmup: need 1d shift (1), 1w EMA50 (50), vol avg (20)
+    start_idx = max(30, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        highest_val = highest_high[i]
-        lowest_val = lowest_low[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         ema_val = ema_50_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Look for entry: Donchian breakout with weekly EMA alignment and volume spike
-            long_condition = (close_val > highest_val and 
+            # Look for entry: Camarilla R3/S3 breakout with weekly EMA alignment and volume spike
+            long_condition = (close_val > r3_val and 
                             close_val > ema_val and 
                             vol_spike)
-            short_condition = (close_val < lowest_val and 
+            short_condition = (close_val < s3_val and 
                              close_val < ema_val and 
                              vol_spike)
             
             if long_condition:
                 signals[i] = size
                 position = 1
+                entry_price = close_val
             elif short_condition:
                 signals[i] = -size
                 position = -1
+                entry_price = close_val
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR weekly trend reversal
-            if close_val < lowest_val or close_val < ema_val:
+            # Exit long: price crosses below weekly EMA50 (trend reversal)
+            if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR weekly trend reversal
-            if close_val > highest_val or close_val > ema_val:
+            # Exit short: price crosses above weekly EMA50 (trend reversal)
+            if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -size
     
     return signals
 
-name = "6h_Donchian20_Breakout_WeeklyTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_HT"
+timeframe = "12h"
 leverage = 1.0
