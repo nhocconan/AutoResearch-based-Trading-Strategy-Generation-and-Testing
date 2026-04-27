@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-hour range trading with 4-hour trend filter and volume confirmation.
-Trades mean reversion at 1-hour Bollinger Bands (20,2) when 4-hour trend is strong.
-In bull markets: buy dips in uptrend. In bear markets: sell rallies in downtrend.
-Uses volume filter to avoid low-liquidity whipsaws.
-Target: 60-150 total trades over 4 years = 15-37/year for 1h.
-Position size: 0.20 (20%) to manage drawdown.
+Hypothesis: 6-hour Elder Ray Power with Weekly Trend Filter and Volume Confirmation.
+Uses daily Bull Power (Close - EMA13) and Bear Power (EMA13 - High) to measure buying/selling pressure.
+Trades in direction of weekly trend (EMA34) when power exceeds volume-adjusted threshold.
+Designed to work in both bull and bear markets by using weekly trend as filter.
+Target: 15-35 trades/year per symbol (60-140 total over 4 years) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -21,46 +20,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4-hour data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Get daily data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4-hour EMA(34) for trend
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Calculate EMA13 for Elder Ray (daily)
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 4-hour data for volume filter
-    vol_4h = df_4h['volume'].values
-    vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # Calculate Bull Power and Bear Power (daily)
+    bull_power_1d = close_1d - ema13_1d  # Close - EMA13
+    bear_power_1d = ema13_1d - df_1d['high'].values  # EMA13 - High
     
-    # Calculate 1-hour Bollinger Bands (20,2)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean()
-    bb_std = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_middle_vals = bb_middle.values
-    bb_upper_vals = bb_upper.values
-    bb_lower_vals = bb_lower.values
+    # Align Elder Ray powers to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
+        return np.zeros(n)
+    
+    # Calculate EMA34 for weekly trend
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Get 6h data for volume filter
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 6h volume MA(20)
+    vol_6h = df_6h['volume'].values
+    vol_ma_20_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need 4h EMA, volume MA, and BB
-    start_idx = max(34, 20, 20)
+    # Warmup: need Elder Ray, volume MA, and weekly EMA
+    start_idx = max(13, 20, 34)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(vol_ma_20_4h_aligned[i]) or
-            np.isnan(bb_middle_vals[i]) or np.isnan(bb_upper_vals[i]) or np.isnan(bb_lower_vals[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,42 +80,40 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        ema_34_4h_val = ema_34_4h_aligned[i]
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
+        trend_1w = ema34_1w_aligned[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_4h_aligned[i]
-        bb_upper = bb_upper_vals[i]
-        bb_middle = bb_middle_vals[i]
-        bb_lower = bb_lower_vals[i]
+        vol_ma = vol_ma_20_6h_aligned[i]
         
-        # Volume filter: volume > 1.3x 4h average
+        # Volume filter: volume > 1.3x 6h average
         vol_filter = vol_now > 1.3 * vol_ma
         
-        # Trend determination from 4h EMA
-        uptrend = close[i] > ema_34_4h_val
-        downtrend = close[i] < ema_34_4h_val
+        # Power threshold: 0.5% of price for significance
+        power_threshold = close[i] * 0.005
         
-        # Entry conditions: mean reversion with trend filter
+        # Entry conditions
         if position == 0:
-            # Long: pullback to lower BB in uptrend with volume
-            if close[i] <= bb_lower and uptrend and vol_filter:
+            # Long: Bull power > threshold + volume + weekly uptrend
+            if bull_power > power_threshold and vol_filter and close[i] > trend_1w:
                 signals[i] = size
                 position = 1
-            # Short: rally to upper BB in downtrend with volume
-            elif close[i] >= bb_upper and downtrend and vol_filter:
+            # Short: Bear power > threshold + volume + weekly downtrend
+            elif bear_power > power_threshold and vol_filter and close[i] < trend_1w:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: return to middle BB or trend reversal
-            if close[i] >= bb_middle or not uptrend:
+            # Exit long: bull power turns negative or weekly trend turns down
+            if bull_power <= 0 or close[i] < trend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: return to middle BB or trend reversal
-            if close[i] <= bb_middle or not downtrend:
+            # Exit short: bear power turns negative or weekly trend turns up
+            if bear_power <= 0 or close[i] > trend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_BollingerMeanReversion_4hTrendFilter_Volume"
-timeframe = "1h"
+name = "6h_ElderRayPower_WeeklyTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
