@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla pivot levels on 1d timeframe provide strong support/resistance levels.
-Breakouts at R4/S4 with 1d trend alignment and volume confirmation capture strong momentum moves
-while avoiding false breakouts. Designed for low trade frequency (15-25/year) to minimize fee drag.
-Works in both bull and bear markets by following the 1d trend direction.
+4h_Camarilla_Pivot_R1S1_Reversal_v1
+Hypothesis: Camarilla pivot levels (R1/S1) from 1d act as reversal zones in mean-reverting markets.
+Combined with 1d trend filter (EMA34) and volume confirmation to avoid counter-trend trades.
+Designed for low trade frequency (target 20-50/year) to minimize fee drag.
+Works in both bull and bear markets by fading extremes in ranging conditions and following trend in strong moves.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,28 +21,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Calculate Camarilla pivot levels from 1d data (once before loop)
+    # Camarilla pivot levels from 1d
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r4 = pivot + (range_1d * 1.1)
-    s4 = pivot - (range_1d * 1.1)
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_r1 = np.zeros_like(close_1d)
+    camarilla_s1 = np.zeros_like(close_1d)
+    camarilla_r2 = np.zeros_like(close_1d)
+    camarilla_s2 = np.zeros_like(close_1d)
     
-    # 2. 1d trend filter: EMA34
+    for i in range(1, len(close_1d)):
+        # Use previous day's range
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        rang = prev_high - prev_low
+        
+        camarilla_r1[i] = prev_close + (rang * 1.1 / 12)
+        camarilla_s1[i] = prev_close - (rang * 1.1 / 12)
+        camarilla_r2[i] = prev_close + (rang * 1.1 / 6)
+        camarilla_s2[i] = prev_close - (rang * 1.1 / 6)
+    
+    # 1d trend filter: EMA34
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 3. Volume confirmation: current volume > 2.0 * 24-period average (1d equivalent on 6h)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_avg)
     
-    # Align 1d indicators to 6h timeframe
-    r4_1d = align_htf_to_ltf(prices, df_1d, r4)
-    s4_1d = align_htf_to_ltf(prices, df_1d, s4)
+    # Align 1d indicators to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
@@ -51,19 +68,21 @@ def generate_signals(prices):
     entry_price = 0.0
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need Camarilla (1d), EMA34 (34), volume avg (24)
-    start_idx = max(34, 24)
+    # Warmup: need enough 1d data for indicators
+    start_idx = 34  # EMA34 needs 34 bars
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or 
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r4_level = r4_1d[i]
-        s4_level = s4_1d[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        r2 = camarilla_r2_aligned[i]
+        s2 = camarilla_s2_aligned[i]
         ema34 = ema34_1d_aligned[i]
         vol_conf = volume_confirm_aligned[i]
         
@@ -72,28 +91,35 @@ def generate_signals(prices):
             uptrend = close_val > ema34
             downtrend = close_val < ema34
             
-            if uptrend and vol_conf:
-                # Long: break above R4 with volume
-                if close_val > r4_level:
+            # Long setup: price at S1/S2 support in uptrend or strong reversal from S2 in downtrend
+            if (uptrend and close_val <= s1 and vol_conf) or \
+               (not uptrend and close_val <= s2 and vol_conf):
+                # Additional confirmation: price showing rejection (close > open)
+                if close_val > prices['open'].iloc[i]:
                     signals[i] = size
                     position = 1
                     entry_price = close_val
-            elif downtrend and vol_conf:
-                # Short: break below S4 with volume
-                if close_val < s4_level:
+            
+            # Short setup: price at R1/R2 resistance in downtrend or strong reversal from R2 in uptrend
+            elif (downtrend and close_val >= r1 and vol_conf) or \
+                 (not downtrend and close_val >= r2 and vol_conf):
+                # Additional confirmation: price showing rejection (close < open)
+                if close_val < prices['open'].iloc[i]:
                     signals[i] = -size
                     position = -1
                     entry_price = close_val
+        
         elif position == 1:
-            # Exit: price re-enters below R4 or trend reversal
-            if close_val < r4_level:  # Re-enter below R4
+            # Exit: price reaches R1 (profit target) or breaks below S2 (stop/reversal)
+            if close_val >= r1 or close_val < s2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
+        
         elif position == -1:
-            # Exit: price re-enters above S4 or trend reversal
-            if close_val > s4_level:  # Re-enter above S4
+            # Exit: price reaches S1 (profit target) or breaks above R2 (stop/reversal)
+            if close_val <= s1 or close_val > r2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_Pivot_R1S1_Reversal_v1"
+timeframe = "4h"
 leverage = 1.0
