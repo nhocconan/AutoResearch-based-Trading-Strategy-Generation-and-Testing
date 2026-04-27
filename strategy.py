@@ -3,6 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1d Williams %R with weekly trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; weekly trend ensures directional bias
+# Volume filter avoids low-liquidity false signals. Designed for mean reversion in ranging markets
+# and trend-following in strong trends, working in both bull and bear regimes.
+# Target: 20-60 trades/year to stay within fee drag limits.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -13,27 +19,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for higher timeframe trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily EMA(34) for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA(20) for trend direction
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate daily Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Calculate daily average volume for spike detection
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -43,12 +48,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -57,18 +63,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: weekly EMA20 direction
+        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # Volatility filter: avoid extremely high volatility periods
-        vol_filter = atr_14_1d_aligned[i] > 0 and atr_14_1d_aligned[i] < np.median(atr_14_1d_aligned[:i+1]) * 3
+        # Volume filter: above average volume
+        vol_spike = volume[i] > vol_ma_20[i]
         
-        # Long conditions: bullish trend + volatility filter
-        long_condition = (price_above_ema and vol_filter)
+        # Williams %R levels: oversold < -80, overbought > -20
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
         
-        # Short conditions: bearish trend + volatility filter
-        short_condition = (price_below_ema and vol_filter)
+        # Long conditions: weekly uptrend + oversold + volume spike
+        long_condition = weekly_uptrend and oversold and vol_spike
+        
+        # Short conditions: weekly downtrend + overbought + volume spike
+        short_condition = weekly_downtrend and overbought and vol_spike
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -76,11 +86,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal
-        elif position == 1 and not price_above_ema:
+        # Exit conditions: Williams %R reverts to midpoint (-50)
+        elif position == 1 and williams_r[i] >= -50:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not price_below_ema:
+        elif position == -1 and williams_r[i] <= -50:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -94,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyEMA34_VolumeFilter_Session"
-timeframe = "6h"
+name = "1d_WilliamsR_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
