@@ -27,23 +27,31 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 4h Donchian channels (20-period) for breakout signals
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
+    # Calculate daily RSI(14) for momentum
+    delta_1d = pd.Series(close_1d).diff()
+    gain_1d = delta_1d.where(delta_1d > 0, 0)
+    loss_1d = -delta_1d.where(delta_1d < 0, 0)
+    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1d = avg_gain_1d / avg_loss_1d.replace(0, np.nan)
+    rsi_1d = 100 - (100 / (1 + rs_1d))
+    rsi_1d_values = rsi_1d.fillna(50).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # Calculate 4h volume moving average for confirmation
-    vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Calculate 12h Bollinger Bands for volatility regime
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    close_12h = df_12h['close'].values
+    sma_20_12h = pd.Series(close_12h).rolling(window=20, min_periods=20).mean()
+    std_20_12h = pd.Series(close_12h).rolling(window=20, min_periods=20).std()
+    upper_bb_12h = sma_20_12h + (std_20_12h * 2)
+    lower_bb_12h = sma_20_12h - (std_20_12h * 2)
+    bb_width_12h = (upper_bb_12h - lower_bb_12h) / sma_20_12h
+    bb_width_aligned = align_htf_to_ltf(prices, df_12h, bb_width_12h.values)
     
     # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
@@ -55,9 +63,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_4h_aligned[i])):
+            np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(bb_width_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,22 +77,16 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 4h volume above average
-        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 0.8
+        # Momentum filter: RSI in neutral zone (40-60) to avoid extremes
+        rsi_momentum = (rsi_1d_aligned[i] >= 40) and (rsi_1d_aligned[i] <= 60)
         
-        # Breakout signals: price breaks 4h Donchian channels
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        # Volatility filter: Bollinger Band width above median (avoid low volatility)
+        vol_median = np.nanmedian(bb_width_aligned[:i+1])
+        vol_filter = bb_width_aligned[i] > vol_median if not np.isnan(vol_median) else False
         
-        # Long conditions: bullish trend + volume + upward breakout
-        long_condition = (price_above_ema and 
-                         volume_filter and 
-                         breakout_up)
-        
-        # Short conditions: bearish trend + volume + downward breakout
-        short_condition = (price_below_ema and 
-                          volume_filter and 
-                          breakout_down)
+        # Entry conditions: trend + momentum + volatility
+        long_condition = price_above_ema and rsi_momentum and vol_filter
+        short_condition = price_below_ema and rsi_momentum and vol_filter
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -93,11 +94,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal
-        elif position == 1 and not price_above_ema:
+        # Exit conditions: trend reversal or momentum extreme
+        elif position == 1 and (not price_above_ema or rsi_1d_aligned[i] > 70):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not price_below_ema:
+        elif position == -1 and (not price_below_ema or rsi_1d_aligned[i] < 30):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -111,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_4hDonchianBreakout_VolumeFilter"
-timeframe = "4h"
+name = "1d_EMA34_RSI14_BBWidthFilter"
+timeframe = "1d"
 leverage = 1.0
