@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_1wEMA34_TrendFilter
-Hypothesis: Kaufman Adaptive Moving Average (KAMA) on 12h captures trend direction, filtered by 1-week EMA34 to ensure alignment with higher timeframe trend. Works in bull markets (trend following) and bear markets (avoids false signals during sideways chop). Uses volume confirmation to filter weak breakouts. Target: 15-30 trades/year per symbol.
+4h_Camarilla_R2_S2_Breakout_1dEMA34_Trend_Volume
+Hypothesis: Moderate breakouts at R2/S2 levels with volume confirmation and 1d EMA34 trend filter capture institutional moves while avoiding false breakouts. Works in bull (breakouts continue) and bear (breakdowns continue) markets. Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, n=period))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,61 +18,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1w EMA34 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 1d EMA34 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate KAMA on 12h data
-    kama = calculate_kama(close, period=10, fast=2, slow=30)
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_cam = df_1d['close'].values
+    
+    # Camarilla R2, S2 levels: H/L from previous day
+    R2 = close_1d_cam + (high_1d - low_1d) * 1.1 / 4
+    S2 = close_1d_cam - (high_1d - low_1d) * 1.1 / 4
+    
+    # Align to 4h timeframe (previous day's levels available at open)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
     
     # Volume spike detection (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup period
-    start_idx = 30  # need 30 for KAMA and EMA warmup
+    start_idx = 20  # need 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema34_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R2_aligned[i]) or 
+            np.isnan(S2_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above KAMA with volume spike and uptrend on 1w
-            if (close[i] > kama[i] and volume_spike[i] and 
-                close[i] > ema34_1w_aligned[i]):
+            # Long: price breaks above R2 with volume spike and uptrend on 1d
+            if (close[i] > R2_aligned[i] and volume_spike[i] and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA with volume spike and downtrend on 1w
-            elif (close[i] < kama[i] and volume_spike[i] and 
-                  close[i] < ema34_1w_aligned[i]):
+            # Short: price breaks below S2 with volume spike and downtrend on 1d
+            elif (close[i] < S2_aligned[i] and volume_spike[i] and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns below KAMA or trend fails
-            if (close[i] < kama[i] or 
-                close[i] < ema34_1w_aligned[i]):
+            # Long exit: price returns below S2 or trend fails
+            if (close[i] < S2_aligned[i] or 
+                close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns above KAMA or trend fails
-            if (close[i] > kama[i] or 
-                close[i] > ema34_1w_aligned[i]):
+            # Short exit: price returns above R2 or trend fails
+            if (close[i] > R2_aligned[i] or 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_With_1wEMA34_TrendFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R2_S2_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
