@@ -1,14 +1,12 @@
-# 12h Institutional Flow Strategy with 1d Trend and Volume Confirmation
-# Hypothesis: Institutional money flows often manifest as sustained price moves accompanied by volume.
-# On 12h timeframe, we combine: (1) price breaking above/below 1d VWAP bands (institutional interest),
-# (2) volume > 2x 4-period average (institutional participation), and (3) 1d EMA50 trend filter.
-# This captures sustained moves while avoiding chop. Works in bull/bear by aligning with 1d trend.
-# Target: 15-35 trades/year to minimize fee drag.
-
-from typing import Any
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation
+# Donchian breakouts capture momentum; 12h EMA filter ensures alignment with higher timeframe trend
+# Volume spike confirms institutional interest. Works in bull/bear by filtering breakout direction with 12h EMA.
+# Target: 50-150 total trades over 4 years (~12-37/year) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,95 +18,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for VWAP and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for Donchian calculation and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d VWAP (volume-weighted average price)
-    vwap_1d = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
-        vwap_1d[i] = np.sum(volume_1d[:i+1] * typical_price) / np.sum(volume_1d[:i+1]) if np.sum(volume_1d[:i+1]) > 0 else typical_price
+    # Calculate Donchian channels (20-period) on 12h timeframe
+    donchian_high = np.full(len(df_12h), np.nan)
+    donchian_low = np.full(len(df_12h), np.nan)
     
-    # Calculate 1d VWAP upper/lower bands (1 standard deviation)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_dev = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        if i >= 19:  # 20-period lookback for std dev
-            vwap_dev[i] = np.std(typical_price_1d[i-19:i+1])
-        else:
-            vwap_dev[i] = np.std(typical_price_1d[:i+1]) if i > 0 else 0.0
+    for i in range(19, len(df_12h)):
+        donchian_high[i] = np.max(high_12h[i-19:i+1])
+        donchian_low[i] = np.min(low_12h[i-19:i+1])
     
-    vwap_upper_1d = vwap_1d + vwap_dev
-    vwap_lower_1d = vwap_1d - vwap_dev
+    # Align Donchian levels to 4h timeframe (wait for 12h close)
+    dh_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    dl_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    # Align VWAP bands to 12h timeframe
-    vwap_upper_aligned = align_htf_to_ltf(prices, df_1d, vwap_upper_1d)
-    vwap_lower_aligned = align_htf_to_ltf(prices, df_1d, vwap_lower_1d)
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # 12h EMA trend filter (50-period)
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: volume > 2.0 x 4-period average (2 days of 12h bars)
-    vol_ma_4 = np.full(n, np.nan)
-    for i in range(3, n):
-        vol_ma_4[i] = np.mean(volume[i-3:i+1])
+    # Volume filter: volume > 1.5 x 20-period average (approx 10 hours of 4h bars)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 1d VWAP (20), EMA (50), volume MA (4)
-    start_idx = max(20, 50, 4)
+    # Warmup: need 12h data (19 bars), EMA (50), volume MA (20)
+    start_idx = max(19, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(vwap_upper_aligned[i]) or np.isnan(vwap_lower_aligned[i]) or 
-            np.isnan(vwap_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(dh_12h_aligned[i]) or np.isnan(dl_12h_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_4[i]
+        vol_avg = vol_ma_20[i]
         
         # Volume filter: significant volume spike
-        vol_filter = vol_now > 2.0 * vol_avg
+        vol_filter = vol_now > 1.5 * vol_avg
         
-        # Trend filter from 1d EMA50
+        # Trend filter from 12h EMA
         bullish_trend = price > ema_50_aligned[i]
         bearish_trend = price < ema_50_aligned[i]
         
         if position == 0:
-            # Long: price above VWAP upper band with volume and bullish trend
-            if price > vwap_upper_aligned[i] and vol_filter and bullish_trend:
+            # Long: break above Donchian high with volume and bullish trend
+            if price > dh_12h_aligned[i] and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: price below VWAP lower band with volume and bearish trend
-            elif price < vwap_lower_aligned[i] and vol_filter and bearish_trend:
+            # Short: break below Donchian low with volume and bearish trend
+            elif price < dl_12h_aligned[i] and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to VWAP (mean reversion) or trend turns bearish
-            if price <= vwap_aligned[i] or not bullish_trend:
+            # Exit long: price returns to Donchian low (mean reversion) or trend turns bearish
+            if price <= dl_12h_aligned[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to VWAP (mean reversion) or trend turns bullish
-            if price >= vwap_aligned[i] or not bearish_trend:
+            # Exit short: price returns to Donchian high (mean reversion) or trend turns bullish
+            if price >= dh_12h_aligned[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Institutional_Flow_VWAP_Bands_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
