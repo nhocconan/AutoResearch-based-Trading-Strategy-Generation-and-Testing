@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -30,7 +30,7 @@ def generate_signals(prices):
         else:
             ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
     
-    # Align daily EMA to 12h
+    # Align daily EMA to 4h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate 14-period ATR for volatility and stop
@@ -61,7 +61,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    size = 0.25
+    size = 0.30
     
     # Warmup period
     start_idx = max(14, vol_period, period) + 5
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_EMA34_Trend_Volume_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_EMA34_Trend_Volume_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
