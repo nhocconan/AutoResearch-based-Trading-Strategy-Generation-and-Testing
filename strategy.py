@@ -3,111 +3,150 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d/1w EMA trend filter with price reversal signals at extreme Bollinger Bands.
-# Long when price closes below lower Bollinger Band (20,2) with 1d EMA50 uptrend and 1w EMA200 uptrend.
-# Short when price closes above upper Bollinger Band with 1d EMA50 downtrend and 1w EMA200 downtrend.
-# Exit when price crosses the 20-period SMA (middle Bollinger Band).
-# Uses Bollinger Bands for mean reversion in ranging markets, EMA filters for trend alignment.
-# Target: 20-40 trades per year by requiring multi-timeframe trend alignment and extreme price action.
+# Hypothesis: 1d strategy using weekly Donchian channel breakout with volume confirmation and ADX filter.
+# Long when price breaks above weekly Donchian high (20-week period) with ADX > 25 and volume > 1.5x average.
+# Short when price breaks below weekly Donchian low with same conditions.
+# Exit when price crosses the weekly Donchian midline.
+# Targets 7-25 trades per year to avoid fee drag, suitable for both bull and bear markets via trend filter.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d and 1w data for trend filters
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 50:
+    # Get weekly data for Donchian channels and ADX
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    close_1w = df_1w['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
+    volume_weekly = df_weekly['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_period_1d = 50
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_period_1d:
-        ema_1d[ema_period_1d - 1] = np.mean(close_1d[:ema_period_1d])
-        for i in range(ema_period_1d, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * (2 / (ema_period_1d + 1)) + 
-                         ema_1d[i - 1] * (1 - (2 / (ema_period_1d + 1))))
+    # Calculate weekly ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        n = len(high)
+        if n < period * 2:
+            return np.full(n, np.nan)
+        
+        # True Range
+        tr = np.maximum(high - low, 
+                        np.maximum(np.abs(high - np.concatenate([[np.nan], close[:-1]])),
+                                   np.abs(np.concatenate([[np.nan], low[:-1]]) - low)))
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.concatenate([[np.nan], high[:-1]])) > 
+                           (np.concatenate([[np.nan], low[:-1]]) - low), 
+                           np.maximum(high - np.concatenate([[np.nan], high[:-1]]), 0), 0)
+        dm_minus = np.where((np.concatenate([[np.nan], low[:-1]]) - low) > 
+                            (high - np.concatenate([[np.nan], high[:-1]])), 
+                            np.maximum(np.concatenate([[np.nan], low[:-1]]) - low, 0), 0)
+        
+        # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
+        def wilder_smooth(data, period):
+            n = len(data)
+            result = np.full(n, np.nan)
+            if n < period:
+                return result
+            # First value: simple average
+            result[period-1] = np.nansum(data[:period])
+            # Subsequent values: Wilder smoothing
+            for i in range(period, n):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+            return result
+        
+        tr_smooth = wilder_smooth(tr, period)
+        dm_plus_smooth = wilder_smooth(dm_plus, period)
+        dm_minus_smooth = wilder_smooth(dm_minus, period)
+        
+        # Directional Indicators
+        plus_di = 100 * dm_plus_smooth / tr_smooth
+        minus_di = 100 * dm_minus_smooth / tr_smooth
+        
+        # DX and ADX
+        dx = np.where((plus_di + minus_di) != 0, 
+                      100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        adx = wilder_smooth(dx, period)
+        
+        return adx
     
-    # Calculate 1w EMA200 for trend filter
-    ema_period_1w = 200
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= ema_period_1w:
-        ema_1w[ema_period_1w - 1] = np.mean(close_1w[:ema_period_1w])
-        for i in range(ema_period_1w, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_period_1w + 1)) + 
-                         ema_1w[i - 1] * (1 - (2 / (ema_period_1w + 1))))
+    adx_weekly = calculate_adx(high_weekly, low_weekly, close_weekly, 14)
     
-    # Calculate Bollinger Bands (20, 2) on 4h
-    bb_period = 20
-    bb_std_dev = 2
-    sma = np.full(n, np.nan)
-    std_dev = np.full(n, np.nan)
-    bb_upper = np.full(n, np.nan)
-    bb_lower = np.full(n, np.nan)
-    bb_middle = np.full(n, np.nan)
+    # Calculate weekly Donchian channels (20-period)
+    donch_period = 20
+    donch_high_weekly = np.full(len(high_weekly), np.nan)
+    donch_low_weekly = np.full(len(low_weekly), np.nan)
+    donch_mid_weekly = np.full(len(close_weekly), np.nan)
     
-    for i in range(bb_period - 1, n):
-        sma[i] = np.mean(close[i - bb_period + 1:i + 1])
-        std_dev[i] = np.std(close[i - bb_period + 1:i + 1])
-        bb_upper[i] = sma[i] + bb_std_dev * std_dev[i]
-        bb_lower[i] = sma[i] - bb_std_dev * std_dev[i]
-        bb_middle[i] = sma[i]
+    for i in range(donch_period - 1, len(high_weekly)):
+        donch_high_weekly[i] = np.max(high_weekly[i - donch_period + 1:i + 1])
+        donch_low_weekly[i] = np.min(low_weekly[i - donch_period + 1:i + 1])
+        donch_mid_weekly[i] = (donch_high_weekly[i] + donch_low_weekly[i]) / 2
     
-    # Align HTF EMAs to 4h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align weekly indicators to daily timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_weekly, donch_high_weekly)
+    donch_low_aligned = align_htf_to_ltf(prices, df_weekly, donch_low_weekly)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_weekly, donch_mid_weekly)
+    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx_weekly)
+    
+    # Volume MA for confirmation (20-period)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Bollinger Bands, EMAs
-    start_idx = max(bb_period - 1, ema_period_1d - 1, ema_period_1w - 1)
+    # Warmup: need Donchian channels, ADX, and volume MA20
+    start_idx = max(donch_period - 1, 14*2, 19)  # ADX needs ~28 bars for stability
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(bb_middle[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol_now = volume[i]
+        vol_avg = vol_ma_20[i]
+        
+        # Volume filter: require volume above average
+        vol_filter = vol_now > 1.5 * vol_avg
+        # Trend filter: require ADX > 25
+        trend_filter = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: price closes below lower BB with 1d EMA50 uptrend and 1w EMA200 uptrend
-            if (price < bb_lower[i] and 
-                price > ema_1d_aligned[i] and 
-                price > ema_1w_aligned[i]):
+            # Long: break above weekly Donchian high with ADX > 25 and volume filter
+            if (price > donch_high_aligned[i] and 
+                trend_filter and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price closes above upper BB with 1d EMA50 downtrend and 1w EMA200 downtrend
-            elif (price > bb_upper[i] and 
-                  price < ema_1d_aligned[i] and 
-                  price < ema_1w_aligned[i]):
+            # Short: break below weekly Donchian low with ADX > 25 and volume filter
+            elif (price < donch_low_aligned[i] and 
+                  trend_filter and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above middle BB (SMA)
-            if price > bb_middle[i]:
+            # Exit long: price crosses below weekly Donchian midline
+            if price < donch_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses below middle BB (SMA)
-            if price < bb_middle[i]:
+            # Exit short: price crosses above weekly Donchian midline
+            if price > donch_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Bollinger20_2_Reversal_1dEMA50_1wEMA200"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_ADX25_Volume"
+timeframe = "1d"
 leverage = 1.0
