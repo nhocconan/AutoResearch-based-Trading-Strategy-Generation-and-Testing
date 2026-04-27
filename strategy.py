@@ -1,108 +1,101 @@
 #!/usr/bin/env python3
-"""
-Hypothesis: 1-day mean reversion using RSI extremes with weekly trend filter.
-In both bull and bear markets, price tends to revert to mean when RSI reaches extremes,
-but only in the direction of the weekly trend to avoid counter-trend losses.
-Uses weekly EMA40 as trend filter and RSI(14) for entry/exit.
-Target: 10-25 trades per year with low turnover to minimize fee drag.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d EMA34 trend filter
+# Uses Donchian channel breakout for trend following, volume to filter false breakouts,
+# and 1d EMA34 for trend alignment. Designed to work in both bull and bear markets by
+# only taking breakouts in the direction of the daily trend, reducing whipsaws.
+# Target: 20-50 trades per year (80-200 total over 4 years) to minimize fee drag.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA40 for trend filter
-    ema_period = 40
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= ema_period:
-        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
-        for i in range(ema_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
-                         ema_1w[i - 1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 1d EMA34 for trend filter
+    ema_period = 34
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate daily RSI(14)
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Donchian channel (20-period) - using built-in max/min with proper lookback
+    donch_len = 20
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
+    for i in range(donch_len - 1, n):
+        upper_channel[i] = np.max(high[i - donch_len + 1:i + 1])
+        lower_channel[i] = np.min(low[i - donch_len + 1:i + 1])
     
-    # First average
-    if n >= rsi_period:
-        avg_gain[rsi_period - 1] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period - 1] = np.mean(loss[:rsi_period])
-        
-        # Wilder smoothing
-        for i in range(rsi_period, n):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
+    # Volume MA for confirmation (20-period)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
     
-    rs = np.full(n, np.nan)
-    rsi = np.full(n, np.nan)
-    for i in range(rsi_period - 1, n):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100
-    
-    # Align weekly EMA to daily timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need RSI and weekly EMA
-    start_idx = max(rsi_period, ema_period - 1)
+    # Warmup: need Donchian channels, EMA34, and volume MA20
+    start_idx = max(donch_len - 1, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(rsi[i]) or np.isnan(ema_1w_aligned[i]):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        weekly_trend_up = price > ema_1w_aligned[i]
-        weekly_trend_down = price < ema_1w_aligned[i]
+        vol_now = volume[i]
+        vol_avg = vol_ma_20[i]
+        
+        # Volume filter: require volume above average
+        vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: RSI oversold (<30) in weekly uptrend
-            if rsi[i] < 30 and weekly_trend_up:
+            # Long: price breaks above upper Donchian with 1d EMA34 uptrend and volume filter
+            if (price > upper_channel[i] and 
+                price > ema_1d_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: RSI overbought (>70) in weekly downtrend
-            elif rsi[i] > 70 and weekly_trend_down:
+            # Short: price breaks below lower Donchian with 1d EMA34 downtrend and volume filter
+            elif (price < lower_channel[i] and 
+                  price < ema_1d_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral (>50)
-            if rsi[i] > 50:
+            # Exit long: price breaks below lower Donchian
+            if price < lower_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI returns to neutral (<50)
-            if rsi[i] < 50:
+            # Exit short: price breaks above upper Donchian
+            if price > upper_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI14_MeanReversion_1wEMA40_Trend"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
