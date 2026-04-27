@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_1wTrend_VolumeFilter
-Hypothesis: Daily Donchian(20) breakouts with weekly trend filter and volume confirmation work in both bull and bear markets.
-Enter long when price breaks above 20-day high AND weekly close > weekly EMA20 (uptrend) AND volume > 1.5 * 20-day average volume.
-Enter short when price breaks below 20-day low AND weekly close < weekly EMA20 (downtrend) AND volume > 1.5 * 20-day average volume.
-Exit when price returns to 20-day midpoint OR weekly trend reverses.
-Uses discrete position sizing (0.25) to minimize fee churn. Target: 30-100 trades over 4 years (7-25/year).
-Donchian channels provide objective breakout levels; weekly trend filter ensures alignment with higher timeframe structure.
-Volume confirmation filters weak breakouts. Designed for BTC/ETH with SOL as secondary.
+6h_ADX_Regime_Donchian_Breakout_Volume
+Hypothesis: Combines ADX regime filter with Donchian channel breakout and volume confirmation on 6h timeframe.
+Enter long when price breaks above Donchian(20) upper band AND ADX > 25 (trending) AND volume > 1.5 * 20-period average.
+Enter short when price breaks below Donchian(20) lower band AND ADX > 25 (trending) AND volume > 1.5 * 20-period average.
+Exit when price returns to Donchian midpoint OR ADX < 20 (range regime) OR opposite breakout occurs.
+Uses 1d EMA50 as higher timeframe trend filter to avoid counter-trend trades in strong trends.
+Designed to work in both bull and bear markets by only taking trades in strong trending regimes (ADX>25).
+Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position size.
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,22 +24,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for higher timeframe trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA20 for trend filter
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema_20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA50 for trend filter
+    close_1d_series = pd.Series(df_1d['close'].values)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 20-day Donchian channels (using daily high/low)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Calculate ADX(14) on 6h data
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Volume confirmation: current volume > 1.5 * 20-day average volume
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm[0] = 0.0
+    minus_dm[0] = 0.0
+    
+    # Smoothed values using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        alpha = 1.0 / period
+        result = np.full_like(data, np.nan)
+        result[period-1] = np.nanmean(data[:period])  # Seed with simple average
+        for i in range(period, len(data)):
+            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    period = 14
+    atr = wilders_smoothing(tr, period)
+    plus_di_smoothed = wilders_smoothing(plus_dm, period)
+    minus_di_smoothed = wilders_smoothing(minus_dm, period)
+    
+    # Avoid division by zero
+    dx = np.where((plus_di_smoothed + minus_di_smoothed) != 0,
+                  100 * np.abs(plus_di_smoothed - minus_di_smoothed) / (plus_di_smoothed + minus_di_smoothed),
+                  0)
+    adx = wilders_smoothing(dx, period)
+    
+    # Donchian Channel(20) on 6h data
+    donchian_period = 20
+    upper_band = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    middle_band = (upper_band + lower_band) / 2.0
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_avg)
     
@@ -47,32 +82,31 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need 20-day Donchian (20), weekly EMA20 (20), volume avg (20)
-    start_idx = 20
+    # Warmup: need ADX (14*3=42), Donchian (20), volume avg (20), 1d EMA (50)
+    start_idx = max(42, 20, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(ema_20_1w_aligned[i]) or 
+        if (np.isnan(adx[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(middle_band[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        mid = donchian_mid[i]
-        weekly_ema = ema_20_1w_aligned[i]
+        adx_val = adx[i]
+        upper = upper_band[i]
+        lower = lower_band[i]
+        middle = middle_band[i]
+        ema_1d_val = ema_50_1d_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: breakout of Donchian levels with weekly trend filter AND volume
-            # Long: price breaks above upper band AND weekly uptrend AND volume
-            long_condition = (high_val > upper) and (close_val > weekly_ema) and vol_conf
-            # Short: price breaks below lower band AND weekly downtrend AND volume
-            short_condition = (low_val < lower) and (close_val < weekly_ema) and vol_conf
+            # Look for entry: Donchian breakout with ADX > 25 (trending) AND volume
+            # Long: price breaks above upper band AND ADX > 25 AND volume
+            long_condition = (close_val > upper) and (adx_val > 25) and vol_conf
+            # Short: price breaks below lower band AND ADX > 25 AND volume
+            short_condition = (close_val < lower) and (adx_val > 25) and vol_conf
             
             if long_condition:
                 signals[i] = size
@@ -81,8 +115,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price returns to midpoint OR weekly trend breaks down
-            exit_condition = (close_val <= mid) or (close_val < weekly_ema)
+            # Exit long when price returns to middle OR ADX < 20 (range) OR opposite breakout
+            exit_condition = (close_val <= middle) or (adx_val < 20) or (close_val < lower)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -90,8 +124,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price returns to midpoint OR weekly trend breaks up
-            exit_condition = (close_val >= mid) or (close_val > weekly_ema)
+            # Exit short when price returns to middle OR ADX < 20 (range) OR opposite breakout
+            exit_condition = (close_val >= middle) or (adx_val < 20) or (close_val > upper)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -101,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wTrend_VolumeFilter"
-timeframe = "1d"
+name = "6h_ADX_Regime_Donchian_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
