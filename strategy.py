@@ -55,7 +55,7 @@ def generate_signals(prices):
     adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 1-day Donchian channels (20-period)
+    # 6-hour Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1dRSI_ADX_VolumeFilter"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_1dRSI_ADX_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
