@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d data for calculations (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1-day EMA (34-period) for trend filter
@@ -27,7 +27,7 @@ def generate_signals(prices):
         for i in range(1, len(close_1d)):
             ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
     
-    # Calculate 1-day ATR (14-period) for volatility filter
+    # Calculate 1-day ATR (14-period) for volatility
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_prev = np.roll(close_1d, 1)
@@ -71,14 +71,14 @@ def generate_signals(prices):
         else:
             rsi_1d[i] = 100
     
-    # Align 1d indicators to 6h timeframe
+    # Align 1d indicators to daily timeframe
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 4-period volume average for spike detection
+    # Calculate 10-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 4
+    vol_period = 10
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -98,11 +98,11 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.5x average volume
-        vol_filter = vol_ratio > 1.5
+        # Volume spike filter: at least 2x average volume (stricter)
+        vol_filter = vol_ratio > 2.0
         
         # RSI filter: avoid extreme overbought/oversold
-        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
+        rsi_filter = (rsi_1d_aligned[i] > 35) & (rsi_1d_aligned[i] < 65)
         
         if position == 0:
             # Long: Price above EMA34 with volume and RSI not extreme
@@ -117,14 +117,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long exit: Price closes below EMA34 or volatility spike (potential reversal)
-            if price < ema_34_1d_aligned[i] or (vol_ratio > 2.5 and rsi_1d_aligned[i] > 70):
+            if price < ema_34_1d_aligned[i] or (vol_ratio > 3.0 and rsi_1d_aligned[i] > 65):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
             # Short exit: Price closes above EMA34 or volatility spike (potential reversal)
-            if price > ema_34_1d_aligned[i] or (vol_ratio > 2.5 and rsi_1d_aligned[i] < 30):
+            if price > ema_34_1d_aligned[i] or (vol_ratio > 3.0 and rsi_1d_aligned[i] < 35):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI14_EMA34_Volume"
-timeframe = "6h"
+name = "1d_EMA34_RSI14_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
