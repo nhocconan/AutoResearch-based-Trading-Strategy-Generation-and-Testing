@@ -1,15 +1,33 @@
 #!/usr/bin/env python3
 """
-1h Bollinger Band Reversal with 4h Trend and Volume Spike Filter.
-Long when price touches lower BB + 4h uptrend + volume spike.
-Short when price touches upper BB + 4h downtrend + volume spike.
-Exit when price crosses back inside Bollinger Bands or trend changes.
-Designed for low frequency (15-30 trades/year) to minimize fee drag.
+12h Camarilla Pivot Reversal with 1d Trend and Volume Spike.
+Long when price touches S3 and closes back above + daily trend up + volume spike.
+Short when price touches R3 and closes back below + daily trend down + volume spike.
+Exit when price reaches opposite Camarilla level (S1/R1) or trend reverses.
+Designed for low frequency (10-25 trades/year) to minimize fee drag on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    range_val = high - low
+    if range_val <= 0:
+        return close, close, close, close, close, close, close, close
+    c = close
+    h = high
+    l = low
+    r4 = c + ((h - l) * 1.500)
+    r3 = c + ((h - l) * 1.250)
+    r2 = c + ((h - l) * 1.166)
+    r1 = c + ((h - l) * 1.083)
+    s1 = c - ((h - l) * 1.083)
+    s2 = c - ((h - l) * 1.166)
+    s3 = c - ((h - l) * 1.250)
+    s4 = c - ((h - l) * 1.500)
+    return r4, r3, r2, r1, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,100 +39,110 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08:00-20:00 UTC (precomputed)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get daily data for trend filter and Camarilla
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA20 for trend
-    close_4h = df_4h['close'].values
-    ema_20_4h = np.full_like(close_4h, np.nan, dtype=np.float64)
-    alpha = 2.0 / (20 + 1)
-    for i in range(len(close_4h)):
-        if i < 20:
-            if i == 0:
-                ema_20_4h[i] = close_4h[i]
-            else:
-                ema_20_4h[i] = (close_4h[i] * alpha) + (ema_20_4h[i-1] * (1 - alpha))
-        else:
-            ema_20_4h[i] = (close_4h[i] * alpha) + (ema_20_4h[i-1] * (1 - alpha))
+    # Calculate EMA34 on daily close for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full_like(close_1d, np.nan, dtype=np.float64)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34
     
-    # Align 4h EMA20 to 1h with proper delay
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate Camarilla levels for each daily bar
+    r4_1d = np.full(len(df_1d), np.nan)
+    r3_1d = np.full(len(df_1d), np.nan)
+    r2_1d = np.full(len(df_1d), np.nan)
+    r1_1d = np.full(len(df_1d), np.nan)
+    s1_1d = np.full(len(df_1d), np.nan)
+    s2_1d = np.full(len(df_1d), np.nan)
+    s3_1d = np.full(len(df_1d), np.nan)
+    s4_1d = np.full(len(df_1d), np.nan)
     
-    # Bollinger Bands on 1h
-    bb_length = 20
-    bb_std = 2.0
-    sma = np.full(n, np.nan, dtype=np.float64)
-    std = np.full(n, np.nan, dtype=np.float64)
+    for i in range(len(df_1d)):
+        r4, r3, r2, r1, s1, s2, s3, s4 = calculate_camarilla(
+            df_1d['high'].values[i],
+            df_1d['low'].values[i],
+            df_1d['close'].values[i]
+        )
+        r4_1d[i] = r4
+        r3_1d[i] = r3
+        r2_1d[i] = r2
+        r1_1d[i] = r1
+        s1_1d[i] = s1
+        s2_1d[i] = s2
+        s3_1d[i] = s3
+        s4_1d[i] = s4
     
-    for i in range(n):
-        if i >= bb_length - 1:
-            sma[i] = np.mean(close[i-bb_length+1:i+1])
-            std[i] = np.std(close[i-bb_length+1:i+1])
+    # Align daily indicators to 12h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    upper = sma + (bb_std * std)
-    lower = sma - (bb_std * std)
-    
-    # Volume filter: volume > 1.5x average (to avoid false signals)
-    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
+    # Volume filter: volume > 1.8x average (adapted for 12h)
+    vol_ma_20 = np.full_like(volume, np.nan, dtype=np.float64)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Warmup: need Bollinger Bands (20) + volume MA (20)
-    start_idx = max(bb_length, 20)
+    # Warmup: need EMA (34) + volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(sma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            not in_session[i]):
+        # Skip if any data not ready
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Current values
+        # Current price and volume
         price_now = close[i]
         vol_now = volume[i]
         
-        # Bollinger Bands
-        upper_band = upper[i]
-        lower_band = lower[i]
+        # Current indicators
+        ema_34 = ema_34_aligned[i]
+        r3 = r3_aligned[i]
+        r1 = r1_aligned[i]
+        s3 = s3_aligned[i]
+        s1 = s1_aligned[i]
         
-        # 4h EMA20 trend
-        ema_20 = ema_20_4h_aligned[i]
-        
-        # Volume filter: volume > 1.5x average
-        vol_filter = vol_now > 1.5 * vol_ma_20[i]
+        # Volume filter: volume > 1.8x average
+        vol_filter = vol_now > 1.8 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price at or below lower BB + 4h uptrend + volume spike
-            if price_now <= lower_band and price_now > ema_20 and vol_filter:
+            # Long: price touches S3 and closes back above + daily trend up + volume spike
+            if (price_now <= s3 * 1.002 and close[i] > s3 and  # touches S3 and closes above
+                close[i] > ema_34 and  # daily trend up
+                vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price at or above upper BB + 4h downtrend + volume spike
-            elif price_now >= upper_band and price_now < ema_20 and vol_filter:
+            # Short: price touches R3 and closes back below + daily trend down + volume spike
+            elif (price_now >= r3 * 0.998 and close[i] < r3 and  # touches R3 and closes below
+                  close[i] < ema_34 and  # daily trend down
+                  vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back inside Bollinger Bands or 4h trend turns down
-            if price_now >= sma[i] or price_now < ema_20:
+            # Exit long: price reaches S1 (take profit) or trend turns down
+            if price_now >= s1 or close[i] < ema_34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses back inside Bollinger Bands or 4h trend turns up
-            if price_now <= sma[i] or price_now > ema_20:
+            # Exit short: price reaches R1 (take profit) or trend turns up
+            if price_now <= r1 or close[i] > ema_34:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_BollingerReversal_4hTrend_Volume"
-timeframe = "1h"
+name = "12h_Camarilla_R3S3_Reversal_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
