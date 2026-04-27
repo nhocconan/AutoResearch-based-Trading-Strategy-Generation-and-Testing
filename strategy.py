@@ -1,14 +1,16 @@
+# 4h CAMARILLA PIVOT R1 S1 BREAKOUT WITH VOLUME CONFIRMATION AND TREND FILTER
+# Hypothesis: CAMARILLA PIVOT LEVELS ARE SIGNIFICANT SUPPORT/RESISTANCE LEVELS
+# BREAKOUTS ABOVE R1 OR BELOW S1 WITH VOLUME CONFIRMATION AND TREND FILTER
+# ARE HIGH PROBABILITY TRADES THAT WORK IN BOTH BULL AND BEAR MARKETS
+# TREND FILTER: 1D EMA34 ENSURES WE TRADE IN DIRECTION OF HIGHER TIMEFRAME TREND
+# VOLUME CONFIRMATION: VOLUME > 1.5X 20-PERIOD AVERAGE
+# POSITION SIZE: 0.25 (25%) TO BALANCE RISK AND RETURN
+# TARGET: 20-50 TRADES/YEAR TO AVOID FEE DRAG
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h strategy using 1-week Camarilla pivot levels with price action confirmation.
-# Long when price breaks above R4 with close > open (bullish candle) and volume > 1.3x average.
-# Short when price breaks below S4 with close < open (bearish candle) and volume > 1.3x average.
-# Exit when price returns to the weekly pivot point (PP).
-# Uses weekly Camarilla levels for institutional support/resistance, price action for confirmation,
-# and volume filter to avoid false breakouts. Works in trending markets (breakouts) and ranges (mean reversion to PP).
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,61 +20,57 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 1d data for CAMARILLA PIVOT AND EMA34 TREND FILTER
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each week
-    # Based on previous week's high, low, close
-    camarilla_pp = np.full(len(close_1w), np.nan)
-    camarilla_r4 = np.full(len(close_1w), np.nan)
-    camarilla_s4 = np.full(len(close_1w), np.nan)
+    # Calculate CAMARILLA PIVOT LEVELS FROM PREVIOUS DAY
+    # PIVOT = (HIGH + LOW + CLOSE) / 3
+    # R1 = CLOSE + (HIGH - LOW) * 1.1 / 12
+    # S1 = CLOSE - (HIGH - LOW) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    for i in range(1, len(close_1w)):
-        # Previous week's values
-        ph = high_1w[i-1]
-        pl = low_1w[i-1]
-        pc = close_1w[i-1]
-        
-        # Pivot point
-        camarilla_pp[i] = (ph + pl + pc) / 3
-        
-        # Range
-        rng = ph - pl
-        
-        # Camarilla levels
-        camarilla_r4[i] = pc + rng * 1.1 / 2
-        camarilla_s4[i] = pc - rng * 1.1 / 2
+    # Calculate 1-day EMA34 FOR TREND FILTER
+    ema_period = 34
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Get volume MA for confirmation
+    # Get volume MA FOR CONFIRMATION
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
     
-    # Align weekly Camarilla levels to 6h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pp)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # ALIGN 1-DAY INDICATORS TO 4H TIMEFRAME
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    position = 0  # 0: FLAT, 1: LONG, -1: SHORT
+    size = 0.25   # 25% POSITION SIZE
     
-    # Warmup: need weekly Camarilla (need at least 1 week of history) and volume MA
-    start_idx = max(19, 1)  # volume MA20 and weekly data (need 1 week back)
+    # WARMUP: NEED PIVOT, R1, S1, EMA34, AND VOLUME MA20
+    start_idx = max(19, ema_period - 1)  # 20 for VOLUME, 33 FOR EMA
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ma_20[i])):
+        # SKIP IF ANY DATA NOT READY
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -80,36 +78,32 @@ def generate_signals(prices):
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
-        # Volume filter
-        vol_filter = vol_now > 1.3 * vol_avg
-        
-        # Price action: bullish/bearish candle
-        bullish_candle = close[i] > open_price[i]
-        bearish_candle = close[i] < open_price[i]
+        # VOLUME FILTER
+        vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: break above R4 with bullish candle and volume
-            if (price > camarilla_r4_aligned[i] and 
-                bullish_candle and vol_filter):
+            # LONG: BREAK ABOVE R1 WITH UPTREND AND VOLUME
+            if (price > r1_1d_aligned[i] and 
+                price > ema_1d_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: break below S4 with bearish candle and volume
-            elif (price < camarilla_s4_aligned[i] and 
-                  bearish_candle and vol_filter):
+            # SHORT: BREAK BELOW S1 WITH DOWNTREND AND VOLUME
+            elif (price < s1_1d_aligned[i] and 
+                  price < ema_1d_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to weekly pivot point
-            if price <= camarilla_pp_aligned[i]:
+            # EXIT LONG: PRICE CROSSES BELOW PIVOT OR STOPLOSS
+            if price < pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to weekly pivot point
-            if price >= camarilla_pp_aligned[i]:
+            # EXIT SHORT: PRICE CROSSES ABOVE PIVOT OR STOPLOSS
+            if price > pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyCamarilla_R4S4_Breakout_PP"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
