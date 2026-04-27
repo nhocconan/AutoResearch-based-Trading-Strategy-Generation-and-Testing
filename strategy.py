@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Ichimoku Cloud with 1-day trend filter and volume confirmation.
-Long when Tenkan-sen crosses above Kijun-sen AND price above Kumo (cloud) AND price > 1-day EMA50.
-Short when Tenkan-sen crosses below Kijun-sen AND price below Kumo AND price < 1-day EMA50.
-Ichimoku provides multi-layer trend confirmation; daily EMA filters higher-timeframe trend;
-volume confirms institutional participation. Target: 12-35 trades/year per symbol.
+Hypothesis: 4-hour Bollinger Band squeeze with 1-day trend filter and volume confirmation.
+In bull market (price > 1-day EMA34): long when BB width < 20th percentile and price > SMA20.
+In bear market (price < 1-day EMA34): short when BB width < 20th percentile and price < SMA20.
+BB squeeze identifies low volatility breakout conditions, daily trend filters direction,
+volume confirms institutional participation. Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,70 +26,53 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend
+    # Calculate daily EMA34 for trend
     daily_close = df_1d['close'].values
-    ema_50_1d = np.empty_like(daily_close, dtype=np.float64)
-    ema_50_1d.fill(np.nan)
-    if len(daily_close) >= 50:
-        alpha = 2.0 / (50 + 1)
-        ema_50_1d[49] = np.mean(daily_close[:50])
-        for i in range(50, len(daily_close)):
-            ema_50_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema_50_1d[i-1]
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = np.empty_like(daily_close, dtype=np.float64)
+    ema_34_1d.fill(np.nan)
+    if len(daily_close) >= 34:
+        alpha = 2.0 / (34 + 1)
+        ema_34_1d[33] = np.mean(daily_close[:34])
+        for i in range(34, len(daily_close)):
+            ema_34_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema_34_1d[i-1]
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = np.full_like(high, np.nan)
-    period9_low = np.full_like(low, np.nan)
-    for i in range(8, len(high)):
-        period9_high[i] = np.max(high[i-8:i+1])
-        period9_low[i] = np.min(low[i-8:i+1])
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate Bollinger Bands (20, 2) on 4h data
+    bb_period = 20
+    bb_std = 2.0
+    sma_20 = np.empty_like(close, dtype=np.float64)
+    sma_20.fill(np.nan)
+    for i in range(bb_period - 1, n):
+        sma_20[i] = np.mean(close[i-bb_period+1:i+1])
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = np.full_like(high, np.nan)
-    period26_low = np.full_like(low, np.nan)
-    for i in range(25, len(high)):
-        period26_high[i] = np.max(high[i-25:i+1])
-        period26_low[i] = np.min(low[i-25:i+1])
-    kijun_sen = (period26_high + period26_low) / 2
+    bb_std_dev = np.empty_like(close, dtype=np.float64)
+    bb_std_dev.fill(np.nan)
+    for i in range(bb_period - 1, n):
+        bb_std_dev[i] = np.std(close[i-bb_period+1:i+1])
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = np.full_like(high, np.nan)
-    period52_low = np.full_like(low, np.nan)
-    for i in range(51, len(high)):
-        period52_high[i] = np.max(high[i-51:i+1])
-        period52_low[i] = np.min(low[i-51:i+1])
-    senkou_b = ((period52_high + period52_low) / 2)
+    bb_upper = sma_20 + bb_std * bb_std_dev
+    bb_lower = sma_20 - bb_std * bb_std_dev
+    bb_width = bb_upper - bb_lower
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Get daily data for volume confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = np.empty_like(vol_1d, dtype=np.float64)
-    vol_ma_20_1d.fill(np.nan)
-    for i in range(19, len(vol_1d)):
-        vol_ma_20_1d[i] = np.mean(vol_1d[i-19:i+1])
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate 20th percentile of BB width for squeeze detection
+    bb_width_pct_20 = np.empty_like(bb_width, dtype=np.float64)
+    bb_width_pct_20.fill(np.nan)
+    for i in range(bb_period - 1, n):
+        if i >= 50:  # Need sufficient history for percentile
+            window = bb_width[i-49:i+1]
+            bb_width_pct_20[i] = np.percentile(window, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Ichimoku (52), daily EMA50 (50), daily volume MA20 (20)
-    start_idx = max(52, 50, 20)
+    # Warmup: need BB (20), BB width percentile (50)
+    start_idx = max(bb_period - 1, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(bb_width[i]) or 
+            np.isnan(bb_width_pct_20[i]) or np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -98,33 +81,10 @@ def generate_signals(prices):
         vol_now = volume[i]
         
         # Current indicators
-        tenkan = tenkan_aligned[i]
-        kijun = kijun_aligned[i]
-        senkou_a = senkou_a_aligned[i]
-        senkou_b = senkou_b_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        
-        # Kumo (Cloud) boundaries
-        upper_cloud = max(senkou_a, senkou_b)
-        lower_cloud = min(senkou_a, senkou_b)
-        
-        # Price above/below cloud
-        above_cloud = price_now > upper_cloud
-        below_cloud = price_now < lower_cloud
-        
-        # Tenkan/Kijun crossover
-        if i > start_idx:
-            tenkan_prev = tenkan_aligned[i-1]
-            kijun_prev = kijun_aligned[i-1]
-            tk_cross_above = (tenkan_prev <= kijun_prev) and (tenkan > kijun)
-            tk_cross_below = (tenkan_prev >= kijun_prev) and (tenkan < kijun)
-        else:
-            tk_cross_above = False
-            tk_cross_below = False
-        
-        # Volume filter: volume > 1.2x daily average
-        vol_filter = vol_now > 1.2 * vol_ma
+        sma_val = sma_20[i]
+        bb_width_val = bb_width[i]
+        bb_width_pct = bb_width_pct_20[i]
+        ema_trend = ema_34_1d_aligned[i]
         
         # Daily close price for trend comparison
         daily_close_price = df_1d['close'].values
@@ -134,27 +94,37 @@ def generate_signals(prices):
             continue
         daily_close_val = daily_close_aligned[i]
         
+        # Volume filter: volume > 1.1x average (calculated from 4h volume MA20)
+        vol_ma_20 = np.empty_like(volume, dtype=np.float64)
+        vol_ma_20.fill(np.nan)
+        for j in range(19, n):
+            vol_ma_20[j] = np.mean(volume[j-19:j+1])
+        vol_filter = vol_now > 1.1 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
+        
+        # Squeeze condition: BB width < 20th percentile of recent width
+        squeeze = bb_width_val < bb_width_pct
+        
         if position == 0:
-            # Long conditions: TK cross bullish + price above cloud + price > daily EMA50 + volume
-            if tk_cross_above and above_cloud and (daily_close_val > ema_trend) and vol_filter:
+            # Bull market (price > daily EMA34): look for long when squeeze + price > SMA20
+            if daily_close_val > ema_trend and squeeze and price_now > sma_val and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short conditions: TK cross bearish + price below cloud + price < daily EMA50 + volume
-            elif tk_cross_below and below_cloud and (daily_close_val < ema_trend) and vol_filter:
+            # Bear market (price < daily EMA34): look for short when squeeze + price < SMA20
+            elif daily_close_val < ema_trend and squeeze and price_now < sma_val and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: TK cross bearish OR price below cloud OR trend turns bearish
-            if tk_cross_below or (price_now < upper_cloud) or (daily_close_val < ema_trend):
+            # Exit long: price < SMA20 or trend changes to bear
+            if price_now < sma_val or daily_close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: TK cross bullish OR price above cloud OR trend turns bullish
-            if tk_cross_above or (price_now > lower_cloud) or (daily_close_val > ema_trend):
+            # Exit short: price > SMA20 or trend changes to bull
+            if price_now > sma_val or daily_close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -162,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_DailyTrend_Volume"
-timeframe = "6h"
+name = "4h_BBSqueeze_DailyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
