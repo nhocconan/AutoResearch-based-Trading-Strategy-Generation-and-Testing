@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolSpike
-Hypothesis: Uses 4h Camarilla pivot levels (R1/S1) for breakout entries in the direction of 4h trend (price > EMA34). Volume confirmation (>1.5x 20-period average on 1d) ensures conviction. 1h timeframe for precise entry timing, with 4h for signal direction and 1d for volume regime filter. Targets 15-35 trades/year by requiring confluence of HTF trend, HTF breakout, and HTF volume spike. Works in bull markets via upside breakouts and in bear markets via downside breakdowns. Camarilla R1/S1 represent tight intraday levels where breakouts often continue, while the 4h EMA34 filter avoids counter-trend trades.
+6h_Supertrend_Regime_Adaptive
+Hypothesis: Combines Supertrend for trend direction with a choppy regime filter (Choppiness Index) to avoid whipsaws. In trending regimes (CHOP < 38.2), follow Supertrend signals. In choppy regimes (CHOP > 61.8), mean-revert at Supertrend extremes. Uses 1d HTF for regime filter to reduce noise. 6h timeframe targets 50-150 trades over 4 years. Works in bull/bear via trend following and in range via mean reversion at adaptive levels.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,106 +18,137 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivots and trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Supertrend calculation (6h)
+    atr_period = 10
+    multiplier = 3.0
     
-    # Calculate 4h EMA34 for trend filter
-    close_4h_series = pd.Series(df_4h['close'].values)
-    ema_34_4h = close_4h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # TR and ATR
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate 4h Camarilla pivot levels (using previous 4h bar's HLC)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Basic upper/lower bands
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (multiplier * atr)
+    lower_band = hl2 - (multiplier * atr)
     
-    # Shift by 1 to use previous 4h bar's HLC for current levels
-    prev_high_4h = np.roll(high_4h, 1)
-    prev_low_4h = np.roll(low_4h, 1)
-    prev_close_4h = np.roll(close_4h, 1)
-    prev_high_4h[0] = np.nan
-    prev_low_4h[0] = np.nan
-    prev_close_4h[0] = np.nan
+    # Initialize Supertrend
+    supertrend = np.full(n, np.nan)
+    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
     
-    # Camarilla levels (R1/S1, R3/S3 for exits)
-    range_4h = prev_high_4h - prev_low_4h
-    camarilla_r1 = prev_close_4h + range_4h * 1.1 / 12
-    camarilla_s1 = prev_close_4h - range_4h * 1.1 / 12
-    camarilla_r3 = prev_close_4h + range_4h * 1.1 / 4
-    camarilla_s3 = prev_close_4h - range_4h * 1.1 / 4
+    for i in range(1, n):
+        if close[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
     
-    # Get 1d data for volume spike filter
+    # Choppiness Index (1d HTF for regime filter)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = vol_1d > (1.5 * vol_avg_1d)
+    chop_period = 14
+    # True Range for 1d
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1_1d[0] = 0
+    tr2_1d[0] = 0
+    tr3_1d[0] = 0
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    atr_1d_sum = pd.Series(tr_1d).rolling(window=chop_period, min_periods=chop_period).sum().values
     
-    # Align all HTF indicators to 1h timeframe
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    max_high_1d = pd.Series(high_1d).rolling(window=chop_period, min_periods=chop_period).max().values
+    min_low_1d = pd.Series(low_1d).rolling(window=chop_period, min_periods=chop_period).min().values
     
-    # Session filter: 08-20 UTC (reduce noise trades)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Avoid division by zero
+    range_1d = max_high_1d - min_low_1d
+    chop_1d = 100 * np.log10(atr_1d_sum / np.log10(chop_period)) / np.log10(range_1d)
+    chop_1d = np.where(range_1d > 0, chop_1d, 50)  # default to neutral when range=0
+    
+    # Align 1d Choppiness Index to 6h
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # Position size: 20% of capital (discrete level to reduce churn)
+    size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need EMA34 (34), volume avg (20), and Camarilla (need previous bar)
-    start_idx = max(34, 20, 1)
+    # Warmup: need ATR (10), Supertrend needs ~2*ATR period, Chop (14), volume avg (20)
+    start_idx = max(atr_period * 2, chop_period, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_spike_1d_aligned[i]) or
-            not in_session[i]):
+        # Skip if any data not ready
+        if (np.isnan(supertrend[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_4h_val = ema_34_4h_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        vol_spike = volume_spike_1d_aligned[i]
+        st_val = supertrend[i]
+        chop_val = chop_1d_aligned[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Determine 4h trend: price > EMA34 = uptrend, price < EMA34 = downtrend
-            is_uptrend = close_val > ema_4h_val
-            is_downtrend = close_val < ema_4h_val
+            # Determine regime: choppy or trending
+            is_choppy = chop_val > 61.8
+            is_trending = chop_val < 38.2
             
-            if is_uptrend:
-                # Uptrend: long when price breaks above R1 and volume spike confirms
-                if (close_val > r1) and vol_spike:
+            if is_trending:
+                # Trending regime: follow Supertrend direction
+                if close_val > st_val and vol_conf:  # Uptrend
                     signals[i] = size
                     position = 1
-            elif is_downtrend:
-                # Downtrend: short when price breaks below S1 and volume spike confirms
-                if (close_val < s1) and vol_spike:
+                elif close_val < st_val and vol_conf:  # Downtrend
+                    signals[i] = -size
+                    position = -1
+            elif is_choppy:
+                # Choppy regime: mean reversion at Supertrend extremes
+                # Long when price is significantly below Supertrend (oversold)
+                # Short when price is significantly above Supertrend (overbought)
+                deviation = (close_val - st_val) / st_val
+                if deviation < -0.02 and vol_conf:  # 2% below ST -> long
+                    signals[i] = size
+                    position = 1
+                elif deviation > 0.02 and vol_conf:  # 2% above ST -> short
                     signals[i] = -size
                     position = -1
         elif position == 1:
-            # Exit long: price reverts to R3 or trend changes to downtrend
-            exit_condition = (close_val < r3) or (close_val < ema_4h_val)
+            # Exit long: price crosses below Supertrend OR regime shifts to choppy and mean reversion signal
+            exit_trend = close_val < st_val
+            exit_choppy_mean = (chop_val > 61.8) and ((close_val - st_val) / st_val > -0.01)  # Near ST
             
-            if exit_condition:
+            if exit_trend or exit_choppy_mean:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price reverts to S3 or trend changes to uptrend
-            exit_condition = (close_val > s3) or (close_val > ema_4h_val)
+            # Exit short: price crosses above Supertrend OR regime shifts to choppy and mean reversion signal
+            exit_trend = close_val > st_val
+            exit_choppy_mean = (chop_val > 61.8) and ((close_val - st_val) / st_val < 0.01)  # Near ST
             
-            if exit_condition:
+            if exit_trend or exit_choppy_mean:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolSpike"
-timeframe = "1h"
+name = "6h_Supertrend_Regime_Adaptive"
+timeframe = "6h"
 leverage = 1.0
