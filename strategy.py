@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_RegimeFilter
-Hypothesis: 4h strategy using Camarilla R3/S3 levels from 1d for breakout entries with 1d EMA34 trend filter and chop regime filter. 
-Enter long when price closes above R3 with 1d uptrend (price > EMA34) and chop regime (range-bound) for mean reversion exit precision. 
-Enter short when price closes below S3 with 1d downtrend (price < EMA34) and chop regime. 
-Exit on opposite Camarilla level touch (S3/R3) or 1d trend reversal (price crosses EMA34). 
-Designed for moderate trade frequency (~30-60/year) with discrete position sizing (0.25) to reduce fee drag and improve test generalization.
-Uses chop regime to avoid false breakouts in strong trends and capture reversals in ranging markets.
-Works in both bull and bear markets by following the 1d trend while using Camarilla levels for precise entries and chop filter for regime adaptation.
+1h_Camarilla_R3_S3_Breakout_4hTrend_VolumeSpike
+Hypothesis: 1h strategy using Camarilla R3/S3 levels from 4h for breakout entries with 4h EMA50 trend filter and volume spike confirmation. 
+Enter long when price closes above R3 with 4h uptrend (price > EMA50) and volume > 2.0x 20-period average. 
+Enter short when price closes below S3 with 4h downtrend (price < EMA50) and volume confirmation. 
+Exit on opposite Camarilla level touch (S3/R3) or 4h trend reversal (price crosses EMA50). 
+Uses 4h for signal direction, 1h only for entry timing to control trade frequency (~20-50/year). 
+Session filter (08-20 UTC) reduces noise. Discrete position sizing (0.20) minimizes fee drag.
+Designed to work in both bull and bear markets by following the 4h trend while using Camarilla levels for precise breakout entries.
 """
 
 import numpy as np
@@ -23,70 +23,65 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d data for Camarilla levels and EMA trend
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h data for Camarilla levels and EMA trend
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1d OHLC for Camarilla levels
-    o_1d = df_1d['open'].values
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Calculate 4h OHLC for Camarilla levels
+    o_4h = df_4h['open'].values
+    h_4h = df_4h['high'].values
+    l_4h = df_4h['low'].values
+    c_4h = df_4h['close'].values
     
-    # Camarilla levels: R3/S3 from 1d OHLC (wider than R1/S1 for fewer false breakouts)
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = c_1d + (h_1d - l_1d) * 1.1 / 4
-    camarilla_s3 = c_1d - (h_1d - l_1d) * 1.1 / 4
+    # Camarilla levels: R3/S3 from 4h OHLC
+    camarilla_r3 = c_4h + (h_4h - l_4h) * 1.1 / 4
+    camarilla_s3 = c_4h - (h_4h - l_4h) * 1.1 / 4
     
-    # 1d EMA34 for trend filter
-    close_1d_series = pd.Series(c_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 4h EMA50 for trend filter
+    close_4h_series = pd.Series(c_4h)
+    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d indicators to 4h timeframe (completed bars only)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 4h indicators to 1h timeframe (completed bars only)
+    r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Chop regime filter: use 1d data to calculate chop index (range vs trend)
-    # Chop = 100 * log10(sum(ATR(14)) / log10(highest high - lowest low)) / log10(14)
-    # We'll use a simplified version: high-low range relative to ATR
-    tr_1d = np.maximum(h_1d - l_1d, np.maximum(np.abs(h_1d - np.roll(c_1d, 1)), np.abs(l_1d - np.roll(c_1d, 1))))
-    tr_1d[0] = h_1d[0] - l_1d[0]  # first bar
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    hl_range_1d = h_1d - l_1d
-    chop_1d = 100 * np.log10(hl_range_1d / atr_1d) / np.log10(14)
-    # Chop > 61.8 = ranging (good for mean reversion), Chop < 38.2 = trending
-    chop_regime = chop_1d > 50  # Using 50 as threshold for ranging regime
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
     
-    # Align chop regime to 4h timeframe
-    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime.astype(float))
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(open_time).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital (discrete level)
+    size = 0.20   # Position size: 20% of capital (discrete level)
     
-    # Warmup: need 1d EMA34 (34) and chop calculation (14)
-    start_idx = max(34, 14)
+    # Warmup: need 4h EMA50 (50) + volume avg (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
+        # Skip if any data not ready or outside session
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(chop_regime_aligned[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
-        ema_val = ema_34_aligned[i]
-        chop_reg = chop_regime_aligned[i] > 0.5  # Convert back to boolean
+        ema_val = ema_50_aligned[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: Camarilla R3/S3 breakout with 1d EMA34 trend filter and chop regime (ranging)
-            # Long: price closes above R3 AND above EMA34 (1d uptrend) AND chop regime (ranging)
-            long_condition = (close_val > r3_val) and (close_val > ema_val) and chop_reg
-            # Short: price closes below S3 AND below EMA34 (1d downtrend) AND chop regime (ranging)
-            short_condition = (close_val < s3_val) and (close_val < ema_val) and chop_reg
+            # Look for entry: Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike
+            # Long: price closes above R3 AND above EMA50 (4h uptrend)
+            long_condition = (close_val > r3_val) and (close_val > ema_val) and vol_conf
+            # Short: price closes below S3 AND below EMA50 (4h downtrend)
+            short_condition = (close_val < s3_val) and (close_val < ema_val) and vol_conf
             
             if long_condition:
                 signals[i] = size
@@ -95,14 +90,14 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price touches S3 (opposite level) OR 1d EMA34 turns bearish (price below EMA)
+            # Exit long: price touches S3 (opposite level) OR 4h EMA50 turns bearish (price below EMA)
             if (close_val < s3_val) or (close_val < ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price touches R3 (opposite level) OR 1d EMA34 turns bullish (price above EMA)
+            # Exit short: price touches R3 (opposite level) OR 4h EMA50 turns bullish (price above EMA)
             if (close_val > r3_val) or (close_val > ema_val):
                 signals[i] = 0.0
                 position = 0
@@ -111,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_RegimeFilter"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_4hTrend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
