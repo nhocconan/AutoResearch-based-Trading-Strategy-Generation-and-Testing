@@ -43,9 +43,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-period average (stricter filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,9 +65,9 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Volatility filter: current 4h ATR > 1.2x 1d ATR (avoid low volatility periods)
+        # Volatility filter: current 4h ATR > 1.3x 1d ATR (avoid low volatility periods)
         atr_4h = np.abs(high[i] - low[i])
-        vol_filter = atr_4h > (atr_1d_aligned[i] * 1.2)
+        vol_filter = atr_4h > (atr_1d_aligned[i] * 1.3)
         
         # Long conditions: price breaks above upper Donchian + above 1d EMA + volume + volatility
         long_breakout = (close[i] > highest_high[i-1] and price_above_ema and volume_filter[i] and vol_filter)
@@ -75,10 +75,10 @@ def generate_signals(prices):
         short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_filter[i] and vol_filter)
         
         if long_breakout:
-            signals[i] = 0.28
+            signals[i] = 0.25
             position = 1
         elif short_breakout:
-            signals[i] = -0.28
+            signals[i] = -0.25
             position = -1
         # Exit conditions: opposite Donchian breakout
         elif position == 1 and close[i] < lowest_low[i-1]:
@@ -90,14 +90,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.28
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.28
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolVolFilter"
+name = "4h_Donchian20_Breakout_1dEMA34_VolVolFilter_Strict"
 timeframe = "4h"
 leverage = 1.0
