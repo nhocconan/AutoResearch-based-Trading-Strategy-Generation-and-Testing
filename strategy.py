@@ -65,7 +65,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    size = 0.20
+    size = 0.25
     
     # Warmup period
     start_idx = max(34, vol_period, 14) + 5
@@ -79,8 +79,8 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.8x average volume (stricter to reduce trades)
-        vol_filter = vol_ratio > 1.8
+        # Volume spike filter: at least 1.5x average volume
+        vol_filter = vol_ratio > 1.5
         
         if position == 0:
             # Long: Price breaks above R3 with volume and above daily EMA34
@@ -95,14 +95,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long exit: Price closes below S3 or trailing stop
-            if price < s3_aligned[i] or price < ema_34_1d_aligned[i] - 2.0 * atr[i]:
+            if price < s3_aligned[i] or price < ema_34_1d_aligned[i] - 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
             # Short exit: Price closes above R3 or trailing stop
-            if price > r3_aligned[i] or price > ema_34_1d_aligned[i] + 2.0 * atr[i]:
+            if price > r3_aligned[i] or price > ema_34_1d_aligned[i] + 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume_v2"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
