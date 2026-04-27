@@ -40,10 +40,6 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
-    # Volume MA for spike detection
-    vol_ma_14_1d = pd.Series(volume_1d).rolling(window=14, min_periods=14).mean().values
-    vol_ma_14_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_14_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -53,8 +49,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(vol_ma_14_1d_aligned[i])):
+            np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,6 +66,11 @@ def generate_signals(prices):
         vol_filter = atr_14_1d_aligned[i] > 0 and atr_14_1d_aligned[i] < np.median(atr_14_1d_aligned[:i+1]) * 3
         
         # Volume filter: above average volume
+        vol_ma_14_1d = pd.Series(volume_1d).rolling(window=14, min_periods=14).mean().values
+        vol_ma_14_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_14_1d)
+        if np.isnan(vol_ma_14_1d_aligned[i]):
+            signals[i] = 0.0
+            continue
         vol_spike = volume[i] > vol_ma_14_1d_aligned[i]
         
         # Long conditions: bullish trend + volatility filter + volume spike
@@ -80,10 +80,10 @@ def generate_signals(prices):
         short_condition = (price_below_ema and vol_filter and vol_spike)
         
         if long_condition and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_condition and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         # Exit conditions: trend reversal
         elif position == 1 and not price_above_ema:
@@ -95,14 +95,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_DailyEMA34_VolumeFilter_Session"
-timeframe = "4h"
+name = "1h_DailyEMA34_VolumeFilter_Session"
+timeframe = "1h"
 leverage = 1.0
