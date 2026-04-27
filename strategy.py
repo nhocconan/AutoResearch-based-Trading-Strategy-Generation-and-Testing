@@ -13,31 +13,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    
-    # 4h EMA50 for trend direction
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Get 1d data for regime filter
+    # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1d EMA200 for long-term trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate 1d ATR for volatility filter
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Hour filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 1d ADX for trend strength
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 6-hour Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,46 +64,47 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price > 4h EMA50 AND price > 1d EMA200
-        long_condition = (close[i] > ema_50_4h_aligned[i]) and (close[i] > ema_200_1d_aligned[i])
+        # Volatility filter: ATR > 0.5% of price (avoid choppy low-vol periods)
+        vol_filter = atr_1d_aligned[i] > (close[i] * 0.005)
         
-        # Short conditions: price < 4h EMA50 AND price < 1d EMA200
-        short_condition = (close[i] < ema_50_4h_aligned[i]) and (close[i] < ema_200_1d_aligned[i])
+        # Trend strength filter: ADX > 25
+        trend_filter = adx_aligned[i] > 25
         
-        if long_condition and position <= 0:
-            signals[i] = 0.20
+        # Long conditions: price breaks above upper Donchian + volatility + trend strength + volume
+        long_breakout = (close[i] > highest_high[i-1] and vol_filter and trend_filter and volume_filter[i])
+        # Short conditions: price breaks below lower Donchian + volatility + trend strength + volume
+        short_breakout = (close[i] < lowest_low[i-1] and vol_filter and trend_filter and volume_filter[i])
+        
+        if long_breakout:
+            signals[i] = 0.25
             position = 1
-        elif short_condition and position >= 0:
-            signals[i] = -0.20
+        elif short_breakout:
+            signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite condition
-        elif position == 1 and not long_condition:
+        # Exit conditions: opposite Donchian breakout
+        elif position == 1 and close[i] < lowest_low[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not short_condition:
+        elif position == -1 and close[i] > highest_high[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA50_4h_EMA200_1d_Trend_Filter_Session"
-timeframe = "1h"
+name = "6h_Donchian20_Breakout_Volume_ADX_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
