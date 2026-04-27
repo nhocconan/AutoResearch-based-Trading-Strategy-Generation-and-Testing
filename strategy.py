@@ -18,48 +18,52 @@ def generate_signals(prices):
     if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close
+    # Calculate EMA34 on 1d close with proper min_periods
     close_1d = df_1d['close'].values
     ema_34 = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 34:
-        ema_34[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34[i] = (close_1d[i] * 2 + ema_34[i-1] * 33) / 35
+        # Use pandas EMA for accuracy and proper min_periods handling
+        ema_series = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean()
+        ema_34 = ema_series.values
     
-    # Align EMA34 to 4h
+    # Align EMA34 to daily timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate ATR(14) for volatility filter
+    # Calculate ATR(14) for volatility filter with proper min_periods
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
     tr = np.concatenate([[np.nan], tr])
     atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    if n >= 15:
+        # Use pandas rolling for proper min_periods
+        tr_series = pd.Series(tr)
+        atr_series = tr_series.rolling(window=14, min_periods=14).mean()
+        atr = atr_series.values
     
-    # Calculate 20-period volume average
+    # Calculate 20-period volume average with proper min_periods
     vol_ma = np.full(n, np.nan)
     vol_period = 20
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    if n >= vol_period:
+        volume_series = pd.Series(volume)
+        vol_ma_series = volume_series.rolling(window=vol_period, min_periods=vol_period).mean()
+        vol_ma = vol_ma_series.values
     
-    # Calculate 20-period high/low for Donchian breakout
+    # Calculate 20-period high/low for Donchian breakout with proper min_periods
     high_max = np.full(n, np.nan)
     low_min = np.full(n, np.nan)
     period = 20
-    for i in range(period, n):
-        high_max[i] = np.max(high[i-period:i])
-        low_min[i] = np.min(low[i-period:i])
+    if n >= period:
+        high_series = pd.Series(high)
+        low_series = pd.Series(low)
+        high_max = high_series.rolling(window=period, min_periods=period).max().values
+        low_min = low_series.rolling(window=period, min_periods=period).min().values
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
-    # Warmup period
+    # Warmup period - ensure all indicators are valid
     start_idx = max(14, vol_period, period) + 5
     
     for i in range(start_idx, n):
@@ -99,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Volume_Trend"
-timeframe = "4h"
+name = "1d_Donchian20_1dEMA34_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
