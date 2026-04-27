@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Reversal_With_Trend_Filter
-Hypothesis: KAMA (adaptive moving average) identifies trend direction and potential reversals.
-Combined with 1-week EMA trend filter and volume confirmation to avoid false signals.
-Designed to work in both bull and bear markets by using adaptive smoothing and strict entry conditions.
-Target: 15-25 trades per year (60-100 total over 4 years).
+6h_WeeklyPivot_Bias_With_Trend
+Hypothesis: Weekly pivot bias (from 1w) + 1d EMA trend + 6h breakout captures sustained moves.
+In bull: long bias from weekly pivot + uptrend. In bear: short bias from weekly pivot + downtrend.
+Avoids whipsaw by requiring weekly structure alignment. Target: 15-30 trades/year.
 """
 
 import numpy as np
@@ -21,82 +20,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) - 14-period
-    # Efficiency Ratio: |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=1)  # sum of abs changes over 10 periods
-    # Pad volatility to match change length
-    volatility_padded = np.concatenate([np.full(10, np.nan), volatility])
-    
-    # Calculate ER with proper handling
-    er = np.full_like(close, np.nan, dtype=float)
-    valid_idx = ~np.isnan(volatility_padded) & (volatility_padded != 0)
-    er[valid_idx] = change / volatility_padded[valid_idx]
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Get 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for EMA trend and weekly pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1-week EMA20 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # 1d EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume spike detection (20-period average)
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points (using previous week's data)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot: P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    
+    # Align weekly pivots to 6h timeframe (1 week = 28 * 6h bars)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # 6-hour breakout levels (20-period lookback)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup period - need enough data for KAMA calculation
-    start_idx = 30  # 10 for ER + 20 for volatility + buffer
+    # Warmup period
+    start_idx = 21  # need 20 for rolling + 1 for shift
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(pivot_1w_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price crosses above KAMA with volume spike and weekly uptrend
-            if (close[i] > kama[i] and close[i-1] <= kama[i-1] and 
-                volume_spike[i] and close[i] > ema20_1w_aligned[i]):
+            # Long conditions: price above weekly pivot, above 1d EMA50, and breaks 6h high with volume
+            if (close[i] > pivot_1w_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and
+                close[i] > high_20[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below KAMA with volume spike and weekly downtrend
-            elif (close[i] < kama[i] and close[i-1] >= kama[i-1] and 
-                  volume_spike[i] and close[i] < ema20_1w_aligned[i]):
+            # Short conditions: price below weekly pivot, below 1d EMA50, and breaks 6h low with volume
+            elif (close[i] < pivot_1w_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and
+                  close[i] < low_20[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below KAMA or weekly trend fails
-            if (close[i] < kama[i] and close[i-1] >= kama[i-1]) or close[i] < ema20_1w_aligned[i]:
+            # Long exit: price returns below weekly pivot or trend fails
+            if (close[i] < pivot_1w_aligned[i] or 
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KAMA or weekly trend fails
-            if (close[i] > kama[i] and close[i-1] <= kama[i-1]) or close[i] > ema20_1w_aligned[i]:
+            # Short exit: price returns above weekly pivot or trend fails
+            if (close[i] > pivot_1w_aligned[i] or 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Reversal_With_Trend_Filter"
-timeframe = "1d"
+name = "6h_WeeklyPivot_Bias_With_Trend"
+timeframe = "6h"
 leverage = 1.0
