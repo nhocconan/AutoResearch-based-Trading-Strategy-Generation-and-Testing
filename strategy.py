@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_KAMA_Trend_With_1d_Range_Filter
-Hypothesis: Use 1h Kaufman Adaptive Moving Average (KAMA) with 1d high/low range filter to enter trend-following positions. 
-KAMA adapts to market noise, reducing whipsaws in ranging markets. 
-Enter long when price > KAMA and above 1d low + 0.382*range (pullback support in uptrend).
-Enter short when price < KAMA and below 1d high - 0.382*range (pullback resistance in downtrend).
-Use 1d trend (EMA34) to filter direction. Only trade during 08-20 UTC to avoid low-liquidity hours.
-Target: 15-25 trades/year per symbol with tight stops via signal=0 on trend failure.
-Works in bull (buy dips) and bear (sell rallies) by trading with higher timeframe trend.
+4h_KAMA_Direction_RSI_Trend_Follow
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) for trend direction and RSI for momentum confirmation in the same direction. Enter long when KAMA turns up and RSI > 50; short when KAMA turns down and RSI < 50. This captures momentum in trending markets while avoiding whipsaws in sideways markets. Works in bull (buy dips) and bear (sell rallies) by following the adaptive trend. Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
@@ -16,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,125 +18,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and range
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
+    # 1d KAMA for trend direction
     close_1d = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # 1d range for support/resistance levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    range_1d = high_1d - low_1d
-    # Pullback levels: 38.2% retracement of 1d range
-    support_1d = low_1d + range_1d * 0.382   # buy zone in uptrend
-    resistance_1d = high_1d - range_1d * 0.382  # sell zone in downtrend
-    
-    support_aligned = align_htf_to_ltf(prices, df_1d, support_1d)
-    resistance_aligned = align_htf_to_ltf(prices, df_1d, resistance_1d)
-    
-    # 1h KAMA (adaptive moving average)
-    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    change[0:10] = np.nan  # first 10 values invalid
-    
-    # Volatility: sum of absolute changes over 10 periods
-    volatility = np.zeros(n)
-    for i in range(n):
-        if i < 10:
-            volatility[i] = np.nan
-        else:
-            volatility[i] = np.nansum(np.abs(close[i-9:i+1] - np.roll(close[i-9:i+1], 1)))
-    
-    # Avoid division by zero
-    er = np.zeros(n)
-    er[:] = np.nan
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
-    
+    # Calculate Efficiency Ratio (ER)
+    change = abs(close_1d - close_1d.shift(10))
+    volatility = abs(close_1d - close_1d.shift(1)).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
     # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
     # Calculate KAMA
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    kama[0] = close[0]  # seed
+    kama = np.zeros(len(close_1d))
+    kama[0] = close_1d.iloc[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close_1d.iloc[i] - kama[i-1])
+    kama = kama
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    for i in range(1, n):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # RSI(14) for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Volume filter: avoid low-volume false signals
+    # Volume filter: require volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 10 for KAMA, 20 for vol MA
-    start_idx = max(20, 10)
+    # Warmup period
+    start_idx = 30  # need 30 for KAMA and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(support_aligned[i]) or 
-            np.isnan(resistance_aligned[i]) or np.isnan(kama[i]) or 
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Check session
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: price > KAMA (uptrend) and above 1d support level with volume
-            if (close[i] > kama[i] and 
-                close[i] > support_aligned[i] and 
-                ema34_1d_aligned[i] > kama[i] and  # 1d trend confirms uptrend
-                volume_filter[i]):
-                signals[i] = 0.20
+            # Long: KAMA turning up and RSI > 50 with volume confirmation
+            if (i > 0 and kama_1d_aligned[i] > kama_1d_aligned[i-1] and 
+                rsi[i] > 50 and volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA (downtrend) and below 1d resistance level with volume
-            elif (close[i] < kama[i] and 
-                  close[i] < resistance_aligned[i] and 
-                  ema34_1d_aligned[i] < kama[i] and  # 1d trend confirms downtrend
-                  volume_filter[i]):
-                signals[i] = -0.20
+            # Short: KAMA turning down and RSI < 50 with volume confirmation
+            elif (i > 0 and kama_1d_aligned[i] < kama_1d_aligned[i-1] and 
+                  rsi[i] < 50 and volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below KAMA or 1d trend fails
-            if (close[i] <= kama[i] or 
-                ema34_1d_aligned[i] <= kama[i]):
+            # Long exit: KAMA turns down or RSI < 40
+            if (kama_1d_aligned[i] < kama_1d_aligned[i-1] or rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above KAMA or 1d trend fails
-            if (close[i] >= kama[i] or 
-                ema34_1d_aligned[i] >= kama[i]):
+            # Short exit: KAMA turns up or RSI > 60
+            if (kama_1d_aligned[i] > kama_1d_aligned[i-1] or rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_KAMA_Trend_With_1d_Range_Filter"
-timeframe = "1h"
+name = "4h_KAMA_Direction_RSI_Trend_Follow"
+timeframe = "4h"
 leverage = 1.0
