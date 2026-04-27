@@ -1,11 +1,12 @@
-#!/usr/bin/env python3
-"""
-Hypothesis: 6-hour Elder Ray Power with Weekly Trend Filter and Volume Confirmation.
-Uses daily Bull Power (Close - EMA13) and Bear Power (EMA13 - High) to measure buying/selling pressure.
-Trades in direction of weekly trend (EMA34) when power exceeds volume-adjusted threshold.
-Designed to work in both bull and bear markets by using weekly trend as filter.
-Target: 15-35 trades/year per symbol (60-140 total over 4 years) to minimize fee drag.
-"""
+# 12h_TripleConfirmation_Signal
+# Hypothesis: Use 1-day EMA(50) for trend, 1-day RSI(14) for momentum, and 1-day volume surge for confirmation.
+# Enter long when price > EMA50, RSI > 50, and volume > 1.5x 20-period average.
+# Enter short when price < EMA50, RSI < 50, and volume > 1.5x 20-period average.
+# Exit when any condition fails.
+# Designed for 12h timeframe to capture multi-day trends with volume confirmation.
+# Works in both bull and bear markets by following the 1-day trend.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,42 +21,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation
+    # Get daily data for trend, momentum, and volume filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray (daily)
+    # Calculate 1-day EMA(50) for trend
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Bull Power and Bear Power (daily)
-    bull_power_1d = close_1d - ema13_1d  # Close - EMA13
-    bear_power_1d = ema13_1d - df_1d['high'].values  # EMA13 - High
+    # Calculate 1-day RSI(14) for momentum
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d.values)
     
-    # Align Elder Ray powers to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
-        return np.zeros(n)
-    
-    # Calculate EMA34 for weekly trend
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Get 6h data for volume filter
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 6h volume MA(20)
-    vol_6h = df_6h['volume'].values
-    vol_ma_20_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
+    # Calculate 1-day volume MA(20) for volume filter
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,13 +53,14 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need Elder Ray, volume MA, and weekly EMA
-    start_idx = max(13, 20, 34)  # max of lookbacks
+    # Warmup: need EMA, RSI, and volume MA
+    start_idx = max(50, 14, 20)  # max of lookbacks
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20_6h_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -80,40 +70,36 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        bull_power = bull_power_aligned[i]
-        bear_power = bear_power_aligned[i]
-        trend_1w = ema34_1w_aligned[i]
+        ema_50 = ema_50_1d_aligned[i]
+        rsi = rsi_14_1d_aligned[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_6h_aligned[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
         
-        # Volume filter: volume > 1.3x 6h average
-        vol_filter = vol_now > 1.3 * vol_ma
-        
-        # Power threshold: 0.5% of price for significance
-        power_threshold = close[i] * 0.005
+        # Volume filter: volume > 1.5x 1-day average
+        vol_filter = vol_now > 1.5 * vol_ma
         
         # Entry conditions
         if position == 0:
-            # Long: Bull power > threshold + volume + weekly uptrend
-            if bull_power > power_threshold and vol_filter and close[i] > trend_1w:
+            # Long: price > EMA50, RSI > 50, volume surge
+            if close[i] > ema_50 and rsi > 50 and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Bear power > threshold + volume + weekly downtrend
-            elif bear_power > power_threshold and vol_filter and close[i] < trend_1w:
+            # Short: price < EMA50, RSI < 50, volume surge
+            elif close[i] < ema_50 and rsi < 50 and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bull power turns negative or weekly trend turns down
-            if bull_power <= 0 or close[i] < trend_1w:
+            # Exit long: any condition fails
+            if close[i] <= ema_50 or rsi <= 50 or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: bear power turns negative or weekly trend turns up
-            if bear_power <= 0 or close[i] > trend_1w:
+            # Exit short: any condition fails
+            if close[i] >= ema_50 or rsi >= 50 or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRayPower_WeeklyTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_TripleConfirmation_Signal"
+timeframe = "12h"
 leverage = 1.0
