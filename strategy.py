@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_RSI_Divergence_1dTrend
-Hypothesis: RSI divergence signals on 12h timeframe filtered by 1d EMA50 trend work in both bull and bear markets.
-Focus on quality over quantity: only trade when RSI shows clear divergence with price action.
-Target: 15-25 trades per year to minimize fee drag while maintaining edge.
+12h_Camarilla_Pivot_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot breakouts with 1d EMA34 trend and volume confirmation yield high-probability momentum trades.
+Works in bull/bear via trend filter. Targets 20-40 trades/year on 12h to minimize fee drag while capturing strong moves.
 """
 
 import numpy as np
@@ -12,116 +11,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 55:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate Camarilla pivot levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 12h RSI(14) for divergence detection
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate pivot and levels using previous day's data
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)  # Resistance 1
+    s1 = pivot - (range_1d * 1.1 / 12)  # Support 1
+    
+    # Align to 12h timeframe (wait for 1d bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Get 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for RSI and EMA
-    start_idx = 55  # Enough for RSI(14) + EMA50
+    # Warmup: need enough data for EMA and volume MA
+    start_idx = max(35, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi_values[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema50_1d_aligned[i]
-        current_rsi = rsi_values[i]
-        
-        # Look back for divergence detection (check last 5 bars for pivot points)
-        lookback = 5
-        if i < lookback:
-            signals[i] = size if position == 1 else (-size if position == -1 else 0.0)
-            continue
-            
-        # Find recent swing highs and lows in price
-        recent_high_idx = i - np.argmax(high[i-lookback:i+1][::-1]) if i >= lookback else i
-        recent_low_idx = i - np.argmin(low[i-lookback:i+1][::-1]) if i >= lookback else i
-        
-        # Check for bearish divergence: price makes higher high, RSI makes lower high
-        bearish_div = False
-        if i >= lookback * 2:  # Need enough history
-            # Find two recent swing highs
-            highs = []
-            for j in range(i - lookback, i + 1):
-                if j >= 2 and j < n - 2:  # Avoid edges
-                    if high[j] >= high[j-1] and high[j] >= high[j+1] and \
-                       high[j] >= high[j-2] and high[j] >= high[j+2]:
-                        highs.append(j)
-            
-            if len(highs) >= 2:
-                # Get two most recent swing highs
-                high1, high2 = highs[-2], highs[-1]
-                # Bearish divergence: price higher high, RSI lower high
-                if (high[high2] > high[high1] and 
-                    rsi_values[high2] < rsi_values[high1]):
-                    bearish_div = True
-        
-        # Check for bullish divergence: price makes lower low, RSI makes higher low
-        bullish_div = False
-        if i >= lookback * 2:  # Need enough history
-            # Find two recent swing lows
-            lows = []
-            for j in range(i - lookback, i + 1):
-                if j >= 2 and j < n - 2:  # Avoid edges
-                    if low[j] <= low[j-1] and low[j] <= low[j+1] and \
-                       low[j] <= low[j-2] and low[j] <= low[j+2]:
-                        lows.append(j)
-            
-            if len(lows) >= 2:
-                # Get two most recent swing lows
-                low1, low2 = lows[-2], lows[-1]
-                # Bullish divergence: price lower low, RSI higher low
-                if (low[low2] < low[low1] and 
-                    rsi_values[low2] > rsi_values[low1]):
-                    bullish_div = True
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema34_1d_aligned[i]
+        vol_confirm_val = vol_confirm[i]
         
         if position == 0:
-            # Enter long on bullish divergence with uptrend
-            if bullish_div and close[i] > ema_trend and current_rsi < 40:
+            # Long: break above R1 with uptrend and volume
+            if close[i] > r1_val and vol_confirm_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Enter short on bearish divergence with downtrend
-            elif bearish_div and close[i] < ema_trend and current_rsi > 60:
+            # Short: break below S1 with downtrend and volume
+            elif close[i] < s1_val and vol_confirm_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: bearish divergence or trend breaks down
-            if bearish_div or close[i] < ema_trend:
+            # Exit long: break below pivot or trend turns down
+            if close[i] < pivot_aligned[i] or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: bullish divergence or trend breaks up
-            if bullish_div or close[i] > ema_trend:
+            # Exit short: break above pivot or trend turns up
+            if close[i] > pivot_aligned[i] or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI_Divergence_1dTrend"
+name = "12h_Camarilla_Pivot_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
