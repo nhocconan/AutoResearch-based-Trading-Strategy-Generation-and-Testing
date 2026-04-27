@@ -1,36 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with 1-day trend filter and volume confirmation.
-Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-Enters long when Bull Power > 0, volume > 1.5x daily average, and 1-day close > EMA34 (uptrend).
-Enters short when Bear Power < 0, volume > 1.5x daily average, and 1-day close < EMA34 (downtrend).
-Uses EMA13 for power calculation and EMA34 for trend filter to reduce noise.
-Targets 15-30 trades/year per symbol to minimize fee drift while capturing institutional sentiment.
-Works in bull markets via Bull Power strength and in bear markets via Bear Power extremes.
+Hypothesis: 4-hour ATR breakout with daily volume confirmation and weekly trend filter.
+Enters long when price breaks above ATR-based upper band with above-average volume and weekly uptrend.
+Enters short when price breaks below ATR-based lower band with above-average volume and weekly downtrend.
+Uses volatility-based entry to capture breakouts while filtering low-probability setups.
+Target: 20-30 trades/year per symbol to minimize fee drag and work in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def ema(source, length):
-    """Exponential Moving Average with proper seed"""
-    if length <= 0:
-        return np.full_like(source, np.nan)
-    result = np.full_like(source, np.nan)
-    if len(source) < length:
-        return result
-    # Seed with SMA
-    result[length-1] = np.mean(source[:length])
-    # EMA formula
-    alpha = 2.0 / (length + 1.0)
-    for i in range(length, len(source)):
-        result[i] = alpha * source[i] + (1 - alpha) * result[i-1]
-    return result
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -38,73 +21,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volume average
+    # Get daily data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray (using 6h close)
-    ema13 = ema(close, 13)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate ATR(14) for volatility
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate ATR-based bands (like Donchian but volatility-adjusted)
+    upper_band = np.roll(close, 1) + 1.5 * atr  # Previous close + 1.5*ATR
+    lower_band = np.roll(close, 1) - 1.5 * atr  # Previous close - 1.5*ATR
     
-    # Daily volume average (20-period)
-    vol_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_20_1d)
+    # Calculate daily volume MA(20)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Calculate weekly close for trend filter
+    close_1w = df_1w['close'].values
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position
+    size = 0.25   # 25% position size
     
-    # Warmup: need EMA13 (13) and daily EMA34 (34) and vol (20)
-    start_idx = max(13, 34, 20)
+    # Warmup: need ATR(14) + bands + volume MA
+    start_idx = max(14, 20)  # ATR needs 14, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_20_1d_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(close_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current values
-        bull = bull_power[i]
-        bear = bear_power[i]
+        price_now = close[i]
         vol_now = volume[i]
-        vol_avg = vol_20_1d_aligned[i]
-        trend = ema34_1d_aligned[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
+        trend_1w = close_1w_aligned[i]
         
-        # Volume filter: volume > 1.5x daily average
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Volume filter: volume > 1.2x daily average
+        vol_filter = vol_now > 1.2 * vol_ma
         
-        # Entry conditions
+        # Entry conditions: ATR band breakout with volume + weekly trend
         if position == 0:
-            # Long: Bull Power positive, volume confirmation, uptrend
-            if bull > 0 and vol_filter and close[i] > trend:
+            # Long: price breaks above upper band with volume + weekly uptrend
+            if price_now > upper_band[i] and vol_filter and price_now > trend_1w:
                 signals[i] = size
                 position = 1
-            # Short: Bear Power negative, volume confirmation, downtrend
-            elif bear < 0 and vol_filter and close[i] < trend:
+            # Short: price breaks below lower band with volume + weekly downtrend
+            elif price_now < lower_band[i] and vol_filter and price_now < trend_1w:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bull Power turns negative or trend breaks
-            if bull <= 0 or close[i] < trend:
+            # Exit long: price closes below weekly trend or ATR-based stop
+            if price_now < trend_1w or price_now < (close[i-1] - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Bear Power turns positive or trend breaks
-            if bear >= 0 or close[i] > trend:
+            # Exit short: price closes above weekly trend or ATR-based stop
+            if price_now > trend_1w or price_now > (close[i-1] + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_ATRBreakout_1dVolume_1wTrend"
+timeframe = "4h"
 leverage = 1.0
