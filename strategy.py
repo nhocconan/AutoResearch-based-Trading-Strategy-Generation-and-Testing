@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Vortex_Trend_1wTrend_VolumeSpike
-Hypothesis: Vortex indicator (VI+) on 12h combined with weekly trend filter and volume spike captures strong trend moves while avoiding whipsaws in ranging markets. Works in both bull and bear markets by only taking trades aligned with higher timeframe trend. Target: 15-25 trades/year per symbol.
+4h_4HourDonchian20_SuperTrend_MultiTF_Filter
+Hypothesis: 4-hour Donchian(20) breakout combined with 1-day SuperTrend (ATR=10, mult=3)
+and volume confirmation provides robust trend-following signals. SuperTrend acts as
+a dynamic trend filter to avoid counter-trend trades, while Donchian breakouts capture
+momentum. Volume spike confirms institutional participation. Works in both bull and bear
+markets by only taking trades in the direction of the higher-timeframe trend.
+Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -10,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,95 +23,127 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for higher timeframe trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for SuperTrend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA200 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema200_1w = close_1w.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate 1-day SuperTrend (ATR=10, multiplier=3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 12h data for Vortex indicator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range calculation
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with original array
+    tr[0] = tr1[0]  # First value
     
-    # Vortex movement
-    vm_plus = np.abs(high_12h[1:] - low_12h[:-1])
-    vm_minus = np.abs(low_12h[1:] - high_12h[:-1])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    # ATR(10)
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Sum over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    # Basic Upper and Lower Bands
+    basic_ub = (high_1d + low_1d) / 2 + 3 * atr_10
+    basic_lb = (high_1d + low_1d) / 2 - 3 * atr_10
     
-    # Vortex indicators
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(basic_ub)
+    final_lb = np.zeros_like(basic_lb)
+    for i in range(len(close_1d)):
+        if i == 0:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
+                final_ub[i] = basic_ub[i]
+            else:
+                final_ub[i] = final_ub[i-1]
+                
+            if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
+                final_lb[i] = basic_lb[i]
+            else:
+                final_lb[i] = final_lb[i-1]
     
-    # Align to 12h timeframe (Vortex already calculated on 12h)
-    vi_plus_aligned = align_htf_to_ltf(prices, df_12h, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_12h, vi_minus)
+    # SuperTrend
+    supertrend = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i == 0:
+            supertrend[i] = final_ub[i]
+        else:
+            if supertrend[i-1] == final_ub[i-1]:
+                if close_1d[i] <= final_ub[i]:
+                    supertrend[i] = final_ub[i]
+                else:
+                    supertrend[i] = final_lb[i]
+            else:
+                if close_1d[i] >= final_lb[i]:
+                    supertrend[i] = final_lb[i]
+                else:
+                    supertrend[i] = final_ub[i]
     
-    # Volume spike detection (20-period average on 12h)
+    # SuperTrend trend direction: 1 for uptrend (price > SuperTrend), -1 for downtrend
+    supertrend_dir = np.where(close_1d > supertrend, 1, -1)
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_1d, supertrend_dir)
+    
+    # Get 4h data for Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Donchian(20) upper and lower bands
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 4h timeframe (already in 4h, but ensure proper alignment)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # Volume spike detection (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup period - need enough data for all indicators
-    start_idx = max(100, 20)  # 100 for weekly EMA200 warmup, 20 for volume MA
+    # Warmup period
+    start_idx = 20  # need 20 for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(vi_plus_aligned[i]) or 
-            np.isnan(vi_minus_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: VI+ > VI- (bullish vortex) AND price above weekly EMA200 AND volume spike
-            if (vi_plus_aligned[i] > vi_minus_aligned[i] and 
-                close[i] > ema200_1w_aligned[i] and 
-                volume_spike[i]):
+            # Long: price breaks above Donchian High with volume spike and uptrend on 1d SuperTrend
+            if (close[i] > donchian_high_aligned[i] and volume_spike[i] and 
+                supertrend_dir_aligned[i] == 1):
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- > VI+ (bearish vortex) AND price below weekly EMA200 AND volume spike
-            elif (vi_minus_aligned[i] > vi_plus_aligned[i] and 
-                  close[i] < ema200_1w_aligned[i] and 
-                  volume_spike[i]):
+            # Short: price breaks below Donchian Low with volume spike and downtrend on 1d SuperTrend
+            elif (close[i] < donchian_low_aligned[i] and volume_spike[i] and 
+                  supertrend_dir_aligned[i] == -1):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Vortex turns bearish OR price crosses below weekly EMA200
-            if (vi_minus_aligned[i] > vi_plus_aligned[i] or 
-                close[i] < ema200_1w_aligned[i]):
+            # Long exit: price returns below Donchian Low or trend changes to down
+            if (close[i] < donchian_low_aligned[i] or 
+                supertrend_dir_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Vortex turns bullish OR price crosses above weekly EMA200
-            if (vi_plus_aligned[i] > vi_minus_aligned[i] or 
-                close[i] > ema200_1w_aligned[i]):
+            # Short exit: price returns above Donchian High or trend changes to up
+            if (close[i] > donchian_high_aligned[i] or 
+                supertrend_dir_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Vortex_Trend_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_4HourDonchian20_SuperTrend_MultiTF_Filter"
+timeframe = "4h"
 leverage = 1.0
