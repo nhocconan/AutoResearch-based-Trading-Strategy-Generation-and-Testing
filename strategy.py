@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 12h EMA trend filter and volume confirmation.
-# Long when price breaks above upper Donchian band (20) with 12h uptrend and volume spike (>2x avg).
-# Short when price breaks below lower Donchian band (20) with 12h downtrend and volume spike.
-# Uses Donchian levels calculated on close of 4h bar, confirmed by 12h trend.
-# Designed for ~30-50 trades/year per symbol (120-200 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by following 12h trend and requiring volatility expansion.
+# Hypothesis: 1h momentum with 4h trend filter and volume confirmation.
+# Long when price breaks above 1h high of prior 4h bar with 4h uptrend and volume spike (>1.5x avg).
+# Short when price breaks below 1h low of prior 4h bar with 4h downtrend and volume spike.
+# Uses 4h structure to limit trades to ~20-40 per year, targeting 80-160 total over 4 years.
+# Volume spike filters for institutional participation, reducing false breakouts.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,26 +19,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for structure and trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 50-period EMA on 12h close for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 4h high/low for structure (prior 4h bar)
+    structure_high = high_4h  # High of completed 4h bar
+    structure_low = low_4h    # Low of completed 4h bar
     
-    # Donchian channel (20-period) on 4h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align 4h structure to 1h timeframe
+    structure_high_aligned = align_htf_to_ltf(prices, df_4h, structure_high)
+    structure_low_aligned = align_htf_to_ltf(prices, df_4h, structure_low)
     
-    # Volume filter: volume > 2x 20-period average
+    # 20-period EMA on 4h close for trend filter
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,34 +52,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(structure_high_aligned[i]) or np.isnan(structure_low_aligned[i]) or 
+            np.isnan(ema20_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price breaks above upper Donchian band AND 12h uptrend AND volume spike
-        if (close[i] > high_roll[i] and 
-            close[i] > ema50_12h_aligned[i] and 
+        # Long conditions: price breaks above 4h high AND 4h uptrend AND volume spike
+        if (close[i] > structure_high_aligned[i] and 
+            close[i] > ema20_4h_aligned[i] and 
             volume_filter[i]):
-            signals[i] = 0.30
+            signals[i] = 0.20
             position = 1
-        # Short conditions: price breaks below lower Donchian band AND 12h downtrend AND volume spike
-        elif (close[i] < low_roll[i] and 
-              close[i] < ema50_12h_aligned[i] and 
+        # Short conditions: price breaks below 4h low AND 4h downtrend AND volume spike
+        elif (close[i] < structure_low_aligned[i] and 
+              close[i] < ema20_4h_aligned[i] and 
               volume_filter[i]):
-            signals[i] = -0.30
+            signals[i] = -0.20
             position = -1
         else:
             # Hold current position or flat
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1h_4hStructure_Breakout_20EMA_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
