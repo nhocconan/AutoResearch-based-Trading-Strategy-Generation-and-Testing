@@ -36,7 +36,7 @@ def generate_signals(prices):
     r4 = pivot + range_ * 1.5
     s4 = pivot - range_ * 1.5
     
-    # Align levels to 4h timeframe (4 hours = 4*60min / 15min = 16 bars per day)
+    # Align levels to 4h timeframe
     ema34_aligned = ema34_1d_aligned
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
