@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,90 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for higher timeframe context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for higher timeframe context
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1d EMA 34 for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA 50 for trend direction
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1d RSI for overbought/oversold conditions
-    delta_1d = pd.Series(close_1d).diff()
-    gain_1d = delta_1d.where(delta_1d > 0, 0)
-    loss_1d = -delta_1d.where(delta_1d < 0, 0)
-    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_1d = avg_gain_1d / avg_loss_1d
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 12h RSI for overbought/oversold conditions
+    delta_12h = pd.Series(close_12h).diff()
+    gain_12h = delta_12h.where(delta_12h > 0, 0)
+    loss_12h = -delta_12h.where(delta_12h < 0, 0)
+    avg_gain_12h = gain_12h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_12h = loss_12h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_12h = avg_gain_12h / avg_loss_12h
+    rsi_12h = 100 - (100 / (1 + rs_12h))
+    rsi_12h = rsi_12h.values
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
-    # Calculate 1d ATR for volatility filter
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.abs(high_1d[1:] - close_1d[:-1]), 
-                       np.abs(low_1d[1:] - close_1d[:-1]))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate 12h ATR for volatility filter
+    tr_12h = np.maximum(high_12h[1:] - low_12h[1:], 
+                        np.abs(high_12h[1:] - close_12h[:-1]), 
+                        np.abs(low_12h[1:] - close_12h[:-1]))
+    tr_12h = np.concatenate([[np.nan], tr_12h])
+    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Calculate 1d volume moving average
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Calculate 12h volume moving average for current timeframe volume filter
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h volume moving average
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or
-            np.isnan(vol_ma_12h[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(rsi_12h_aligned[i]) or 
+            np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA50
+        price_above_ema = close[i] > ema_50_12h_aligned[i]
+        price_below_ema = close[i] < ema_50_12h_aligned[i]
         
         # RSI filter: avoid extreme overbought/oversold conditions
-        rsi_not_overbought = rsi_1d_aligned[i] < 70
-        rsi_not_oversold = rsi_1d_aligned[i] > 30
+        rsi_not_overbought = rsi_12h_aligned[i] < 70
+        rsi_not_oversold = rsi_12h_aligned[i] > 30
         
         # Volatility filter: only trade when volatility is reasonable
-        vol_filter = atr_1d_aligned[i] > 0
+        vol_filter = atr_12h_aligned[i] > 0
         
         # Volume filter: current volume above 12h average
-        volume_filter = volume[i] > vol_ma_12h[i]
+        volume_filter = volume[i] > vol_ma_12h_aligned[i]
         
-        # Additional volume filter: current volume above 1d average
-        volume_filter_1d = volume[i] > vol_ma_1d_aligned[i]
-        
-        # Long conditions: price above EMA34 + RSI not overbought + volume + volatility
+        # Long conditions: price above EMA50 + RSI not overbought + volume + volatility
         long_condition = (price_above_ema and 
                          rsi_not_overbought and 
                          volume_filter and 
-                         volume_filter_1d and
                          vol_filter)
         
-        # Short conditions: price below EMA34 + RSI not oversold + volume + volatility
+        # Short conditions: price below EMA50 + RSI not oversold + volume + volatility
         short_condition = (price_below_ema and 
                           rsi_not_oversold and 
                           volume_filter and 
-                          volume_filter_1d and
                           vol_filter)
         
         if long_condition and position <= 0:
@@ -123,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_RSI14_VolumeFilter_1dTrend"
+name = "12h_EMA50_RSI14_VolumeFilter_12hTrend"
 timeframe = "12h"
 leverage = 1.0
