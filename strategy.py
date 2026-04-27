@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend direction with 1w volatility filter and volume confirmation.
-# Uses Kaufman's Adaptive Moving Average (KAMA) for trend identification,
-# weekly Bollinger Band width for volatility regime, and volume spikes for entry confirmation.
-# Designed to work in both bull (expanding volatility + uptrend) and bear (expanding volatility + downtrend) markets.
-# Target: 10-20 trades/year to minimize fee drag while capturing major moves.
+# Hypothesis: 6h Donchian breakout with 1d ADX trend filter and volume confirmation.
+# In trending markets (ADX > 25), price breaks beyond recent 20-period highs/lows with continuation.
+# Uses 1d ADX for trend strength and volume spike for confirmation.
+# Designed to work in both bull (breakouts up) and bear (breakouts down) markets.
+# Target: 15-30 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,64 +19,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA trend
+    # Get daily data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate KAMA (10, 2, 30) on daily close
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # will fix below
     
-    # Proper volatility calculation: sum of absolute changes over 10 periods
-    volatility = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
+    # Calculate ADX(14) on daily data
+    period = 14
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Avoid division by zero
-    er = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if volatility[i] > 0:
-            er[i] = np.abs(close_1d[i] - close_1d[i-10]) / volatility[i] if i >= 10 else 0
-        else:
-            er[i] = 0
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Smoothed values
+    def smoothed_avg(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(arr[1:period])
+        # Subsequent values: Wilder smoothing
+        for i in range(period, len(arr)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if np.isnan(kama[i-1]):
-            kama[i] = close_1d[i]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    tr_smooth = smoothed_avg(tr, period)
+    plus_dm_smooth = smoothed_avg(plus_dm, period)
+    minus_dm_smooth = smoothed_avg(minus_dm, period)
     
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smoothed_avg(dx, period)
     
-    # Get weekly data for Bollinger Band width (volatility filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    close_1w = df_1w['close'].values
-    # Calculate Bollinger Band width (20, 2) on weekly close
-    bb_width = np.zeros_like(close_1w)
-    for i in range(20, len(close_1w)):
-        ma = np.mean(close_1w[i-20:i+1])
-        std = np.std(close_1w[i-20:i+1])
-        if ma > 0:
-            bb_width[i] = (2 * std) / ma  # normalized width
-        else:
-            bb_width[i] = 0
+    # Donchian channels on 6h data (20-period)
+    def donchian_channels(high, low, period):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    # Bollinger Band width needs 1 extra weekly bar for confirmation
-    bb_width_aligned = align_htf_to_ltf(prices, df_1w, bb_width, additional_delay_bars=1)
+    upper_channel, lower_channel = donchian_channels(high, low, 20)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -88,56 +91,45 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup: need enough data for indicators
-    start_idx = max(20, 30)
+    start_idx = max(30, 20)  # ADX needs 30, Donchian needs 20
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(bb_width_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(upper_channel[i]) or
+            np.isnan(lower_channel[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from daily KAMA
-        # Use previous bar's KAMA to avoid look-ahead
-        if i > 0 and not np.isnan(kama_aligned[i-1]):
-            trend_up = close[i] > kama_aligned[i]  # price above KAMA = uptrend
-            trend_down = close[i] < kama_aligned[i]  # price below KAMA = downtrend
-        else:
-            trend_up = False
-            trend_down = False
-        
-        # Volatility filter: expanding volatility (BB width increasing)
-        if i > 0 and not np.isnan(bb_width_aligned[i-1]):
-            vol_expanding = bb_width_aligned[i] > bb_width_aligned[i-1]
-        else:
-            vol_expanding = False
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Long entry: price above KAMA + expanding volatility + volume spike
-            if (trend_up and 
-                vol_expanding and 
+            # Long entry: price breaks above upper channel + strong trend + volume spike
+            if (close[i] > upper_channel[i] and 
+                strong_trend and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below KAMA + expanding volatility + volume spike
-            elif (trend_down and 
-                  vol_expanding and 
+            # Short entry: price breaks below lower channel + strong trend + volume spike
+            elif (close[i] < lower_channel[i] and 
+                  strong_trend and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below KAMA or volatility contracts
-            if (not trend_up or 
-                not vol_expanding):
+            # Long exit: price breaks below lower channel or trend weakens
+            if (close[i] < lower_channel[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KAMA or volatility contracts
-            if (not trend_down or 
-                not vol_expanding):
+            # Short exit: price breaks above upper channel or trend weakens
+            if (close[i] > upper_channel[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -145,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_1wBBWidth_Volume_v1"
-timeframe = "1d"
+name = "6h_DonchianBreakout_1dADX25_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
