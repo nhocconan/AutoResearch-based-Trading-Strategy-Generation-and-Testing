@@ -30,13 +30,13 @@ def generate_signals(prices):
     pivot = (high_prev + low_prev + close_prev * 2) / 4
     range_ = high_prev - low_prev
     
-    # Focus on R3/S3 for fading, R4/S4 for breakout
+    # Resistance and Support levels (focus on R3/S3 for fading, R4/S4 for breakout)
     r3 = pivot + range_ * 1.25
     s3 = pivot - range_ * 1.25
     r4 = pivot + range_ * 1.5
     s4 = pivot - range_ * 1.5
     
-    # Align levels to 4h timeframe
+    # Align levels to 12h timeframe
     ema34_aligned = ema34_1d_aligned
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_R4S4_FadeBreakout_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_R4S4_FadeBreakout_1dEMA34_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
