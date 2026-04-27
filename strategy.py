@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,9 +35,9 @@ def generate_signals(prices):
     atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-period average (stricter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_filter = volume > (vol_ma * 1.5)
     
     # Volatility filter: ATR below its 50-period median (low volatility regime)
     atr_median = pd.Series(atr14_1d_aligned).rolling(window=50, min_periods=20).median().values
@@ -47,7 +47,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_Vol_LowVol_Filter_v3"
-timeframe = "12h"
+name = "4h_EMA34_Vol_LowVol_Filter_v4"
+timeframe = "4h"
 leverage = 1.0
