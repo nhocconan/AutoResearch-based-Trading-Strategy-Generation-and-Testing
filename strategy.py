@@ -13,73 +13,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculation
+    # Get daily data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 10-period RSI on daily close (avoid look-ahead)
-    close_series = pd.Series(df_1d['close'])
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/10, adjust=False, min_periods=10).mean()
-    avg_loss = loss.ewm(alpha=1/10, adjust=False, min_periods=10).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate daily ATR for volatility filter (use previous day's ATR)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # RSI overbought/oversold levels
-    rsi_overbought = 70
-    rsi_oversold = 30
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 20-period SMA on daily close for trend filter
-    sma20_1d = close_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate daily ATR-based channels for mean reversion signals
+    atr_mult = 1.5
+    upper_channel = close_1d + atr_1d * atr_mult
+    lower_channel = close_1d - atr_1d * atr_mult
     
-    # Align daily indicators to 1d timeframe
-    rsi_1d = align_htf_to_ltf(prices, df_1d, rsi)
-    sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma20_1d)
+    # Align to 12h timeframe
+    upper_channel_12h = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_channel_12h = align_htf_to_ltf(prices, df_1d, lower_channel)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume spike detection (20-period average)
+    # Volume spike detection (using 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup period
-    start_idx = max(20, 20) + 1
+    # Warmup period - ensure we have enough data for all indicators
+    start_idx = max(34, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_1d[i]) or np.isnan(sma20_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(upper_channel_12h[i]) or np.isnan(lower_channel_12h[i]) or 
+            np.isnan(atr_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI oversold with volume spike and price above SMA20
-            if (rsi_1d[i] < rsi_oversold and volume_spike[i] and close[i] > sma20_1d_aligned[i]):
+            # Mean reversion long: price touches lower channel with volume spike
+            if (close[i] <= lower_channel_12h[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought with volume spike and price below SMA20
-            elif (rsi_1d[i] > rsi_overbought and volume_spike[i] and close[i] < sma20_1d_aligned[i]):
+            # Mean reversion short: price touches upper channel with volume spike
+            elif (close[i] >= upper_channel_12h[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: RSI returns to neutral or trend fails
-            if (rsi_1d[i] >= 50 or close[i] < sma20_1d_aligned[i]):
+            # Long exit: price returns to mean or volatility drops
+            if (close[i] >= (close[i-1]) or volume_spike[i] == False):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI returns to neutral or trend fails
-            if (rsi_1d[i] <= 50 or close[i] > sma20_1d_aligned[i]):
+            # Short exit: price returns to mean or volatility drops
+            if (close[i] <= (close[i-1]) or volume_spike[i] == False):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI10_MeanReversion_VolumeSpike"
-timeframe = "1d"
+name = "12h_ATR_MeanReversion_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
