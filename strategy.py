@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_ZeroLag_MA_Crossover_v1
-Hypothesis: Combines Elder Ray (Bull/Bear Power) with Zero-Lag Moving Average crossovers
-on 6h timeframe, filtered by 1w trend direction and volume confirmation.
-Elder Ray identifies bullish/bearish power via EMA13, while Zero-Lag MA reduces lag
-for timely entries. Weekly trend filter ensures alignment with higher timeframe momentum.
-Designed for low trade frequency (15-35 trades/year) to minimize fee drag and work
-in both bull and bear markets by capturing momentum shifts with confirmation.
+4h_Donchian20_Breakout_VolumeConfirm_TrendFilter_v1
+Hypothesis: Uses Donchian channel breakouts (20-period) for trend capture, confirmed by volume spikes and 50-period EMA trend filter.
+Designed to capture strong momentum moves while avoiding false breakouts in choppy markets. Targets 20-40 trades per year to minimize fee drag.
+Works in both bull and bear markets by using trend filter to only take longs in uptrends and shorts in downtrends.
 """
 
 import numpy as np
@@ -23,76 +20,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # 50-period EMA for trend filter
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Zero-Lag Moving Average (ZLMA) to reduce lag
-    # EMA of EMA to cancel lag
-    ema1 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema2 = pd.Series(ema1).ewm(span=21, adjust=False, min_periods=21).mean().values
-    zlma = 2 * ema1 - ema2
-    
-    # Signal line (EMA of ZLMA)
-    signal_line = pd.Series(zlma).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # 1-week trend filter (EMA34 on weekly)
-    df_1w = get_htf_data(prices, '1w')
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Volume confirmation: current volume > 1.3 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_avg)
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for all indicators
+    # Warmup: need enough data for Donchian and EMA
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(zlma[i]) or np.isnan(signal_line[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema50[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        zlma_val = zlma[i]
-        signal_val = signal_line[i]
-        ema34_1w_val = ema34_1w_aligned[i]
+        close_val = close[i]
+        high_20_val = high_20[i]
+        low_20_val = low_20[i]
+        ema50_val = ema50[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long conditions: Bull Power > 0 (bullish pressure), ZLMA crosses above signal line,
-            # weekly uptrend, volume confirmation
-            if (bull_power[i] > 0 and zlma_val > signal_val and 
-                zlma[i-1] <= signal_line[i-1] and  # crossover
-                close[i] > ema34_1w_val and vol_conf):
+            # Long: price breaks above Donchian high, above EMA50 (uptrend), volume confirmation
+            if close_val > high_20_val and close_val > ema50_val and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short conditions: Bear Power < 0 (bearish pressure), ZLMA crosses below signal line,
-            # weekly downtrend, volume confirmation
-            elif (bear_power[i] < 0 and zlma_val < signal_val and 
-                  zlma[i-1] >= signal_line[i-1] and  # crossover
-                  close[i] < ema34_1w_val and vol_conf):
+            # Short: price breaks below Donchian low, below EMA50 (downtrend), volume confirmation
+            elif close_val < low_20_val and close_val < ema50_val and vol_conf:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: Bear Power < 0 (loss of bullish pressure) or ZLMA crosses below signal
-            if bear_power[i] < 0 or (zlma_val < signal_val and zlma[i-1] >= signal_line[i-1]):
+            # Exit long: price falls below Donchian low or below EMA50
+            if close_val < low_20_val or close_val < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Bull Power > 0 (loss of bearish pressure) or ZLMA crosses above signal
-            if bull_power[i] > 0 or (zlma_val > signal_val and zlma[i-1] <= signal_line[i-1]):
+            # Exit short: price rises above Donchian high or above EMA50
+            if close_val > high_20_val or close_val > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_ZeroLag_MA_Crossover_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_VolumeConfirm_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
