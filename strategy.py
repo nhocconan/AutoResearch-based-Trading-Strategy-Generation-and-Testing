@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_Volume_Spike
-Hypothesis: Use weekly EMA34 trend filter with 12h timeframe, entering on breaks of weekly R3/S3 levels with volume confirmation. Weekly timeframe reduces noise and false signals, while volume spike confirms institutional interest. Designed to work in both bull (breakouts continue) and bear (false breakdowns reversed quickly) markets by requiring alignment with weekly trend.
+6h_Engulfing_BullBear_Engulf_Trend_1d
+Hypothesis: On 6h candles, detect bullish/bearish engulfing patterns (strong reversal signal) and trade in the direction of the daily EMA50 trend. Engulfing patterns indicate momentum shifts, and filtering by daily trend avoids counter-trend trades. Works in bull markets (buy the dip in uptrend) and bear markets (sell the rally in downtrend). Targets ~20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,75 +13,81 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and Camarilla pivot
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend filter
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate weekly Camarilla levels (R3/S3 - stronger breakout levels)
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    range_ = df_1w['high'] - df_1w['low']
+    # Detect engulfing patterns on 6h candles
+    # Bullish engulfing: current green candle fully engulfs previous red candle
+    bullish_engulf = (close > open_price) & (open_price < close) & \
+                     (close > open_price) & (open_price < close) & \
+                     (close > open_price) & (open_price < close)  # Placeholder, will fix below
     
-    # Camarilla R3 and S3 (strongest breakout levels)
-    r3 = typical_price + (range_ * 1.1 / 4)
-    s3 = typical_price - (range_ * 1.1 / 4)
+    # Actually compute engulfing properly
+    bullish_engulf = (close > open_price) & (open_price < close) & \
+                     (close.shift(1) < open_price.shift(1)) & \
+                     (close > open_price.shift(1)) & \
+                     (open_price < close.shift(1))
     
-    # Align levels to 12h timeframe (use previous week's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3.values)
+    # Bearish engulfing: current red candle fully engulfs previous green candle
+    bearish_engulf = (close < open_price) & (open_price > close) & \
+                     (close.shift(1) > open_price.shift(1)) & \
+                     (close < open_price.shift(1)) & \
+                     (open_price > close.shift(1))
     
-    # Volume confirmation: volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Handle NaN from shift
+    bullish_engulf = np.where(np.isnan(bullish_engulf), False, bullish_engulf)
+    bearish_engulf = np.where(np.isnan(bearish_engulf), False, bearish_engulf)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for EMA and volume MA
-    start_idx = max(34, 20)
+    # Warmup: need enough data for EMA and engulfing (need previous candle)
+    start_idx = max(50, 1)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if np.isnan(ema34_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if EMA data not ready
+        if np.isnan(ema50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema34_1w_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
-        vol_spike_val = vol_spike[i]
+        ema_trend = ema50_1d_aligned[i]
+        bull_eng = bullish_engulf[i]
+        bear_eng = bearish_engulf[i]
         
         if position == 0:
-            # Long: price closes above R3 + volume spike + uptrend (price > EMA34)
-            if close[i] > r3_level and vol_spike_val and close[i] > ema_trend:
+            # Long: bullish engulfing + uptrend (close > EMA50)
+            if bull_eng and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: price closes below S3 + volume spike + downtrend (price < EMA34)
-            elif close[i] < s3_level and vol_spike_val and close[i] < ema_trend:
+            # Short: bearish engulfing + downtrend (close < EMA50)
+            elif bear_eng and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below S3 or trend turns down
-            if close[i] < s3_level or close[i] < ema_trend:
+            # Exit long: bearish engulfing or trend turns down
+            if bear_eng or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above R3 or trend turns up
-            if close[i] > r3_level or close[i] > ema_trend:
+            # Exit short: bullish engulfing or trend turns up
+            if bull_eng or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume_Spike"
-timeframe = "12h"
+name = "6h_Engulfing_BullBear_Engulf_Trend_1d"
+timeframe = "6h"
 leverage = 1.0
