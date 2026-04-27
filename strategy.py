@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot calculation and trend
+    # Get 1d data for daily pivot calculation and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using prior week OHLC)
+    # Calculate daily pivot points (using prior day OHLC)
     high_prev = np.roll(high_1d, 1)
     low_prev = np.roll(low_1d, 1)
     close_prev = np.roll(close_1d, 1)
@@ -33,21 +33,17 @@ def generate_signals(prices):
     pivot = (high_prev + low_prev + close_prev) / 3.0
     r1 = 2 * pivot - low_prev
     s1 = 2 * pivot - high_prev
-    r2 = pivot + (high_prev - low_prev)
-    s2 = pivot - (high_prev - low_prev)
     
-    # Align weekly pivots to 6h
+    # Align daily pivots to 12h
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Weekly trend: price above/below weekly EMA(34)
+    # Daily trend: price above/below daily EMA(34)
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 1.5 x 20-period average (6h)
+    # Volume filter: volume > 1.5 x 20-period average (12h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -97,20 +93,19 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) == 0, 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus))
     adx_1d = wilder_smooth(dx, 14)
     
-    # Align ADX to 6h
+    # Align ADX to 12h
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need pivots (1), weekly EMA (34), volume MA (20), ADX (14+14=28)
+    # Warmup: need pivots (1), daily EMA (34), volume MA (20), ADX (14+14=28)
     start_idx = max(1, 34, 20, 28)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -126,31 +121,31 @@ def generate_signals(prices):
         # Trend filter: only trade when ADX > 25 (trending market)
         trend_filter = adx > 25
         
-        # Weekly trend filter
-        bullish_weekly = price > ema_34_1d_aligned[i]
-        bearish_weekly = price < ema_34_1d_aligned[i]
+        # Daily trend filter
+        bullish_daily = price > ema_34_1d_aligned[i]
+        bearish_daily = price < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price crosses above S2 with volume, trend, and bullish weekly trend
-            if price > s2_aligned[i] and vol_filter and trend_filter and bullish_weekly:
+            # Long: price crosses above S1 with volume, trend, and bullish daily trend
+            if price > s1_aligned[i] and vol_filter and trend_filter and bullish_daily:
                 signals[i] = size
                 position = 1
-            # Short: price crosses below R2 with volume, trend, and bearish weekly trend
-            elif price < r2_aligned[i] and vol_filter and trend_filter and bearish_weekly:
+            # Short: price crosses below R1 with volume, trend, and bearish daily trend
+            elif price < r1_aligned[i] and vol_filter and trend_filter and bearish_daily:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below pivot or weekly trend turns bearish or ADX weakens
-            if price < pivot_aligned[i] or not bullish_weekly or adx < 20:
+            # Exit long: price crosses below pivot or daily trend turns bearish or ADX weakens
+            if price < pivot_aligned[i] or not bullish_daily or adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above pivot or weekly trend turns bullish or ADX weakens
-            if price > pivot_aligned[i] or not bearish_weekly or adx < 20:
+            # Exit short: price crosses above pivot or daily trend turns bullish or ADX weakens
+            if price > pivot_aligned[i] or not bearish_daily or adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -158,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_S2R2_ADX25_Volume"
-timeframe = "6h"
+name = "12h_Pivot_S1R1_ADX25_Volume"
+timeframe = "12h"
 leverage = 1.0
