@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 4h Donchian(30) breakout with 1d EMA100 trend filter and volume confirmation.
-Breakouts aligned with daily EMA100 trend (bullish above, bearish below) tend to continue in both bull and bear markets.
-Volume > 1.8x average confirms breakout strength. Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
-Target: 20-50 trades/year (80-200 over 4 years). Includes ATR-based stoploss to limit drawdown.
+Hypothesis: 1d strategy using weekly Williams Alligator trend filter with daily RSI reversal signals.
+In strong weekly trends (Alligator aligned), daily RSI extremes (<30 or >70) often precede mean-reversion moves.
+Volume confirmation (>1.5x average) filters weak signals. Uses discrete position sizing (0.0, ±0.25) to minimize fee churn.
+Target: 10-25 trades/year (40-100 over 4 years). Includes ATR-based stoploss for risk control.
+Works in both bull (buy RSI<30 in uptrend) and bear (sell RSI>70 in downtrend) markets.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,34 +21,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA100 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    # Get weekly data for Alligator (Jaw, Teeth, Lips)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Calculate EMA100 on 1d close
-    close_1d = df_1d['close'].values
-    ema_100 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 100:
-        ema_100[99] = np.mean(close_1d[:100])  # SMA seed
-        multiplier = 2 / (100 + 1)
-        for i in range(100, len(close_1d)):
-            ema_100[i] = (close_1d[i] * multiplier) + (ema_100[i-1] * (1 - multiplier))
+    # Calculate Alligator components (13,8,5 SMAs shifted)
+    close_1w = df_1w['close'].values
+    jaw = np.full(len(close_1w), np.nan)
+    teeth = np.full(len(close_1w), np.nan)
+    lips = np.full(len(close_1w), np.nan)
     
-    # Align 1d EMA100 to 4h timeframe (waits for 1d bar close)
-    ema_100_aligned = align_htf_to_ltf(prices, df_1d, ema_100)
+    # Jaw: 13-period SMA shifted 8 bars
+    if len(close_1w) >= 13:
+        for i in range(12, len(close_1w)):
+            jaw[i] = np.mean(close_1w[i-12:i+1])
+    jaw_shifted = np.full_like(jaw, np.nan)
+    if len(jaw) >= 8:
+        jaw_shifted[8:] = jaw[:-8]
     
-    # Calculate 30-period Donchian channels on 4h data
-    lookback = 30
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Teeth: 8-period SMA shifted 5 bars
+    if len(close_1w) >= 8:
+        for i in range(7, len(close_1w)):
+            teeth[i] = np.mean(close_1w[i-7:i+1])
+    teeth_shifted = np.full_like(teeth, np.nan)
+    if len(teeth) >= 5:
+        teeth_shifted[5:] = teeth[:-5]
     
-    for i in range(lookback, n):
-        highest_high[i] = np.max(high[i-lookback:i])
-        lowest_low[i] = np.min(low[i-lookback:i])
+    # Lips: 5-period SMA shifted 3 bars
+    if len(close_1w) >= 5:
+        for i in range(4, len(close_1w)):
+            lips[i] = np.mean(close_1w[i-4:i+1])
+    lips_shifted = np.full_like(lips, np.nan)
+    if len(lips) >= 3:
+        lips_shifted[3:] = lips[:-3]
     
-    # 30-period average volume for spike detection
-    vol_period = 30
+    # Align weekly Alligator to daily (waits for weekly bar close)
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw_shifted)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth_shifted)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips_shifted)
+    
+    # Daily RSI (14-period)
+    rsi_period = 14
+    rsi = np.full(n, np.nan)
+    if n >= rsi_period + 1:
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        if n >= rsi_period + 1:
+            avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
+            avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
+            
+            for i in range(rsi_period + 1, n):
+                avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+                avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+                
+                rs = np.where(avg_loss[i] != 0, avg_gain[i] / avg_loss[i], 0)
+                rsi[i] = 100 - (100 / (1 + rs))
+    
+    # Daily average volume for spike detection
+    vol_period = 20
     vol_ma = np.full(n, np.nan)
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
@@ -69,13 +106,14 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup: need 30 for Donchian, 30 for volume, 100 for EMA100 seed
-    start_idx = max(lookback, vol_period, 100)
+    # Warmup: need weekly indicators + RSI + volume + ATR
+    start_idx = max(13+8, rsi_period+1, vol_period, atr_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
-            np.isnan(ema_100_aligned[i]) or
+        if (np.isnan(jaw_aligned[i]) or
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or
+            np.isnan(rsi[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
@@ -84,34 +122,36 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from 1d EMA100
-        bullish = price > ema_100_aligned[i]
-        bearish = price < ema_100_aligned[i]
+        # Determine Alligator alignment (trend direction)
+        # Bullish: Lips > Teeth > Jaw
+        # Bearish: Lips < Teeth < Jaw
+        bullish_align = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
+        bearish_align = lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]
         
-        # Volume confirmation: > 1.8x average volume
-        volume_confirmation = vol_ratio > 1.8
+        # Volume confirmation: > 1.5x average volume
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high in bullish trend with volume
-            if bullish and price > highest_high[i] and volume_confirmation:
+            # Long signal: RSI < 30 (oversold) in bullish Alligator alignment with volume
+            if bullish_align and rsi[i] < 30 and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short breakdown: price breaks below Donchian low in bearish trend with volume
-            elif bearish and price < lowest_low[i] and volume_confirmation:
+            # Short signal: RSI > 70 (overbought) in bearish Alligator alignment with volume
+            elif bearish_align and rsi[i] > 70 and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Donchian low or trend turns bearish or stoploss hit
-            if price < lowest_low[i] or bearish or price < (entry_price - 2.0 * atr[i]):
+            # Long exit: RSI > 50 (neutral) or Alligator turns bearish or stoploss hit
+            if rsi[i] > 50 or not bullish_align or price < (entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above Donchian high or trend turns bullish or stoploss hit
-            if price > highest_high[i] or bullish or price > (entry_price + 2.0 * atr[i]):
+            # Short exit: RSI < 50 (neutral) or Alligator turns bullish or stoploss hit
+            if rsi[i] < 50 or not bearish_align or price > (entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian30_1dEMA100_Volume"
-timeframe = "4h"
+name = "1d_Alligator_RSI_Volume"
+timeframe = "1d"
 leverage = 1.0
