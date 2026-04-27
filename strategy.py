@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
-Hypothesis: 12h strategy using Camarilla R3/S3 breakouts with 1w EMA50 trend filter and volume confirmation. 
-Uses weekly trend to capture major market direction (works in both bull/bear via trend alignment). 
-R3/S3 levels from prior weekly bar reduce false breakouts. Volume spike confirms institutional participation. 
-Designed for BTC/ETH robustness with tight entry conditions (~12-37 trades/year). 
-Position size 0.25 to manage drawdown. Uses discrete levels to minimize fee drag.
+4h_TRIX_VolumeSpike_ChopRegime_BTC_ETH
+Hypothesis: 4h strategy using TRIX (15,9) for momentum, volume spike (>2x 20-bar avg) for confirmation, and Choppiness Index (CHOP > 61.8) for ranging regime. Enters long when TRIX crosses above zero in choppy market with volume confirmation, short when TRIX crosses below zero. Uses 0.30 position size with discrete levels to minimize fee churn. Designed to work in both bull and bear markets by focusing on mean-reversion in ranging conditions (chop > 61.8) where TRIX zero-cross reversals are reliable. Targets 50-120 trades over 4 years (12-30/year).
 """
 
 import numpy as np
@@ -14,78 +10,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # --- TRIX (15,9) --- #
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) then ROC of 9 periods
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix_raw = pd.Series(ema3).pct_change(periods=9).values * 100  # ROC 9
     
-    # Get 1w data for Camarilla R3/S3 levels (from previous completed 1w bar)
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
-    rng = prev_high - prev_low
-    r3 = prev_close + (rng * 1.50)   # R3 level
-    s3 = prev_close - (rng * 1.50)   # S3 level
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # --- Volume Spike (>2x 20-bar average) --- #
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_spike = volume > (2.0 * vol_avg)
     
+    # --- Choppiness Index (CHOP, 14) --- #
+    # CHOP = 100 * log10(sum(ATR(1)) / (HHV(high,14) - LLV(low,14))) / log10(14)
+    atr1 = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+    atr1[0] = high[0] - low[0]  # first bar
+    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    denominator = hh - ll
+    # Avoid division by zero
+    chop = np.where(denominator > 0, 100 * np.log10(sum_atr1 / denominator) / np.log10(14), 100)
+    chop_regime = chop > 61.8  # ranging market
+    
+    # --- Signals --- #
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Fixed position size to minimize churn
+    size = 0.30   # Position size
     
-    # Warmup: need 1w EMA50 (50), 1w shift(1) for Camarilla, vol avg (20)
-    start_idx = max(50 + 1, 1 + 1, 20)
+    # Warmup: need TRIX (15+15+15+9=54), vol avg (20), CHOP (14)
+    start_idx = max(54, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(trix_raw[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(chop_regime[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        ema_val = ema_50_aligned[i]
-        vol_conf = volume_confirm[i]
+        trix_now = trix_raw[i]
+        trix_prev = trix_raw[i-1]
+        vol_spike = volume_spike[i]
+        in_chop = chop_regime[i]
         
         if position == 0:
-            # Look for entry: Camarilla R3/S3 breakout with 1w EMA50 alignment and volume confirmation
-            long_condition = (close_val > r3_val and 
-                            close_val > ema_val and 
-                            vol_conf)
-            short_condition = (close_val < s3_val and 
-                             close_val < ema_val and 
-                             vol_conf)
-            
-            if long_condition:
+            # Enter long: TRIX crosses above zero in choppy market with volume spike
+            if trix_prev <= 0 and trix_now > 0 and in_chop and vol_spike:
                 signals[i] = size
                 position = 1
-            elif short_condition:
+            # Enter short: TRIX crosses below zero in choppy market with volume spike
+            elif trix_prev >= 0 and trix_now < 0 and in_chop and vol_spike:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 1w EMA50 (trend reversal)
-            if close_val < ema_val:
+            # Exit long: TRIX crosses below zero (momentum loss)
+            if trix_prev >= 0 and trix_now < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 1w EMA50 (trend reversal)
-            if close_val > ema_val:
+            # Exit short: TRIX crosses above zero (momentum loss)
+            if trix_prev <= 0 and trix_now > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopRegime_BTC_ETH"
+timeframe = "4h"
 leverage = 1.0
