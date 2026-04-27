@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d trend filter and volume spike.
-# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low.
-# Long when Bull Power > 0 and rising, Bear Power < 0, 1d uptrend, volume > 1.5x 20-period average.
-# Short when Bear Power < 0 and falling, Bull Power < 0, 1d downtrend, volume > 1.5x average.
-# Elder Ray measures bull/bear strength behind price moves; 1d trend filters for higher timeframe bias.
+# Hypothesis: 1d Williams %R with 1w trend filter and volume confirmation.
+# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100 over 14 periods.
+# Long when Williams %R crosses above -80 (oversold), 1w uptrend (price > EMA34), volume > 1.5x average.
+# Short when Williams %R crosses below -20 (overbought), 1w downtrend (price < EMA34), volume > 1.5x average.
+# Williams %R identifies overbought/oversold conditions; 1w trend filters for higher timeframe bias.
 # Volume spike confirms institutional participation. Designed for ~15-25 trades/year per symbol.
 
 def generate_signals(prices):
@@ -15,29 +15,26 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray: EMA(13) of close
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13  # Negative values indicate bear strength
+    # Williams %R (14 periods)
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
-    # Smooth Bull/Bear Power for signal (optional smoothing)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=5, adjust=False, min_periods=5).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=5, adjust=False, min_periods=5).mean().values
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 34-period EMA on 1d close for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    close_1w = df_1w['close'].values
+    # 34-period EMA on 1w close for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,26 +44,23 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: Bull Power rising (>0), Bear Power negative, 1d uptrend, volume filter
-        if (bull_power_smooth[i] > 0 and 
-            bear_power_smooth[i] < 0 and 
-            close[i] > ema34_1d_aligned[i] and 
+        # Long conditions: Williams %R crosses above -80, 1w uptrend, volume filter
+        if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+            close[i] > ema34_1w_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short conditions: Bear Power falling (<0), Bull Power negative, 1d downtrend, volume filter
-        elif (bear_power_smooth[i] < 0 and 
-              bull_power_smooth[i] < 0 and 
-              close[i] < ema34_1d_aligned[i] and 
+        # Short conditions: Williams %R crosses below -20, 1w downtrend, volume filter
+        elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+              close[i] < ema34_1w_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
@@ -81,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA34_VolumeFilter"
-timeframe = "6h"
+name = "1d_WilliamsR_1wEMA34_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
