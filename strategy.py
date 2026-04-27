@@ -28,9 +28,9 @@ def generate_signals(prices):
     R3 = prev_close + range_hl * 1.1 / 4
     S3 = prev_close - range_hl * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
+    # Align Camarilla levels to 1h timeframe
+    R3_1h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_1h = align_htf_to_ltf(prices, df_1d, S3)
     
     # Get daily EMA34 for trend filter
     close_1d = df_1d['close'].values
@@ -50,39 +50,39 @@ def generate_signals(prices):
     start_idx = max(34, 24) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
+        if (np.isnan(R3_1h[i]) or np.isnan(S3_1h[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
             # Long entry: price breaks above R3 + 1-day uptrend + volume spike
-            if (close[i] > R3_12h[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]):
-                signals[i] = 0.25
+            if (close[i] > R3_1h[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]):
+                signals[i] = 0.20
                 position = 1
             # Short entry: price breaks below S3 + 1-day downtrend + volume spike
-            elif (close[i] < S3_12h[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]):
-                signals[i] = -0.25
+            elif (close[i] < S3_1h[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long exit: price breaks below S3 (reversal) or trend changes
-            if (close[i] < S3_12h[i] or close[i] < ema34_1d_aligned[i]):
+            if (close[i] < S3_1h[i] or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Short exit: price breaks above R3 (reversal) or trend changes
-            if (close[i] > R3_12h[i] or close[i] > ema34_1d_aligned[i]):
+            if (close[i] > R3_1h[i] or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
