@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1d trend filter (price > EMA34) and volume spike.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d trend filter (price > EMA34) and volume spike.
 Breakouts at R1/S1 levels with 1d trend alignment and volume confirmation capture strong moves
 while avoiding false breakouts in choppy or counter-trend conditions. Works in both bull and bear
 markets by only trading in the direction of the 1d trend.
-Target: 75-200 total trades over 4 years (19-50/year) for BTC/ETH/SOL.
+Target: 50-150 total trades over 4 years (12-37/year) for BTC/ETH/SOL.
 """
 
 import numpy as np
@@ -43,7 +43,7 @@ def generate_signals(prices):
     R1 = PP + range_1d * 1.1 / 12.0
     S1 = PP - range_1d * 1.1 / 12.0
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
