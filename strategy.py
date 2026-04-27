@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Daily Camarilla R3/S3 breakout with weekly trend filter and volume confirmation.
-Trades only in direction of weekly trend to avoid counter-trend whipsaws. Volume spike confirms breakout strength.
-Designed for very low trade frequency (target: 7-25/year) to minimize fee drag on 1d timeframe.
-Uses discrete position sizing (0.30) to reduce churn. ATR-based stoploss manages risk.
-Works in both bull and bear markets by aligning with longer-term weekly trend.
+4h_TRIX_VolumeSpike_ChopRegime_v1
+Hypothesis: TRIX (15-period) crossover signals combined with volume spike confirmation and choppiness regime filter (CHOP > 61.8 for mean reversion). Enters long when TRIX crosses above zero with volume spike in choppy market, short when TRIX crosses below zero with volume spike in choppy market. Uses ATR-based stoploss for risk control. Designed for low trade frequency (target: 20-50/year) to minimize fee drag. Works in both bull and bear markets by using TRIX for momentum and chop regime to avoid trending whipsaws.
 """
 
 import numpy as np
@@ -17,46 +13,41 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for stoploss (14-period)
+    # Calculate TRIX (15-period): EMA of EMA of EMA of close, then ROC
+    def ema(series, span):
+        return pd.Series(series).ewm(span=span, adjust=False, min_periods=span).mean().values
+    
+    ema1 = ema(close, 15)
+    ema2 = ema(ema1, 15)
+    ema3 = ema(ema2, 15)
+    # Avoid division by zero
+    ema3_safe = np.where(ema3 == 0, 1e-10, ema3)
+    trix = (ema3 - np.roll(ema3, 1)) / ema3_safe * 100
+    trix[0] = 0  # first value has no previous
+    
+    # Calculate ATR (14-period) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate daily Camarilla pivot levels (focus on R3/S3 for breakout entries)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    PP = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Key levels: R3 and S3 for breakout entries
-    R3 = PP + range_1d * 1.1 / 4.0
-    S3 = PP - range_1d * 1.1 / 4.0
-    
-    # Align Camarilla levels to daily timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Calculate Choppiness Index (14-period): measures sideways vs trending market
+    # CHOP = 100 * log10(sum(atr14) / (log10(highest_high - lowest_low) * 14)) / log10(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range_14 = highest_high - lowest_low
+    # Avoid log of zero or negative
+    range_14_safe = np.where(range_14 <= 0, 1e-10, range_14)
+    chop = 100 * (np.log10(sum_atr_14) - np.log10(range_14_safe) - np.log10(14)) / (-np.log10(14))
+    chop = np.where(range_14_safe == 1e-10, 50, chop)  # set to neutral when range invalid
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,51 +56,53 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    size = 0.25  # 25% position size
     
-    # Warmup: need enough for ATR, EMA50 and volume average
-    start_idx = max(100, 50, 20, 14)
+    # Warmup: need enough for TRIX (3*15=45), ATR (14), CHOP (14), volume avg (20)
+    start_idx = max(50, 45, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(trix[i]) or np.isnan(atr[i]) or np.isnan(chop[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_trend = ema_50_aligned[i]
-        vol_spike = volume_spike[i]
+        trix_val = trix[i]
+        trix_prev = trix[i-1]
         atr_val = atr[i]
-        size = 0.30  # 30% position size
+        chop_val = chop[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Flat - look for entry: breakout in direction of weekly trend with volume spike
-            # Long: price breaks above R3 AND weekly trend is up (close > EMA50) AND volume spike
-            # Short: price breaks below S3 AND weekly trend is down (close < EMA50) AND volume spike
-            long_breakout = close_val > R3_aligned[i]
-            short_breakout = close_val < S3_aligned[i]
-            trend_up = close_val > ema_trend
-            trend_down = close_val < ema_trend
+            # Flat - look for entry: TRIX crossover with volume spike in choppy market (CHOP > 61.8)
+            # Long: TRIX crosses above zero AND volume spike AND choppy market
+            # Short: TRIX crosses below zero AND volume spike AND choppy market
+            trix_cross_up = trix_prev <= 0 and trix_val > 0
+            trix_cross_down = trix_prev >= 0 and trix_val < 0
+            choppy_market = chop_val > 61.8
             
-            if long_breakout and trend_up and vol_spike:
+            if trix_cross_up and vol_spike and choppy_market:
                 signals[i] = size
                 position = 1
                 entry_price = close_val
-            elif short_breakout and trend_down and vol_spike:
+            elif trix_cross_down and vol_spike and choppy_market:
                 signals[i] = -size
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Long - exit when price breaks below S3 (failed breakout) or ATR stoploss hit
-            if close_val < S3_aligned[i] or close_val < entry_price - 2.0 * atr_val:
+            # Long - exit when TRIX crosses below zero (momentum loss) or ATR stoploss hit
+            trix_cross_down = trix_prev >= 0 and trix_val < 0
+            if trix_cross_down or close_val < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price breaks above R3 (failed breakout) or ATR stoploss hit
-            if close_val > R3_aligned[i] or close_val > entry_price + 2.0 * atr_val:
+            # Short - exit when TRIX crosses above zero (momentum loss) or ATR stoploss hit
+            trix_cross_up = trix_prev <= 0 and trix_val > 0
+            if trix_cross_up or close_val > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -118,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "4h_TRIX_VolumeSpike_ChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
