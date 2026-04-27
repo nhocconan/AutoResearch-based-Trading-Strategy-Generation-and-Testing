@@ -48,7 +48,8 @@ def generate_signals(prices):
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # ADX on 1d to avoid ranging markets
+    # Additional filter: ADX on 1d to avoid ranging markets
+    # Calculate ADX(14) on daily timeframe
     if len(high_1d) < 14:
         return np.zeros(n)
     
@@ -57,7 +58,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan
+    tr[0] = np.nan  # First value has no previous close
     
     # Directional Movement
     dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
@@ -67,12 +68,14 @@ def generate_signals(prices):
     dm_plus[0] = 0
     dm_minus[0] = 0
     
-    # Wilder's smoothing
+    # Smooth TR, DM+ and DM- with Wilder's smoothing (alpha = 1/period)
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
+        # First value is simple average
         result[period-1] = np.nansum(data[:period])
+        # Subsequent values: Wilder's smoothing
         for i in range(period, len(data)):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
