@@ -13,45 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channel
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12h Donchian(20)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    upper = np.full(len(high_12h), np.nan)
-    lower = np.full(len(high_12h), np.nan)
-    for i in range(20, len(high_12h)):
-        upper[i] = np.max(high_12h[i-20:i])
-        lower[i] = np.min(low_12h[i-20:i])
-    donch_upper_12h = upper
-    donch_lower_12h = lower
-    donch_upper_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_upper_12h)
-    donch_lower_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_lower_12h)
-    
-    # Get 1d data for volume filter
+    # Get daily data for weekly pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 3:
         return np.zeros(n)
     
-    # Calculate 1d volume MA(20)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate weekly pivot points from previous week's data
+    # Group by week (Monday to Sunday)
+    df_1d_copy = df_1d.copy()
+    df_1d_copy['week'] = pd.to_datetime(df_1d_copy.index).isocalendar().week
+    df_1d_copy['year'] = pd.to_datetime(df_1d_copy.index).isocalendar().year
     
-    # Get 1d data for ATR-based volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR is just high-low
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate weekly high, low, close
+    weekly_data = df_1d_copy.groupby(['year', 'week']).agg({
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).reset_index()
+    
+    if len(weekly_data) < 2:
+        return np.zeros(n)
+    
+    # Calculate pivot points: P = (H + L + C)/3
+    weekly_data['pivot'] = (weekly_data['high'] + weekly_data['low'] + weekly_data['close']) / 3
+    # Resistance levels: R1 = 2*P - L, R2 = P + (H - L), R3 = H + 2*(P - L)
+    weekly_data['r1'] = 2 * weekly_data['pivot'] - weekly_data['low']
+    weekly_data['r2'] = weekly_data['pivot'] + (weekly_data['high'] - weekly_data['low'])
+    weekly_data['r3'] = weekly_data['high'] + 2 * (weekly_data['pivot'] - weekly_data['low'])
+    # Support levels: S1 = 2*P - H, S2 = P - (H - L), S3 = L - 2*(H - P)
+    weekly_data['s1'] = 2 * weekly_data['pivot'] - weekly_data['high']
+    weekly_data['s2'] = weekly_data['pivot'] - (weekly_data['high'] - weekly_data['low'])
+    weekly_data['s3'] = weekly_data['low'] - 2 * (weekly_data['high'] - weekly_data['pivot'])
+    
+    # Create arrays for each level
+    weeks = weekly_data[['year', 'week']].values
+    pivot_vals = weekly_data['pivot'].values
+    r3_vals = weekly_data['r3'].values
+    s3_vals = weekly_data['s3'].values
+    
+    # Map each daily bar to its corresponding week's pivot levels
+    pivot_daily = np.full(len(df_1d), np.nan)
+    r3_daily = np.full(len(df_1d), np.nan)
+    s3_daily = np.full(len(df_1d), np.nan)
+    
+    # For each daily bar, find the week it belongs to and assign that week's levels
+    for i in range(len(df_1d)):
+        date = df_1d.index[i]
+        year = date.isocalendar().year
+        week = date.isocalendar().week
+        # Find matching week in weekly_data
+        match_idx = np.where((weeks[:, 0] == year) & (weeks[:, 1] == week))[0]
+        if len(match_idx) > 0:
+            idx = match_idx[0]
+            pivot_daily[i] = pivot_vals[idx]
+            r3_daily[i] = r3_vals[idx]
+            s3_daily[i] = s3_vals[idx]
+    
+    # Align to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_daily)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3_daily)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3_daily)
+    
+    # Calculate 60-period EMA for trend filter (using 6h data)
+    close_s = pd.Series(close)
+    ema_60 = close_s.ewm(span=60, adjust=False, min_periods=60).mean().values
+    
+    # Volume filter: 6h volume > 1.5x 20-period average
+    volume_s = pd.Series(volume)
+    vol_ma_20 = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,13 +89,13 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need Donchian, volume MA, and ATR
-    start_idx = max(20, 20, 14)  # max of lookbacks
+    # Warmup
+    start_idx = max(60, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_upper_12h_aligned[i]) or np.isnan(donch_lower_12h_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(ema_60[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -76,42 +105,38 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        upper = donch_upper_12h_aligned[i]
-        lower = donch_lower_12h_aligned[i]
+        pivot = pivot_6h[i]
+        r3 = r3_6h[i]
+        s3 = s3_6h[i]
+        ema = ema_60[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        atr_now = atr_1d_aligned[i]
+        vol_ma = vol_ma_20[i]
         
-        # Volatility filter: only trade when volatility is above average
-        vol_filter = atr_now > 0  # Ensure ATR is valid
+        # Volume filter
+        vol_filter = vol_now > 1.5 * vol_ma
         
-        # Volume filter: volume > 1.3x 1d MA (volume breakout)
-        vol_breakout = vol_now > 1.3 * vol_ma
-        
-        # Entry conditions: breakout with volume and volatility
+        # Entry conditions
         if position == 0:
-            # Long: break above upper band + volume
-            if close[i] > upper and vol_breakout and vol_filter:
+            # Long: price above R3 + above EMA + volume
+            if close[i] > r3 and close[i] > ema and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: break below lower band + volume
-            elif close[i] < lower and vol_breakout and vol_filter:
+            # Short: price below S3 + below EMA + volume
+            elif close[i] < s3 and close[i] < ema and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below midpoint or volatility drops significantly
-            midpoint = (upper + lower) / 2
-            if close[i] < midpoint or atr_now < 0.7 * atr_1d_aligned[i-1]:
+            # Exit long: price below pivot or trend change
+            if close[i] < pivot or close[i] < ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above midpoint or volatility drops significantly
-            midpoint = (upper + lower) / 2
-            if close[i] > midpoint or atr_now < 0.7 * atr_1d_aligned[i-1]:
+            # Exit short: price above pivot or trend change
+            if close[i] > pivot or close[i] > ema:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeBreakout_ATRFilter"
-timeframe = "12h"
+name = "6h_WeeklyPivot_R3S3_Breakout_EMA60_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
