@@ -4,6 +4,14 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
+    """
+    Hypothesis: 6h Elder Ray with weekly regime filter
+    - Elder Ray (Bull/Bear Power) from daily data captures institutional buying/selling pressure
+    - Weekly trend filter (price vs weekly EMA200) ensures trades align with higher timeframe bias
+    - Volume confirmation filters weak moves
+    - Works in bull/bear by only taking longs in bullish regime, shorts in bearish regime
+    - Target: 50-150 total trades over 4 years
+    """
     n = len(prices)
     if n < 50:
         return np.zeros(n)
@@ -13,37 +21,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
+    # Get daily data for Elder Ray calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot from daily data (last 5 days)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly EMA200 from daily close for regime filter
     close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate weekly pivot using last 5 daily bars
-    weekly_pivot = np.full(len(high_1d), np.nan)
-    for i in range(4, len(high_1d)):  # Need at least 5 days
-        week_high = np.max(high_1d[i-4:i+1])
-        week_low = np.min(low_1d[i-4:i+1])
-        week_close = close_1d[i]
-        weekly_pivot[i] = (week_high + week_low + week_close) / 3
+    # Calculate Elder Ray components from daily data
+    # Bull Power = Daily High - EMA13
+    # Bear Power = Daily Low - EMA13
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = df_1d['high'].values - ema13_1d
+    bear_power = df_1d['low'].values - ema13_1d
     
-    # Align weekly pivot to 4h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Calculate 20-period Donchian channels directly on 4h data
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(lookback, n):
-        highest_high[i] = np.max(high[i-lookback:i])
-        lowest_low[i] = np.min(low[i-lookback:i])
-    
-    # 20-period average volume for spike detection
+    # 20-period average volume for spike detection on 6h data
     vol_period = 20
     vol_ma = np.full(n, np.nan)
     for i in range(vol_period, n):
@@ -53,13 +52,13 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup period: need at least 20 for Donchian, 20 for volume, 5 for weekly pivot
-    start_idx = max(lookback, vol_period, 5)
+    # Warmup period: need EMA200 (200 days), EMA13 (13 days), and volume MA (20)
+    start_idx = max(200, 13, vol_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or
+        if (np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,34 +66,38 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from weekly pivot
-        bullish = price > weekly_pivot_aligned[i]
-        bearish = price < weekly_pivot_aligned[i]
+        # Regime filter: bullish if price > weekly EMA200, bearish if price < weekly EMA200
+        bullish_regime = price > ema200_1d_aligned[i]
+        bearish_regime = price < ema200_1d_aligned[i]
         
-        # Volume confirmation: spike > 2.0x average
-        volume_confirmation = vol_ratio > 2.0
+        # Elder Ray signals: strong bullish/bearish pressure
+        strong_bull = bull_power_aligned[i] > 0 and bull_power_aligned[i] > np.nanmean(bull_power_aligned[max(0, i-20):i])
+        strong_bear = bear_power_aligned[i] < 0 and bear_power_aligned[i] < np.nanmean(bear_power_aligned[max(0, i-20):i])
+        
+        # Volume confirmation: spike > 1.5x average
+        volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high in bullish trend with volume
-            if bullish and price > highest_high[i] and volume_confirmation:
+            # Long only in bullish regime with strong bull power and volume
+            if bullish_regime and strong_bull and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short breakdown: price breaks below Donchian low in bearish trend with volume
-            elif bearish and price < lowest_low[i] and volume_confirmation:
+            # Short only in bearish regime with strong bear power and volume
+            elif bearish_regime and strong_bear and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Donchian low or trend turns bearish
-            if price < lowest_low[i] or bearish:
+            # Long exit: bull power turns negative or regime turns bearish
+            if bull_power_aligned[i] <= 0 or bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above Donchian high or trend turns bullish
-            if price > highest_high[i] or bullish:
+            # Short exit: bear power turns positive or regime turns bullish
+            if bear_power_aligned[i] >= 0 or bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_WeeklyPivot_Trend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_WeeklyEMA200_Regime_Volume"
+timeframe = "6h"
 leverage = 1.0
