@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation and trend filter
+    # Get weekly data for trend filter and monthly data for momentum filter
+    df_1w = get_htf_data(prices, '1w')
+    df_1M = get_htf_data(prices, '1M')
+    
+    if len(df_1w) < 2 or len(df_1M) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    close_1M = df_1M['close'].values
+    
+    # Weekly EMA trend filter (21-period)
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Monthly EMA momentum filter (13-period)
+    ema_13_1M = pd.Series(close_1M).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1M_aligned = align_htf_to_ltf(prices, df_1M, ema_13_1M)
+    
+    # Daily ATR for volatility filter (14-period)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -22,79 +40,67 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from previous daily bar
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Daily EMA trend filter (34-period)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: volume > 2.5 x 24-period average (4h periods = 4 days)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(23, n):
-        vol_ma_24[i] = np.mean(volume[i-23:i+1])
+    # Daily close for price action
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Camarilla (1 day), EMA (34), volume MA (24)
-    start_idx = max(1, 34, 24)
+    # Warmup: need weekly EMA (21), monthly EMA (13), daily ATR (14), daily close
+    start_idx = max(21, 13, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(ema_13_1M_aligned[i]) or
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(close_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_now = volume[i]
-        vol_avg = vol_ma_24[i]
+        ema_21_1w = ema_21_1w_aligned[i]
+        ema_13_1M = ema_13_1M_aligned[i]
+        atr_14_1d = atr_14_1d_aligned[i]
+        close_1d_val = close_1d_aligned[i]
         
-        # Volume filter: significant volume spike (higher threshold = fewer trades)
-        vol_filter = vol_now > 2.5 * vol_avg
+        # Trend alignment: price above both weekly and monthly EMA
+        bullish_alignment = price > ema_21_1w and price > ema_13_1M
+        bearish_alignment = price < ema_21_1w and price < ema_13_1M
         
-        # Trend filter from 1d EMA
-        bullish_trend = price > ema_34_aligned[i]
-        bearish_trend = price < ema_34_aligned[i]
-        
-        camarilla_r3 = camarilla_r3_aligned[i]
-        camarilla_s3 = camarilla_s3_aligned[i]
+        # Volatility filter: avoid extremely low volatility periods
+        vol_filter = atr_14_1d > 0.01 * close_1d_val  # ATR > 1% of price
         
         if position == 0:
-            # Long: price breaks above R3 + volume + bullish 1d trend
-            if price > camarilla_r3 and vol_filter and bullish_trend:
+            # Long: bullish alignment + volatility filter
+            if bullish_alignment and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S3 + volume + bearish 1d trend
-            elif price < camarilla_s3 and vol_filter and bearish_trend:
+            # Short: bearish alignment + volatility filter
+            elif bearish_alignment and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S3 or trend turns bearish
-            if price < camarilla_s3 or not bullish_trend:
+            # Exit long: bearish alignment or volatility collapse
+            if bearish_alignment or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above R3 or trend turns bullish
-            if price > camarilla_r3 or not bearish_trend:
+            # Exit short: bullish alignment or volatility collapse
+            if bullish_alignment or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
-timeframe = "4h"
+name = "1d_WeeklyMonthlyEMA_Alignment_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
