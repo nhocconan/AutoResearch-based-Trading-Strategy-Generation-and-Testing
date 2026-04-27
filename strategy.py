@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -6,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -14,9 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF indicators
+    # Get daily data for trend and volatility filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Daily EMA(34) for trend filter
@@ -32,73 +31,60 @@ def generate_signals(prices):
     atr14_1d = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Weekly ATR(14) for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 4h Donchian channel (20-period) for breakout signals
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
-    tr1_w = pd.Series(df_1w['high'] - df_1w['low'])
-    tr2_w = pd.Series(np.abs(df_1w['high'] - df_1w['close'].shift(1)))
-    tr3_w = pd.Series(np.abs(df_1w['low'] - df_1w['close'].shift(1)))
-    tr_w = pd.concat([tr1_w, tr2_w, tr3_w], axis=1).max(axis=1)
-    tr_w.iloc[0] = 0
-    atr14_1w = tr_w.ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
+    donch_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
     
-    # 12h Donchian(20) breakout levels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 12h volume confirmation: volume > 2.0 * 20-period average
+    # Volume confirmation: volume > 1.3 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.30   # Position size: 30% of capital
+    size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Donchian, volume MA, and HTF indicators
-    start_idx = max(20, 34)
+    # Warmup: need enough data for all indicators
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or np.isnan(atr14_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or \
+           np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]):
             signals[i] = 0.0
             continue
         
         ema34_val = ema34_1d_aligned[i]
-        atr14_1d_val = atr14_1d_aligned[i]
-        atr14_1w_val = atr14_1w_aligned[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
+        atr_val = atr14_1d_aligned[i]
+        donch_high_val = donch_high_aligned[i]
+        donch_low_val = donch_low_aligned[i]
         vol_spike_val = vol_spike[i]
         
-        # Volatility regime filter: use weekly ATR to detect high/low volatility
-        # High volatility: weekly ATR > 1.5 * daily ATR (trending market)
-        # Low volatility: weekly ATR <= 1.5 * daily ATR (ranging market)
-        vol_ratio = atr14_1w_val / atr14_1d_val if atr14_1d_val > 0 else 1.0
-        high_vol_regime = vol_ratio > 1.5
-        
         if position == 0:
-            # Long: price breaks above Donchian high + volume spike + bullish trend (price > daily EMA34) + high volatility regime
-            if close[i] > donchian_high_val and close[i-1] <= donchian_high_val and vol_spike_val and close[i] > ema34_val and high_vol_regime:
+            # Long: price breaks above Donchian high + volume spike + bullish trend (price > daily EMA34)
+            if close[i] > donch_high_val and vol_spike_val and close[i] > ema34_val:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian low + volume spike + bearish trend (price < daily EMA34) + high volatility regime
-            elif close[i] < donchian_low_val and close[i-1] >= donchian_low_val and vol_spike_val and close[i] < ema34_val and high_vol_regime:
+            # Short: price breaks below Donchian low + volume spike + bearish trend (price < daily EMA34)
+            elif close[i] < donch_low_val and vol_spike_val and close[i] < ema34_val:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low or volatility drops (low volatility regime)
-            if close[i] < donchian_low_val or not high_vol_regime:
+            # Exit long: price breaks below Donchian low or trend turns bearish
+            if close[i] < donch_low_val or close[i] < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above Donchian high or volatility drops (low volatility regime)
-            if close[i] > donchian_high_val or not high_vol_regime:
+            # Exit short: price breaks above Donchian high or trend turns bullish
+            if close[i] > donch_high_val or close[i] > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeTrend_Regime_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeTrend_v1"
+timeframe = "4h"
 leverage = 1.0
