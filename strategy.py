@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation.
-# In trending markets, price breaks beyond recent fractal highs/lows with continuation.
-# Uses 1d EMA50 for trend direction and volume spike for confirmation.
-# Designed to work in both bull (breakouts up) and bear (breakouts down) markets.
-# Target: 15-30 trades/year to avoid fee drag.
+# Hypothesis: 1d KAMA trend direction with 1w volatility filter and volume confirmation.
+# Uses Kaufman's Adaptive Moving Average (KAMA) for trend identification,
+# weekly Bollinger Band width for volatility regime, and volume spikes for entry confirmation.
+# Designed to work in both bull (expanding volatility + uptrend) and bear (expanding volatility + downtrend) markets.
+# Target: 10-20 trades/year to minimize fee drag while capturing major moves.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,107 +19,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter (EMA50)
+    # Get daily data for KAMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate EMA(50) on daily close
-    ema_50_1d = np.full(len(df_1d), np.nan)
-    alpha = 2 / (50 + 1)
+    # Calculate KAMA (10, 2, 30) on daily close
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # will fix below
+    
+    # Proper volatility calculation: sum of absolute changes over 10 periods
+    volatility = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
+    
+    # Avoid division by zero
+    er = np.zeros_like(close_1d)
     for i in range(len(close_1d)):
-        if i < 49:
-            ema_50_1d[i] = np.mean(close_1d[:i+1]) if i > 0 else close_1d[i]
+        if volatility[i] > 0:
+            er[i] = np.abs(close_1d[i] - close_1d[i-10]) / volatility[i] if i >= 10 else 0
         else:
-            if np.isnan(ema_50_1d[i-1]):
-                ema_50_1d[i] = np.mean(close_1d[i-49:i+1])
-            else:
-                ema_50_1d[i] = close_1d[i] * alpha + ema_50_1d[i-1] * (1 - alpha)
+            er[i] = 0
     
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Get weekly data for Williams Fractals (need 2 bars confirmation)
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        if np.isnan(kama[i-1]):
+            kama[i] = close_1d[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # Get weekly data for Bollinger Band width (volatility filter)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    # Calculate Bollinger Band width (20, 2) on weekly close
+    bb_width = np.zeros_like(close_1w)
+    for i in range(20, len(close_1w)):
+        ma = np.mean(close_1w[i-20:i+1])
+        std = np.std(close_1w[i-20:i+1])
+        if ma > 0:
+            bb_width[i] = (2 * std) / ma  # normalized width
+        else:
+            bb_width[i] = 0
     
-    # Calculate Williams Fractals on weekly data
-    bearish_fractal = np.zeros(len(df_1w), dtype=bool)
-    bullish_fractal = np.zeros(len(df_1w), dtype=bool)
+    # Bollinger Band width needs 1 extra weekly bar for confirmation
+    bb_width_aligned = align_htf_to_ltf(prices, df_1w, bb_width, additional_delay_bars=1)
     
-    for i in range(2, len(df_1w) - 2):
-        # Bearish fractal: high[i] is highest among 5 bars (i-2 to i+2)
-        if (high_1w[i] > high_1w[i-1] and high_1w[i] > high_1w[i-2] and
-            high_1w[i] > high_1w[i+1] and high_1w[i] > high_1w[i+2]):
-            bearish_fractal[i] = True
-        # Bullish fractal: low[i] is lowest among 5 bars (i-2 to i+2)
-        if (low_1w[i] < low_1w[i-1] and low_1w[i] < low_1w[i-2] and
-            low_1w[i] < low_1w[i+1] and low_1w[i] < low_1w[i+2]):
-            bullish_fractal[i] = True
-    
-    # Williams fractals need 2 extra weekly bars for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal.astype(float), additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal.astype(float), additional_delay_bars=2)
-    
-    # Volume spike: current volume > 1.5 * 20-period average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup: need enough data for indicators
-    start_idx = max(20, 50)
+    start_idx = max(20, 30)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(bullish_fractal_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(bb_width_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from daily EMA50
-        # Use previous bar's EMA to avoid look-ahead
-        if i > 0 and not np.isnan(ema_50_1d_aligned[i-1]):
-            trend_up = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
-            trend_down = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]
+        # Determine trend direction from daily KAMA
+        # Use previous bar's KAMA to avoid look-ahead
+        if i > 0 and not np.isnan(kama_aligned[i-1]):
+            trend_up = close[i] > kama_aligned[i]  # price above KAMA = uptrend
+            trend_down = close[i] < kama_aligned[i]  # price below KAMA = downtrend
         else:
             trend_up = False
             trend_down = False
         
+        # Volatility filter: expanding volatility (BB width increasing)
+        if i > 0 and not np.isnan(bb_width_aligned[i-1]):
+            vol_expanding = bb_width_aligned[i] > bb_width_aligned[i-1]
+        else:
+            vol_expanding = False
+        
         if position == 0:
-            # Long entry: bullish fractal breakout + uptrend + volume spike
-            if (bullish_fractal_aligned[i] > 0 and 
-                trend_up and 
+            # Long entry: price above KAMA + expanding volatility + volume spike
+            if (trend_up and 
+                vol_expanding and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish fractal breakout + downtrend + volume spike
-            elif (bearish_fractal_aligned[i] > 0 and 
-                  trend_down and 
+            # Short entry: price below KAMA + expanding volatility + volume spike
+            elif (trend_down and 
+                  vol_expanding and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: trend turns down or opposite fractal appears
+            # Long exit: price crosses below KAMA or volatility contracts
             if (not trend_up or 
-                bearish_fractal_aligned[i] > 0):
+                not vol_expanding):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend turns up or opposite fractal appears
+            # Short exit: price crosses above KAMA or volatility contracts
             if (not trend_down or 
-                bullish_fractal_aligned[i] > 0):
+                not vol_expanding):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsFractal_Breakout_1dEMA50_Volume_v1"
-timeframe = "6h"
+name = "1d_KAMA_Trend_1wBBWidth_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
