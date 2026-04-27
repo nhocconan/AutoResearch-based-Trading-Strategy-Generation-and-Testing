@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,44 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context (1d)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for higher timeframe context
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate daily EMA(34) for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA(34) for trend direction
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate 12h ADX(14) for trend strength
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    plus_dm = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # Calculate 4-hour Donchian channels (20-period) for breakout signals
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where(np.isnan(dx) | np.isinf(dx), 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
-    # Calculate 4-hour volume moving average for confirmation
-    vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Calculate 6h Donchian channels (20-period) for breakout signals
+    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 6h RSI(14) for momentum confirmation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0] = 50  # First value
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -60,15 +70,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
+            np.isnan(donchian_high_20[i]) or 
+            np.isnan(donchian_low_20[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
@@ -77,31 +87,30 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA34
+        price_above_ema = close[i] > ema_34_12h_aligned[i]
+        price_below_ema = close[i] < ema_34_12h_aligned[i]
         
-        # Volatility filter: avoid high volatility periods
-        atr_threshold = np.nanpercentile(atr_14_1d_aligned[max(0, i-100):i+1], 70) if i >= 30 else atr_14_1d_aligned[i]
-        low_volatility = atr_14_1d_aligned[i] < atr_threshold
+        # Trend strength filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
-        # Volume filter: current 4h volume above average
-        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 0.8
+        # Momentum filter: RSI not in extreme overbought/oversold
+        rsi_not_extreme = (rsi[i] > 20) & (rsi[i] < 80)
         
-        # Breakout signals: price breaks 4h Donchian channels
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        # Breakout signals: price breaks 6h Donchian channels
+        breakout_up = close[i] > donchian_high_20[i]
+        breakout_down = close[i] < donchian_low_20[i]
         
-        # Long conditions: bullish trend + low volatility + volume + upward breakout
+        # Long conditions: bullish trend + strong trend + momentum + upward breakout
         long_condition = (price_above_ema and 
-                         low_volatility and 
-                         volume_filter and 
+                         strong_trend and 
+                         rsi_not_extreme and 
                          breakout_up)
         
-        # Short conditions: bearish trend + low volatility + volume + downward breakout
+        # Short conditions: bearish trend + strong trend + momentum + downward breakout
         short_condition = (price_below_ema and 
-                          low_volatility and 
-                          volume_filter and 
+                          strong_trend and 
+                          rsi_not_extreme and 
                           breakout_down)
         
         if long_condition and position <= 0:
@@ -110,11 +119,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal or volatility spike
-        elif position == 1 and (not price_above_ema or not low_volatility):
+        # Exit conditions: trend weakness or momentum extreme
+        elif position == 1 and (not price_above_ema or not strong_trend or rsi[i] >= 80):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (not price_below_ema or not low_volatility):
+        elif position == -1 and (not price_below_ema or not strong_trend or rsi[i] <= 20):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -128,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_EMA34Trend_VolumeFilter"
-timeframe = "4h"
+name = "6h_ADXTrend_DonchianBreakout_RSIFilter"
+timeframe = "6h"
 leverage = 1.0
