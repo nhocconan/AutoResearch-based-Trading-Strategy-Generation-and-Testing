@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Donchian channel breakout with 1-day volume confirmation and 1-day ATR volatility filter.
-Trades breakouts of the 20-period Donchian channel when volume exceeds 1.5x the 20-day average and ATR(14) is below its 50-day median (low volatility environment).
-Designed to work in both bull and bear markets by using volatility filter to avoid whipsaws and volume to confirm breakout strength.
-Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+Hypothesis: 4-hour Donchian breakout with 1-day ATR filter and 1-day volume confirmation.
+Trades breakouts of 20-period Donchian channel when ATR-based volatility is rising and volume exceeds 1-day average.
+Designed to work in both bull and bear markets by using volatility expansion as a filter and volume to confirm breakout strength.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,48 +20,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12-hour data for Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4-hour data for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 12-hour Donchian channels (20-period high/low)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 4-hour Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Upper and lower bands
+    upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to lower timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Align Donchian levels to 4-hour timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower)
     
-    # Get daily data for volume and ATR filters
+    # Get daily data for ATR filter and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
-    
-    # Calculate 1-day volume MA(20)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     # Calculate 1-day ATR(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1 = high_1d - low_1d
+    tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]  # first period
     
-    # Calculate 50-day median of ATR for volatility regime filter
-    atr_median_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).median().values
-    atr_median_50_aligned = align_htf_to_ltf(prices, df_1d, atr_median_50)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # Calculate 1-day volume MA(20)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,14 +68,13 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need Donchian channels, volume MA, ATR and its median
-    start_idx = max(20, 20, 14, 50)  # max of lookbacks
+    # Warmup: need Donchian channels, ATR, and volume MA
+    start_idx = max(20, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(atr_median_50_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -91,41 +88,40 @@ def generate_signals(prices):
         price_now = close[i]
         vol_now = volume[i]
         vol_ma = vol_ma_20_1d_aligned[i]
-        atr_now = atr_14_aligned[i]
-        atr_med = atr_median_50_aligned[i]
+        atr_now = atr_aligned[i]
         
         # Current Donchian levels
-        donch_high = donchian_high_aligned[i]
-        donch_low = donchian_low_aligned[i]
+        upper_now = upper_aligned[i]
+        lower_now = lower_aligned[i]
         
-        # Volume filter: volume > 1.5x 20-day average
-        vol_filter = vol_now > 1.5 * vol_ma
+        # Volatility filter: ATR rising (current ATR > ATR 3 periods ago)
+        vol_filter = atr_now > atr_aligned[i-3] if i >= 3 else False
         
-        # Volatility filter: ATR < median ATR (low volatility environment)
-        vol_regime_filter = atr_now < atr_med
+        # Volume filter: volume > 1.2x 1-day average
+        vol_confirm = vol_now > 1.2 * vol_ma
         
-        # Entry conditions: Donchian breakout with volume and low volatility
+        # Entry conditions: Donchian breakout with volatility expansion and volume confirmation
         if position == 0:
-            # Long: price breaks above Donchian high with volume + low vol
-            if price_now > donch_high and vol_filter and vol_regime_filter:
+            # Long: break above upper band with volatility expansion and volume
+            if price_now > upper_now and vol_filter and vol_confirm:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian low with volume + low vol
-            elif price_now < donch_low and vol_filter and vol_regime_filter:
+            # Short: break below lower band with volatility expansion and volume
+            elif price_now < lower_now and vol_filter and vol_confirm:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian low or volatility increases
-            if price_now < donch_low or not vol_regime_filter:
+            # Exit long: price returns to lower band or volatility drops
+            if price_now < lower_now or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to Donchian high or volatility increases
-            if price_now > donch_high or not vol_regime_filter:
+            # Exit short: price returns to upper band or volatility drops
+            if price_now > upper_now or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_1dVolume_VolatilityFilter"
-timeframe = "12h"
+name = "4h_DonchianBreakout_ATRVol_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
