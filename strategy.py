@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + Elder Ray combo with 1d volume confirmation.
-# Long when Alligator jaws < teeth < lips (bullish alignment) AND Elder Ray bull power > 0 AND volume > 1.5x average.
-# Short when Alligator jaws > teeth > lips (bearish alignment) AND Elder Ray bear power < 0 AND volume > 1.5x average.
-# Exit when Alligator alignment breaks (jaws > teeth OR teeth > lips).
-# Uses 1d volume filter to reduce noise and focus on institutional participation.
-# Target: 15-35 trades/year to minimize fee drag while capturing strong trends.
+# Hypothesis: 4h Bollinger Band breakout with 12h trend filter and volume confirmation.
+# Long when price breaks above upper BB with bullish trend and volume spike.
+# Short when price breaks below lower BB with bearish trend and volume spike.
+# Exit when price returns to middle BB (mean reversion).
+# Uses 12h timeframe for trend filter to reduce noise and improve win rate.
+# Target: 20-40 trades/year to minimize fee drag while capturing strong moves.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,89 +20,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams Alligator (13,8,5 SMAs of median price)
+    # Get 12h data for EMA50 trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Median price = (high + low) / 2
-    median_price_12h = (high_12h + low_12h) / 2
+    # 12-hour EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs of median price
-    jaw_12h = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean().values
-    teeth_12h = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean().values
-    lips_12h = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean().values
+    # Bollinger Bands on 4h timeframe (20-period, 2 std dev)
+    bb_period = 20
+    bb_std = 2
+    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_bb + (bb_std_dev * bb_std)
+    lower_bb = sma_bb - (bb_std_dev * bb_std)
+    middle_bb = sma_bb
     
-    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
-    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
-    
-    # Get 1d data for Elder Ray and volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
-    
-    # Volume filter: 1d volume > 1.5x 20-period average
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = volume_1d > (vol_ma_1d * 1.5)
-    
-    # Align Elder Ray and volume filter to 12h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d.astype(float))
+    # Volume filter: volume > 1.5x 20-period average (balanced to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 20
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or 
-            np.isnan(lips_12h_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(volume_filter_aligned[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or np.isnan(middle_bb[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Bullish Alligator alignment: jaws < teeth < lips
-        bullish_alligator = (jaw_12h_aligned[i] < teeth_12h_aligned[i] and 
-                            teeth_12h_aligned[i] < lips_12h_aligned[i])
-        # Bearish Alligator alignment: jaws > teeth > lips
-        bearish_alligator = (jaw_12h_aligned[i] > teeth_12h_aligned[i] and 
-                            teeth_12h_aligned[i] > lips_12h_aligned[i])
-        
-        # Long condition: bullish Alligator + bullish Elder Ray + volume confirmation
-        if (bullish_alligator and 
-            bull_power_aligned[i] > 0 and 
-            volume_filter_aligned[i] > 0.5):  # True when aligned
+        # Long condition: price breaks above upper BB, above 12h EMA50, volume spike
+        if (close[i] > upper_bb[i] and 
+            close[i] > ema50_12h_aligned[i] and 
+            volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: bearish Alligator + bearish Elder Ray + volume confirmation
-        elif (bearish_alligator and 
-              bear_power_aligned[i] < 0 and 
-              volume_filter_aligned[i] > 0.5):
+        # Short condition: price breaks below lower BB, below 12h EMA50, volume spike
+        elif (close[i] < lower_bb[i] and 
+              close[i] < ema50_12h_aligned[i] and 
+              volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: Alligator alignment breaks
-        elif position == 1 and not bullish_alligator:
+        # Exit conditions: price returns to middle BB (mean reversion)
+        elif position == 1 and close[i] < middle_bb[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not bearish_alligator:
+        elif position == -1 and close[i] > middle_bb[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -116,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ElderRay_VolumeFilter"
-timeframe = "12h"
+name = "4h_BB_Breakout_12hEMA50_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
