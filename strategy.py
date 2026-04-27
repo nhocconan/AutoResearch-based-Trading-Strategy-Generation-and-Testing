@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,32 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for 12h trading
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get daily data for weekly pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate weekly ATR for volatility filtering
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate weekly pivot from daily data (last 5 days)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate True Range and ATR
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate weekly pivot using last 5 daily bars
+    weekly_pivot = np.full(len(high_1d), np.nan)
+    for i in range(4, len(high_1d)):  # Need at least 5 days
+        week_high = np.max(high_1d[i-4:i+1])
+        week_low = np.min(low_1d[i-4:i+1])
+        week_close = close_1d[i]
+        weekly_pivot[i] = (week_high + week_low + week_close) / 3
     
-    atr_period = 14
-    atr_1w = np.full(len(close_1w), np.nan)
-    for i in range(atr_period, len(tr)):
-        atr_1w[i] = np.mean(tr[i-atr_period+1:i+1])
+    # Align weekly pivot to 12h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # Align weekly ATR to 12h timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    
-    # Calculate 12-period Donchian channels on 12h data
+    # Calculate 12-period Donchian channels directly on 12h data
     lookback = 12
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
@@ -57,13 +53,13 @@ def generate_signals(prices):
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup period: need at least 12 for Donchian, 12 for volume, 14 for ATR
-    start_idx = max(lookback, vol_period, atr_period)
+    # Warmup period: need at least 12 for Donchian, 12 for volume, 5 for weekly pivot
+    start_idx = max(lookback, vol_period, 5)
     
     for i in range(start_idx, n):
         if (np.isnan(highest_high[i]) or
             np.isnan(lowest_low[i]) or
-            np.isnan(atr_1w_aligned[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -71,30 +67,34 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volatility filter: only trade when volatility is above average
-        vol_filter = atr_1w_aligned[i] > np.nanmean(atr_1w_aligned[max(0, i-50):i]) if not np.isnan(np.nanmean(atr_1w_aligned[max(0, i-50):i])) else False
+        # Determine trend from weekly pivot
+        bullish = price > weekly_pivot_aligned[i]
+        bearish = price < weekly_pivot_aligned[i]
+        
+        # Volume confirmation: spike > 2.0x average
+        volume_confirmation = vol_ratio > 2.0
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high with volume and volatility
-            if price > highest_high[i] and vol_ratio > 1.5 and vol_filter:
+            # Long breakout: price breaks above Donchian high in bullish trend with volume
+            if bullish and price > highest_high[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short breakdown: price breaks below Donchian low with volume and volatility
-            elif price < lowest_low[i] and vol_ratio > 1.5 and vol_filter:
+            # Short breakdown: price breaks below Donchian low in bearish trend with volume
+            elif bearish and price < lowest_low[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Donchian low
-            if price < lowest_low[i]:
+            # Long exit: price breaks below Donchian low or trend turns bearish
+            if price < lowest_low[i] or bearish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above Donchian high
-            if price > highest_high[i]:
+            # Short exit: price breaks above Donchian high or trend turns bullish
+            if price > highest_high[i] or bullish:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian12_WeeklyATR_Volume"
+name = "12h_Donchian12_WeeklyPivot_Trend_Volume"
 timeframe = "12h"
 leverage = 1.0
