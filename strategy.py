@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla pivot (R3/S3) breakouts on 12h with 1d trend filter (EMA34) and volume spike capture strong directional moves while avoiding whipsaws. Designed for low trade frequency (target 12-37/year) to minimize fee drag in both bull and bear markets.
+1h_TripleConfirm_TrendBreak_v1
+Hypothesis: Combine 4h trend (EMA50), 1d momentum (RSI>50), and 1h volume spike 
+with Donchian breakout for high-probability entries. Uses 1h only for timing, 
+4h/1d for direction/filter. Target 15-35 trades/year to avoid fee drag. 
+Works in bull (trend continuation) and bear (mean reversion within trend).
 """
 
 import numpy as np
@@ -10,84 +13,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous 12h bar
-    # R3 = C + (H-L) * 1.1/2, S3 = C - (H-L) * 1.1/2
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # 1h Donchian breakout (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # 4h trend: EMA50
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # 1d trend filter: EMA34
+    # 1d momentum: RSI(14) > 50
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # Volume confirmation: current volume > 2.0 * 24-period average (2 days)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    # 1h volume confirmation: current > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need Camarilla (1), EMA34 (34), volume avg (24)
-    start_idx = max(1, 34, 24)
+    # Warmup: need Donchian (20), EMA50 (50), RSI (14), vol avg (20)
+    start_idx = max(20, 50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r3 = camarilla_r3[i]
-        s3 = camarilla_s3[i]
-        ema34 = ema34_1d_aligned[i]
-        vol_conf = volume_confirm[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        ema50 = ema50_4h_aligned[i]
+        rsi = rsi_1d_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Determine trend: price vs EMA34 (1d)
-            uptrend = close_val > ema34
-            downtrend = close_val < ema34
+            # Determine 4h trend
+            uptrend = close_val > ema50
+            downtrend = close_val < ema50
             
-            if uptrend and vol_conf:
-                # Long: break above R3 with volume
-                if close_val > r3:
-                    signals[i] = size
-                    position = 1
-                    entry_price = close_val
-            elif downtrend and vol_conf:
-                # Short: break below S3 with volume
-                if close_val < s3:
-                    signals[i] = -size
-                    position = -1
-                    entry_price = close_val
+            # Long: uptrend + RSI>50 + volume spike + break above Donchian high
+            if uptrend and rsi > 50 and vol_spike and close_val > upper:
+                signals[i] = size
+                position = 1
+            # Short: downtrend + RSI<50 + volume spike + break below Donchian low
+            elif downtrend and rsi < 50 and vol_spike and close_val < lower:
+                signals[i] = -size
+                position = -1
         elif position == 1:
-            # Exit: price re-enters R3-S3 range or trend reversal
-            if close_val < r3 and close_val > s3:  # Back in range
+            # Exit: trend reversal (close below 4h EMA50) or loss of momentum
+            if close_val < ema50 or rsi < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: price re-enters R3-S3 range or trend reversal
-            if close_val < r3 and close_val > s3:  # Back in range
+            # Exit: trend reversal (close above 4h EMA50) or loss of momentum
+            if close_val > ema50 or rsi > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1h_TripleConfirm_TrendBreak_v1"
+timeframe = "1h"
 leverage = 1.0
