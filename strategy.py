@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
-Uses tighter entry (R1/S1) to reduce trade frequency vs R3/S3 variants. 1d EMA34 ensures alignment with daily trend.
-Volume spike confirms breakout authenticity. Designed for 20-40 trades/year on 4h to minimize fee drag.
-Works in both bull and bear markets by following daily trend direction.
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_HTF
+Hypothesis: Camarilla R1/S1 breakout on daily timeframe with 1-week EMA50 trend filter and volume confirmation.
+Uses tighter entry (R1/S1) to reduce trade frequency vs R3/S3 variants. 1w EMA50 ensures alignment with higher timeframe trend.
+Volume spike confirms breakout authenticity. Designed for 7-25 trades/year on 1d to minimize fee drag.
+Works in both bull and bear markets by following 1w trend direction.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,7 +29,7 @@ def generate_signals(prices):
     tr = np.concatenate([[tr0], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Camarilla levels from previous 4h bar's OHLC
+    # Calculate Camarilla levels from previous day's OHLC
     prev_close = np.concatenate([[close[0]], close[:-1]])
     prev_high = np.concatenate([[high[0]], high[:-1]])
     prev_low = np.concatenate([[low[0]], low[:-1]])
@@ -37,11 +37,11 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,27 +53,27 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup: need enough for ATR, EMA34, volume average
-    start_idx = max(100, 50, 34, 20)
+    # Warmup: need enough for ATR, EMA50, volume average
+    start_idx = max(100, 50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         size = 0.25  # 25% position size
         
         if position == 0:
-            # Flat - look for entry: breakout in direction of 1d trend with volume spike
-            # Long: price breaks above Camarilla R1 AND 1d trend is up (close > EMA34) AND volume spike
-            # Short: price breaks below Camarilla S1 AND 1d trend is down (close < EMA34) AND volume spike
+            # Flat - look for entry: breakout in direction of 1w trend with volume spike
+            # Long: price breaks above Camarilla R1 AND 1w trend is up (close > EMA50) AND volume spike
+            # Short: price breaks below Camarilla S1 AND 1w trend is down (close < EMA50) AND volume spike
             long_breakout = close_val > camarilla_r1[i]
             short_breakout = close_val < camarilla_s1[i]
             trend_up = close_val > ema_trend
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_HTF"
+timeframe = "1d"
 leverage = 1.0
