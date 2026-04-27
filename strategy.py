@@ -5,13 +5,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     """
-    12h Channels: Donchian(20) breakout with weekly trend and volume confirmation.
-    Long: Break above 20-period high + weekly EMA20 uptrend + volume > 1.5x avg
-    Short: Break below 20-period low + weekly EMA20 downtrend + volume > 1.5x avg
-    Exit: Opposite Donchian break or trailing stop at 2x ATR
+    4h Williams %R Reversal with weekly EMA trend and volume confirmation.
+    Long when: Williams %R(14) < -80 (oversold) + price > weekly EMA50 + volume spike
+    Short when: Williams %R(14) > -20 (overbought) + price < weekly EMA50 + volume spike
+    Exits on opposite Williams %R cross or trailing stop.
     """
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,23 +19,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for EMA50
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
+    # Calculate weekly EMA50
     close_1w = df_1w['close'].values
-    ema_20_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 20:
-        ema_20_1w[19] = np.mean(close_1w[:20])
-        for i in range(20, len(close_1w)):
-            ema_20_1w[i] = (close_1w[i] * 2 + ema_20_1w[i-1] * 18) / 20  # EMA20
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 48) / 50  # EMA50
     
-    # Align weekly EMA to 12h timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Williams %R (14) on 4h data
+    williams_r = np.full(n, np.nan)
+    lookback = 14
+    for i in range(lookback - 1, n):
+        highest_high = np.max(high[i - lookback + 1:i + 1])
+        lowest_low = np.min(low[i - lookback + 1:i + 1])
+        if highest_high != lowest_low:
+            williams_r[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+        else:
+            williams_r[i] = -50  # neutral if no range
     
-    # Calculate 12h ATR(14) for volatility and stop loss
+    # Align weekly EMA50 to 4h
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate 20-period volume average
+    vol_ma = np.full(n, np.nan)
+    vol_period = 20
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    
+    # Calculate 4h ATR(14) for stop loss
     tr = np.maximum(high[1:] - low[1:], 
                     np.maximum(np.abs(high[1:] - close[:-1]), 
                                np.abs(low[1:] - close[:-1])))
@@ -47,57 +64,46 @@ def generate_signals(prices):
         else:
             atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Calculate 20-period volume average
-    vol_ma = np.full(n, np.nan)
-    vol_period = 20
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
-    
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
     # Warmup period
-    start_idx = max(20, vol_period, 14) + 5
+    start_idx = max(lookback, vol_period, 14) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        
+        # Volume spike filter: at least 1.5x average volume
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Break above Donchian high with volume and weekly uptrend
-            if price > donchian_high[i] and vol_filter and ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]:
+            # Long: Oversold reversal with volume and above weekly EMA50
+            if williams_r[i] < -80 and vol_filter and price > ema_50_1w_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Break below Donchian low with volume and weekly downtrend
-            elif price < donchian_low[i] and vol_filter and ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]:
+            # Short: Overbought reversal with volume and below weekly EMA50
+            elif williams_r[i] > -20 and vol_filter and price < ema_50_1w_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Break below Donchian low or trailing stop
-            if price < donchian_low[i] or price < ema_20_1w_aligned[i] - 2.0 * atr[i]:
+            # Long exit: Overbought or trailing stop
+            if williams_r[i] > -20 or price < ema_50_1w_aligned[i] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Break above Donchian high or trailing stop
-            if price > donchian_high[i] or price > ema_20_1w_aligned[i] + 2.0 * atr[i]:
+            # Short exit: Oversold or trailing stop
+            if williams_r[i] < -80 or price > ema_50_1w_aligned[i] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_WeeklyEMA20_Trend_Volume"
-timeframe = "12h"
+name = "4h_WilliamsR_14_1wEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
