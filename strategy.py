@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_RSI20_Pullback_12hTrend_VolumeFilter
-Hypothesis: Use RSI(20) pullback to 30/70 levels with 12h EMA50 trend filter and volume confirmation. RSI20 is more responsive than RSI14 for catching short-term reversals in 4h charts. Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend). Target 20-30 trades/year to minimize fee drag.
+6h_Donchian_Breakout_WeeklyPivot_Direction_Volume
+Hypothesis: Trade Donchian(20) breakouts on 6h only when aligned with weekly pivot bias (price above/below weekly pivot) and volume confirmation. Weekly pivot provides institutional bias that works in both bull (breakouts with bias) and bear (fade against bias when overextended). Target 15-25 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -18,67 +18,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Weekly Pivot Point (standard calculation)
+    weekly_high = df_1w['high']
+    weekly_low = df_1w['low']
+    weekly_close = df_1w['close']
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
     
-    # RSI(20) on 4h closes
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/20, adjust=False, min_periods=20).mean()
-    avg_loss = loss.ewm(alpha=1/20, adjust=False, min_periods=20).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align weekly pivot to 6h (use previous week's pivot)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot.values)
     
-    # Volume confirmation: volume > 1.8 * 20-period average
+    # Donchian channels (20-period) on 6h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.8)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for RSI and EMA
-    start_idx = max(50, 20)
+    # Warmup: need enough data for Donchian and volume MA
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema50_12h_aligned[i]) or np.isnan(rsi_values[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(pivot_aligned[i]):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema50_12h_aligned[i]
-        rsi_val = rsi_values[i]
-        vol_ok = vol_filter[i]
+        pivot_level = pivot_aligned[i]
+        upper_channel = donchian_high[i]
+        lower_channel = donchian_low[i]
+        vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: RSI pulls back to 30 in uptrend with volume
-            if rsi_val <= 30 and ema_trend > 0 and vol_ok:
+            # Long: price breaks above Donchian high + above weekly pivot + volume spike
+            if close[i] > upper_channel and close[i] > pivot_level and vol_spike_val:
                 signals[i] = size
                 position = 1
-            # Short: RSI rallies to 70 in downtrend with volume
-            elif rsi_val >= 70 and ema_trend < 0 and vol_ok:
+            # Short: price breaks below Donchian low + below weekly pivot + volume spike
+            elif close[i] < lower_channel and close[i] < pivot_level and vol_spike_val:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI reaches 70 or trend turns down
-            if rsi_val >= 70 or ema_trend <= 0:
+            # Exit long: price breaks below Donchian low or falls below weekly pivot
+            if close[i] < lower_channel or close[i] < pivot_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI reaches 30 or trend turns up
-            if rsi_val <= 30 or ema_trend >= 0:
+            # Exit short: price breaks above Donchian high or rises above weekly pivot
+            if close[i] > upper_channel or close[i] > pivot_level:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI20_Pullback_12hTrend_VolumeFilter"
-timeframe = "4h"
+name = "6h_Donchian_Breakout_WeeklyPivot_Direction_Volume"
+timeframe = "6h"
 leverage = 1.0
