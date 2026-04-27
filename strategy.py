@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Breakout_1wTrend_VolumeFilter
-Hypothesis: Combines Keltner channel breakouts with weekly trend filter and volume confirmation.
-Designed for daily timeframe to capture medium-term trends with low trade frequency.
-Keltner channels (EMA + ATR) adapt to volatility, making them effective in both trending and ranging markets.
-Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
-Volume confirmation filters out low-conviction breakouts.
-Target: 10-25 trades per year to minimize fee drag in bear markets.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
+Hypothesis: Uses Camarilla pivot levels (R3/S3) from daily timeframe for breakout signals,
+combined with daily EMA trend filter and volume confirmation. Designed to capture
+strong intraday trends with low trade frequency to minimize fee drag. Targets 15-30
+trades per year, suitable for both bull and bear markets by following the daily trend.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,70 +21,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Keltner Channel (20-period EMA, 2.0 ATR multiplier)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels from previous day
+    # R3 = Close + (High - Low) * 1.1/4
+    # S3 = Close - (High - Low) * 1.1/4
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    keltner_upper = ema_20 + (2.0 * atr)
-    keltner_lower = ema_20 - (2.0 * atr)
+    # Use previous day's values to avoid look-ahead
+    camarilla_R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Weekly trend filter: 50-period EMA
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align to 4h timeframe (wait for daily bar to close)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
     
-    # Volume confirmation: current volume > 1.5 * 20-day average
+    # Daily EMA trend filter (34-period)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    volume_confirm = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for all indicators
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper = keltner_upper[i]
-        lower = keltner_lower[i]
-        weekly_trend = ema_50_1w_aligned[i]
+        r3_level = camarilla_R3_aligned[i]
+        s3_level = camarilla_S3_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: price breaks above upper Keltner band with uptrend and volume
-            if close_val > upper and close_val > weekly_trend and vol_conf:
+            # Long: price breaks above R3 with uptrend and volume
+            if close_val > r3_level and close_val > ema_trend and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below lower Keltner band with downtrend and volume
-            elif close_val < lower and close_val < weekly_trend and vol_conf:
+            # Short: price breaks below S3 with downtrend and volume
+            elif close_val < s3_level and close_val < ema_trend and vol_conf:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA(20) (trend reversal signal)
-            if close_val < ema_20[i]:
+            # Exit long: price crosses below S3 (reversal signal)
+            if close_val < s3_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above EMA(20) (trend reversal signal)
-            if close_val > ema_20[i]:
+            # Exit short: price crosses above R3 (reversal signal)
+            if close_val > r3_level:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_Breakout_1wTrend_VolumeFilter"
-timeframe = "1d"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
