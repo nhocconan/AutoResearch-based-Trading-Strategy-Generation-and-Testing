@@ -1,15 +1,16 @@
+# SPDX-FileCopyrightText: 2025 The NVD Corporation <nvd@nvd.com>
+# SPDX-License-Identifier: MIT
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour strategy using the 1-week Relative Strength Index (RSI) with a mean-reversion bias
-# when combined with 1-day trend filter and volume confirmation. RSI above 70 indicates overbought
-# conditions (short signal) when price is below the 1-day EMA (downtrend). RSI below 30 indicates
-# oversold conditions (long signal) when price is above the 1-day EMA (uptrend). Volume confirmation
-# (>1.5x 20-period average) ensures institutional participation. Designed for low trade frequency
-# (target: 50-150 total trades over 4 years) to minimize fee drag. Works in bull markets (buying
-# oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend).
+# Hypothesis: 1-day strategy using weekly pivot levels (weekly R4/S4) with daily trend filter and volume confirmation.
+# Weekly R4/S4 act as strong weekly support/resistance; breakouts indicate strong momentum.
+# Uses daily EMA50 for trend filter to avoid counter-trend trades.
+# Volume spike (>1.8x 20-period average) confirms institutional participation.
+# Designed for low trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag.
+# Works in bull markets (breakout continuations) and bear markets (breakdown continuations).
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,48 +22,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for RSI calculation
+    # Get weekly data for pivot calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 14-period RSI on weekly data
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate weekly pivot levels (Weekly Pivot = (H+L+C)/3)
+    # R4 = Close + Range * 1.1
+    # S4 = Close - Range * 1.1
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r4_1w = close_1w + (range_1w * 1.1)
+    s4_1w = close_1w - (range_1w * 1.1)
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Align weekly pivot levels to daily timeframe
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Daily EMA50 for trend filter
+    ema50_daily = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w[:13] = np.nan  # Not enough data for first 13 periods
-    
-    # Align RSI to 12h timeframe (wait for weekly bar to close)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,28 +58,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or 
+            np.isnan(ema50_daily[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long signal: RSI < 30 (oversold) + uptrend + volume
-        if (rsi_1w_aligned[i] < 30 and 
-            close[i] > ema34_1d_aligned[i] and 
+        # Long breakout: price breaks above weekly R4 with uptrend and volume
+        if (close[i] > r4_1w_aligned[i] and 
+            close[i] > ema50_daily[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short signal: RSI > 70 (overbought) + downtrend + volume
-        elif (rsi_1w_aligned[i] > 70 and 
-              close[i] < ema34_1d_aligned[i] and 
+        # Short breakdown: price breaks below weekly S4 with downtrend and volume
+        elif (close[i] < s4_1w_aligned[i] and 
+              close[i] < ema50_daily[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: RSI returns to neutral zone (40-60)
-        elif position == 1 and rsi_1w_aligned[i] > 40:
+        # Exit conditions
+        elif position == 1 and close[i] <= ema50_daily[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and rsi_1w_aligned[i] < 60:
+        elif position == -1 and close[i] >= ema50_daily[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -107,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI14_1wMeanRev_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "1d_Weekly_R4S4_50EMA_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
