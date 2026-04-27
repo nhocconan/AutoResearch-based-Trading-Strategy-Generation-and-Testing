@@ -99,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1dEMA34_Volume_Trend"
-timeframe = "1d"
+name = "4h_Donchian20_1dEMA34_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
