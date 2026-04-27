@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-#100718 - 1d_WeeklyDonchian20_1wEMA50_Trend_VolumeFilter
-Hypothesis: Daily Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation.
-Works in bull markets (breakouts with uptrend) and bear markets (breakouts with downtrend).
-Weekly EMA50 provides robust trend filter to avoid false breakouts.
-Volume confirmation ensures breakouts have conviction.
-Target: 15-25 trades/year to minimize fee drag.
+#100720 - 4h_PriceAction_Pullback_1dTrend_VolumeFilter
+Hypothesis: Price action pullback strategy using price rejection at key levels with 1d trend filter and volume confirmation.
+Works in bull (pullbacks in uptrend) and bear (pullbacks in downtrend) by trading with the higher timeframe trend.
+Target: 20-40 trades/year to minimize fee drag. Uses price action patterns rather than indicator lag.
 """
 
 import numpy as np
@@ -21,31 +19,31 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get weekly data for Donchian channels and EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels (weekly)
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 1-day EMA20 for trend filter (responsive but smooth)
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Calculate 50-period EMA for trend filter (weekly)
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ATR for dynamic thresholds
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align to daily timeframe (previous week's values for current day)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume filter: volume > 1.5x 20-day average
+    # Volume filter: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,28 +53,45 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above weekly Donchian high, above weekly EMA50, volume spike
-        if (close[i] > donchian_high_aligned[i] and 
-            close[i] > ema50_1w_aligned[i] and 
+        # Price action signals: rejection candles
+        body_size = np.abs(close[i] - open_price[i])
+        upper_wick = high[i] - max(close[i], open_price[i])
+        lower_wick = min(close[i], open_price[i]) - low[i]
+        
+        # Bullish rejection: long lower wick, small body (hammer/pin bar)
+        bullish_rejection = (lower_wick > body_size * 2) and (body_size > 0)
+        # Bearish rejection: long upper wick, small body (shooting star)
+        bearish_rejection = (upper_wick > body_size * 2) and (body_size > 0)
+        
+        # Long condition: bullish rejection + above 1d EMA20 + volume filter
+        if (bullish_rejection and 
+            close[i] > ema20_1d_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below weekly Donchian low, below weekly EMA50, volume spike
-        elif (close[i] < donchian_low_aligned[i] and 
-              close[i] < ema50_1w_aligned[i] and 
+        # Short condition: bearish rejection + below 1d EMA20 + volume filter
+        elif (bearish_rejection and 
+              close[i] < ema20_1d_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to opposite Donchian level (mean reversion)
-        elif position == 1 and close[i] < donchian_low_aligned[i]:
+        # Exit conditions: opposite rejection or trend change
+        elif position == 1 and bearish_rejection:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > donchian_high_aligned[i]:
+        elif position == -1 and bullish_rejection:
+            signals[i] = 0.0
+            position = 0
+        # Trend filter exit: price crosses 1d EMA20
+        elif position == 1 and close[i] < ema20_1d_aligned[i]:
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and close[i] > ema20_1d_aligned[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -90,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian20_1wEMA50_Trend_VolumeFilter"
-timeframe = "1d"
+name = "4h_PriceAction_Pullback_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
