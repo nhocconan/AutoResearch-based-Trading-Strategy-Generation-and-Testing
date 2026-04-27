@@ -1,36 +1,30 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Williams %R with weekly trend filter and volume confirmation.
-In oversold conditions (Williams %R < -80) with weekly uptrend: long.
-In overbought conditions (Williams %R > -20) with weekly downtrend: short.
-Williams %R identifies reversal points, weekly trend filters for direction,
-volume confirms participation. Target: 15-30 trades/year per symbol.
+Hypothesis: 12-hour Price Channel Breakout with weekly trend filter and volume confirmation.
+Buy when price breaks above 12h Donchian upper channel (20-period) with weekly uptrend and volume spike.
+Sell when price breaks below 12h Donchian lower channel with weekly downtrend and volume spike.
+Exit when price returns to the middle of the channel or trend reverses.
+Designed to work in both bull and bear markets by requiring volume confirmation and trend alignment.
+Target: 12-30 trades/year per symbol (50-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_williams_r(high, low, close, length=14):
-    """Williams %R: momentum oscillator measuring overbought/oversold levels"""
-    if len(high) < length:
-        return np.full_like(high, np.nan, dtype=np.float64)
+def calculate_donchian_channels(high, low, period=20):
+    """Calculate Donchian channels: upper=max(high,period), lower=min(low,period)"""
+    if len(high) < period:
+        return np.full_like(high, np.nan, dtype=np.float64), np.full_like(high, np.nan, dtype=np.float64)
     
-    highest_high = np.full_like(high, np.nan, dtype=np.float64)
-    lowest_low = np.full_like(high, np.nan, dtype=np.float64)
+    upper = np.full_like(high, np.nan, dtype=np.float64)
+    lower = np.full_like(high, np.nan, dtype=np.float64)
     
-    for i in range(length-1, len(high)):
-        highest_high[i] = np.max(high[i-length+1:i+1])
-        lowest_low[i] = np.min(low[i-length+1:i+1])
+    for i in range(period-1, len(high)):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
     
-    williams_r = np.full_like(high, np.nan, dtype=np.float64)
-    for i in range(length-1, len(high)):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
-        else:
-            williams_r[i] = -50.0
-    
-    return williams_r
+    return upper, lower
 
 def calculate_ema(values, period):
     """Exponential Moving Average"""
@@ -66,8 +60,9 @@ def generate_signals(prices):
     ema_34_1w = calculate_ema(wk_close, 34)
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 12h Williams %R
-    williams_r = calculate_williams_r(high, low, close, 14)
+    # Calculate 12h Donchian channels (20-period)
+    upper_channel, lower_channel = calculate_donchian_channels(high, low, 20)
+    middle_channel = (upper_channel + lower_channel) / 2.0
     
     # Get daily volume for confirmation
     df_1d = get_htf_data(prices, '1d')
@@ -82,13 +77,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Williams %R (14) + EMA (34) + volume MA (20)
-    start_idx = max(14, 34, 20)
+    # Warmup: need Donchian (20) + EMA (34) + volume MA (20)
+    start_idx = max(20, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -98,42 +93,35 @@ def generate_signals(prices):
         vol_ma = vol_ma_20_1d_aligned[i]
         
         # Current indicators
-        wr = williams_r[i]
+        upper = upper_channel[i]
+        lower = lower_channel[i]
+        middle = middle_channel[i]
         ema_trend = ema_34_1w_aligned[i]
         
-        # Volume filter: volume > 1.3x daily average
-        vol_filter = vol_now > 1.3 * vol_ma
-        
-        # Trend filter: price above/below weekly EMA34
-        # Need weekly close price for comparison
-        wk_close_price = df_1w['close'].values
-        wk_close_aligned = align_htf_to_ltf(prices, df_1w, wk_close_price)
-        if np.isnan(wk_close_aligned[i]):
-            signals[i] = 0.0
-            continue
-        weekly_close = wk_close_aligned[i]
+        # Volume filter: volume > 1.5x daily average (tighter to reduce trades)
+        vol_filter = vol_now > 1.5 * vol_ma
         
         if position == 0:
-            # Oversold with weekly uptrend: long
-            if wr < -80 and weekly_close > ema_trend and vol_filter:
+            # Long: price breaks above upper channel with weekly uptrend and volume
+            if price_now > upper and ema_trend > lower and vol_filter:
                 signals[i] = size
                 position = 1
-            # Overbought with weekly downtrend: short
-            elif wr > -20 and weekly_close < ema_trend and vol_filter:
+            # Short: price breaks below lower channel with weekly downtrend and volume
+            elif price_now < lower and ema_trend < upper and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: overbought or trend change
-            if wr > -20 or weekly_close < ema_trend:
+            # Exit long: price returns to middle of channel or trend turns down
+            if price_now < middle or ema_trend < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: oversold or trend change
-            if wr < -80 or weekly_close > ema_trend:
+            # Exit short: price returns to middle of channel or trend turns up
+            if price_now > middle or ema_trend > upper:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_WeeklyTrend_Volume"
+name = "12h_DonchianBreakout_WeeklyTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
