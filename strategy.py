@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_1d_ADX_Filter
-Hypothesis: KAMA adapts to market noise - in trending markets it follows price closely, in ranging markets it stays flat. 
-Combined with 1-day ADX > 25 to confirm trending regime, this should capture trends while avoiding whipsaws in ranges.
-Works in both bull (follows uptrends) and bear (follows downtrends) markets. Target: 20-40 trades/year.
+1d_KAMA_Trend_Signal_RSI_Pullback_1wTrend_Filter
+Hypothesis: Use 1d KAMA trend direction as primary filter, enter on RSI pullbacks (RSI<30 for long, RSI>70 for short) only when 1-week trend agrees. Exit on opposite RSI extreme (RSI>70 for long exit, RSI<30 for short exit). Designed for low trade frequency (<15/year) to minimize fee drag while capturing trend continuation moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -12,150 +10,97 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) - adaptive to market noise
-    def calculate_kama(close_array, er_length=10, fast_sc=2, slow_sc=30):
-        n = len(close_array)
-        kama = np.full(n, np.nan)
-        if n < er_length:
-            return kama
-        
-        # Efficiency Ratio
-        change = np.abs(np.diff(close_array, n=er_length))  # |close[i] - close[i-er_length]|
-        volatility = np.sum(np.abs(np.diff(close_array)), axis=0)  # sum of |close[i] - close[i-1]| over er_length period
-        
-        # Handle first er_length elements
-        for i in range(er_length, n):
-            if i - er_length >= 0:
-                change_val = np.abs(close_array[i] - close_array[i - er_length])
-                # Calculate volatility from i-er_length+1 to i
-                vol_sum = 0.0
-                for j in range(i - er_length + 1, i + 1):
-                    vol_sum += np.abs(close_array[j] - close_array[j-1])
-                if vol_sum > 0:
-                    er = change_val / vol_sum
-                else:
-                    er = 0
-                sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1))**2
-                if i == er_length:
-                    kama[i] = close_array[i]
-                else:
-                    kama[i] = kama[i-1] + sc * (close_array[i] - kama[i-1])
-            else:
-                kama[i] = close_array[i]
-        
-        # Fill beginning with first close value
-        for i in range(er_length):
-            kama[i] = close_array[0] if len(close_array) > 0 else 0
-            
-        return kama
-    
-    # Calculate ADX (Average Directional Index) for trend strength
-    def calculate_adx(high_array, low_array, close_array, period=14):
-        n = len(close_array)
-        if n < period * 2:
-            return np.full(n, np.nan)
-        
-        # True Range
-        tr1 = high_array[1:] - low_array[1:]
-        tr2 = np.abs(high_array[1:] - close_array[:-1])
-        tr3 = np.abs(low_array[1:] - close_array[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.max(tr[:3]) if len(tr) >= 3 else np.mean(tr) if len(tr) > 0 else 0], tr])
-        
-        # Directional Movement
-        dm_plus = np.where((high_array[1:] - high_array[:-1]) > (low_array[:-1] - low_array[1:]), 
-                           np.maximum(high_array[1:] - high_array[:-1], 0), 0)
-        dm_minus = np.where((low_array[:-1] - low_array[1:]) > (high_array[1:] - high_array[:-1]), 
-                            np.maximum(low_array[:-1] - low_array[1:], 0), 0)
-        dm_plus = np.concatenate([[0], dm_plus])
-        dm_minus = np.concatenate([[0], dm_minus])
-        
-        # Smoothed values
-        def smooth_values(arr, period):
-            n = len(arr)
-            smoothed = np.full(n, np.nan)
-            if n < period:
-                return smoothed
-            # First value is simple average
-            smoothed[period-1] = np.mean(arr[1:period+1]) if period+1 <= n else np.mean(arr[1:])
-            # Subsequent values: Wilder smoothing
-            for i in range(period, n):
-                smoothed[i] = (smoothed[i-1] * (period-1) + arr[i]) / period
-            return smoothed
-        
-        atr = smooth_values(tr, period)
-        dm_plus_smooth = smooth_values(dm_plus, period)
-        dm_minus_smooth = smooth_values(dm_minus, period)
-        
-        # Directional Indicators
-        di_plus = np.where(atr > 0, dm_plus_smooth / atr * 100, 0)
-        di_minus = np.where(atr > 0, dm_minus_smooth / atr * 100, 0)
-        
-        # DX and ADX
-        dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-        adx = smooth_values(dx, period)
-        
-        return adx
-    
-    # Calculate KAMA on close prices
-    kama = calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30)
-    
-    # Get 1-day data for ADX calculation
+    # Calculate 1d KAMA for trend direction
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ADX on 1-day data
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
+    # Efficiency Ratio for KAMA
+    close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        if volatility[i] != 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
     
-    # Align indicators to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)  # Using 1d as reference for alignment
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Align 1d KAMA to 1d timeframe (no alignment needed as we're on 1d)
+    kama_aligned = kama
+    
+    # Calculate 1-week trend using EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate 14-period RSI on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = rsi
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for indicators
-    start_idx = 50
+    # Warmup: need enough data for RSI and KAMA
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(rsi_aligned[i])):
             signals[i] = 0.0
             continue
         
         kama_val = kama_aligned[i]
-        adx_val = adx_1d_aligned[i]
-        close_val = close[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
+        rsi_val = rsi_aligned[i]
+        close_1d_val = close_1d[i]
         
         if position == 0:
-            # Long: price above KAMA AND ADX > 25 (strong trend)
-            if close_val > kama_val and adx_val > 25:
+            # Long: price above KAMA (uptrend), RSI<30 (oversold), and 1w EMA50 rising
+            if close_1d_val > kama_val and rsi_val < 30 and ema_50_1w_val > ema_50_1w_aligned[i-1]:
                 signals[i] = size
                 position = 1
-            # Short: price below KAMA AND ADX > 25 (strong trend)
-            elif close_val < kama_val and adx_val > 25:
+            # Short: price below KAMA (downtrend), RSI>70 (overbought), and 1w EMA50 falling
+            elif close_1d_val < kama_val and rsi_val > 70 and ema_50_1w_val < ema_50_1w_aligned[i-1]:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close_val < kama_val:
+            # Exit long: RSI>70 (overbought) or price below KAMA
+            if rsi_val > 70 or close_1d_val < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close_val > kama_val:
+            # Exit short: RSI<30 (oversold) or price above KAMA
+            if rsi_val < 30 or close_1d_val > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -163,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_With_1d_ADX_Filter"
-timeframe = "4h"
+name = "1d_KAMA_Trend_Signal_RSI_Pullback_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
