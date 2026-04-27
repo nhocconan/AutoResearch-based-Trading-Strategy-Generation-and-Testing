@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_WilliamsAlligator_ElderRay_TrendFilter
-Hypothesis: Williams Alligator (Jaws/Teeth/Lips) identifies trend direction, Elder Ray (Bull/Bear Power) confirms momentum strength. Long when price > Teeth and Bull Power > 0; Short when price < Teeth and Bear Power < 0. Uses 1d EMA13 for trend filter and volume spike for confirmation. Works in bull via Alligator alignment and bear via divergence. Targets ~20 trades/year on 12h to minimize fee drag.
+4h_ChaosBreakout_Volume_12hTrend
+Hypothesis: Williams Fractal breakouts aligned with 12h EMA trend and volume spikes capture strong directional moves in both bull and bear markets. Fractals identify key support/resistance levels where price breaks through with momentum. Volume confirms institutional participation. Targets ~20-30 trades/year on 4h to minimize fee drag while maintaining edge in volatile markets.
 """
 
 import numpy as np
@@ -18,90 +18,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Williams Fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate 1d EMA13 for trend filter
-    close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    # Calculate Williams Fractals
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n+1] and high[n-1] > high[n+2]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n+1] and low[n-1] < low[n+2]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Williams Alligator: SMAs of median price (HL/2)
-    median_price = (high + low) / 2
-    # Jaws: SMA(13, 8) - 13-period SMA shifted 8 bars ahead
-    # Teeth: SMA(8, 5) - 8-period SMA shifted 5 bars ahead
-    # Lips: SMA(5, 3) - 5-period SMA shifted 3 bars ahead
-    jaws_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    bearish = np.zeros(len(high_1d), dtype=bool)
+    bullish = np.zeros(len(low_1d), dtype=bool)
     
-    # Shift to avoid look-ahead (Williams Alligator uses future values)
-    jaws = np.roll(jaws_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    # Set initial values to NaN due to roll
-    jaws[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    for i in range(2, len(high_1d) - 2):
+        if (high[i-2] < high[i-1] and 
+            high[i] < high[i-1] and 
+            high[i+1] < high[i-1] and 
+            high[i+2] < high[i-1]):
+            bearish[i] = True
+        if (low[i-2] > low[i-1] and 
+            low[i] > low[i-1] and 
+            low[i+1] > low[i-1] and 
+            low[i+2] > low[i-1]):
+            bullish[i] = True
     
-    # Align Alligator lines to 12h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Convert to levels: bearish fractal = resistance, bullish fractal = support
+    fractal_resistance = np.where(bearish, high_1d, np.nan)
+    fractal_support = np.where(bullish, low_1d, np.nan)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13_1d_aligned
-    bear_power = low - ema13_1d_aligned
+    # Forward fill to get the most recent fractal level
+    fractal_resistance = pd.Series(fractal_resistance).ffill().values
+    fractal_support = pd.Series(fractal_support).ffill().values
     
-    # Volume confirmation: volume > 1.5 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Align fractal levels to 4h timeframe with 2-bar delay for confirmation
+    # Williams fractals need 2 additional bars after the center bar for confirmation
+    resistance_aligned = align_htf_to_ltf(prices, df_1d, fractal_resistance, additional_delay_bars=2)
+    support_aligned = align_htf_to_ltf(prices, df_1d, fractal_support, additional_delay_bars=2)
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Volume confirmation: volume > 2.0 * 20-period average (stricter for fewer trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Alligator and volume MA
-    start_idx = max(13, 30)
+    # Warmup: need enough data for EMA and volume MA
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema13_1d_aligned[i])):
+        if (np.isnan(resistance_aligned[i]) or np.isnan(support_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        jaw = jaws_aligned[i]
-        tooth = teeth_aligned[i]
-        lip = lips_aligned[i]
-        ema_trend = ema13_1d_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        resistance = resistance_aligned[i]
+        support = support_aligned[i]
+        ema_trend = ema50_12h_aligned[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: price > Teeth, Bull Power > 0, volume spike, and uptrend alignment
-            if close[i] > tooth and bull > 0 and vol_spike_val and close[i] > ema_trend:
+            # Long: price breaks above recent fractal resistance with uptrend and volume spike
+            if close[i] > resistance and vol_spike_val and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: price < Teeth, Bear Power < 0, volume spike, and downtrend alignment
-            elif close[i] < tooth and bear < 0 and vol_spike_val and close[i] < ema_trend:
+            # Short: price breaks below recent fractal support with downtrend and volume spike
+            elif close[i] < support and vol_spike_val and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price < Lips or Bear Power < 0 or trend turns down
-            if close[i] < lip or bear < 0 or close[i] < ema_trend:
+            # Exit long: price falls below recent fractal support or trend turns down
+            if close[i] < support or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price > Lips or Bull Power > 0 or trend turns up
-            if close[i] > lip or bull > 0 or close[i] > ema_trend:
+            # Exit short: price rises above recent fractal resistance or trend turns up
+            if close[i] > resistance or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ElderRay_TrendFilter"
-timeframe = "12h"
+name = "4h_ChaosBreakout_Volume_12hTrend"
+timeframe = "4h"
 leverage = 1.0
