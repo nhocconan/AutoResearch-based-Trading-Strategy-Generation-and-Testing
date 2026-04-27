@@ -13,49 +13,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for 100-bar EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Camarilla: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
-    # We'll use H3 and L3 for tighter levels: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    camarilla_h3 = np.full(len(close_1d), np.nan)
-    camarilla_l3 = np.full(len(close_1d), np.nan)
-    for i in range(1, len(close_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        camarilla_h3[i] = prev_close + 1.1 * (prev_high - prev_low) / 4
-        camarilla_l3[i] = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # Calculate 100 EMA on daily
+    ema_period = 100
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        # Initialize with SMA
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                        ema_1d[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for ATR volatility filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA50
-    ema_period = 50
-    ema_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= ema_period:
-        ema_12h[ema_period - 1] = np.mean(close_12h[:ema_period])
-        for i in range(ema_period, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * (2 / (ema_period + 1)) + 
-                         ema_12h[i-1] * (1 - (2 / (ema_period + 1))))
+    # Calculate ATR(14) on 4h
+    tr = np.zeros(len(close_4h))
+    tr[0] = high_4h[0] - low_4h[0]
+    for i in range(1, len(close_4h)):
+        tr[i] = max(high_4h[i] - low_4h[i], 
+                   abs(high_4h[i] - close_4h[i-1]), 
+                   abs(low_4h[i] - close_4h[i-1]))
     
-    # Align indicators to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    atr_period = 14
+    atr_4h = np.full(len(close_4h), np.nan)
+    if len(tr) >= atr_period:
+        atr_4h[atr_period - 1] = np.mean(tr[:atr_period])
+        for i in range(atr_period, len(tr)):
+            atr_4h[i] = (tr[i] * (1 / atr_period) + 
+                        atr_4h[i-1] * (1 - 1 / atr_period))
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Align indicators to 4h timeframe
+    ema_1d_aligned_4h = align_htf_to_ltf(df_4h['open_time'].values, df_1d, ema_1d)
+    atr_4h_aligned_4h = atr_4h  # Already on 4h timeframe
+    
+    # Align from 4h to 15m
+    ema_1d_aligned = align_htf_to_ltf(prices, df_4h, ema_1d_aligned_4h)
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h_aligned_4h)
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
@@ -65,13 +73,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Camarilla, EMA, and volume MA
-    start_idx = max(1, ema_period, vol_period)
+    # Warmup: need EMA, ATR, and volume MA
+    start_idx = max(100, 14, vol_period)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -79,32 +87,32 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price crosses above Camarilla H3 + volume spike + above 12h EMA50
-            if (price > camarilla_h3_aligned[i] and 
-                vol_ratio > 1.3 and 
-                price > ema_12h_aligned[i]):
+            # Long: Price above daily EMA100 + volume spike + volatility filter
+            if (price > ema_1d_aligned[i] and 
+                vol_ratio > 1.5 and 
+                atr_4h_aligned[i] > 0):
                 signals[i] = size
                 position = 1
-            # Short: Price crosses below Camarilla L3 + volume spike + below 12h EMA50
-            elif (price < camarilla_l3_aligned[i] and 
-                  vol_ratio > 1.3 and 
-                  price < ema_12h_aligned[i]):
+            # Short: Price below daily EMA100 + volume spike + volatility filter
+            elif (price < ema_1d_aligned[i] and 
+                  vol_ratio > 1.5 and 
+                  atr_4h_aligned[i] > 0):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below Camarilla L3 OR loses trend
-            if (price < camarilla_l3_aligned[i] or 
-                price < ema_12h_aligned[i]):
+            # Long exit: Price crosses below daily EMA100 OR volatility drops
+            if (price < ema_1d_aligned[i] or 
+                atr_4h_aligned[i] < atr_4h_aligned[i-1] * 0.8):  # Volatility contraction
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses above Camarilla H3 OR loses trend
-            if (price > camarilla_h3_aligned[i] or 
-                price > ema_12h_aligned[i]):
+            # Short exit: Price crosses above daily EMA100 OR volatility drops
+            if (price > ema_1d_aligned[i] or 
+                atr_4h_aligned[i] < atr_4h_aligned[i-1] * 0.8):  # Volatility contraction
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_12hEMA50_Volume"
-timeframe = "12h"
+name = "15m_DailyEMA100_Volume_VolatilityFilter"
+timeframe = "15m"
 leverage = 1.0
