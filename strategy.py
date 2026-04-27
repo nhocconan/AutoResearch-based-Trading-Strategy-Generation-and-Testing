@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot R1/S1 Breakout with 1d Supertrend Filter and Volume Spike.
-Long when: 1) Price breaks above R1, 2) 1d Supertrend = bullish, 3) Volume > 1.5x 20-period average.
-Short when: 1) Price breaks below S1, 2) 1d Supertrend = bearish, 3) Volume > 1.5x 20-period average.
-Exit when price returns to pivot point (mean reversion).
-Designed for 4h timeframe: targets 75-200 total trades over 4 years (19-50/year).
-Uses 1d Supertrend (ATR=10, mult=3) as trend filter to avoid whipsaws.
+1d Weekly Donchian Breakout with Weekly EMA Trend and Volume Confirmation.
+Long when: 1) Price breaks above weekly Donchian high (20-period), 2) Price > weekly EMA20 (bullish trend), 3) Volume > 2x 20-period average.
+Short when: 1) Price breaks below weekly Donchian low (20-period), 2) Price < weekly EMA20 (bearish trend), 3) Volume > 2x 20-period average.
+Exit when price returns to weekly midpoint (mean reversion) or trend reverses.
+Designed for 1d timeframe: targets 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -22,84 +21,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Supertrend trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Donchian and EMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate Supertrend on daily timeframe
-    atr_period = 10
-    multiplier = 3
+    # Weekly Donchian channels (20-period)
+    donchian_high = np.full(len(high_1w), np.nan, dtype=np.float64)
+    donchian_low = np.full(len(low_1w), np.nan, dtype=np.float64)
+    for i in range(19, len(high_1w)):
+        donchian_high[i] = np.max(high_1w[i-19:i+1])
+        donchian_low[i] = np.min(low_1w[i-19:i+1])
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # ATR
-    atr = np.full_like(close_1d, np.nan, dtype=np.float64)
-    for i in range(atr_period, len(close_1d)):
-        if i == atr_period:
-            atr[i] = np.mean(tr[:i+1])
-        else:
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    # Align weekly data to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Supertrend calculation
-    hl2 = (high_1d + low_1d) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.full_like(close_1d, np.nan, dtype=np.float64)
-    direction = np.full_like(close_1d, np.nan, dtype=np.float64)  # 1 for up, -1 for down
-    
-    for i in range(atr_period, len(close_1d)):
-        if i == atr_period:
-            supertrend[i] = upper_band[i]
-            direction[i] = 1
-        else:
-            if supertrend[i-1] == upper_band[i-1]:
-                if close_1d[i] <= upper_band[i]:
-                    supertrend[i] = upper_band[i]
-                else:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = -1
-            else:
-                if close_1d[i] >= lower_band[i]:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = -1
-                else:
-                    supertrend[i] = upper_band[i]
-                    direction[i] = 1
-    
-    # Supertrend direction (1 = bullish, -1 = bearish)
-    supertrend_dir = direction
-    
-    # Align Supertrend direction to 4h timeframe
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_1d, supertrend_dir)
-    
-    # Calculate pivot points and Camarilla levels from previous day
-    # We need daily high, low, close to calculate today's Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate pivot and Camarilla levels (R1, S1)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align daily levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 2x 20-period average
     vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -108,50 +55,50 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Supertrend (10 periods), daily data, volume MA (20 periods)
-    start_idx = max(20, 10)
+    # Warmup: need weekly Donchian (20 periods), weekly EMA (20 periods), volume MA (20 periods)
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
-        trend = supertrend_dir_aligned[i]
-        pivot_level = pivot_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
+        donch_high = donchian_high_aligned[i]
+        donch_low = donchian_low_aligned[i]
+        ema_trend = ema_20_1w_aligned[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
-        # Volume filter: volume > 1.5x average
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Volume filter: volume > 2x average
+        vol_filter = vol_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: price breaks above R1 + bullish trend + volume spike
-            if price > r1_level and trend > 0 and vol_filter:
+            # Long: price breaks above weekly Donchian high + bullish trend + volume spike
+            if price > donch_high and price > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S1 + bearish trend + volume spike
-            elif price < s1_level and trend < 0 and vol_filter:
+            # Short: price breaks below weekly Donchian low + bearish trend + volume spike
+            elif price < donch_low and price < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to pivot (mean reversion)
-            if price <= pivot_level:
+            # Exit long: price returns to weekly midpoint (mean reversion) or trend turns bearish
+            weekly_mid = (donch_high + donch_low) / 2.0
+            if price <= weekly_mid or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to pivot (mean reversion)
-            if price >= pivot_level:
+            # Exit short: price returns to weekly midpoint (mean reversion) or trend turns bullish
+            weekly_mid = (donch_high + donch_low) / 2.0
+            if price >= weekly_mid or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -159,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dSupertrend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_Donchian_Breakout_WeeklyEMA20_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
