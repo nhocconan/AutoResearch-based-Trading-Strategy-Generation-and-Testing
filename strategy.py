@@ -38,7 +38,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
     
-    # Donchian channels (20-period) on 6h
+    # Donchian channels (20-period) on 12h
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_VolumeSpike_DualTrendFilter_1d_1w"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_VolumeSpike_DualTrendFilter_1d_1w"
+timeframe = "12h"
 leverage = 1.0
