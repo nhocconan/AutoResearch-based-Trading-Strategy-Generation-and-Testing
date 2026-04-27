@@ -13,14 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for higher timeframe context
+    # Get 12h and 1d data for higher timeframe context
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    
+    # Calculate 12h EMA34 for trend direction
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     # Calculate 1d RSI for momentum filter
     delta = np.diff(close_1d, prepend=close_1d[0])
@@ -32,7 +38,7 @@ def generate_signals(prices):
     rsi_1d = 100 - (100 / (1 + rs))
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate 1d ADX for trend strength
+    # Calculate 1d ATR for volatility filter
     tr_1d = np.maximum(
         high_1d[1:] - low_1d[1:],
         np.maximum(
@@ -41,21 +47,10 @@ def generate_signals(prices):
         )
     )
     tr_1d = np.concatenate([[np.nan], tr_1d])
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 6-hour Donchian channels (20-period)
+    # 12h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -71,21 +66,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Trend strength filter: ADX > 20
-        trend_filter = adx_1d_aligned[i] > 20
+        # Trend filter: price above/below 12h EMA34
+        trend_up = close[i] > ema34_12h_aligned[i]
+        trend_down = close[i] < ema34_12h_aligned[i]
         
         # Momentum filter: RSI between 30 and 70 (avoid extremes)
         mom_filter = (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
         
-        # Long conditions: price breaks above upper Donchian + trend + momentum + volume
-        long_breakout = (close[i] > highest_high[i-1] and trend_filter and mom_filter and volume_filter[i])
-        # Short conditions: price breaks below lower Donchian + trend + momentum + volume
-        short_breakout = (close[i] < lowest_low[i-1] and trend_filter and mom_filter and volume_filter[i])
+        # Volatility filter: ATR > 0 (always true but keeps structure)
+        vol_filter = atr_1d_aligned[i] > 0
+        
+        # Long conditions: price breaks above upper Donchian + trend up + momentum + volume
+        long_breakout = (close[i] > highest_high[i-1] and trend_up and mom_filter and vol_filter and volume_filter[i])
+        # Short conditions: price breaks below lower Donchian + trend down + momentum + volume
+        short_breakout = (close[i] < lowest_low[i-1] and trend_down and mom_filter and vol_filter and volume_filter[i])
         
         if long_breakout:
             signals[i] = 0.25
@@ -111,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dRSI_ADX_VolumeFilter"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_12hEMA34_1dRSI_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
