@@ -13,12 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and volume (HTF)
+    # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for trend filter (HTF)
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
@@ -38,18 +38,18 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily volume average for volume filter
+    # Calculate daily average volume for volume filter
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 12h timeframe
+    # Align indicators to daily timeframe
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.25   # 25% position size
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyTrend_VolumeVolatilityFilter"
-timeframe = "12h"
+name = "1d_WeeklyTrend_VolumeVolatilityFilter"
+timeframe = "1d"
 leverage = 1.0
