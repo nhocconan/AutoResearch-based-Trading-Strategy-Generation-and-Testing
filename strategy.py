@@ -21,25 +21,24 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate 1d EMA 34 for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h Donchian channels (20-period for breakout)
+    # 1h Donchian channels (20-period for tighter entries)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 30-period average (strong filter)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume filter: volume > 1.5x 20-period average (moderate filter)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -59,10 +58,10 @@ def generate_signals(prices):
         short_breakout = (close[i] < lowest_low[i-1] and price_below_ema and volume_filter[i])
         
         if long_breakout:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_breakout:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         # Exit conditions: opposite Donchian breakout
         elif position == 1 and close[i] < lowest_low[i-1]:
@@ -74,14 +73,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "1h_Donchian20_Breakout_1dEMA34_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
