@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Camarilla pivot point reversal with volume confirmation and 12-hour trend filter.
-Trades reversals at key Camarilla levels (L3, L4, H3, H4) in the direction of the 12-hour trend.
-Designed to work in both bull and bear markets by using the 12-hour trend as filter.
-Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag.
+Hypothesis: 1-hour range trading with 4-hour trend filter and volume confirmation.
+Trades mean reversion at 1-hour Bollinger Bands (20,2) when 4-hour trend is strong.
+In bull markets: buy dips in uptrend. In bear markets: sell rallies in downtrend.
+Uses volume filter to avoid low-liquidity whipsaws.
+Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Position size: 0.20 (20%) to manage drawdown.
 """
 import numpy as np
 import pandas as pd
@@ -19,66 +21,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4-hour data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
-    
-    # Camarilla levels: H4, H3, L3, L4
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_val = high_prev - low_prev
-    
-    H4 = close_prev + range_val * 1.1 / 2
-    H3 = close_prev + range_val * 1.1 / 4
-    L3 = close_prev - range_val * 1.1 / 4
-    L4 = close_prev - range_val * 1.1 / 2
-    
-    # Align Camarilla levels
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Get 12-hour data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12-hour EMA(50) for trend
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4-hour EMA(34) for trend
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
     # Get 4-hour data for volume filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 4-hour volume MA(20)
     vol_4h = df_4h['volume'].values
     vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
     
+    # Calculate 1-hour Bollinger Bands (20,2)
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean()
+    bb_std = close_series.rolling(window=20, min_periods=20).std()
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_middle_vals = bb_middle.values
+    bb_upper_vals = bb_upper.values
+    bb_lower_vals = bb_lower.values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need Camarilla levels, volume MA, and 12h EMA
-    start_idx = max(2, 20, 50)  # max of lookbacks
+    # Warmup: need 4h EMA, volume MA, and BB
+    start_idx = max(34, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(H4_aligned[i]) or np.isnan(H3_aligned[i]) or 
-            np.isnan(L3_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(ema_34_4h_aligned[i]) or 
+            np.isnan(vol_ma_20_4h_aligned[i]) or
+            np.isnan(bb_middle_vals[i]) or np.isnan(bb_upper_vals[i]) or np.isnan(bb_lower_vals[i])):
             signals[i] = 0.0
             continue
         
@@ -88,41 +70,42 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        H4 = H4_aligned[i]
-        H3 = H3_aligned[i]
-        L3 = L3_aligned[i]
-        L4 = L4_aligned[i]
+        ema_34_4h_val = ema_34_4h_aligned[i]
         vol_now = volume[i]
         vol_ma = vol_ma_20_4h_aligned[i]
-        trend_12h = ema_50_12h_aligned[i]
+        bb_upper = bb_upper_vals[i]
+        bb_middle = bb_middle_vals[i]
+        bb_lower = bb_lower_vals[i]
         
-        # Volume filter: volume > 1.5x 4h average (moderate to balance trades)
-        vol_filter = vol_now > 1.5 * vol_ma
+        # Volume filter: volume > 1.3x 4h average
+        vol_filter = vol_now > 1.3 * vol_ma
         
-        # Entry conditions: Camarilla level reversal with volume and 12h trend alignment
+        # Trend determination from 4h EMA
+        uptrend = close[i] > ema_34_4h_val
+        downtrend = close[i] < ema_34_4h_val
+        
+        # Entry conditions: mean reversion with trend filter
         if position == 0:
-            # Long: bounce from L3 or L4 + volume + 12h uptrend
-            if ((close[i] > L3 and close[i] <= L3 * 1.001) or 
-                (close[i] > L4 and close[i] <= L4 * 1.001)) and vol_filter and close[i] > trend_12h:
+            # Long: pullback to lower BB in uptrend with volume
+            if close[i] <= bb_lower and uptrend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: rejection from H3 or H4 + volume + 12h downtrend
-            elif ((close[i] < H3 and close[i] >= H3 * 0.999) or 
-                  (close[i] < H4 and close[i] >= H4 * 0.999)) and vol_filter and close[i] < trend_12h:
+            # Short: rally to upper BB in downtrend with volume
+            elif close[i] >= bb_upper and downtrend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below 12h EMA or at opposite Camarilla level (H3)
-            if close[i] < trend_12h or close[i] >= H3:
+            # Exit long: return to middle BB or trend reversal
+            if close[i] >= bb_middle or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above 12h EMA or at opposite Camarilla level (L3)
-            if close[i] > trend_12h or close[i] <= L3:
+            # Exit short: return to middle BB or trend reversal
+            if close[i] <= bb_middle or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_CamarillaReversal_Volume_12hTrendFilter"
-timeframe = "4h"
+name = "1h_BollingerMeanReversion_4hTrendFilter_Volume"
+timeframe = "1h"
 leverage = 1.0
