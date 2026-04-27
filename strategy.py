@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily pivot points (R3/S3 levels) with volume confirmation and daily EMA(34) trend filter.
+# Hypothesis: 4h strategy using daily pivot points (R3/S3 levels) with volume confirmation and daily EMA(34) trend filter.
 # Enters long when price breaks above S3 with volume, short when breaks below R3 with volume.
-# Designed for ~15-25 trades/year by requiring significant breakouts (R3/S3) rather than minor S1/R1 levels.
+# Designed for ~25-40 trades/year by requiring significant breakouts (R3/S3) rather than minor S1/R1 levels.
 # Works in bull/bear: buys support breaks, sells resistance breaks.
 # Uses strict volume filter (volume > 2x 30-period average) to avoid false breakouts.
 # Exit when price returns to pivot or trend changes.
@@ -45,7 +45,7 @@ def generate_signals(prices):
     r3 = high_prev + 2 * (pivot - low_prev)
     s3 = low_prev - 2 * (high_prev - pivot)
     
-    # Align daily pivots to 12h
+    # Align daily pivots to 4h
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -54,7 +54,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 2.0 x 30-period average (12h) for significance
+    # Volume filter: volume > 2.0 x 30-period average (4h) for significance
     vol_ma_30 = np.full(n, np.nan)
     for i in range(29, n):
         vol_ma_30[i] = np.mean(volume[i-29:i+1])
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_S3R3_Volume_Trend"
-timeframe = "12h"
+name = "4h_Pivot_S3R3_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
