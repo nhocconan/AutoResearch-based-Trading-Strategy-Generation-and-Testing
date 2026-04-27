@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Signal_1dTrend_Volume
-Hypothesis: Vortex Indicator identifies trend direction and strength; combined with 1d EMA50 trend filter and volume spike confirmation to capture strong trends while avoiding whipsaws. Works in bull markets via strong VI+ signals and in bear markets via strong VI- signals. Targets ~20-30 trades/year on 4h to minimize fee drag.
+6h_Aroon_Trend_1wADX_Filter
+Hypothesis: Aroon identifies trend strength and direction (new highs/lows over 25 periods); combined with weekly ADX filter (>25) to ensure trending market, avoiding whipsaws in ranging markets. Works in bull markets via Aroon-up strength and in bear markets via Aroon-down strength. Targets ~15-25 trades/year on 6h to minimize fee drag.
 """
 
 import numpy as np
@@ -10,95 +10,122 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly ADX (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Vortex Indicator (14-period) on 4h data
-    # VM+ = |High - Prior Low|, VM- = |Low - Prior High|
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.abs(high[0] - low[0])  # first value
-    vm_minus[0] = np.abs(low[0] - high[0])  # first value
-    
-    # Sum of true range
-    tr1 = np.abs(high - np.roll(low, 1))
-    tr2 = np.abs(low - np.roll(high, 1))
-    tr3 = np.abs(high - np.roll(high, 1))
+    # True Range
+    tr1 = np.abs(high_1w - np.roll(low_1w, 1))
+    tr2 = np.abs(low_1w - np.roll(high_1w, 1))
+    tr3 = np.abs(high_1w - np.roll(high_1w, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = high[0] - low[0]  # first true range
+    tr[0] = high_1w[0] - low_1w[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
     # Smooth over 14 periods
-    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / \
-              pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / \
-               pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Volume confirmation: volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # DI+ and DI-
+    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1w = adx  # already weekly
+    
+    # Align weekly ADX to 6h
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Aroon (25-period) on 6h data
+    # Aroon Up: ((25 - periods since 25-period high) / 25) * 100
+    # Aroon Down: ((25 - periods since 25-period low) / 25) * 100
+    aroon_period = 25
+    aroon_up = np.full(n, np.nan)
+    aroon_down = np.full(n, np.nan)
+    
+    for i in range(aroon_period - 1, n):
+        window_high = high[i - aroon_period + 1:i + 1]
+        window_low = low[i - aroon_period + 1:i + 1]
+        periods_since_high = aroon_period - 1 - np.argmax(window_high)
+        periods_since_low = aroon_period - 1 - np.argmin(window_low)
+        aroon_up[i] = ((aroon_period - periods_since_high) / aroon_period) * 100
+        aroon_down[i] = ((aroon_period - periods_since_low) / aroon_period) * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Vortex, EMA, and volume MA
-    start_idx = max(50, 20)
+    # Warmup: need enough data for Aroon and weekly ADX
+    start_idx = max(30, aroon_period)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(aroon_up[i]) or np.isnan(aroon_down[i]) or 
+            np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vi_p = vi_plus[i]
-        vi_m = vi_minus[i]
-        ema_trend = ema50_1d_aligned[i]
-        vol_spike_val = vol_spike[i]
+        aroon_up_val = aroon_up[i]
+        aroon_down_val = aroon_down[i]
+        adx_val = adx_1w_aligned[i]
         
-        if position == 0:
-            # Long: VI+ > VI- (bullish trend) with uptrend and volume spike
-            if vi_p > vi_m and vol_spike_val and close[i] > ema_trend:
-                signals[i] = size
-                position = 1
-            # Short: VI- > VI+ (bearish trend) with downtrend and volume spike
-            elif vi_m > vi_p and vol_spike_val and close[i] < ema_trend:
-                signals[i] = -size
-                position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # Exit long: trend weakens (VI- > VI+) or trend turns down
-            if vi_m > vi_p or close[i] < ema_trend:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = size
-        elif position == -1:
-            # Exit short: trend weakens (VI+ > VI-) or trend turns up
-            if vi_p > vi_m or close[i] > ema_trend:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -size
+        # Only trade when weekly ADX > 25 (trending market)
+        if adx_val > 25:
+            if position == 0:
+                # Long: Aroon Up > Aroon Down (bullish strength)
+                if aroon_up_val > aroon_down_val:
+                    signals[i] = size
+                    position = 1
+                # Short: Aroon Down > Aroon Up (bearish strength)
+                elif aroon_down_val > aroon_up_val:
+                    signals[i] = -size
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            elif position == 1:
+                # Exit long: Aroon Down > Aroon Up (trend weakness)
+                if aroon_down_val > aroon_up_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = size
+            elif position == -1:
+                # Exit short: Aroon Up > Aroon Down (trend weakness)
+                if aroon_up_val > aroon_down_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -size
+        else:
+            # Range market: stay flat
+            signals[i] = 0.0
+            position = 0
     
     return signals
 
-name = "4h_Vortex_Signal_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Aroon_Trend_1wADX_Filter"
+timeframe = "6h"
 leverage = 1.0
