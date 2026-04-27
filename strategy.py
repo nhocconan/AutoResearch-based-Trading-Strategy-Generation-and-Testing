@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_WeeklyPivotDir_VolumeConfirm
-Hypothesis: 6h strategy using Donchian(20) breakouts with weekly pivot direction filter (from 1w HTF) and volume confirmation. Weekly pivot provides robust trend filter that works in both bull and bear markets by identifying institutional supply/demand zones. Volume confirmation ensures breakout has participation. Designed for low trade frequency (12-30/year) with discrete position sizing to minimize fee drag. Uses 6h primary timeframe with 1d/1w HTF for multi-timeframe alignment.
+12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_Regime
+Hypothesis: 12h strategy using Camarilla R1/S1 breakouts from 1d pivot levels, filtered by 1w EMA50 trend direction and volume spike confirmation. Uses ATR-based volatility regime filter to avoid low-volatility whipsaws. Designed for BTC/ETH robustness: 1w trend filter ensures alignment with higher timeframe momentum, volume confirms breakout participation, volatility regime avoids chop. Targets 50-150 total trades over 4 years (12-37/year) with 0.25 position size. Uses discrete levels to minimize fee drag. Works in bull/bear via 1w trend filter and volatility regime.
 """
 
 import numpy as np
@@ -18,57 +18,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channel calculation (20-period)
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate Donchian(20) on 1d data: highest high and lowest low over 20 days
-    highest_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    # Align to 6h timeframe (wait for completed 1d bar)
-    donchian_high = align_htf_to_ltf(prices, df_1d, highest_high)
-    donchian_low = align_htf_to_ltf(prices, df_1d, lowest_low)
-    
-    # Get 1w data for weekly pivot direction (more robust than daily)
+    # Get 1w data for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
-    # Weekly pivot: (weekly_high + weekly_low + weekly_close) / 3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Align weekly pivot to 6h timeframe (wait for completed 1w bar)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    # Get 1d data for Camarilla R1/S1 levels (from previous completed 1d bar)
+    df_1d = get_htf_data(prices, '1d')
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    rng = prev_high - prev_low
+    r1 = prev_close + (rng * 1.08)   # R1 level
+    s1 = prev_close - (rng * 1.08)   # S1 level
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume confirmation: current volume > 2.5 * 30-period average
+    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (2.5 * vol_avg)
+    
+    # ATR-based regime filter: avoid extremely low volatility (choppy sideways)
+    # ATR(30) > 30-period moving average of ATR(30) * 0.7
+    tr1 = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr1])  # same length as close
+    atr = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
+    atr_ma = pd.Series(atr).rolling(window=30, min_periods=30).mean().values
+    volatility_regime = atr > (0.7 * atr_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Fixed position size to minimize churn
     
-    # Warmup: need Donchian(20) (20), weekly pivot, volume avg (20)
-    start_idx = max(20, 20)
+    # Warmup: need 1w EMA50 (50), 1d shift(1) for Camarilla, vol avg (30), ATR (30+30 for EMA+MA)
+    start_idx = max(50 + 1, 1 + 1, 30, 30 + 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_confirm[i]) or
+            np.isnan(volatility_regime[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
-        weekly_pivot_val = weekly_pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_val = ema_50_1w_aligned[i]
         vol_conf = volume_confirm[i]
+        vol_reg = volatility_regime[i]
         
         if position == 0:
-            # Look for entry: Donchian breakout with weekly pivot direction filter and volume confirmation
-            long_condition = (close_val > donchian_high_val and 
-                            close_val > weekly_pivot_val and  # Above weekly pivot = bullish bias
-                            vol_conf)
-            short_condition = (close_val < donchian_low_val and 
-                             close_val < weekly_pivot_val and  # Below weekly pivot = bearish bias
-                             vol_conf)
+            # Look for entry: Camarilla R1/S1 breakout with 1w EMA50 alignment, volume confirmation, and volatility regime
+            long_condition = (close_val > r1_val and 
+                            close_val > ema_val and 
+                            vol_conf and 
+                            vol_reg)
+            short_condition = (close_val < s1_val and 
+                             close_val < ema_val and 
+                             vol_conf and 
+                             vol_reg)
             
             if long_condition:
                 signals[i] = size
@@ -77,15 +87,15 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price closes below weekly pivot (trend change) or Donchian low (mean reversion)
-            if close_val < weekly_pivot_val or close_val < donchian_low_val:
+            # Exit long: price crosses below 1w EMA50 (trend reversal)
+            if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price closes above weekly pivot (trend change) or Donchian high (mean reversion)
-            if close_val > weekly_pivot_val or close_val > donchian_high_val:
+            # Exit short: price crosses above 1w EMA50 (trend reversal)
+            if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_WeeklyPivotDir_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_Regime"
+timeframe = "12h"
 leverage = 1.0
