@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT_v2
-Hypothesis: 6h strategy using Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume confirmation. 
-Adds ATR-based volatility filter to reduce whipsaws in low-volatility regimes. R3/S3 levels represent stronger 
-support/resistance than R1/S1, reducing false breakouts. Trend filter ensures alignment with daily momentum. 
-Volume spike confirms institutional participation. ATR filter ensures trades occur in sufficient volatility. 
-Designed for BTC/ETH robustness in both bull and bear markets via trend filter. Targets 50-150 trades over 4 years 
-(12-37/year) with 0.25 position size. Uses discrete levels to minimize fee drag.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 4h strategy using Camarilla R3/S3 breakouts from previous 1d bar, with 1d EMA34 trend filter and volume confirmation. 
+R3/S3 levels represent stronger support/resistance than R1/S1, reducing false breakouts. 
+Trend filter ensures alignment with daily momentum. Volume spike confirms institutional participation. 
+Designed for BTC/ETH robustness in both bull and bear markets via trend filter. 
+Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position size. 
+Uses discrete levels to minimize fee drag.
 """
 
 import numpy as np
@@ -28,14 +28,6 @@ def generate_signals(prices):
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Get 1d data for ATR (14) for volatility filter
-    tr1 = pd.Series(df_1d['high']).values - pd.Series(df_1d['low']).values
-    tr2 = np.abs(pd.Series(df_1d['high']).values - pd.Series(df_1d['close']).shift(1).values)
-    tr3 = np.abs(pd.Series(df_1d['low']).values - pd.Series(df_1d['close']).shift(1).values)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
     # Get 1d data for Camarilla R3/S3 levels (from previous completed 1d bar)
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -50,22 +42,17 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
-    # Volatility filter: ATR > 0.5 * 50-period ATR average (avoid low-vol chop)
-    atr_avg_50 = pd.Series(atr_14_aligned).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr_14_aligned > (0.5 * atr_avg_50)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Fixed position size to minimize churn
     
-    # Warmup: need 1d EMA34 (34), ATR (14+50), shift(1) for Camarilla, vol avg (20)
-    start_idx = max(34 + 1, 14 + 50 + 1, 1 + 1, 20)
+    # Warmup: need 1d EMA34 (34), 1d shift(1) for Camarilla, vol avg (20)
+    start_idx = max(34 + 1, 1 + 1, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i]) or
-            np.isnan(vol_filter[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
@@ -74,18 +61,15 @@ def generate_signals(prices):
         s3_val = s3_aligned[i]
         ema_val = ema_34_aligned[i]
         vol_conf = volume_confirm[i]
-        vol_filt = vol_filter[i]
         
         if position == 0:
-            # Look for entry: Camarilla R3/S3 breakout with 1d EMA34 alignment, volume confirmation, and volatility filter
+            # Look for entry: Camarilla R3/S3 breakout with 1d EMA34 alignment and volume confirmation
             long_condition = (close_val > r3_val and 
                             close_val > ema_val and 
-                            vol_conf and 
-                            vol_filt)
+                            vol_conf)
             short_condition = (close_val < s3_val and 
                              close_val < ema_val and 
-                             vol_conf and 
-                             vol_filt)
+                             vol_conf)
             
             if long_condition:
                 signals[i] = size
@@ -110,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT_v2"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
