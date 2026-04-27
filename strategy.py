@@ -18,23 +18,8 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day ATR (14-period) for volatility and stop loss
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.zeros(len(close_1d))
-    atr_1d = np.zeros(len(close_1d))
-    if len(close_1d) >= 2:
-        tr1[0] = high_1d[0] - low_1d[0]
-        for i in range(1, len(close_1d)):
-            tr1[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
-        # Calculate ATR using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-        if len(tr1) >= 14:
-            atr_1d[13] = np.mean(tr1[:14])
-            for i in range(14, len(tr1)):
-                atr_1d[i] = (atr_1d[i-1] * 13 + tr1[i]) / 14
-    
     # Calculate 1-day Exponential Moving Average (34-period) for trend
+    close_1d = df_1d['close'].values
     ema_34_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 34:
         multiplier = 2 / (34 + 1)
@@ -42,9 +27,21 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema_34_1d[i] = (close_1d[i] * multiplier) + (ema_34_1d[i-1] * (1 - multiplier))
     
-    # Align 1d indicators to 4h timeframe
+    # Calculate 1-day Bollinger Bands (20, 2.0)
+    sma_20_1d = np.full(len(close_1d), np.nan)
+    std_20_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        for i in range(19, len(close_1d)):
+            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
+            std_20_1d[i] = np.std(close_1d[i-19:i+1])
+    
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    
+    # Align 1d indicators to 4h timeframe (primary timeframe)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
     # Calculate 4-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
@@ -61,7 +58,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(upper_bb_1d_aligned[i]) or 
+            np.isnan(lower_bb_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -73,12 +71,12 @@ def generate_signals(prices):
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price above EMA34 and breaks with volume
-            if price > ema_34_1d_aligned[i] and vol_filter:
+            # Long: Price above EMA34 and breaks above upper Bollinger Band with volume
+            if price > ema_34_1d_aligned[i] and price > upper_bb_1d_aligned[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price below EMA34 and breaks with volume
-            elif price < ema_34_1d_aligned[i] and vol_filter:
+            # Short: Price below EMA34 and breaks below lower Bollinger Band with volume
+            elif price < ema_34_1d_aligned[i] and price < lower_bb_1d_aligned[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
@@ -100,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_ATR_Volume"
+name = "4h_EMA34_BB20_Volume"
 timeframe = "4h"
 leverage = 1.0
