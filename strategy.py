@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,86 +13,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA trend filter (21-period)
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Daily ATR for volatility filter
+    # Get daily data for pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate Camarilla pivot levels from previous daily bar
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # 4h ATR for stoploss
-    tr_4h1 = high[1:] - low[1:]
-    tr_4h2 = np.abs(high[1:] - close[:-1])
-    tr_4h3 = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))])
-    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Daily EMA trend filter (34-period)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: volume > 2.5 x 12-period average (12h periods = 6 days)
+    vol_ma_12 = np.full(n, np.nan)
+    for i in range(11, n):
+        vol_ma_12[i] = np.mean(volume[i-11:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need weekly EMA (21), daily ATR (14)
-    start_idx = max(21, 14)
+    # Warmup: need Camarilla (1 day), EMA (34), volume MA (12)
+    start_idx = max(1, 34, 11)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(atr_14_4h[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_12[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr_4h = atr_14_4h[i]
+        vol_now = volume[i]
+        vol_avg = vol_ma_12[i]
         
-        # Trend filter from weekly EMA
-        bullish_trend = price > ema_21_1w_aligned[i]
-        bearish_trend = price < ema_21_1w_aligned[i]
+        # Volume filter: significant volume spike (higher threshold = fewer trades)
+        vol_filter = vol_now > 2.5 * vol_avg
         
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_14_1d_aligned[i] > 0.01 * price  # ATR > 1% of price
+        # Trend filter from 1d EMA
+        bullish_trend = price > ema_34_aligned[i]
+        bearish_trend = price < ema_34_aligned[i]
+        
+        camarilla_r3 = camarilla_r3_aligned[i]
+        camarilla_s3 = camarilla_s3_aligned[i]
         
         if position == 0:
-            # Long: price above weekly EMA + volatility filter
-            if bullish_trend and vol_filter:
+            # Long: price breaks above R3 + volume + bullish 1d trend
+            if price > camarilla_r3 and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: price below weekly EMA + volatility filter
-            elif bearish_trend and vol_filter:
+            # Short: price breaks below S3 + volume + bearish 1d trend
+            elif price < camarilla_s3 and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below weekly EMA or ATR-based stoploss
-            if not bullish_trend or price < ema_21_1w_aligned[i] - 2.0 * atr_4h:
+            # Exit long: price breaks below S3 or trend turns bearish
+            if price < camarilla_s3 or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above weekly EMA or ATR-based stoploss
-            if not bearish_trend or price > ema_21_1w_aligned[i] + 2.0 * atr_4h:
+            # Exit short: price breaks above R3 or trend turns bullish
+            if price > camarilla_r3 or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyEMA21_Trend_VolumeFilter_ATRStop"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
