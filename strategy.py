@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Volume-Weighted Average Price (VWAP) deviation with 1-week trend filter and volume confirmation.
-In bull market (price > 1-week EMA50): long when price deviates below VWAP by >1.5 standard deviations and volume > 1.3x average.
-In bear market (price < 1-week EMA50): short when price deviates above VWAP by >1.5 standard deviations and volume > 1.3x average.
-VWAP acts as dynamic support/resistance, weekly trend filters direction, volume confirms institutional participation.
+Hypothesis: 12-hour Williams %R reversal with 1-day trend filter and volume confirmation.
+In bull market (price > 1-day EMA34): long when Williams %R crosses above -80 (oversold) and volume > 1.2x average.
+In bear market (price < 1-day EMA34): short when Williams %R crosses below -20 (overbought) and volume > 1.2x average.
+Williams %R identifies momentum exhaustion, daily trend filters direction, volume confirms institutional participation.
 Target: 12-35 trades/year per symbol.
 """
 
@@ -21,108 +21,114 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for trend filter and Williams %R
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend
-    weekly_close = df_1w['close'].values
-    ema_50_1w = np.empty_like(weekly_close, dtype=np.float64)
-    ema_50_1w.fill(np.nan)
-    if len(weekly_close) >= 50:
-        alpha = 2.0 / (50 + 1)
-        ema_50_1w[49] = np.mean(weekly_close[:50])
-        for i in range(50, len(weekly_close)):
-            ema_50_1w[i] = alpha * weekly_close[i] + (1 - alpha) * ema_50_1w[i-1]
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily EMA34 for trend
+    daily_close = df_1d['close'].values
+    ema_34_1d = np.empty_like(daily_close, dtype=np.float64)
+    ema_34_1d.fill(np.nan)
+    if len(daily_close) >= 34:
+        alpha = 2.0 / (34 + 1)
+        ema_34_1d[33] = np.mean(daily_close[:34])
+        for i in range(34, len(daily_close)):
+            ema_34_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema_34_1d[i-1]
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get weekly data for volume confirmation
-    vol_1w = df_1w['volume'].values
-    vol_ma_20_1w = np.empty_like(vol_1w, dtype=np.float64)
-    vol_ma_20_1w.fill(np.nan)
-    for i in range(19, len(vol_1w)):
-        vol_ma_20_1w[i] = np.mean(vol_1w[i-19:i+1])
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
+    # Calculate daily Williams %R (14-period)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close_wr = df_1d['close'].values
     
-    # Calculate 6-hour VWAP and standard deviation
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(typical_price, np.nan), where=vwap_den!=0)
+    highest_high = np.full_like(daily_high, np.nan)
+    lowest_low = np.full_like(daily_low, np.nan)
+    for i in range(13, len(daily_high)):
+        highest_high[i] = np.max(daily_high[i-13:i+1])
+        lowest_low[i] = np.min(daily_low[i-13:i+1])
     
-    # Calculate rolling standard deviation of price-VWAP deviation
-    price_dev = typical_price - vwap
-    vwap_std = np.full_like(price_dev, np.nan)
-    for i in range(19, len(price_dev)):  # 20-period std
-        if not np.isnan(price_dev[i-19:i+1]).any():
-            vwap_std[i] = np.std(price_dev[i-19:i+1])
+    williams_r = np.full_like(daily_close, np.nan)
+    for i in range(13, len(daily_close)):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = -100 * (highest_high[i] - daily_close_wr[i]) / (highest_high[i] - lowest_low[i])
+        else:
+            williams_r[i] = -50  # neutral when range is zero
+    
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Get daily data for volume confirmation
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = np.empty_like(vol_1d, dtype=np.float64)
+    vol_ma_20_1d.fill(np.nan)
+    for i in range(19, len(vol_1d)):
+        vol_ma_20_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need VWAP std (20), weekly EMA50 (50), weekly volume MA20 (20)
-    start_idx = max(20, 50, 20)
+    # Warmup: need Williams %R (14), daily EMA34 (34), daily volume MA20 (20)
+    start_idx = max(14, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(vwap[i]) or np.isnan(vwap_std[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20_1w_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price and volume
         price_now = close[i]
         vol_now = volume[i]
-        tp_now = typical_price[i]
-        vol_ma = vol_ma_20_1w_aligned[i]
         
         # Current indicators
-        vwap_val = vwap[i]
-        vwap_std_val = vwap_std[i]
-        ema_trend = ema_50_1w_aligned[i]
+        wr_now = williams_r_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
         
-        # Weekly close price for trend comparison
-        weekly_close_price = df_1w['close'].values
-        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close_price)
-        if np.isnan(weekly_close_aligned[i]):
+        # Daily close price for trend comparison
+        daily_close_price = df_1d['close'].values
+        daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_price)
+        if np.isnan(daily_close_aligned[i]):
             signals[i] = 0.0
             continue
-        weekly_close_val = weekly_close_aligned[i]
+        daily_close_val = daily_close_aligned[i]
         
-        # Volume filter: volume > 1.3x weekly average
-        vol_filter = vol_now > 1.3 * vol_ma
+        # Volume filter: volume > 1.2x daily average
+        vol_filter = vol_now > 1.2 * vol_ma
         
-        # VWAP deviation signals
-        if vwap_std_val > 0:
-            dev_below = (vwap_val - tp_now) > (1.5 * vwap_std_val)  # Price below VWAP
-            dev_above = (tp_now - vwap_val) > (1.5 * vwap_std_val)  # Price above VWAP
+        # Williams %R signals with crossover detection
+        if i > start_idx:
+            wr_prev = williams_r_aligned[i-1]
+            wr_cross_above_80 = (wr_prev <= -80) and (wr_now > -80)  # Oversold bounce
+            wr_cross_below_20 = (wr_prev >= -20) and (wr_now < -20)  # Overbought rejection
         else:
-            dev_below = False
-            dev_above = False
+            wr_cross_above_80 = False
+            wr_cross_below_20 = False
         
         if position == 0:
-            # Bull market (price > weekly EMA50): look for long when price deviates below VWAP
-            if weekly_close_val > ema_trend and dev_below and vol_filter:
+            # Bull market (price > daily EMA34): look for long when WR crosses above -80
+            if daily_close_val > ema_trend and wr_cross_above_80 and vol_filter:
                 signals[i] = size
                 position = 1
-            # Bear market (price < weekly EMA50): look for short when price deviates above VWAP
-            elif weekly_close_val < ema_trend and dev_above and vol_filter:
+            # Bear market (price < daily EMA34): look for short when WR crosses below -20
+            elif daily_close_val < ema_trend and wr_cross_below_20 and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to VWAP or trend changes to bear
-            if tp_now >= vwap_val or weekly_close_val < ema_trend:
+            # Exit long: WR crosses above -20 (overbought) or trend changes to bear
+            if wr_now >= -20 or daily_close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to VWAP or trend changes to bull
-            if tp_now <= vwap_val or weekly_close_val > ema_trend:
+            # Exit short: WR crosses below -80 (oversold) or trend changes to bull
+            if wr_now <= -80 or daily_close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VWAP_Deviation_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_DailyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
