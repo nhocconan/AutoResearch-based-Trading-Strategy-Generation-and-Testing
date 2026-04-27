@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1D_Camarilla_R1S1_Breakout_VolumeSpike
-Hypothesis: Price breaks above/below Camarilla R1/S1 levels (from daily) with volume spike (2x average) and price above/below 1d EMA50 for trend filter.
-Camarilla levels provide institutional support/resistance that works in both bull and bear markets.
-Volume spike confirms institutional participation. EMA50 filter ensures we trade with the daily trend.
-Target: 20-35 trades/year to stay under fee drag threshold while capturing high-probability moves.
+1d_WeeklyBreakout_Pullback_v3
+Hypothesis: Breakout above weekly Donchian high with pullback to 20-day EMA support in uptrend.
+Long when price breaks above weekly Donchian(20) high, pulls back to touch or cross above 20-day EMA,
+and volume confirms (>1.5x average). Reverse for short.
+Designed to capture momentum with pullback entries for better risk-reward in both bull and bear markets.
+Target: 15-25 trades/year to minimize fee decay.
 """
 
 import numpy as np
@@ -21,90 +22,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for Donchian channels
+    df_weekly = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Formula: R4 = C + (H-L)*1.5/2, R3 = C + (H-L)*1.25/2, R2 = C + (H-L)*1.1/2, R1 = C + (H-L)*1.05/2
-    #          S1 = C - (H-L)*1.05/2, S2 = C - (H-L)*1.1/2, S3 = C - (H-L)*1.25/2, S4 = C - (H-L)*1.5/2
-    # where C = (H+L+CLOSE)/3 of previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Donchian(20) high/low
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    donchian_high = np.full(len(weekly_high), np.nan)
+    donchian_low = np.full(len(weekly_low), np.nan)
     
-    pivots = (high_1d + low_1d + close_1d) / 3
-    ranges = high_1d - low_1d
+    for i in range(20, len(weekly_high)):
+        donchian_high[i] = np.max(weekly_high[i-20:i])
+        donchian_low[i] = np.min(weekly_low[i-20:i])
     
-    r1 = pivots + ranges * 1.05 / 2
-    s1 = pivots - ranges * 1.05 / 2
+    # Calculate 20-day EMA on daily closes
+    ema_period = 20
+    ema = np.full(n, np.nan)
+    if n >= ema_period:
+        ema[ema_period - 1] = np.mean(close[:ema_period])
+        multiplier = 2 / (ema_period + 1)
+        for i in range(ema_period, n):
+            ema[i] = (close[i] * multiplier) + (ema[i-1] * (1 - multiplier))
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_1d_period = 50
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_1d_period:
-        ema_1d[ema_1d_period - 1] = np.mean(close_1d[:ema_1d_period])
-        multiplier = 2 / (ema_1d_period + 1)
-        for i in range(ema_1d_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
-    
-    # Align 1d indicators to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate 4h volume average (20-period)
-    vol_ma_20 = np.full(n, np.nan)
+    # Calculate 20-period volume average
+    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
+        vol_ma[i] = np.mean(volume[i-20:i])
+    
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup: need all indicators
-    start_idx = max(20, 50)  # volume MA needs 20, EMA needs 50
+    start_idx = max(20, 20)  # 20 for Donchian, 20 for EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend filter: price vs 1d EMA50
-        uptrend = price > ema_1d_aligned[i]
-        downtrend = price < ema_1d_aligned[i]
-        
-        # Volume confirmation: > 2x average volume
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation: > 1.5x average volume
+        volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Long: break above R1 with volume and uptrend
-            if uptrend and volume_confirmation and price > r1_aligned[i]:
+            # Long: break above weekly Donchian high, pullback to EMA support
+            if (close[i-1] <= donchian_high_aligned[i-1] and  # Was at or below resistance
+                price > donchian_high_aligned[i] and          # Break above
+                price >= ema[i] and                           # At or above EMA (pullback complete)
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume and downtrend
-            elif downtrend and volume_confirmation and price < s1_aligned[i]:
+            # Short: break below weekly Donchian low, pullback to EMA resistance
+            elif (close[i-1] >= donchian_low_aligned[i-1] and  # Was at or above support
+                  price < donchian_low_aligned[i] and          # Break below
+                  price <= ema[i] and                          # At or below EMA (pullback complete)
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price below S1 or trend reversal
-            if price < s1_aligned[i] or price <= ema_1d_aligned[i]:
+            # Long exit: price falls below EMA or reverses to weekly low
+            if price < ema[i] or price <= donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price above R1 or trend reversal
-            if price > r1_aligned[i] or price >= ema_1d_aligned[i]:
+            # Short exit: price rises above EMA or reverses to weekly high
+            if price > ema[i] or price >= donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1D_Camarilla_R1S1_Breakout_VolumeSpike"
-timeframe = "4h"
+name = "1d_WeeklyBreakout_Pullback_v3"
+timeframe = "1d"
 leverage = 1.0
