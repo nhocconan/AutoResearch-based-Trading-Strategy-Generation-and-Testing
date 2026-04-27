@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-#101006 - 4h_RSI2_MeanReversion_WithRegimeFilter
-Hypothesis: Mean reversion using RSI(2) extremes combined with 1d trend filter and volatility regime filter.
-Works in both bull and bear markets by only taking mean-reversion trades when the higher timeframe trend
-is aligned, avoiding counter-trend trades during strong moves. Uses Bollinger Band width percentile to
-detect low-volatility regimes for higher probability mean reversion.
-Target: 20-30 trades/year to minimize fee drag. Uses discrete position sizing (0.25).
+#101007 - 6h_WeeklyPivot_Direction_DailyBreakout_Volume
+Hypothesis: Use weekly pivot points from 1w data to establish long-term bias, then take daily breakouts with volume confirmation on 6h timeframe.
+In weekly uptrend (price above weekly pivot), look for long entries on daily resistance breakouts with volume.
+In weekly downtrend (price below weekly pivot), look for short entries on daily support breakouts with volume.
+This combines long-term trend bias with short-term momentum, reducing false signals in choppy markets.
+Target: 12-25 trades/year to minimize fee drag on 6s timeframe. Uses discrete position sizing (0.25).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,42 +22,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot points (long-term bias)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 50-period EMA for trend filter on daily
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly pivot points: P = (H + L + C)/3
+    # Support 1: S1 = 2*P - H
+    # Resistance 1: R1 = 2*P - L
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # RSI(2) for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # Wilder's smoothing
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0.), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly pivot data to 6h timeframe
+    pivot_1w_aligned = align_ltf_to_htf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_ltf_to_htf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_ltf_to_htf(prices, df_1w, s1_1w)
     
-    # Bollinger Band Width for volatility regime (20, 2)
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Get daily data for breakout levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Percentile of BB width over 50 periods to identify low volatility regimes
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) == 50 else np.nan, raw=False
-    ).values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Low volatility regime: BB width below 30th percentile (tightening bands)
-    low_vol_regime = bb_width_percentile < 30
+    # Daily high/low for breakout detection
+    daily_high = high_1d
+    daily_low = low_1d
+    
+    # Align daily data to 6h timeframe
+    daily_high_aligned = align_ltf_to_htf(prices, df_1d, daily_high)
+    daily_low_aligned = align_ltf_to_htf(prices, df_1d, daily_low)
+    
+    # Volume filter: volume > 2.0x 24-period average (4 days on 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,28 +71,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(low_vol_regime[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(daily_high_aligned[i]) or 
+            np.isnan(daily_low_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: RSI(2) < 10 (oversold), price above daily EMA50 (uptrend filter), low volatility regime
-        if (rsi[i] < 10 and 
-            close[i] > ema50_1d_aligned[i] and 
-            low_vol_regime[i]):
+        # Determine weekly trend bias
+        weekly_uptrend = close[i] > pivot_1w_aligned[i]
+        weekly_downtrend = close[i] < pivot_1w_aligned[i]
+        
+        # Long condition: weekly uptrend + price breaks above daily high + volume
+        if (weekly_uptrend and 
+            close[i] > daily_high_aligned[i] and 
+            volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: RSI(2) > 90 (overbought), price below daily EMA50 (downtrend filter), low volatility regime
-        elif (rsi[i] > 90 and 
-              close[i] < ema50_1d_aligned[i] and 
-              low_vol_regime[i]):
+        # Short condition: weekly downtrend + price breaks below daily low + volume
+        elif (weekly_downtrend and 
+              close[i] < daily_low_aligned[i] and 
+              volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: RSI returns to neutral zone (50) or volatility regime changes
-        elif position == 1 and (rsi[i] >= 50 or not low_vol_regime[i]):
+        # Exit conditions: price returns to weekly pivot (mean reversion to bias)
+        elif position == 1 and close[i] < pivot_1w_aligned[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (rsi[i] <= 50 or not low_vol_regime[i]):
+        elif position == -1 and close[i] > pivot_1w_aligned[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -102,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI2_MeanReversion_WithRegimeFilter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Direction_DailyBreakout_Volume"
+timeframe = "6h"
 leverage = 1.0
