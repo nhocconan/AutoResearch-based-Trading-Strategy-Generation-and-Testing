@@ -1,94 +1,96 @@
 #!/usr/bin/env python3
 """
-1h_RSI2_MeanReversion_4h1dTrend_Filter
-Hypothesis: RSI(2) mean reversion (RSI<10) works only when aligned with higher timeframe trend (4h EMA50 & 1d EMA200) to avoid counter-trend trades. 
-Uses 1h for precise entry timing, 4h/1d for trend filter. Designed for low trade frequency (target: 15-30/year) to minimize fee drag in 1h timeframe.
-Works in bull/bear via trend filter: only long in uptrends, only short in downtrends.
+12h_Camarilla_Pivot_S1_S4_Breakout_1dTrend_Volume
+Hypothesis: Price breaking above S1 or below S4 of daily Camarilla pivots with volume confirmation and daily trend filter works in both bull/bear markets. Target: 15-25 trades/year on 12h to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for intermediate trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for long-term trend filter
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h trend: EMA50
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate daily Camarilla pivot levels
+    # Using previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # 1d trend: EMA200
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Camarilla calculations
+    range_ = prev_high - prev_low
+    S1 = prev_close - (range_ * 1.0 / 6)
+    S2 = prev_close - (range_ * 2.0 / 6)
+    S3 = prev_close - (range_ * 3.0 / 6)
+    S4 = prev_close - (range_ * 4.0 / 6)
+    R1 = prev_close + (range_ * 1.0 / 6)
+    R2 = prev_close + (range_ * 2.0 / 6)
+    R3 = prev_close + (range_ * 3.0 / 6)
+    R4 = prev_close + (range_ * 4.0 / 6)
     
-    # RSI(2) calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(100).values  # when loss=0, RSI=100
+    # Align pivots to 12h timeframe (only use completed daily bars)
+    S1_12h = align_ltf_to_htf(prices, df_1d, S1)
+    S4_12h = align_ltf_to_htf(prices, df_1d, S4)
+    R1_12h = align_ltf_to_htf(prices, df_1d, R1)
+    R4_12h = align_ltf_to_htf(prices, df_1d, R4)
     
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Daily trend filter: EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h = align_ltf_to_htf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: volume > 2.0 * 24-period average (24 * 12h = 12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # Position size: 20% of capital
+    size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for RSI and EMAs
-    start_idx = max(2, 50, 200)
+    # Warmup: need enough data for EMA and volume MA
+    start_idx = max(34, 24)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or not in_session[i]:
+        # Skip if any data not ready
+        if np.isnan(ema34_12h[i]) or np.isnan(S1_12h[i]) or np.isnan(S4_12h[i]):
             signals[i] = 0.0
             continue
         
-        ema40_trend = ema50_4h_aligned[i]
-        ema1d_trend = ema200_1d_aligned[i]
-        rsi_val = rsi[i]
+        ema_trend = ema34_12h[i]
+        vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Long: RSI(2) < 10 (oversold) + uptrend on both 4h and 1d
-            if rsi_val < 10 and close[i] > ema40_trend and close[i] > ema1d_trend:
+            # Long: price breaks above S1 with volume spike and uptrend
+            if vol_spike_val and close[i] > S1_12h[i] and close[i] > ema_trend:
                 signals[i] = size
                 position = 1
-            # Short: RSI(2) > 90 (overbought) + downtrend on both 4h and 1d
-            elif rsi_val > 90 and close[i] < ema40_trend and close[i] < ema1d_trend:
+            # Short: price breaks below S4 with volume spike and downtrend
+            elif vol_spike_val and close[i] < S4_12h[i] and close[i] < ema_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI crosses above 50 (mean reversion complete) or trend breaks
-            if rsi_val > 50 or close[i] < ema40_trend or close[i] < ema1d_trend:
+            # Exit long: price breaks below S1 or trend turns down
+            if close[i] < S1_12h[i] or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI crosses below 50 (mean reversion complete) or trend breaks
-            if rsi_val < 50 or close[i] > ema40_trend or close[i] > ema1d_trend:
+            # Exit short: price breaks above S4 or trend turns up
+            if close[i] > S4_12h[i] or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI2_MeanReversion_4h1dTrend_Filter"
-timeframe = "1h"
+name = "12h_Camarilla_Pivot_S1_S4_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
