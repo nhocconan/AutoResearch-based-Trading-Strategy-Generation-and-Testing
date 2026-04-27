@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for higher timeframe context
+    # Get daily data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -21,18 +21,17 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate 1d EMA 34 for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h Donchian channels (20-period)
+    # 6-hour Donchian channels (20-period for structure)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 20-period average (moderate filter)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: volume > 1.5x 24-period average (strong filter to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
@@ -82,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "6h_Donchian20_Breakout_1dEMA34_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
