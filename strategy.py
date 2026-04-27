@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter_v5
-Hypothesis: Camarilla R3/S3 breakouts with 1d EMA34 trend alignment, volume spike confirmation, 
-and Choppiness Index regime filter (CHOP < 61.8) capture high-probability trend continuation moves 
-while avoiding whipsaws in ranging markets. Weekly EMA50 filter avoids counter-trend trades. 
-ATR-based stoploss (2.5x) manages risk. Discrete sizing 0.30 balances return and fee drag. 
-Target: 75-200 total trades over 4 years (19-50/year).
+1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_ChopFilter
+Hypothesis: Daily Camarilla R3/S3 breakouts with weekly trend alignment (price vs 1w EMA50), volume confirmation, and Choppiness Index regime filter capture high-probability moves in both bull and bear markets. Weekly trend avoids counter-trend trades; chop filter avoids whipsaws in ranging markets. Discrete sizing (0.30) limits fee drag. Target: 30-100 trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -33,9 +29,6 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.125 * range_1d
     camarilla_s3 = close_1d - 1.125 * range_1d
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
     # Get 1w data for weekly trend filter (price vs EMA50)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
@@ -56,10 +49,9 @@ def generate_signals(prices):
     chop = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
     chop_filter = chop < 61.8  # Only allow breakouts when not strongly ranging
     
-    # Align all indicators to primary timeframe (4h)
+    # Align all indicators to primary timeframe (1d)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)  # volume is LTF, but confirm using 1d avg
     chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter)  # align chop filter from 1d
@@ -69,29 +61,28 @@ def generate_signals(prices):
     entry_price = 0.0
     size = 0.30   # Position size: 30% of capital (discrete level)
     
-    # Warmup: need Camarilla (1), EMA34 (34), EMA50 (50), volume avg (20), chop (14)
-    start_idx = max(1, 34, 50, 20, 14)
+    # Warmup: need Camarilla (1), EMA50 (50), volume avg (20), chop (14)
+    start_idx = max(1, 50, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(volume_confirm_aligned[i]) or np.isnan(chop_filter_aligned[i])):
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_confirm_aligned[i]) or 
+            np.isnan(chop_filter_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r3 = camarilla_r3_aligned[i]
         s3 = camarilla_s3_aligned[i]
-        ema34 = ema34_1d_aligned[i]
         ema50 = ema50_1w_aligned[i]
         vol_conf = volume_confirm_aligned[i]
         chop_ok = chop_filter_aligned[i]
         
         if position == 0:
-            # Determine trend alignment: price vs EMA34 (1d) and EMA50 (1w)
-            uptrend = close_val > ema34 and close_val > ema50
-            downtrend = close_val < ema34 and close_val < ema50
+            # Determine trend alignment: price vs EMA50 (1w)
+            uptrend = close_val > ema50
+            downtrend = close_val < ema50
             
             if uptrend and vol_conf and chop_ok:
                 # Long bias: long when price breaks above R3 with volume and not choppy
@@ -134,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter_v5"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
