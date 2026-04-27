@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Alligator_Trend_Filter_SmallSignal
-Hypothesis: Williams Alligator with strict thresholds and small position size reduces whipsaw in chop.
-Uses 1d Alligator (JAWS/TEETH/LIPS) for trend direction and 12h price action for entry.
-Small position (0.15) and strict trend filter aim for <30 trades/year to avoid fee drag.
-Works in bull by catching trends, in bear by avoiding false signals via strict Alligator alignment.
+1d_RelativeStrengthIndex_WeeklyTrend_Filtered
+Hypothesis: Weekly trend filtered RSI mean reversion on daily timeframe captures reversals in both bull and bear markets.
+Uses weekly trend filter to avoid counter-trend trades, RSI(14) < 30 for long and > 70 for short with volume confirmation.
+Target: 15-25 trades/year to minimize fee drag while capturing significant reversals.
 """
 
 import numpy as np
@@ -19,66 +18,67 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Alligator
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Williams Alligator: SMAs of median price
-    median_price = (df_1d['high'] + df_1d['low']) / 2
-    close_median = median_price.values
+    # Calculate weekly EMA21 for trend filter
+    close_1w = df_1w['close'].values
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    # JAWS (13-period, 8-bar shift), TEETH (8-period, 5-bar shift), LIPS (5-period, 3-bar shift)
-    jaws = pd.Series(close_median).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close_median).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close_median).rolling(window=5, min_periods=5).mean().shift(3).values
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align to 12h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.15   # Small position size to reduce drawdown and trade frequency
+    size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Alligator (max shift 8)
-    start_idx = 13 + 8  # 21
+    # Warmup: need enough data for RSI and volume MA
+    start_idx = max(35, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]):
+        if np.isnan(ema21_1w_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        jaws_val = jaws_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        
-        # Trend conditions: Alligator alignment
-        bullish = lips_val > teeth_val > jaws_val  # Green alignment
-        bearish = lips_val < teeth_val < jaws_val  # Red alignment
+        weekly_trend = ema21_1w_aligned[i]
+        rsi_val = rsi[i]
+        vol_confirm_val = vol_confirm[i]
         
         if position == 0:
-            # Enter long only on strong bullish alignment with price above LIPS
-            if bullish and close[i] > lips_val:
+            # Long: RSI oversold in uptrend with volume confirmation
+            if rsi_val < 30 and close[i] > weekly_trend and vol_confirm_val:
                 signals[i] = size
                 position = 1
-            # Enter short only on strong bearish alignment with price below LIPS
-            elif bearish and close[i] < lips_val:
+            # Short: RSI overbought in downtrend with volume confirmation
+            elif rsi_val > 70 and close[i] < weekly_trend and vol_confirm_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: bearish alignment or price crosses below TEETH
-            if bearish or close[i] < teeth_val:
+            # Exit long: RSI overbought or trend turns down
+            if rsi_val > 70 or close[i] < weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: bullish alignment or price crosses above TEETH
-            if bullish or close[i] > teeth_val:
+            # Exit short: RSI oversold or trend turns up
+            if rsi_val < 30 or close[i] > weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Alligator_Trend_Filter_SmallSignal"
-timeframe = "12h"
+name = "1d_RelativeStrengthIndex_WeeklyTrend_Filtered"
+timeframe = "1d"
 leverage = 1.0
