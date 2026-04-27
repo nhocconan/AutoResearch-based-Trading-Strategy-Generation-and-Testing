@@ -28,65 +28,61 @@ def generate_signals(prices):
     R3 = prev_close + range_hl * 1.1 / 4
     S3 = prev_close - range_hl * 1.1 / 4
     
-    # Align Camarilla levels to 1h timeframe
-    R3_1h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_1h = align_htf_to_ltf(prices, df_1d, S3)
+    # Align Camarilla levels to 12h timeframe
+    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
     
     # Get daily EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike: current volume > 2.0 * 24-period average (48h lookback)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    volume_spike = volume > (2.0 * vol_ma_24)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume spike: current volume > 2.0 * 12-period average (6h lookback)
+    vol_ma_12 = np.full(n, np.nan)
+    for i in range(12, n):
+        vol_ma_12[i] = np.mean(volume[i-12:i])
+    volume_spike = volume > (2.0 * vol_ma_12)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup: need enough data for calculations
-    start_idx = max(34, 24) + 1
+    start_idx = max(34, 12) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(R3_1h[i]) or np.isnan(S3_1h[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_12[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 + 1-day uptrend + volume spike + session
-            if (close[i] > R3_1h[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i] and session_filter[i]):
-                signals[i] = 0.20
+            # Long entry: price breaks above R3 + 1-day uptrend + volume spike
+            if (close[i] > R3_12h[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 + 1-day downtrend + volume spike + session
-            elif (close[i] < S3_1h[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i] and session_filter[i]):
-                signals[i] = -0.20
+            # Short entry: price breaks below S3 + 1-day downtrend + volume spike
+            elif (close[i] < S3_12h[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long exit: price breaks below S3 (reversal) or trend changes
-            if (close[i] < S3_1h[i] or close[i] < ema34_1d_aligned[i]):
+            if (close[i] < S3_12h[i] or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short exit: price breaks above R3 (reversal) or trend changes
-            if (close[i] > R3_1h[i] or close[i] > ema34_1d_aligned[i]):
+            if (close[i] > R3_12h[i] or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Session"
-timeframe = "1h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
