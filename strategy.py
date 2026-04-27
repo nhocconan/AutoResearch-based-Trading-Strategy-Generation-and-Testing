@@ -1,20 +1,11 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe strategy using weekly (1w) EMA for trend direction,
-# daily (1d) ATR-based volatility filter, and volume confirmation.
-# Goes long in bullish trend with high volatility and volume,
-# short in bearish trend with high volatility and volume.
-# Designed to work in both bull and bear markets by using trend-following
-# with volatility/volume filters to avoid choppy periods.
-# Target: 50-150 total trades over 4 years (12-37/year).
-# Position size: 0.25 (25% of capital).
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,14 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
     # Get 1d data for ATR and volume (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Get 1w data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     # Calculate weekly EMA(34) for trend
@@ -51,14 +42,14 @@ def generate_signals(prices):
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 6h timeframe
+    # Align indicators to 12h timeframe
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Reduced position size to 20% to lower risk and trade frequency
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -123,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyTrend_VolumeVolatilityFilter"
-timeframe = "6h"
+name = "12h_WeeklyTrend_VolumeVolatilityFilter_v2"
+timeframe = "12h"
 leverage = 1.0
