@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_ChaikinMoneyFlow_WeeklyTrend
-Hypothesis: 6h Chaikin Money Flow (CMF) with weekly trend filter for institutional flow confirmation.
-- CMF(20) > 0 indicates buying pressure, < 0 selling pressure on 6h
-- Weekly trend: price > weekly EMA50 for longs, < for shorts
-- Entry: CMF crosses above 0.1 + weekly uptrend (long), CMF crosses below -0.1 + weekly downtrend (short)
-- Exit: CMF crosses back through 0 or trend failure
-- Designed to capture smart money flows while avoiding counter-trend moves
+6h_Ichimoku_Cloud_Filter
+Hypothesis: 6s Ichimoku with daily cloud filter for trend alignment and momentum confirmation.
+- Uses Ichimoku (Tenkan/Kijun/Senkou) on 6h for momentum and support/resistance
+- Daily trend filter: price above/below daily Kumo cloud for long/short bias
+- Entry: Tenkan crosses above Kijun + price above daily cloud (long)
+         Tenkan crosses below Kijun + price below daily cloud (short)
+- Exit: Reverse cross or price crosses cloud boundary
+- Designed to capture momentum in trending markets while avoiding counter-trend noise
 - Target: 20-35 trades/year on 6h (80-140 total over 4 years)
 """
 
@@ -19,71 +20,99 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # 6h Chaikin Money Flow (CMF) - 20 period
-    # CMF = Sum((Close - Low - (High - Close)) / (High - Low) * Volume) / Sum(Volume)
-    mfm = np.zeros_like(close)
-    mfv = np.zeros_like(close)
+    # Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_tenkan + min_low_tenkan) / 2
     
-    # Avoid division by zero
-    hl_range = high - low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_kijun + min_low_kijun) / 2
     
-    mfm = ((close - low) - (high - close)) / hl_range
-    mfv = mfm * volume
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Calculate 20-period sums
-    cmf = np.full(n, np.nan)
-    for i in range(20, n):
-        sum_mfv = np.sum(mfv[i-20:i+1])
-        sum_vol = np.sum(volume[i-20:i+1])
-        if sum_vol != 0:
-            cmf[i] = sum_mfv / sum_vol
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2
     
-    # Weekly trend filter (EMA50)
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Daily trend filter: price relative to Kumo cloud
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
-    close_weekly = df_weekly['close'].values
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    
+    # Daily Senkou Span A and B
+    period_tenkan_d = 9
+    period_kijun_d = 26
+    period_senkou_b_d = 52
+    
+    max_high_tenkan_d = pd.Series(high_daily).rolling(window=period_tenkan_d, min_periods=period_tenkan_d).max().values
+    min_low_tenkan_d = pd.Series(low_daily).rolling(window=period_tenkan_d, min_periods=period_tenkan_d).min().values
+    tenkan_d = (max_high_tenkan_d + min_low_tenkan_d) / 2
+    
+    max_high_kijun_d = pd.Series(high_daily).rolling(window=period_kijun_d, min_periods=period_kijun_d).max().values
+    min_low_kijun_d = pd.Series(low_daily).rolling(window=period_kijun_d, min_periods=period_kijun_d).min().values
+    kijun_d = (max_high_kijun_d + min_low_kijun_d) / 2
+    
+    senkou_a_d = (tenkan_d + kijun_d) / 2
+    
+    max_high_senkou_b_d = pd.Series(high_daily).rolling(window=period_senkou_b_d, min_periods=period_senkou_b_d).max().values
+    min_low_senkou_b_d = pd.Series(low_daily).rolling(window=period_senkou_b_d, min_periods=period_senkou_b_d).min().values
+    senkou_b_d = (max_high_senkou_b_d + min_low_senkou_b_d) / 2
+    
+    # Align daily Ichimoku to 6h
+    senkou_a_d_aligned = align_htf_to_ltf(prices, df_daily, senkou_a_d)
+    senkou_b_d_aligned = align_htf_to_ltf(prices, df_daily, senkou_b_d)
+    
+    # Kumo cloud boundaries (Senkou A and B)
+    upper_daily = np.maximum(senkou_a_d_aligned, senkou_b_d_aligned)
+    lower_daily = np.minimum(senkou_a_d_aligned, senkou_b_d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough data for calculations
-    start_idx = max(50, 20) + 1
+    # Warmup: need enough data for Ichimoku calculations
+    start_idx = max(period_kijun, period_senkou_b) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(cmf[i]) or np.isnan(ema50_weekly_aligned[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(upper_daily[i]) or np.isnan(lower_daily[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: CMF crosses above 0.1 + weekly uptrend
-            if (cmf[i] > 0.1 and cmf[i-1] <= 0.1 and close[i] > ema50_weekly_aligned[i]):
+            # Long entry: Tenkan crosses above Kijun + price above daily cloud
+            if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] and close[i] > upper_daily[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: CMF crosses below -0.1 + weekly downtrend
-            elif (cmf[i] < -0.1 and cmf[i-1] >= -0.1 and close[i] < ema50_weekly_aligned[i]):
+            # Short entry: Tenkan crosses below Kijun + price below daily cloud
+            elif (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] and close[i] < lower_daily[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: CMF crosses below 0 or weekly trend failure
-            if (cmf[i] < 0 or close[i] < ema50_weekly_aligned[i]):
+            # Long exit: Tenkan crosses below Kijun or price falls below cloud
+            if (tenkan[i] < kijun[i] or close[i] < upper_daily[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: CMF crosses above 0 or weekly trend failure
-            if (cmf[i] > 0 or close[i] > ema50_weekly_aligned[i]):
+            # Short exit: Tenkan crosses above Kijun or price rises above cloud
+            if (tenkan[i] > kijun[i] or close[i] > lower_daily[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ChaikinMoneyFlow_WeeklyTrend"
+name = "6h_Ichimoku_Cloud_Filter"
 timeframe = "6h"
 leverage = 1.0
