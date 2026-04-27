@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,105 +13,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for pivot calculation
+    # Get daily data for 10-period ATR (volatility regime filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 48) / 50  # EMA50
-    
-    # Calculate daily pivot points (classic)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    
-    # Classic pivot point calculation
-    pp = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pp - prev_low
-    s1 = 2 * pp - prev_high
-    r2 = pp + (prev_high - prev_low)
-    s2 = pp - (prev_high - prev_low)
-    
-    # Align weekly and daily indicators to 6h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Calculate 6h ATR(14) for volatility filter
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
+    # Calculate daily ATR(10) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr_1d = np.maximum(high_1d[1:] - low_1d[1:],
+                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
+                                  np.abs(low_1d[1:] - close_1d[:-1])))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_10_1d = np.full(len(close_1d), np.nan)
+    for i in range(10, len(close_1d)):
+        if i == 10:
+            atr_10_1d[i] = np.mean(tr_1d[1:11])
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            atr_10_1d[i] = (atr_10_1d[i-1] * 9 + tr_1d[i]) / 10
     
-    # Calculate 20-period volume average
+    atr_10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
+    
+    # Calculate 4-period volume average for volume filter
     vol_ma = np.full(n, np.nan)
-    vol_period = 20
+    vol_period = 4
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
+    
+    # Calculate 4-period high/low for breakout levels
+    high_4 = np.full(n, np.nan)
+    low_4 = np.full(n, np.nan)
+    for i in range(4, n):
+        high_4[i] = np.max(high[i-4:i])
+        low_4[i] = np.min(low[i-4:i])
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
     # Warmup period
-    start_idx = max(50, vol_period, 14) + 5
+    start_idx = max(10, vol_period, 4) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_10_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(high_4[i]) or np.isnan(low_4[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.5x average volume
-        vol_filter = vol_ratio > 1.5
+        # Volatility filter: avoid extreme volatility (ATR > 1.5x median)
+        vol_filter = atr_10_1d_aligned[i] < np.nanmedian(atr_10_1d_aligned[:i+1]) * 1.5
         
         if position == 0:
-            # Long: Price breaks above R2 with volume and above weekly EMA50
-            if price > r2_aligned[i] and vol_filter and price > ema_50_1w_aligned[i]:
+            # Long: Break above 4-period high with volume and normal volatility
+            if price > high_4[i] and vol_ratio > 1.8 and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below S2 with volume and below weekly EMA50
-            elif price < s2_aligned[i] and vol_filter and price < ema_50_1w_aligned[i]:
+            # Short: Break below 4-period low with volume and normal volatility
+            elif price < low_4[i] and vol_ratio > 1.8 and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below S1 or trailing stop
-            if price < s1_aligned[i] or price < ema_50_1w_aligned[i] - 1.5 * atr[i]:
+            # Long exit: Price closes below 4-period low or volatility spike
+            if price < low_4[i] or atr_10_1d_aligned[i] > np.nanmedian(atr_10_1d_aligned[:i+1]) * 2.0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above R1 or trailing stop
-            if price > r1_aligned[i] or price > ema_50_1w_aligned[i] + 1.5 * atr[i]:
+            # Short exit: Price closes above 4-period high or volatility spike
+            if price > high_4[i] or atr_10_1d_aligned[i] > np.nanmedian(atr_10_1d_aligned[:i+1]) * 2.0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyEMA50_DailyPivot_Breakout_Volume"
-timeframe = "6h"
+name = "4h_Breakout_4Period_VolumeVolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
