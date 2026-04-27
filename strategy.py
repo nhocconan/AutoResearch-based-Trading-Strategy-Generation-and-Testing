@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily pivot calculation and trend
+    # Get daily data for daily pivot calculation and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -34,7 +34,7 @@ def generate_signals(prices):
     r1 = 2 * pivot - low_prev
     s1 = 2 * pivot - high_prev
     
-    # Align daily pivots to 12h
+    # Align daily pivots to 1d
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -43,13 +43,12 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 1.5 x 20-period average (12h)
+    # Volume filter: volume > 1.5 x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Additional filter: ADX on 1d to avoid ranging markets
-    # Calculate ADX(14) on daily timeframe
+    # ADX on 1d to avoid ranging markets
     if len(high_1d) < 14:
         return np.zeros(n)
     
@@ -58,7 +57,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan  # First value has no previous close
+    tr[0] = np.nan
     
     # Directional Movement
     dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
@@ -68,14 +67,12 @@ def generate_signals(prices):
     dm_plus[0] = 0
     dm_minus[0] = 0
     
-    # Smooth TR, DM+ and DM- with Wilder's smoothing (alpha = 1/period)
+    # Wilder's smoothing
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
-        # First value is simple average
         result[period-1] = np.nansum(data[:period])
-        # Subsequent values: Wilder's smoothing
         for i in range(period, len(data)):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
@@ -93,7 +90,7 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) == 0, 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus))
     adx_1d = wilder_smooth(dx, 14)
     
-    # Align ADX to 12h
+    # Align ADX to 1d
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
@@ -153,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_S1R1_ADX25_Volume"
-timeframe = "12h"
+name = "1d_Pivot_S1R1_ADX25_Volume"
+timeframe = "1d"
 leverage = 1.0
