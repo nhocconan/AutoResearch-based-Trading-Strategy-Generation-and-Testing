@@ -1,15 +1,16 @@
-# ==========================================================
-# Strategy: 6h_Donchian20_WeeklyPivot_Filter
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter.
-# - Uses weekly pivot points (from weekly OHLC) to determine trend direction.
-# - Long only when price is above weekly pivot; short only when below.
-# - Volume confirmation (2x average volume) to filter breakouts.
-# - Designed for 6h timeframe: expects ~15-30 trades/year per symbol.
-# - Works in bull/bear: pivot adapts to weekly structure; volume avoids false breaks.
-# ==========================================================
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# ==========================================================
+# Strategy: 6h_RVI_Period_7_TF_Signal_1d
+# Hypothesis: 6h Relative Vigor Index (RVI) with 1d EMA trend filter.
+# - RVI(7) measures conviction of price moves; values > 0.5 indicate bullish momentum, < -0.5 bearish.
+# - Uses 1d EMA(34) as trend filter: only long when price > EMA, short when price < EMA.
+# - Designed for low frequency (~20-30 trades/year) to minimize fee drag on 6s timeframe.
+# - Works in bull/bear: RVI adapts to momentum shifts, EMA filter avoids counter-trend trades.
+# ==========================================================
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,87 +18,100 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 5:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
-    pivot_w = (high_w + low_w + close_w) / 3.0
+    # Calculate 1d EMA(34)
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2 / 35) + (ema_34_1d[i-1] * 33 / 35)
     
-    # Align weekly pivot to 6h (no extra delay needed for pivot)
-    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
+    # Align 1d EMA to 6h (no extra delay needed for EMA)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 14-period ATR for volatility filter
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr = np.full(len(tr), np.nan)
-    for i in range(14, len(tr)):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Calculate RVI(7) on 6s data
+    # RVI = [SMMA((Close - Open) + 2*(Close-1 - Open-1) + 2*(Close-2 - Open-2) + (Close-3 - Open-3))] /
+    #       [SMMA((High - Low) + 2*(High-1 - Low-1) + 2*(High-2 - Low-2) + (High-3 - Low-3))]
+    # where SMMA is smoothed moving average (same as Wilder's smoothing)
     
-    # Calculate 20-period volume average
-    vol_ma = np.full(n, np.nan)
-    vol_period = 20
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    num = np.zeros(n)  # numerator: close - open weighted
+    den = np.zeros(n)  # denominator: high - low weighted
     
-    # Calculate 20-period high/low for Donchian breakout
-    high_max = np.full(n, np.nan)
-    low_min = np.full(n, np.nan)
-    period = 20
-    for i in range(period, n):
-        high_max[i] = np.max(high[i-period:i])
-        low_min[i] = np.min(low[i-period:i])
+    # Calculate weighted components
+    a = (close - open_price) + 2 * np.roll(close - open_price, 1) + 2 * np.roll(close - open_price, 2) + np.roll(close - open_price, 3)
+    b = (high - low) + 2 * np.roll(high - low, 1) + 2 * np.roll(high - low, 2) + np.roll(high - low, 3)
+    
+    # Handle roll NaNs for first 3 elements
+    a[:3] = 0
+    b[:3] = 0
+    
+    # Wilder's smoothing (SMMA) with period 7
+    def wilder_smooth(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(x[:period])
+        # Subsequent values: smoothed = (prev * (period-1) + current) / period
+        for i in range(period, len(x)):
+            if not np.isnan(result[i-1]) and not np.isnan(x[i]):
+                result[i] = (result[i-1] * (period-1) + x[i]) / period
+            else:
+                result[i] = np.nan
+        return result
+    
+    num_smooth = wilder_smooth(a, 7)
+    den_smooth = wilder_smooth(b, 7)
+    
+    # RVI = num_smooth / den_smooth, handle division by zero
+    rvi = np.full(n, np.nan)
+    mask = den_smooth != 0
+    rvi[mask] = num_smooth[mask] / den_smooth[mask]
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
-    # Warmup period
-    start_idx = max(14, vol_period, period) + 5
+    # Warmup: need enough for RVI smoothing and EMA
+    start_idx = max(34, 10)  # EMA needs 34, RVI needs ~10 for smoothing
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
+        if np.isnan(rvi[i]) or np.isnan(ema_34_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume AND above weekly pivot
-            if price > high_max[i] and vol_ratio > 2.0 and price > pivot_w_aligned[i]:
+            # Long: RVI > 0.5 (bullish momentum) AND price above 1d EMA
+            if rvi[i] > 0.5 and price > ema_34_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below Donchian low with volume AND below weekly pivot
-            elif price < low_min[i] and vol_ratio > 2.0 and price < pivot_w_aligned[i]:
+            # Short: RVI < -0.5 (bearish momentum) AND price below 1d EMA
+            elif rvi[i] < -0.5 and price < ema_34_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below Donchian low or 2x ATR trailing stop
-            if price < low_min[i] or price < high_max[i] - 2 * atr[i]:
+            # Long exit: RVI < 0 (momentum lost) OR price crosses below EMA
+            if rvi[i] < 0 or price < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above Donchian high or 2x ATR trailing stop
-            if price > high_max[i] or price > low_min[i] + 2 * atr[i]:
+            # Short exit: RVI > 0 (momentum lost) OR price crosses above EMA
+            if rvi[i] > 0 or price > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,7 +119,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Filter"
+name = "6h_RVI_Period_7_TF_Signal_1d"
 timeframe = "6h"
 leverage = 1.0
 # ==========================================================
