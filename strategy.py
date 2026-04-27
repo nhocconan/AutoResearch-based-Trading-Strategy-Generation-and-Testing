@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Donchian_20_WeeklyPivot_Direction_VolumeConfirmation_v1
-Hypothesis: 6h Donchian(20) breakouts aligned with weekly pivot direction (based on 1w high/low) and volume confirmation capture high-probability trend moves. Weekly pivot provides structural bias (above/below weekly pivot = bullish/bearish bias). Volume filter ensures breakouts have conviction. Designed to work in both bull (breakouts with volume) and bear (short breakdowns with volume) markets. Target: 50-150 total trades over 4 years.
+4h_TRIX_15_Signal_Line_Cross_1dTrend_VolumeSpike
+Hypothesis: TRIX (15) crossing its signal line (9) captures momentum shifts. 
+Trades only when aligned with 1d EMA50 trend and volume > 1.5x 20-period average. 
+Uses fixed position size 0.25 to limit trades and control drawdown. 
+Designed for low trade frequency (~25-40/year) to avoid fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,77 +21,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot (using prior week's high, low, close)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate TRIX (15) and signal line (9) on close
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) then % change
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3.pct_change())  # percentage change
     
-    # Weekly pivot point: (H + L + C) / 3
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Signal line: EMA of TRIX, period 9
+    signal_line = trix.ewm(span=9, adjust=False, min_periods=9).mean()
     
-    # Weekly bias: above pivot = bullish bias, below pivot = bearish bias
-    weekly_bullish = close_1w > weekly_pivot
-    weekly_bearish = close_1w < weekly_pivot
+    # TRIX histogram = TRIX - signal line (for crossover detection)
+    trix_hist = trix - signal_line
     
-    # Donchian channel (20-period) - using current bar's high/low for breakout
-    # Note: We use rolling window on past 20 bars (excluding current) for breakout level
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_avg)
     
-    # Align weekly bias and volume confirmation to 6h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1w, volume_confirm)  # volume is LTF, but align using 1w for consistency
+    # Align all indicators to primary timeframe (4h)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
+    trix_hist_aligned = align_htf_to_ltf(prices, pd.DataFrame({'trix_hist': trix_hist}), trix_hist.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    size = 0.25   # Position size: 25% of capital (discrete level to reduce churn)
+    size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need Donchian (20), volume avg (20)
-    start_idx = max(20, 20) + 1  # +1 due to shift(1) in Donchian
+    # Warmup: TRIX needs 15*3=45, signal line needs 9, volume avg needs 20
+    start_idx = max(45, 9, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
+        if (np.isnan(trix_hist_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
-        weekly_bull = weekly_bullish_aligned[i]
-        weekly_bear = weekly_bearish_aligned[i]
+        trix_hist_val = trix_hist_aligned[i]
+        ema50 = ema50_1d_aligned[i]
         vol_conf = volume_confirm_aligned[i]
         
         if position == 0:
-            # Long bias: price breaks above Donchian high with volume and weekly bullish bias
-            if weekly_bull and vol_conf and close_val > donch_high:
+            # Determine trend: price vs 1d EMA50
+            uptrend = close_val > ema50
+            downtrend = close_val < ema50
+            
+            # Long when TRIX histogram crosses above zero (bullish momentum) in uptrend
+            if uptrend and vol_conf and trix_hist_val > 0 and trix_hist_aligned[i-1] <= 0:
                 signals[i] = size
                 position = 1
-                entry_price = close_val
-            # Short bias: price breaks below Donchian low with volume and weekly bearish bias
-            elif weekly_bear and vol_conf and close_val < donch_low:
+            # Short when TRIX histogram crosses below zero (bearish momentum) in downtrend
+            elif downtrend and vol_conf and trix_hist_val < 0 and trix_hist_aligned[i-1] >= 0:
                 signals[i] = -size
                 position = -1
-                entry_price = close_val
         elif position == 1:
-            # Exit: price retouches Donchian low (mean reversion) or weekly bias flips
-            if close_val <= donch_low or not weekly_bull:
+            # Exit when TRIX histogram crosses below zero (momentum fade)
+            if trix_hist_val < 0 and trix_hist_aligned[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: price retouches Donchian high or weekly bias flips
-            if close_val >= donch_high or not weekly_bear:
+            # Exit when TRIX histogram crosses above zero (momentum fade)
+            if trix_hist_val > 0 and trix_hist_aligned[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_20_WeeklyPivot_Direction_VolumeConfirmation_v1"
-timeframe = "6h"
+name = "4h_TRIX_15_Signal_Line_Cross_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
