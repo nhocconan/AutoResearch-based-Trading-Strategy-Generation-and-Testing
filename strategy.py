@@ -13,86 +13,83 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 12h data for trend direction and market regime
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Donchian channels and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA 50 for trend direction
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Calculate 12h EMA 200 for long-term trend filter
-    ema_200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d Donchian channels (20-period) using previous day's data
+    prev_high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    prev_low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align 12h EMAs to 6h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    ema_200_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
+    # Align Donchian levels to 4h timeframe
+    donch_high = align_htf_to_ltf(prices, df_1d, prev_high_max)
+    donch_low = align_htf_to_ltf(prices, df_1d, prev_low_min)
     
-    # Calculate 12h ADX for trend strength (14-period)
-    tr1 = np.abs(high_12h - low_12h)
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # Calculate 1d ADX for trend strength (14-period)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    up_move = np.diff(high_12h, prepend=np.nan)
-    down_move = -np.diff(low_12h, prepend=np.nan)
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=np.nan)
+    down_move = -np.diff(low_1d, prepend=np.nan)
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_12h = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume filter: 6h volume > 1.8x 20-period average (more stringent)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or 
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 12h trend regime
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        strong_trend = adx_aligned[i] > 25
-        
-        # Long conditions: uptrend + strong trend + price above EMA50 + volume spike
-        if (uptrend and strong_trend and 
-            close[i] > ema_50_aligned[i] and 
+        # Long condition: price breaks above Donchian high, ADX > 25, volume spike
+        if (close[i] > donch_high[i] and 
+            adx_aligned[i] > 25 and 
             volume_spike[i]):
             signals[i] = 0.25
             position = 1
-        # Short conditions: downtrend + strong trend + price below EMA50 + volume spike
-        elif (not uptrend and strong_trend and 
-              close[i] < ema_50_aligned[i] and 
+        # Short condition: price breaks below Donchian low, ADX > 25, volume spike
+        elif (close[i] < donch_low[i] and 
+              adx_aligned[i] > 25 and 
               volume_spike[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend weakening or price crosses EMA200
-        elif position == 1 and (not uptrend or close[i] < ema_200_aligned[i]):
+        # Exit conditions: price returns to opposite Donchian level
+        elif position == 1 and close[i] < donch_low[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (uptrend or close[i] > ema_200_aligned[i]):
+        elif position == -1 and close[i] > donch_high[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -106,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA50_200_ADX25_VolumeSpike_12h_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_ADX25_VolumeSpike_1d_v1"
+timeframe = "4h"
 leverage = 1.0
