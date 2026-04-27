@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike
-Hypothesis: 1h strategy using Camarilla R1/S1 breakouts with 4h EMA50 trend filter and volume confirmation. R1/S1 levels provide tighter stops and more frequent entries than R3/S3, suitable for 1h timeframe. Trend filter ensures alignment with 4h momentum. Volume spike confirms institutional participation. Designed for BTC/ETH robustness in both bull and bear markets via trend filter. Targets 60-150 total trades over 4 years (15-37/year) with 0.20 position size. Uses discrete levels to minimize fee drag.
+6h_ElderRay_ZeroLag_MACD_Confluence
+Hypothesis: 6h strategy combining Elder Ray (Bull/Bear Power) with zero-lag MACD and weekly trend filter. 
+Elder Ray measures bull/bear power relative to EMA13. Zero-lag MACD reduces lag for timely signals. 
+Weekly trend filter (price vs weekly EMA20) ensures alignment with higher timeframe momentum. 
+Volume confirmation filters low-participation moves. Designed for BTC/ETH robustness in trending and ranging markets. 
+Targets 50-150 trades over 4 years (12-37/year) with 0.25 position size. Uses discrete levels to minimize fee drag.
 """
 
 import numpy as np
@@ -17,60 +21,67 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    ema_50 = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Get daily data for Elder Ray EMA13
+    df_1d = get_htf_data(prices, '1d')
+    ema_13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Get 4h data for Camarilla R1/S1 levels (from previous completed 4h bar)
-    prev_high = df_4h['high'].shift(1).values
-    prev_low = df_4h['low'].shift(1).values
-    prev_close = df_4h['close'].shift(1).values
-    rng = prev_high - prev_low
-    r1 = prev_close + (rng * 1.0833)   # R1 level
-    s1 = prev_close - (rng * 1.0833)   # S1 level
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13_1d_aligned
+    bear_power = low - ema_13_1d_aligned
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Zero-lag MACD (6h close)
+    close_s = pd.Series(close)
+    ema_12 = close_s.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema_26 = close_s.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd_line = ema_12 - ema_26
+    signal_line = macd_line.ewm(span=9, adjust=False, min_periods=9).mean()
+    # Zero-lag adjustment: MACD line + (MACD line - Signal line)
+    zl_macd = macd_line + (macd_line - signal_line)
+    zl_macd_values = zl_macd.values
+    
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # Fixed position size to minimize churn
+    size = 0.25   # Fixed position size to minimize churn
     
-    # Warmup: need 4h EMA50 (50), 4h shift(1) for Camarilla, vol avg (20)
-    start_idx = max(50 + 1, 1 + 1, 20)
+    # Warmup: need weekly EMA20 (20), daily EMA13 (13), MACD (max 26,9), vol avg (20)
+    start_idx = max(20 + 1, 13 + 1, 26 + 9 + 1, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i]) or
-            not in_session[i]):
+        # Skip if any data not ready
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_13_1d_aligned[i]) or
+            np.isnan(zl_macd_values[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_val = ema_50_aligned[i]
+        weekly_ema = ema_20_1w_aligned[i]
+        zl_macd_val = zl_macd_values[i]
         vol_conf = volume_confirm[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with 4h EMA50 alignment and volume confirmation
-            long_condition = (close_val > r1_val and 
-                            close_val > ema_val and 
-                            vol_conf)
-            short_condition = (close_val < s1_val and 
-                             close_val < ema_val and 
-                             vol_conf)
+            # Look for entry: Weekly trend alignment + zero-lag MACD + Elder Ray confirmation + volume
+            long_condition = (close_val > weekly_ema and           # Above weekly trend
+                            zl_macd_val > 0 and                   # Zero-lag MACD bullish
+                            bull_val > 0 and                      # Bull power positive
+                            vol_conf)                             # Volume confirmation
+            
+            short_condition = (close_val < weekly_ema and         # Below weekly trend
+                             zl_macd_val < 0 and                  # Zero-lag MACD bearish
+                             bear_val < 0 and                     # Bear power negative
+                             vol_conf)                            # Volume confirmation
             
             if long_condition:
                 signals[i] = size
@@ -79,15 +90,17 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 4h EMA50 (trend reversal)
-            if close_val < ema_val:
+            # Exit long: weekly trend break or zero-lag MACD bearish crossover
+            if (close_val < weekly_ema or 
+                (zl_macd_val < 0 and bull_val <= 0)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 4h EMA50 (trend reversal)
-            if close_val > ema_val:
+            # Exit short: weekly trend break or zero-lag MACD bullish crossover
+            if (close_val > weekly_ema or 
+                (zl_macd_val > 0 and bear_val >= 0)):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike"
-timeframe = "1h"
+name = "6h_ElderRay_ZeroLag_MACD_Confluence"
+timeframe = "6h"
 leverage = 1.0
