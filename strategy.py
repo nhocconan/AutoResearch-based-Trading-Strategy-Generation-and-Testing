@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R3/S3 breakout on 6h with 1d EMA34 trend filter and volume spike confirmation.
-Designed for 12-30 trades/year on BTC/ETH/SOL. Uses tighter R3/S3 levels (vs R1/S1) for fewer, higher-quality breakouts.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter and volume spike confirmation.
+Designed for 15-40 trades/year on BTC/ETH/SOL. Uses tighter R3/S3 levels (vs R1/S1) for fewer, higher-quality breakouts.
 1d EMA34 provides smoother trend filter than faster HTF EMAs. Volume spike confirms institutional participation.
 Should work in both bull (breakouts with volume) and bear (fade false breakouts, trend filter prevents wrong-way trades).
 """
@@ -42,7 +42,7 @@ def generate_signals(prices):
     R3 = PP + (high_1d - low_1d) * 1.0 / 4.0
     S3 = PP - (high_1d - low_1d) * 1.0 / 4.0
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
@@ -50,7 +50,7 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_avg)
     
-    # ATR for stoploss (14-period on 6h)
+    # ATR for stoploss (14-period on 4h)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -117,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
