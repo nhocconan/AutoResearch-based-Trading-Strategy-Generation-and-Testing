@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1d EMA34 trend filter and volume spike confirmation.
-Uses wider Camarilla levels (R3/S3) for fewer, higher-quality entries. 1d EMA34 determines trend direction:
-price above EMA34 = bullish bias (long only), price below EMA34 = bearish bias (short only).
-Volume spike confirms institutional participation. Designed for 12-30 trades/year on 12h timeframe to minimize fee drag
+4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v2
+Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter and volume spike confirmation. 
+Uses tighter Camarilla levels (R3/S3) for selective entries. 1d EMA34 determines trend direction: 
+price above EMA34 = bullish bias (long only), price below EMA34 = bearish bias (short only). 
+Volume spike confirms institutional participation. Designed for 20-40 trades/year to minimize fee drag 
 while working in both bull and bear markets by taking directional trades only.
 """
 
@@ -32,18 +32,15 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate 1d Camarilla pivot levels (R3, S3)
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     PP = (high_1d + low_1d + close_1d) / 3.0
-    R3 = PP + (high_1d - low_1d) * 1.125
-    S3 = PP - (high_1d - low_1d) * 1.125
+    R3 = PP + (high_1d - low_1d) * 1.0 / 4.0
+    S3 = PP - (high_1d - low_1d) * 1.0 / 4.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
@@ -51,7 +48,7 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_avg)
     
-    # ATR for stoploss (14-period on 12h)
+    # ATR for stoploss (14-period on 4h)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -118,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
