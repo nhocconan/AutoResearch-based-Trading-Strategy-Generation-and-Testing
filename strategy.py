@@ -8,50 +8,55 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for regime detection
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get 1d data for Donchian channels and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend regime
-    close_weekly = df_weekly['close'].values
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily ATR for volatility filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 14:
-        return np.zeros(n)
+    # Calculate 1d Donchian channels (20-period) using previous day's data
+    prev_high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    prev_low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Align Donchian levels to 12h timeframe
+    donch_high = align_htf_to_ltf(prices, df_1d, prev_high_max)
+    donch_low = align_htf_to_ltf(prices, df_1d, prev_low_min)
     
+    # Calculate 1d ADX for trend strength (14-period)
     # True Range
-    tr1 = np.abs(high_daily - low_daily)
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    atr_daily = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=np.nan)
+    down_move = -np.diff(low_1d, prepend=np.nan)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Daily range for volatility regime
-    daily_range = high_daily - low_daily
-    range_ma = pd.Series(daily_range).ewm(span=20, adjust=False, min_periods=20).mean().values
-    range_ma_aligned = align_htf_to_ltf(prices, df_daily, range_ma)
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Volume spike filter
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,39 +66,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_weekly_aligned[i]) or 
-            np.isnan(atr_daily_aligned[i]) or 
-            np.isnan(range_ma_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when weekly price above EMA50 (bull regime)
-        # and daily volatility is elevated (range > 1.5x average)
-        bull_regime = close[i] > ema50_weekly_aligned[i]
-        high_volatility = daily_range[i] > (range_ma_aligned[i] * 1.5)
-        
-        if not (bull_regime and high_volatility):
+        # Long condition: price breaks above Donchian high, ADX > 25, volume spike
+        if (close[i] > donch_high[i] and 
+            adx_aligned[i] > 25 and 
+            volume_spike[i]):
+            signals[i] = 0.30
+            position = 1
+        # Short condition: price breaks below Donchian low, ADX > 25, volume spike
+        elif (close[i] < donch_low[i] and 
+              adx_aligned[i] > 25 and 
+              volume_spike[i]):
+            signals[i] = -0.30
+            position = -1
+        # Exit conditions: price returns to opposite Donchian level
+        elif position == 1 and close[i] < donch_low[i]:
             signals[i] = 0.0
             position = 0
-            continue
-        
-        # Long condition: price above weekly EMA50 + volume spike
-        if bull_regime and volume_spike[i]:
-            signals[i] = 0.25
-            position = 1
-        # Exit: price drops below weekly EMA50
-        elif position == 1 and close[i] < ema50_weekly_aligned[i]:
+        elif position == -1 and close[i] > donch_high[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
+            elif position == -1:
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyEMA50_VolumeSpike_BullRegime"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_ADX25_VolumeSpike_1d"
+timeframe = "12h"
 leverage = 1.0
