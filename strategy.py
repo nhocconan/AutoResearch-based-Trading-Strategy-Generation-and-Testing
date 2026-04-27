@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_1dCloud_Filter
-Hypothesis: Uses Ichimoku Tenkan/Kijun cross on 6h with 1d cloud filter to capture trend changes. TK cross provides timely entries, while 1d cloud (Senkou Span A/B) acts as a strong trend filter. Works in bull/bear by only taking trades in direction of higher timeframe cloud color. Targets 15-25 trades/year on 6h to minimize fee drag.
+4h_Constitutional_Conservative_Edge
+Hypothesis: Combines 1-day volatility breakout (ATR-based) with 4-hour momentum confirmation and volume filter. Designed for low trade frequency (target 15-25/year) to minimize fee drag while capturing strong directional moves in both bull and bear markets. Uses conservative position sizing and strict entry conditions.
 """
 
 import numpy as np
@@ -10,105 +10,92 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku cloud (Senkou Span A/B)
+    # Get 1d data for volatility calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 1d
+    # Calculate 1-day ATR(14) for volatility breakout
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
+    tr = np.concatenate([[np.inf], tr2])  # First TR undefined
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Calculate 1-day EMA(50) for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    # Align 1d indicators to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
+    # Calculate 4-hour momentum (ROC 3-period)
+    roc_period = 3
+    roc = np.zeros_like(close)
+    roc[roc_period:] = (close[roc_period:] - close[:-roc_period]) / close[:-roc_period] * 100
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Calculate TK cross on 6d using actual 6h data (more responsive)
-    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_6h_fast = (period9_high_6h + period9_low_6h) / 2
-    
-    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_6h_fast = (period26_high_6h + period26_low_6h) / 2
-    
-    # Cloud color: green if Senkou A > Senkou B (bullish), red if Senkou A < Senkou B (bearish)
-    cloud_green = senkou_a_6h > senkou_b_6h
-    cloud_red = senkou_a_6h < senkou_b_6h
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for Ichimoku calculations
-    start_idx = max(52, 26)
+    # Warmup: need enough data for ATR, EMA, ROC, and volume
+    start_idx = max(50, 20, roc_period)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
-            np.isnan(tenkan_6h_fast[i]) or np.isnan(kijun_6h_fast[i])):
+        if (np.isnan(atr_14_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(roc[i])):
             signals[i] = 0.0
             continue
         
-        tenkan_val = tenkan_6h_fast[i]
-        kijun_val = kijun_6h_fast[i]
-        tenkan_prev = tenkan_6h_fast[i-1]
-        kijun_prev = kijun_6h_fast[i-1]
-        
-        # TK cross signals
-        tk_cross_up = (tenkan_prev <= kijun_prev) and (tenkan_val > kijun_val)
-        tk_cross_down = (tenkan_prev >= kijun_prev) and (tenkan_val < kijun_val)
+        atr_val = atr_14_aligned[i]
+        ema_trend = ema50_1d_aligned[i]
+        roc_val = roc[i]
+        vol_ok = vol_filter[i]
         
         if position == 0:
-            # Long: TK cross up in bullish cloud (Senkou A > Senkou B)
-            if tk_cross_up and cloud_green[i]:
+            # Long: volatility breakout up + positive momentum + uptrend + volume
+            if (close[i] > close[i-1] + 0.5 * atr_val and  # Break above prior close + 0.5*ATR
+                roc_val > 0.2 and                          # Positive momentum
+                close[i] > ema_trend and                   # Above daily EMA50
+                vol_ok):                                   # Volume confirmation
                 signals[i] = size
                 position = 1
-            # Short: TK cross down in bearish cloud (Senkou A < Senkou B)
-            elif tk_cross_down and cloud_red[i]:
+            # Short: volatility breakout down + negative momentum + downtrend + volume
+            elif (close[i] < close[i-1] - 0.5 * atr_val and  # Break below prior close - 0.5*ATR
+                  roc_val < -0.2 and                         # Negative momentum
+                  close[i] < ema_trend and                   # Below daily EMA50
+                  vol_ok):                                   # Volume confirmation
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: TK cross down or cloud turns bearish
-            if tk_cross_down or cloud_red[i]:
+            # Exit long: momentum dies or trend breaks
+            if roc_val < 0 or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: TK cross up or cloud turns bullish
-            if tk_cross_up or cloud_green[i]:
+            # Exit short: momentum dies or trend breaks
+            if roc_val > 0 or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_1dCloud_Filter"
-timeframe = "6h"
+name = "4h_Constitutional_Conservative_Edge"
+timeframe = "4h"
 leverage = 1.0
