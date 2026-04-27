@@ -19,26 +19,27 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Calculate daily EMA(34) for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 4h data for entry timing
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Calculate 12h Donchian channels (20-period) for breakout signals
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_20)
     
-    # Calculate 4h RSI(14) for overbought/oversold conditions
-    delta = pd.Series(df_4h['close']).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14_values = rsi_14.fillna(50).values
-    rsi_14_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_values)
+    # Calculate 12h volume moving average for confirmation
+    vol_ma_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -53,7 +54,9 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi_14_aligned[i])):
+            np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -66,23 +69,28 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # RSI conditions: avoid extremes
-        rsi_not_overbought = rsi_14_aligned[i] < 70
-        rsi_not_oversold = rsi_14_aligned[i] > 30
+        # Volume filter: current 12h volume above average
+        volume_filter = vol_ma_12h_aligned[i] > 0 and volume[i] > vol_ma_12h_aligned[i] * 0.8
         
-        # Long conditions: bullish trend + RSI not overbought
+        # Breakout signals: price breaks 12h Donchian channels
+        breakout_up = close[i] > donchian_high_aligned[i]
+        breakout_down = close[i] < donchian_low_aligned[i]
+        
+        # Long conditions: bullish trend + volume + upward breakout
         long_condition = (price_above_ema and 
-                         rsi_not_overbought)
+                         volume_filter and 
+                         breakout_up)
         
-        # Short conditions: bearish trend + RSI not oversold
+        # Short conditions: bearish trend + volume + downward breakout
         short_condition = (price_below_ema and 
-                          rsi_not_oversold)
+                          volume_filter and 
+                          breakout_down)
         
         if long_condition and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_condition and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         # Exit conditions: trend reversal
         elif position == 1 and not price_above_ema:
@@ -94,14 +102,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_EMA34_4hRSI14_Filter"
-timeframe = "1h"
+name = "1d_EMA34_12hDonchianBreakout_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
