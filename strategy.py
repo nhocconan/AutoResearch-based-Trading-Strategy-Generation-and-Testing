@@ -59,7 +59,7 @@ def generate_signals(prices):
             ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
                         ema_1d[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Align indicators to 6h timeframe
+    # Align indicators to 4h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
@@ -124,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_L4H4_Breakout_1dEMA34_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_L4H4_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
