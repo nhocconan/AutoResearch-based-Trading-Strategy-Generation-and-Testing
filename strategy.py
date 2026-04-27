@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-# 12h_1W_1D_Camarilla_R3_S3_Breakout_VolumeSpike
-# Hypothesis: Breakout above/below weekly and daily combined R3/S3 levels with volume > 2.5x average and ATR volatility filter.
-# Combines multiple timeframe confirmation (weekly + daily) to reduce false breakouts and improve signal quality.
-# Works in both bull and bear markets by capturing strong momentum moves with volume confirmation.
-# Target: 15-25 trades/year to minimize fee drag while capturing significant moves.
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,65 +13,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly and daily data for multi-timeframe confirmation
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for 200-day EMA (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1w) < 2 or len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate weekly high/low/close for Camarilla levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate daily high/low/close for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 200-day EMA for trend filter
     close_1d = df_1d['close'].values
+    ema_200 = np.zeros(len(close_1d))
+    ema_200[0] = close_1d[0]
+    alpha = 2 / (200 + 1)
+    for i in range(1, len(close_1d)):
+        ema_200[i] = alpha * close_1d[i] + (1 - alpha) * ema_200[i-1]
     
-    # Camarilla levels: Range = (H-L), R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3_1w = close_1w + (high_1w - low_1w) * 1.1 / 2
-    camarilla_s3_1w = close_1w - (high_1w - low_1w) * 1.1 / 2
-    camarilla_r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # Align daily EMA200 to 4h timeframe
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # Calculate ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    for i in range(n):
-        if i < 14:
-            atr[i] = np.mean(tr[:i+1]) if i > 0 else tr[0]
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Calculate 4-period RSI for entry signal
+    def calculate_rsi(prices, period):
+        delta = np.diff(prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(prices)
+        avg_loss = np.zeros_like(prices)
+        
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        for i in range(period + 1, len(prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_4 = calculate_rsi(close, 4)
     
     # Calculate volume average (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     
-    # Align weekly and daily Camarilla levels to 12h timeframe
-    camarilla_r3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
-    camarilla_s3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
-    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    
-    # Combined levels: Use the more restrictive levels (higher S3, lower R3) for confirmation
-    camarilla_r3_combined = np.minimum(camarilla_r3_1w_aligned, camarilla_r3_1d_aligned)
-    camarilla_s3_combined = np.maximum(camarilla_s3_1w_aligned, camarilla_s3_1d_aligned)
-    
     signals = np.zeros(n)
     position = 0
     
-    # Warmup: need all indicators
-    start_idx = max(20, 14)
+    # Warmup: need EMA200 and RSI4
+    start_idx = max(20, 1)
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_combined[i]) or
-            np.isnan(camarilla_s3_combined[i]) or
+        if (np.isnan(ema_200_aligned[i]) or
+            np.isnan(rsi_4[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -85,47 +72,45 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Volume confirmation: > 2.5x average volume
-        volume_confirmation = vol_ratio > 2.5
+        # Volume confirmation: > 2x average volume
+        volume_confirmation = vol_ratio > 2.0
         
-        # ATR volatility filter: avoid low volatility periods
-        # Only trade when ATR is above 60% of its 50-period average
-        if i >= 50:
-            atr_avg = np.mean(atr[i-50:i+1])
-            vol_filter = atr[i] > atr_avg * 0.6
-        else:
-            vol_filter = True  # No filter during warmup
+        # RSI condition: RSI(4) < 30 for long, > 70 for short
+        rsi_long = rsi_4[i] < 30
+        rsi_short = rsi_4[i] > 70
+        
+        # Trend filter: price above/below daily EMA200
+        above_ema200 = price > ema_200_aligned[i]
+        below_ema200 = price < ema_200_aligned[i]
         
         if position == 0:
-            # Long: break above combined R3 with volume and volatility
-            if volume_confirmation and vol_filter and price > camarilla_r3_combined[i]:
+            # Long: oversold RSI + above EMA200 + volume
+            if rsi_long and above_ema200 and volume_confirmation:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below combined S3 with volume and volatility
-            elif volume_confirmation and vol_filter and price < camarilla_s3_combined[i]:
+            # Short: overbought RSI + below EMA200 + volume
+            elif rsi_short and below_ema200 and volume_confirmation:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to daily midpoint or volatility drops significantly
-            daily_mid = (camarilla_r3_1d_aligned[i] + camarilla_s3_1d_aligned[i]) / 2
-            if price < daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.4:
+            # Long exit: RSI returns to neutral or trend changes
+            if rsi_4[i] >= 50 or price < ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # Maintain position
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to daily midpoint or volatility drops significantly
-            daily_mid = (camarilla_r3_1d_aligned[i] + camarilla_s3_1d_aligned[i]) / 2
-            if price > daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.4:
+            # Short exit: RSI returns to neutral or trend changes
+            if rsi_4[i] <= 50 or price > ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # Maintain position
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_1W_1D_Camarilla_R3_S3_Breakout_VolumeSpike"
-timeframe = "12h"
+name = "4h_1D_EMA200_RSI4_Volume"
+timeframe = "4h"
 leverage = 1.0
