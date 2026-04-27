@@ -13,28 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for higher timeframe context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for higher timeframe context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate 1d ATR for volatility filter
-    tr_1d = np.maximum(
-        high_1d[1:] - low_1d[1:],
+    # Calculate weekly ATR for volatility filter
+    tr_1w = np.maximum(
+        high_1w[1:] - low_1w[1:],
         np.maximum(
-            np.abs(high_1d[1:] - close_1d[:-1]),
-            np.abs(low_1d[1:] - close_1d[:-1])
+            np.abs(high_1w[1:] - close_1w[:-1]),
+            np.abs(low_1w[1:] - close_1w[:-1])
         )
     )
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    tr_1w = np.concatenate([[np.nan], tr_1w])
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # 4h Donchian channels (20-period)
+    # Calculate weekly RSI for momentum filter
+    delta = pd.Series(close_1w).diff().values
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Daily Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -46,22 +58,25 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+        if (np.isnan(atr_1w_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
             np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR > 0.7% of price (avoid choppy low-vol periods)
-        vol_filter = atr_1d_aligned[i] > (close[i] * 0.007)
+        # Volatility filter: ATR > 1% of price (avoid choppy low-vol periods)
+        vol_filter = atr_1w_aligned[i] > (close[i] * 0.01)
         
-        # Long conditions: price breaks above upper Donchian + volatility + volume
-        long_breakout = (close[i] > highest_high[i-1] and vol_filter and volume_filter[i])
-        # Short conditions: price breaks below lower Donchian + volatility + volume
-        short_breakout = (close[i] < lowest_low[i-1] and vol_filter and volume_filter[i])
+        # Momentum filter: RSI between 30 and 70 (avoid extremes)
+        mom_filter = (rsi_1w_aligned[i] > 30) and (rsi_1w_aligned[i] < 70)
+        
+        # Long conditions: price breaks above upper Donchian + volatility + momentum + volume
+        long_breakout = (close[i] > highest_high[i-1] and vol_filter and mom_filter and volume_filter[i])
+        # Short conditions: price breaks below lower Donchian + volatility + momentum + volume
+        short_breakout = (close[i] < lowest_low[i-1] and vol_filter and mom_filter and volume_filter[i])
         
         if long_breakout:
             signals[i] = 0.25
@@ -87,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_Volume_Threshold"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_Volume_RSI_MomentumFilter"
+timeframe = "1d"
 leverage = 1.0
