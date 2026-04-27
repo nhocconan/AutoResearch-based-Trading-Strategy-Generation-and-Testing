@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high and 1d EMA(50) is rising.
-# Short when price breaks below Donchian(20) low and 1d EMA(50) is falling.
-# Uses volume > 1.5x 20-period average for confirmation.
-# Exit on opposite Donchian break or when 1d EMA direction changes.
-# Designed to work in both bull (breakouts) and bear (breakdowns) markets.
-# Target: 20-50 trades/year to avoid fee drag.
+# Hypothesis: 1d strategy using weekly Keltner Channel breakout with volume confirmation and monthly trend filter.
+# Long when price breaks above upper KC (EMA20 + 2*ATR) with volume > 1.5x average and monthly trend up.
+# Short when price breaks below lower KC (EMA20 - 2*ATR) with volume > 1.5x average and monthly trend down.
+# Exit when price crosses back below/above EMA20.
+# Uses weekly KC for breakout signals, volume for confirmation, monthly EMA50 for trend filter.
+# Target: 10-25 trades/year to avoid fee drag. Works in bull/bear via trend-filtered breakouts.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,84 +20,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Keltner Channel
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate 1d EMA(50) for trend direction
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 0.04) + (ema_50_1d[i-1] * 0.96)
+    # Get monthly data for trend filter (EMA50)
+    df_monthly = get_htf_data(prices, '1M')
+    if len(df_monthly) < 50:
+        return np.zeros(n)
     
-    # Calculate 1d EMA direction (rising/falling)
-    ema_rising_1d = np.full(len(close_1d), False)
-    ema_falling_1d = np.full(len(close_1d), False)
-    for i in range(1, len(ema_50_1d)):
-        if not np.isnan(ema_50_1d[i]) and not np.isnan(ema_50_1d[i-1]):
-            ema_rising_1d[i] = ema_50_1d[i] > ema_50_1d[i-1]
-            ema_falling_1d[i] = ema_50_1d[i] < ema_50_1d[i-1]
+    close_monthly = df_monthly['close'].values
     
-    # Align 1d EMA direction to 4h timeframe
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising_1d.astype(float))
-    ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_falling_1d.astype(float))
+    # Calculate ATR(14) for weekly data
+    def calculate_atr(high, low, close, period):
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        atr = np.full_like(tr, np.nan, dtype=float)
+        for i in range(period, len(tr)):
+            if i == period:
+                atr[i] = np.nanmean(tr[1:period+1])
+            else:
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    # Calculate Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(19, n):
-        donch_high[i] = np.max(high[i-19:i+1])
-        donch_low[i] = np.min(low[i-19:i+1])
+    atr_weekly = calculate_atr(high_weekly, low_weekly, close_weekly, 14)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Calculate EMA(20) for weekly data
+    def calculate_ema(data, period):
+        ema = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return ema
+        multiplier = 2 / (period + 1)
+        ema[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            ema[i] = (data[i] * multiplier) + (ema[i-1] * (1 - multiplier))
+        return ema
+    
+    ema20_weekly = calculate_ema(close_weekly, 20)
+    
+    # Calculate Keltner Channel: EMA20 ± 2*ATR
+    kc_upper = ema20_weekly + 2 * atr_weekly
+    kc_lower = ema20_weekly - 2 * atr_weekly
+    
+    # Calculate EMA(50) for monthly trend filter
+    ema50_monthly = calculate_ema(close_monthly, 50)
+    
+    # Get volume MA(20) for daily data
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    
+    # Align indicators to daily timeframe
+    kc_upper_aligned = align_htf_to_ltf(prices, df_weekly, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_weekly, kc_lower)
+    ema50_aligned = align_htf_to_ltf(prices, df_monthly, ema50_monthly)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 20-period Donchian, 20-period volume MA, and 50-period EMA
-    start_idx = max(19, 19, 49)
+    # Warmup: need 30-period weekly data and 20-period volume MA
+    start_idx = max(30, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_rising_aligned[i]) or 
-            np.isnan(ema_falling_aligned[i])):
+        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ok = vol_filter[i]
+        vol_now = volume[i]
+        vol_avg = vol_ma_20[i]
+        
+        # Volume filter
+        vol_filter = vol_now > 1.5 * vol_avg
+        
+        # Trend filter: monthly EMA50 slope
+        trend_up = ema50_aligned[i] > ema50_aligned[i-1] if i > 0 else False
+        trend_down = ema50_aligned[i] < ema50_aligned[i-1] if i > 0 else False
         
         if position == 0:
-            # Long: price breaks above Donchian high, 1d EMA rising, volume confirmation
-            if price > donch_high[i] and ema_rising_aligned[i] > 0.5 and vol_ok:
+            # Long: price breaks above KC upper with volume and trend up
+            if price > kc_upper_aligned[i] and vol_filter and trend_up:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian low, 1d EMA falling, volume confirmation
-            elif price < donch_low[i] and ema_falling_aligned[i] > 0.5 and vol_ok:
+            # Short: price breaks below KC lower with volume and trend down
+            elif price < kc_lower_aligned[i] and vol_filter and trend_down:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR 1d EMA starts falling
-            if price < donch_low[i] or ema_falling_aligned[i] > 0.5:
+            # Exit long: price crosses below EMA20 (using KC middle as proxy)
+            if price < kc_upper_aligned[i] - atr_weekly[i]:  # EMA20 ≈ KC middle
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR 1d EMA starts rising
-            if price > donch_high[i] or ema_rising_aligned[i] > 0.5:
+            # Exit short: price crosses above EMA20
+            if price > kc_lower_aligned[i] + atr_weekly[i]:  # EMA20 ≈ KC middle
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_1dEMA50_Volume"
-timeframe = "4h"
+name = "1d_KeltnerChannel_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
