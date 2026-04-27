@@ -1,43 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_TRIX_Confluence_v2
-Hypothesis: KAMA adapts to market noise while TRIX identifies momentum shifts.
-Combining KAMA direction (trend) with TRIX zero-cross (momentum) and volume confirmation
-creates a high-conviction signal that works in both bull and bear markets by avoiding
-whipsaws in ranging markets. Uses 1d ADX filter to ensure trades only in strong targets.
-Target: 15-25 trades/year to minimize fee drag on 12h timeframe.
+1h_4h1d_Confluence_Strategy_v1
+Hypothesis: Use 4h and 1d trend direction as primary signal filters, with 1h timeframe for precise entry timing.
+Combines 4h EMA trend, 1d ADX trend strength, and 1h volume confirmation to avoid whipsaws.
+Targets 15-37 trades per year to minimize fee drag while capturing major trends.
+Works in both bull and bear markets by requiring strong trend alignment before entering.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_kama(close, er_length=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0])).cumsum()
-    volatility = np.where(volatility == 0, 1, volatility)
-    er = change / volatility
-    
-    er_smoothed = pd.Series(er).ewm(alpha=1/er_length, adjust=False).mean().values
-    
-    sc = (er_smoothed * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_trix(close, period=15):
-    """Calculate TRIX indicator"""
-    ema1 = pd.Series(close).ewm(span=period, adjust=False).mean()
-    ema2 = pd.Series(ema1).ewm(span=period, adjust=False).mean()
-    ema3 = pd.Series(ema2).ewm(span=period, adjust=False).mean()
-    
-    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    return trix.fillna(0).values
 
 def generate_signals(prices):
     n = len(prices)
@@ -49,12 +21,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for EMA trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ADX for trend strength filter
+    # Calculate 4h EMA21
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Get 1d data for ADX trend strength
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate 1d ADX
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -85,55 +66,53 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     dx = np.where((plus_di + minus_di) == 0, 0, dx)
     adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
-    
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate KAMA on 12h data
-    kama = calculate_kama(close, er_length=10, fast=2, slow=30)
-    
-    # Calculate TRIX on 12h data
-    trix = calculate_trix(close, period=15)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # 1h volume confirmation: volume > 1.3 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need enough data for ADX, KAMA, TRIX and volume MA
-    start_idx = max(35, 20)  # ADX needs ~30, TRIX needs period, volume MA needs 20
+    # Warmup: need enough data for EMA, ADX, and volume MA
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if np.isnan(adx_aligned[i]) or np.isnan(kama[i]) or np.isnan(trix[i]):
+        # Skip if any data not ready or outside session
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma[i]) or not session_filter[i]):
             signals[i] = 0.0
             continue
         
+        ema_4h_val = ema_4h_aligned[i]
         adx_val = adx_aligned[i]
-        trix_val = trix[i]
         vol_confirm_val = vol_confirm[i]
         
         if position == 0:
-            # Long: price above KAMA, TRIX positive (bullish momentum), ADX > 25, volume confirmation
-            if close[i] > kama[i] and trix_val > 0 and adx_val > 25 and vol_confirm_val:
+            # Long: price above 4h EMA, ADX > 20 (trending), volume confirmation
+            if close[i] > ema_4h_val and adx_val > 20 and vol_confirm_val:
                 signals[i] = size
                 position = 1
-            # Short: price below KAMA, TRIX negative (bearish momentum), ADX > 25, volume confirmation
-            elif close[i] < kama[i] and trix_val < 0 and adx_val > 25 and vol_confirm_val:
+            # Short: price below 4h EMA, ADX > 20 (trending), volume confirmation
+            elif close[i] < ema_4h_val and adx_val > 20 and vol_confirm_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below KAMA or TRIX turns negative or ADX weakens
-            if close[i] < kama[i] or trix_val < 0 or adx_val < 20:
+            # Exit long: price crosses below 4h EMA or ADX weakens
+            if close[i] < ema_4h_val or adx_val < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above KAMA or TRIX turns positive or ADX weakens
-            if close[i] > kama[i] or trix_val > 0 or adx_val < 20:
+            # Exit short: price crosses above 4h EMA or ADX weakens
+            if close[i] > ema_4h_val or adx_val < 15:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_TRIX_Confluence_v2"
-timeframe = "12h"
+name = "1h_4h1d_Confluence_Strategy_v1"
+timeframe = "1h"
 leverage = 1.0
