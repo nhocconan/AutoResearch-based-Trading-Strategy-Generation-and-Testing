@@ -23,21 +23,6 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 6h Donchian channels (20-period) for breakout signals
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
-        return np.zeros(n)
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    donchian_high_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low_20)
-    
-    # Calculate 6h volume moving average for confirmation
-    vol_ma_6h = pd.Series(df_6h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
-    
     # Calculate daily EMA(34) for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
@@ -51,6 +36,21 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Calculate 4h Donchian channels (20-period) for breakout signals
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
+    
+    # Calculate 4h volume moving average for confirmation
+    vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -68,7 +68,7 @@ def generate_signals(prices):
             np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(donchian_high_aligned[i]) or 
             np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_6h_aligned[i])):
+            np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -85,10 +85,10 @@ def generate_signals(prices):
         atr_threshold = np.nanpercentile(atr_14_1d_aligned[max(0, i-100):i+1], 70) if i >= 30 else atr_14_1d_aligned[i]
         low_volatility = atr_14_1d_aligned[i] < atr_threshold
         
-        # Volume filter: current 6h volume above average
-        volume_filter = vol_ma_6h_aligned[i] > 0 and volume[i] > vol_ma_6h_aligned[i] * 0.8
+        # Volume filter: current 4h volume above average
+        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 0.8
         
-        # Breakout signals: price breaks 6h Donchian channels
+        # Breakout signals: price breaks 4h Donchian channels
         breakout_up = close[i] > donchian_high_aligned[i]
         breakout_down = close[i] < donchian_low_aligned[i]
         
@@ -128,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DonchianBreakout_EMA34Trend_VolumeFilter"
-timeframe = "6h"
+name = "4h_DonchianBreakout_EMA34Trend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
