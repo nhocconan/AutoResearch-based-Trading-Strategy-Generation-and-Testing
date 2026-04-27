@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,53 +13,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data (called ONCE before loop)
+    # Get 1d data for calculations (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Calculate 1-day Exponential Moving Average (34-period) for trend
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        multiplier = 2 / (34 + 1)
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * multiplier) + (ema_34_1d[i-1] * (1 - multiplier))
     
-    # 1-day KAMA calculation
-    def kama(price, period=10, fast=2, slow=30):
-        change = np.abs(np.diff(price, n=period))
-        volatility = np.sum(np.abs(np.diff(price)), axis=1)
-        er = np.zeros_like(price)
-        er[period:] = change[period-1:] / volatility[period-1:]
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))**2
-        kama = np.full_like(price, np.nan)
-        kama[period] = price[period]
-        for i in range(period+1, len(price)):
-            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
-        return kama
+    # Calculate 1-day Bollinger Bands (20, 2.0)
+    sma_20_1d = np.full(len(close_1d), np.nan)
+    std_20_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        for i in range(19, len(close_1d)):
+            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
+            std_20_1d[i] = np.std(close_1d[i-19:i+1])
     
-    # 1-day RSI calculation
-    def rsi(price, period=14):
-        delta = np.diff(price)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full_like(price, np.nan)
-        avg_loss = np.full_like(price, np.nan)
-        if len(price) >= period+1:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-            for i in range(period+1, len(price)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
     
-    kama_1d = kama(close_1d, 10, 2, 30)
-    rsi_1d = rsi(close_1d, 14)
+    # Align 1d indicators to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # Align 1d indicators to 12h timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Volume spike detection (6-period average)
+    # Calculate 6-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
     vol_period = 6
     for i in range(vol_period, n):
@@ -70,11 +54,12 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(10, 14, vol_period) + 5
+    start_idx = max(34, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(upper_bb_1d_aligned[i]) or 
+            np.isnan(lower_bb_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -86,26 +71,26 @@ def generate_signals(prices):
         vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: KAMA trending up + RSI not overbought + volume spike
-            if kama_1d_aligned[i] > kama_1d_aligned[i-1] and rsi_1d_aligned[i] < 70 and vol_filter:
+            # Long: Price above EMA34 and breaks above upper Bollinger Band with volume
+            if price > ema_34_1d_aligned[i] and price > upper_bb_1d_aligned[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: KAMA trending down + RSI not oversold + volume spike
-            elif kama_1d_aligned[i] < kama_1d_aligned[i-1] and rsi_1d_aligned[i] > 30 and vol_filter:
+            # Short: Price below EMA34 and breaks below lower Bollinger Band with volume
+            elif price < ema_34_1d_aligned[i] and price < lower_bb_1d_aligned[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: KAMA turns down OR RSI overbought
-            if kama_1d_aligned[i] < kama_1d_aligned[i-1] or rsi_1d_aligned[i] > 70:
+            # Long exit: Price crosses below EMA34 or volatility spike (potential reversal)
+            if price < ema_34_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: KAMA turns up OR RSI oversold
-            if kama_1d_aligned[i] > kama_1d_aligned[i-1] or rsi_1d_aligned[i] < 30:
+            # Short exit: Price crosses above EMA34 or volatility spike (potential reversal)
+            if price > ema_34_1d_aligned[i] or (vol_ratio > 2.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_Volume"
-timeframe = "12h"
+name = "4h_EMA34_BB20_Volume"
+timeframe = "4h"
 leverage = 1.0
