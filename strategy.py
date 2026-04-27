@@ -1,13 +1,15 @@
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d trend filter and volume spike
+# Camarilla levels provide institutional support/resistance; breakouts with volume
+# and higher timeframe trend capture momentum while minimizing false breaks.
+# Works in bull/bear by filtering breakout direction with 1d EMA trend.
+# Target: 50-150 total trades over 4 years (~12-37/year) to avoid fee drag.
+# Focus on ETH and BTC as primary markets.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Choppiness Index + Donchian(20) breakout with volume confirmation
-# Choppiness Index identifies trending vs ranging markets (CHOP > 61.8 = range, < 38.2 = trend).
-# In trending markets, Donchian breakouts capture momentum; in ranging markets, fade at Donchian bands.
-# Volume filter ensures breakouts have institutional participation.
-# Works in bull/bear by adapting to market regime via Choppiness Index.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,113 +21,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(19, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
-    
-    # Calculate Choppiness Index (14-period) on 1d timeframe
+    # Get 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range for 1d
-    tr_1d = np.full(len(df_1d), np.nan)
+    # Calculate Camarilla levels for each 1d bar (based on previous day)
+    camarilla_H1 = np.full(len(df_1d), np.nan)
+    camarilla_L1 = np.full(len(df_1d), np.nan)
+    camarilla_H2 = np.full(len(df_1d), np.nan)
+    camarilla_L2 = np.full(len(df_1d), np.nan)
+    
     for i in range(1, len(df_1d)):
-        hl = high_1d[i] - low_1d[i]
-        hc = np.abs(high_1d[i] - close_1d[i-1])
-        lc = np.abs(low_1d[i] - close_1d[i-1])
-        tr_1d[i] = np.max([hl, hc, lc])
+        # Previous day's range
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        rang = ph - pl
+        
+        # Camarilla levels (R1/S1 = H1/L1, R2/S2 = H2/L2)
+        camarilla_H1[i] = pc + 1.1 * rang / 6
+        camarilla_L1[i] = pc - 1.1 * rang / 6
+        camarilla_H2[i] = pc + 1.1 * rang / 4
+        camarilla_L2[i] = pc - 1.1 * rang / 4
     
-    # ATR(14) for 1d
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        atr_1d[i] = np.mean(tr_1d[i-14:i+1])
+    # Align Camarilla levels to 12h timeframe (wait for 1d close)
+    H1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H1)
+    L1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L1)
+    H2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H2)
+    L2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L2)
     
-    # Choppiness Index: 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
-    chop_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        sum_atr = np.sum(atr_1d[i-14:i+1])
-        max_high = np.max(high_1d[i-14:i+1])
-        min_low = np.min(low_1d[i-14:i+1])
-        if max_high > min_low:
-            chop_1d[i] = 100 * np.log10(sum_atr / (max_high - min_low)) / np.log10(14)
+    # 1d EMA trend filter (50-period)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Choppiness Index to 6h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Volume filter: volume > 1.5 x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Volume filter: volume > 2.0 x 24-period average (12 days of 12h bars)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(23, n):
+        vol_ma_24[i] = np.mean(volume[i-23:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian (20), Chop (14), Vol MA (20)
-    start_idx = max(19, 14, 19)
+    # Warmup: need 1d data (1 bar), EMA (50), volume MA (24)
+    start_idx = max(1, 50, 24)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(H1_aligned[i]) or np.isnan(L1_aligned[i]) or 
+            np.isnan(H2_aligned[i]) or np.isnan(L2_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        chop = chop_aligned[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        vol_avg = vol_ma_24[i]
         
-        # Volume filter
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Volume filter: significant volume spike
+        vol_filter = vol_now > 2.0 * vol_avg
         
-        # Regime detection
-        is_trending = chop < 38.2
-        is_ranging = chop > 61.8
+        # Trend filter from 1d EMA
+        bullish_trend = price > ema_50_aligned[i]
+        bearish_trend = price < ema_50_aligned[i]
         
         if position == 0:
-            if is_trending and vol_filter:
-                # In trending market: Donchian breakout
-                if price > donchian_high[i]:
-                    signals[i] = size
-                    position = 1
-                elif price < donchian_low[i]:
-                    signals[i] = -size
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif is_ranging and vol_filter:
-                # In ranging market: fade at Donchian bands (mean reversion)
-                if price >= donchian_high[i]:
-                    signals[i] = -size
-                    position = -1
-                elif price <= donchian_low[i]:
-                    signals[i] = size
-                    position = 1
-                else:
-                    signals[i] = 0.0
+            # Long: break above H1 with volume and bullish trend
+            if price > H1_aligned[i] and vol_filter and bullish_trend:
+                signals[i] = size
+                position = 1
+            # Short: break below L1 with volume and bearish trend
+            elif price < L1_aligned[i] and vol_filter and bearish_trend:
+                signals[i] = -size
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to midpoint or Donchian low
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
-            if price <= midpoint or price <= donchian_low[i]:
+            # Exit long: price returns to L2 (mean reversion) or trend turns bearish
+            if price <= L2_aligned[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to midpoint or Donchian high
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
-            if price >= midpoint or price >= donchian_high[i]:
+            # Exit short: price returns to H2 (mean reversion) or trend turns bullish
+            if price >= H2_aligned[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Choppiness_Donchian_Breakout_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
