@@ -13,33 +13,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for higher timeframe context (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for higher timeframe context (1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly ATR(14) for volatility filter
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate weekly EMA(34) for trend direction
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate daily EMA(34) for trend direction
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate weekly volume moving average
-    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # Calculate daily volume moving average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -53,9 +53,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(atr_14_1w_aligned[i]) or 
-            np.isnan(vol_ma_1w_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -64,23 +64,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA34
-        price_above_ema = close[i] > ema_34_1w_aligned[i]
-        price_below_ema = close[i] < ema_34_1w_aligned[i]
+        # Trend filter: price above/below daily EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
         # Volatility filter: avoid high volatility periods (ATR below median)
-        atr_median = np.nanmedian(atr_14_1w_aligned[:i+1]) if i >= 50 else atr_14_1w_aligned[i]
-        low_volatility = atr_14_1w_aligned[i] < atr_median
+        atr_median = np.nanmedian(atr_14_1d_aligned[:i+1]) if i >= 50 else atr_14_1d_aligned[i]
+        low_volatility = atr_14_1d_aligned[i] < atr_median
         
-        # Volume filter: current volume above weekly average
-        volume_filter = volume[i] > vol_ma_1w_aligned[i]
+        # Volume filter: current volume above daily average
+        volume_filter = volume[i] > vol_ma_1d_aligned[i]
         
-        # Long conditions: price above weekly EMA34 + low volatility + volume
+        # Long conditions: price above daily EMA34 + low volatility + volume
         long_condition = (price_above_ema and 
                          low_volatility and 
                          volume_filter)
         
-        # Short conditions: price below weekly EMA34 + low volatility + volume
+        # Short conditions: price below daily EMA34 + low volatility + volume
         short_condition = (price_below_ema and 
                           low_volatility and 
                           volume_filter)
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_WeeklyTrend_VolumeFilter_Session"
-timeframe = "12h"
+name = "4h_EMA34_VolumeFilter_1dTrend_Session"
+timeframe = "4h"
 leverage = 1.0
