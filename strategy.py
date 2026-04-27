@@ -1,8 +1,3 @@
-# Hypothesis: Price action around daily pivot points (S1/R1) with volume confirmation and ADX filter on 12h timeframe.
-# In both bull and bear markets, price often respects key daily support/resistance levels.
-# Volume confirms institutional interest, ADX ensures we trade in trending conditions to avoid chop.
-# Position size 0.25 to manage risk. Target: 15-30 trades/year.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
