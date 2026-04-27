@@ -1,4 +1,4 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -26,7 +26,7 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema_34[i] = (close_1d[i] * 2 + ema_34[i-1] * 33) / 35
     
-    # Align EMA34 to 6h
+    # Align EMA34 to 12h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate ATR(14) for volatility filter
@@ -99,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dEMA34_Volume_Trend"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
