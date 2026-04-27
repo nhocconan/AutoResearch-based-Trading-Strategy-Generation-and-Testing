@@ -1,8 +1,3 @@
-# 12h_1D_Camarilla_R3_S3_Breakout_VolumeFilter_v1
-# Hypothesis: Breakout above/below daily Camarilla R3/S3 on 12h timeframe with volume > 2x average and ATR volatility filter.
-# Works in both bull and bear markets by capturing strong momentum moves with volume confirmation.
-# Designed for 12h timeframe with fewer trades (target: 12-37/year) to minimize fee drag.
-
 #!/usr/bin/env python3
 
 import numpy as np
@@ -11,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,99 +14,132 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Get daily data for Supertrend calculation
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 2:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (R3, S3)
+    # Calculate Supertrend on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla: Range = (H-L), R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    atr_period = 10
+    multiplier = 3.0
     
-    # Calculate ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    for i in range(n):
-        if i < 14:
+    # Calculate ATR
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr = np.zeros(len(tr))
+    for i in range(len(tr)):
+        if i < atr_period:
             atr[i] = np.mean(tr[:i+1]) if i > 0 else tr[0]
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Calculate volume average (30-period for 12h timeframe)
-    vol_ma_30 = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma_30[i] = np.mean(volume[i-30:i])
+    # Calculate basic upper and lower bands
+    hl2 = (high_1d + low_1d) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
     
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Initialize Supertrend
+    supertrend = np.zeros(len(close_1d))
+    direction = np.ones(len(close_1d))  # 1 for uptrend, -1 for downtrend
+    
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close_1d)):
+        if close_1d[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close_1d[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    # Align Supertrend to 4h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    
+    # Calculate RSI on 4h
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(n):
+        if i < 14:
+            avg_gain[i] = np.mean(gain[:i]) if i > 0 else 0
+            avg_loss[i] = np.mean(loss[:i]) if i > 0 else 0
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate volume average (20-period)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0
     
-    # Warmup: need all indicators
-    start_idx = max(30, 14)  # volume MA needs 30, ATR needs 14
+    # Warmup: need Supertrend and RSI
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(supertrend_aligned[i]) or
+            np.isnan(direction_aligned[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_30[i] if vol_ma_30[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Volume confirmation: > 2x average volume (adjusted for 12h)
+        # Volume confirmation: > 2.0x average volume
         volume_confirmation = vol_ratio > 2.0
         
-        # ATR volatility filter: avoid low volatility periods
-        # Only trade when ATR is above 50% of its 50-period average
-        if i >= 50:
-            atr_avg = np.mean(atr[i-50:i+1])
-            vol_filter = atr[i] > atr_avg * 0.5
-        else:
-            vol_filter = True  # No filter during warmup
-        
         if position == 0:
-            # Long: break above daily R3 with volume and volatility
-            if volume_confirmation and vol_filter and price > camarilla_r3_aligned[i]:
+            # Long: Supertrend uptrend, RSI > 50, volume confirmation
+            if direction_aligned[i] == 1 and rsi[i] > 50 and volume_confirmation:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below daily S3 with volume and volatility
-            elif volume_confirmation and vol_filter and price < camarilla_s3_aligned[i]:
+            # Short: Supertrend downtrend, RSI < 50, volume confirmation
+            elif direction_aligned[i] == -1 and rsi[i] < 50 and volume_confirmation:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to daily midpoint or volatility drops significantly
-            daily_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
-            if price < daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
+            # Long exit: Supertrend turns down or RSI < 40
+            if direction_aligned[i] == -1 or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # Maintain position
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to daily midpoint or volatility drops significantly
-            daily_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
-            if price > daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
+            # Short exit: Supertrend turns up or RSI > 60
+            if direction_aligned[i] == 1 or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # Maintain position
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_1D_Camarilla_R3_S3_Breakout_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_1D_Supertrend_RSI_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
