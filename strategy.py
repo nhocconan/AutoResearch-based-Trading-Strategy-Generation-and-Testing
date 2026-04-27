@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Williams %R reversal with 4h EMA34 trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 from below (oversold reversal) with 4h EMA34 uptrend and volume > 1.5x average.
-# Short when Williams %R crosses below -80 from above (overbought reversal) with 4h EMA34 downtrend and volume > 1.5x average.
-# Exit when Williams %R crosses back through -50 (mean reversion).
-# Uses 4h trend to avoid counter-trend trades, targeting 15-37 trades per year on 1h timeframe.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1w EMA50 trend filter and volume confirmation.
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Long when Bull Power turns positive (from negative/zero) with 1w EMA50 uptrend and volume > 1.5x average.
+# Short when Bear Power turns negative (from positive/zero) with 1w EMA50 downtrend and volume > 1.5x average.
+# Exit when power crosses back through zero (mean reversion).
+# Elder Ray captures institutional buying/selling pressure; works in bull/bear via trend filter.
+# Target: 50-150 total trades over 4 years = 12-37/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,40 +21,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA34 for trend filter
-    ema_period = 34
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= ema_period:
-        ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
-        for i in range(ema_period, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * (2 / (ema_period + 1)) + 
-                         ema_4h[i - 1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 1w EMA50 for trend filter
+    ema_period = 50
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
+                         ema_1w[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate Williams %R (14-period)
-    willr_period = 14
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    willr = np.full(n, np.nan)
+    # Calculate EMA13 for Elder Ray (6h timeframe)
+    ema13_period = 13
+    ema13 = np.full(n, np.nan)
+    if n >= ema13_period:
+        ema13[ema13_period - 1] = np.mean(close[:ema13_period])
+        for i in range(ema13_period, n):
+            ema13[i] = (close[i] * (2 / (ema13_period + 1)) + 
+                        ema13[i - 1] * (1 - (2 / (ema13_period + 1))))
     
-    for i in range(willr_period - 1, n):
-        highest_high[i] = np.max(high[i - willr_period + 1:i + 1])
-        lowest_low[i] = np.min(low[i - willr_period + 1:i + 1])
-        if highest_high[i] != lowest_low[i]:
-            willr[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
-    # Williams %R previous value for crossover detection
-    willr_prev = np.full(n, np.nan)
-    willr_prev[1:] = willr[:-1]
+    # Previous values for crossover detection
+    bull_power_prev = np.full(n, np.nan)
+    bear_power_prev = np.full(n, np.nan)
+    bull_power_prev[1:] = bull_power[:-1]
+    bear_power_prev[1:] = bear_power[:-1]
     
-    # Align 4h EMA to 1h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Align 1w EMA50 to 6h timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -61,19 +66,19 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.20   # 20% position size
+    size = 0.25   # 25% position size
     
-    # Warmup: need Williams %R, EMA34, and volume MA20
-    start_idx = max(willr_period, ema_period - 1, 19)
+    # Warmup: need EMA13, EMA50(1w), and volume MA20
+    start_idx = max(ema13_period, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(willr[i]) or np.isnan(willr_prev[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(bull_power_prev[i]) or np.isnan(bear_power_prev[i]) or
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
@@ -81,28 +86,28 @@ def generate_signals(prices):
         vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: Williams %R crosses above -20 from below with 4h EMA34 uptrend and volume filter
-            if (willr_prev[i] <= -20 and willr[i] > -20 and 
-                price > ema_4h_aligned[i] and vol_filter):
+            # Long: Bull Power turns positive (from <=0) with 1w EMA50 uptrend and volume filter
+            if (bull_power_prev[i] <= 0 and bull_power[i] > 0 and 
+                close[i] > ema_1w_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: Williams %R crosses below -80 from above with 4h EMA34 downtrend and volume filter
-            elif (willr_prev[i] >= -80 and willr[i] < -80 and 
-                  price < ema_4h_aligned[i] and vol_filter):
+            # Short: Bear Power turns negative (from >=0) with 1w EMA50 downtrend and volume filter
+            elif (bear_power_prev[i] >= 0 and bear_power[i] < 0 and 
+                  close[i] < ema_1w_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R crosses below -50 from above
-            if willr_prev[i] >= -50 and willr[i] < -50:
+            # Exit long: Bull Power crosses back below zero
+            if bull_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: Williams %R crosses above -50 from below
-            if willr_prev[i] <= -50 and willr[i] > -50:
+            # Exit short: Bear Power crosses back above zero
+            if bear_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_WilliamsR14_Reversal_4hEMA34_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_Energy_1wEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
