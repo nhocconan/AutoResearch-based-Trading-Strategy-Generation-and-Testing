@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band breakout with 1d trend filter and volume spike
-# BB breakouts capture momentum, filtered by 1d EMA trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation. Works in bull/bear by aligning
-# breakout direction with higher timeframe trend. Target: 50-150 total trades over 4 years.
+# Hypothesis: 1d Donchian(20) breakout with weekly trend filter and volume confirmation
+# Donchian breakouts capture momentum; weekly EMA(50) filters direction to avoid counter-trend trades.
+# Volume surge confirms institutional participation. Works in bull/bear by only taking breakouts
+# in direction of weekly trend. Target: 30-100 total trades over 4 years (~7-25/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,45 +18,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Weekly EMA(50) trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Bollinger Bands (20, 2) on 1d close
-    bb_period = 20
-    bb_std = 2.0
-    sma_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean()
-    std_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std()
-    upper_bb = sma_20 + (std_20 * bb_std)
-    lower_bb = sma_20 - (std_20 * bb_std)
+    # Daily Donchian(20) channels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    # Align Bollinger Bands to 6h timeframe (wait for 1d close)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb.values)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb.values)
-    
-    # 1d EMA trend filter (50-period)
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: volume > 1.5 x 20-period average
+    # Volume filter: volume > 2.0 x 20-day average
     vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need BB (20), EMA (50), volume MA (20)
-    start_idx = max(bb_period, 50, 20)
+    # Warmup: need Donchian (20), weekly EMA (50), volume MA (20)
+    start_idx = max(20, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -65,35 +59,33 @@ def generate_signals(prices):
         vol_avg = vol_ma_20[i]
         
         # Volume filter: significant volume spike
-        vol_filter = vol_now > 1.5 * vol_avg
+        vol_filter = vol_now > 2.0 * vol_avg
         
-        # Trend filter from 1d EMA
-        bullish_trend = price > ema_50_aligned[i]
-        bearish_trend = price < ema_50_aligned[i]
+        # Trend filter from weekly EMA
+        bullish_trend = price > ema_50_1w_aligned[i]
+        bearish_trend = price < ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: break above upper BB with volume and bullish trend
-            if price > upper_bb_aligned[i] and vol_filter and bullish_trend:
+            # Long: break above Donchian high with volume and bullish weekly trend
+            if price > donchian_high[i] and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: break below lower BB with volume and bearish trend
-            elif price < lower_bb_aligned[i] and vol_filter and bearish_trend:
+            # Short: break below Donchian low with volume and bearish weekly trend
+            elif price < donchian_low[i] and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle BB or trend turns bearish
-            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if price <= middle_bb or not bullish_trend:
+            # Exit long: price returns to Donchian low (mean reversion) or trend turns bearish
+            if price <= donchian_low[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to middle BB or trend turns bullish
-            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if price >= middle_bb or not bearish_trend:
+            # Exit short: price returns to Donchian high (mean reversion) or trend turns bullish
+            if price >= donchian_high[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Bollinger_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "1d_Donchian_20_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
