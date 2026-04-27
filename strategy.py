@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSqueeze
-Hypothesis: Combines Camarilla pivot breakouts with volatility squeeze detection and 1d EMA trend filter.
-Only trades when volatility is low (squeeze) and price breaks key levels with volume confirmation.
-Reduces false breakouts by requiring low volatility environment before entry.
-Target: 20-40 total trades over 4 years to minimize fee drag.
-Works in both bull and bear markets by using trend filter for direction and squeeze for timing.
+6h_WeeklyPivot_1dTrend_WithVolume
+Hypothesis: Weekly pivot points provide strong support/resistance that hold across both bull and bear markets.
+In bull markets: long when price breaks above weekly R1 with 1d uptrend and volume confirmation.
+In bear markets: short when price breaks below weekly S1 with 1d downtrend and volume confirmation.
+Uses weekly pivots (H/L/C from prior week) and 1d EMA50 trend filter.
+Target: 50-150 total trades over 4 years (~12-37/year) to balance opportunity and cost.
 """
 
 import numpy as np
@@ -22,38 +22,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 4h bar
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly pivot points: (H+L+C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
-    camarilla_r1 = np.zeros(len(close_4h))
-    camarilla_s1 = np.zeros(len(close_4h))
-    for i in range(len(close_4h)):
-        if high_4h[i] == low_4h[i]:
-            camarilla_r1[i] = close_4h[i]
-            camarilla_s1[i] = close_4h[i]
-        else:
-            camarilla_r1[i] = close_4h[i] + (high_4h[i] - low_4h[i]) * 1.1 / 12
-            camarilla_s1[i] = close_4h[i] - (high_4h[i] - low_4h[i]) * 1.1 / 12
+    pivot = (high_w + low_w + close_w) / 3
+    weekly_r1 = 2 * pivot - low_w
+    weekly_s1 = 2 * pivot - high_w
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
+    # Align weekly pivots to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA(34) on 1d close
+    # Calculate EMA(50) on 1d close
     close_1d = df_1d['close'].values
-    ema_period = 34
+    ema_period = 50
     ema_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= ema_period:
         ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
@@ -61,30 +56,16 @@ def generate_signals(prices):
         for i in range(ema_period, len(close_1d)):
             ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Align 1d EMA to 4h timeframe
+    # Align 1d EMA to 6h timeframe
     ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Bollinger Bands for volatility squeeze detection (20, 2)
-    bb_period = 20
-    bb_std = 2.0
-    sma = np.full(n, np.nan)
-    bb_up = np.full(n, np.nan)
-    bb_dn = np.full(n, np.nan)
-    bb_width = np.full(n, np.nan)
-    
-    for i in range(bb_period, n):
-        sma[i] = np.mean(close[i-bb_period:i])
-        std = np.std(close[i-bb_period:i])
-        bb_up[i] = sma[i] + bb_std * std
-        bb_dn[i] = sma[i] - bb_std * std
-        bb_width[i] = (bb_up[i] - bb_dn[i]) / sma[i] if sma[i] > 0 else 0
-    
-    # Bollinger Band width percentile for squeeze detection
-    bb_width_percentile = np.full(n, np.nan)
-    lookback = 50
-    for i in range(lookback, n):
-        if not np.isnan(bb_width[i-lookback:i+1]).any():
-            bb_width_percentile[i] = np.percentile(bb_width[i-lookback:i+1], 20)  # 20th percentile = squeeze
+    # ATR for volatility measurement
+    atr_period = 14
+    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = np.full(n, np.nan)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
     
     # Volume confirmation
     vol_ma_period = 20
@@ -96,11 +77,11 @@ def generate_signals(prices):
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(bb_period, vol_ma_period, 34) + lookback
+    start_idx = max(atr_period, vol_ma_period, 1)
     
     for i in range(start_idx, n):
         if (np.isnan(ema_aligned[i]) or
-            np.isnan(bb_width_percentile[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -108,44 +89,41 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Trend filter: price above/below 1d EMA34
+        # Trend filter: price above/below 1d EMA50
         uptrend = price > ema_aligned[i]
         downtrend = price < ema_aligned[i]
-        
-        # Volatility squeeze: BB width below 20th percentile of recent values
-        volatility_squeeze = bb_width[i] < bb_width_percentile[i]
         
         # Volume confirmation: > 1.5x average volume
         volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: uptrend, squeeze, volume, price breaks above R1
-            if uptrend and volatility_squeeze and volume_confirmation and price > r1_aligned[i]:
+            # Long: price breaks above weekly R1 with uptrend and volume
+            if uptrend and volume_confirmation and price > r1_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: downtrend, squeeze, volume, price breaks below S1
-            elif downtrend and volatility_squeeze and volume_confirmation and price < s1_aligned[i]:
+            # Short: price breaks below weekly S1 with downtrend and volume
+            elif downtrend and volume_confirmation and price < s1_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns below S1 or trend reverses or volatility expands
-            if price < s1_aligned[i] or not uptrend or not volatility_squeeze:
+            # Long exit: price returns below weekly pivot or trend reverses
+            if price < pivot[min(i // len(df_weekly), len(pivot)-1)] if len(pivot) > 0 else r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # Maintain position
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above R1 or trend reverses or volatility expands
-            if price > r1_aligned[i] or not downtrend or not volatility_squeeze:
+            # Short exit: price returns above weekly pivot or trend reverses
+            if price > pivot[min(i // len(df_weekly), len(pivot)-1)] if len(pivot) > 0 else s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # Maintain position
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSqueeze"
-timeframe = "4h"
+name = "6h_WeeklyPivot_1dTrend_WithVolume"
+timeframe = "6h"
 leverage = 1.0
