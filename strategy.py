@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_4H_1D_RelativeStrengthIndex_MeanReversion_with_Volume_Filter
-Mean reversion strategy using RSI on 4h with 1d trend filter and volume confirmation.
-Long when RSI < 30 and 1d EMA50 uptrend with volume > 1.2x average.
-Short when RSI > 70 and 1d EMA50 downtrend with volume > 1.2x average.
-Exit when RSI returns to neutral zone (40-60).
-Targets 25-40 trades per year to minimize fee drag.
+12h_Donchian20_Breakout_VolumeSpike_1dTrend
+Long when price breaks above Donchian(20) high with volume > 2x average and 1d EMA50 uptrend.
+Short when price breaks below Donchian(20) low with volume > 2x average and 1d EMA50 downtrend.
+Exit when price crosses the Donchian midline (average of 20-period high/low).
+Target: 20-40 trades per year (80-160 over 4 years).
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -38,33 +37,18 @@ def generate_signals(prices):
             ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
                          ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate RSI on 4h
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Donchian channels (20-period)
+    donchian_period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
     
-    # First average gain/loss
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    if n >= rsi_period:
-        avg_gain[rsi_period - 1] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period - 1] = np.mean(loss[:rsi_period])
-        for i in range(rsi_period, n):
-            avg_gain[i] = (avg_gain[i - 1] * (rsi_period - 1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i - 1] * (rsi_period - 1) + loss[i]) / rsi_period
+    for i in range(donchian_period - 1, n):
+        upper[i] = np.max(high[i - donchian_period + 1:i + 1])
+        lower[i] = np.min(low[i - donchian_period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2.0
     
-    # Calculate RSI
-    rsi = np.zeros(n)
-    rs = np.zeros(n)
-    for i in range(rsi_period, n):
-        if avg_loss[i] > 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100 if avg_gain[i] > 0 else 50
-    
-    # Align 1d EMA to 4h timeframe
+    # Align 1d EMA to 12h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume MA for confirmation (20-period)
@@ -76,13 +60,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need RSI, EMA1d, and volume MA20
-    start_idx = max(rsi_period, ema_period - 1, 19)
+    # Warmup: need Donchian, EMA1d, and volume MA20
+    start_idx = max(donchian_period - 1, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -91,31 +75,31 @@ def generate_signals(prices):
         vol_avg = vol_ma_20[i]
         
         # Volume filter: require volume above average
-        vol_filter = vol_now > 1.2 * vol_avg
+        vol_filter = vol_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: RSI < 30 (oversold) with 1d EMA50 uptrend and volume filter
-            if (rsi[i] < 30 and 
+            # Long: break above Donchian upper with 1d EMA50 uptrend and volume filter
+            if (price > upper[i] and close[i - 1] <= upper[i - 1] and 
                 price > ema_1d_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: RSI > 70 (overbought) with 1d EMA50 downtrend and volume filter
-            elif (rsi[i] > 70 and 
+            # Short: break below Donchian lower with 1d EMA50 downtrend and volume filter
+            elif (price < lower[i] and close[i - 1] >= lower[i - 1] and 
                   price < ema_1d_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral zone (40-60)
-            if 40 <= rsi[i] <= 60:
+            # Exit long: price crosses below Donchian midline
+            if price < middle[i] and close[i - 1] >= middle[i - 1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: RSI returns to neutral zone (40-60)
-            if 40 <= rsi[i] <= 60:
+            # Exit short: price crosses above Donchian midline
+            if price > middle[i] and close[i - 1] <= middle[i - 1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_4H_1D_RelativeStrengthIndex_MeanReversion_with_Volume_Filter"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_VolumeSpike_1dTrend"
+timeframe = "12h"
 leverage = 1.0
