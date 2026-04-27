@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,18 +15,16 @@ def generate_signals(prices):
     
     # Get daily data for calculations (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA34 for trend filter (vectorized)
     close_1d = df_1d['close'].values
     ema_34_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 34:
-        # Initialize with SMA of first 34 values
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        # Calculate EMA for remaining values
         alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
+        ema_34_1d[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
             ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
     
     # Calculate previous day's OHLC for Camarilla (avoid look-ahead)
