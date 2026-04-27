@@ -37,7 +37,7 @@ def generate_signals(prices):
         else:
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align daily indicators to 1d
+    # Align daily indicators to 12h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_Volume_Trend_Filter"
-timeframe = "1d"
+name = "12h_EMA34_Volume_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
