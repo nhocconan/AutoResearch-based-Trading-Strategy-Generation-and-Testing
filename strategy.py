@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud with 1-day trend filter and volume confirmation.
-Long when price > Kumo cloud + Tenkan > Kijun + price > 1-day EMA34 + volume spike.
-Short when price < Kumo cloud + Tenkan < Kijun + price < 1-day EMA34 + volume spike.
-Ichimoku provides dynamic support/resistance and momentum, daily trend filters direction,
-volume confirms institutional participation. Target: 20-40 trades/year per symbol.
+6h Williams Alligator + 1-day ADX Trend Filter + Volume Spike
+Long when: Alligator bullish (Jaw < Teeth < Lips), ADX > 25 (trending), volume > 2x MA20
+Short when: Alligator bearish (Jaw > Teeth > Lips), ADX > 25, volume > 2x MA20
+Williams Alligator identifies trend direction and alignment, ADX filters for trending markets,
+volume confirms institutional participation. Designed for 6H timeframe to avoid overtrading.
+Target: 20-35 trades/year per symbol.
 """
 
 import numpy as np
@@ -23,73 +24,105 @@ def generate_signals(prices):
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend
-    daily_close = df_1d['close'].values
-    ema_34_1d = np.empty_like(daily_close, dtype=np.float64)
-    ema_34_1d.fill(np.nan)
-    if len(daily_close) >= 34:
-        alpha = 2.0 / (34 + 1)
-        ema_34_1d[33] = np.mean(daily_close[:34])
-        for i in range(34, len(daily_close)):
-            ema_34_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema_34_1d[i-1]
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily ADX for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = np.empty_like(high, dtype=np.float64)
-    tenkan_sen.fill(np.nan)
-    for i in range(tenkan_period - 1, n):
-        tenkan_sen[i] = (np.max(high[i-tenkan_period+1:i+1]) + np.min(low[i-tenkan_period+1:i+1])) / 2
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = np.empty_like(high, dtype=np.float64)
-    kijun_sen.fill(np.nan)
-    for i in range(kijun_period - 1, n):
-        kijun_sen[i] = (np.max(high[i-kijun_period+1:i+1]) + np.min(low[i-kijun_period+1:i+1])) / 2
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        smoothed = np.full_like(values, np.nan, dtype=np.float64)
+        if len(values) < period:
+            return smoothed
+        # First value is simple average
+        smoothed[period-1] = np.nanmean(values[1:period])
+        # Subsequent values: smoothed[i] = (smoothed[i-1] * (period-1) + values[i]) / period
+        for i in range(period, len(values)):
+            if not np.isnan(smoothed[i-1]) and not np.isnan(values[i]):
+                smoothed[i] = (smoothed[i-1] * (period-1) + values[i]) / period
+            else:
+                smoothed[i] = np.nan
+        return smoothed
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a = np.empty_like(high, dtype=np.float64)
-    senkou_span_a.fill(np.nan)
-    for i in range(n):
-        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
-            senkou_span_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2
+    period = 14
+    tr_smoothed = wilders_smoothing(tr, period)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, period)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, period)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    senkou_span_b = np.empty_like(high, dtype=np.float64)
-    senkou_span_b.fill(np.nan)
-    for i in range(senkou_span_b_period - 1, n):
-        senkou_span_b[i] = (np.max(high[i-senkou_span_b_period+1:i+1]) + np.min(low[i-senkou_span_b_period+1:i+1])) / 2
+    # Directional Indicators
+    di_plus = np.full_like(tr_smoothed, np.nan, dtype=np.float64)
+    di_minus = np.full_like(tr_smoothed, np.nan, dtype=np.float64)
+    dx = np.full_like(tr_smoothed, np.nan, dtype=np.float64)
     
-    # Chikou Span (Lagging Span): close plotted 26 periods back
-    chikou_span = np.empty_like(close, dtype=np.float64)
-    chikou_span.fill(np.nan)
-    for i in range(kijun_period - 1, n):
-        chikou_span[i] = close[i - kijun_period + 1]
+    for i in range(len(tr_smoothed)):
+        if not np.isnan(tr_smoothed[i]) and tr_smoothed[i] != 0:
+            di_plus[i] = (dm_plus_smoothed[i] / tr_smoothed[i]) * 100
+            di_minus[i] = (dm_minus_smoothed[i] / tr_smoothed[i]) * 100
+            if not np.isnan(di_plus[i]) and not np.isnan(di_minus[i]):
+                dx[i] = (np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])) * 100
     
-    # Calculate cloud boundaries (future Senkou spans shifted forward)
-    # For simplicity, we use current Senkou spans as cloud (standard Ichimoku cloud)
-    # Cloud top = max(Senkou Span A, Senkou Span B)
-    # Cloud bottom = min(Senkou Span A, Senkou Span B)
-    cloud_top = np.empty_like(high, dtype=np.float64)
-    cloud_bottom = np.empty_like(high, dtype=np.float64)
-    for i in range(n):
-        if not np.isnan(senkou_span_a[i]) and not np.isnan(senkou_span_b[i]):
-            cloud_top[i] = max(senkou_span_a[i], senkou_span_b[i])
-            cloud_bottom[i] = min(senkou_span_a[i], senkou_span_b[i])
-        else:
-            cloud_top[i] = np.nan
-            cloud_bottom[i] = np.nan
+    # ADX: smoothed DX
+    adx = wilders_smoothing(dx, period)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume filter: volume > 1.5x average (calculated from 6h volume MA20)
-    vol_ma_20 = np.empty_like(volume, dtype=np.float64)
-    vol_ma_20.fill(np.nan)
+    # Williams Alligator (6-period, 5-period, 3-period SMAs with future shifts)
+    # Jaw: 13-period SMMA shifted 8 bars forward
+    # Teeth: 8-period SMMA shifted 5 bars forward  
+    # Lips: 5-period SMMA shifted 3 bars forward
+    def smoothed_ma(values, period):
+        """Smoothed Moving Average (SMMA) - Wilder's smoothing"""
+        sma = np.full_like(values, np.nan, dtype=np.float64)
+        if len(values) < period:
+            return sma
+        # First value is simple average
+        sma[period-1] = np.mean(values[:period])
+        # Subsequent values: sma[i] = (sma[i-1] * (period-1) + values[i]) / period
+        for i in range(period, len(values)):
+            sma[i] = (sma[i-1] * (period-1) + values[i]) / period
+        return sma
+    
+    jaw_raw = smoothed_ma(close, 13)
+    teeth_raw = smoothed_ma(close, 8)
+    lips_raw = smoothed_ma(close, 5)
+    
+    # Shift forward: Jaw(+8), Teeth(+5), Lips(+3)
+    jaw = np.full_like(jaw_raw, np.nan)
+    teeth = np.full_like(teeth_raw, np.nan)
+    lips = np.full_like(lips_raw, np.nan)
+    
+    for i in range(len(jaw)):
+        if i + 8 < len(jaw) and not np.isnan(jaw_raw[i]):
+            jaw[i + 8] = jaw_raw[i]
+    for i in range(len(teeth)):
+        if i + 5 < len(teeth) and not np.isnan(teeth_raw[i]):
+            teeth[i + 5] = teeth_raw[i]
+    for i in range(len(lips)):
+        if i + 3 < len(lips) and not np.isnan(lips_raw[i]):
+            lips[i + 3] = lips_raw[i]
+    
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Volume filter: volume > 2x average (calculated from 6h volume MA20)
+    vol_ma_20 = np.full_like(volume, np.nan, dtype=np.float64)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
@@ -97,14 +130,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Ichimoku components (52 periods for Senkou B)
-    start_idx = senkou_span_b_period - 1
+    # Warmup: need Alligator components (13+8=21 for teeth, plus shifts)
+    start_idx = 21  # Need enough data for SMAs and shifts
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -113,54 +146,42 @@ def generate_signals(prices):
         vol_now = volume[i]
         
         # Current indicators
-        tenkan = tenkan_sen[i]
-        kijun = kijun_sen[i]
-        cloud_top_val = cloud_top[i]
-        cloud_bottom_val = cloud_bottom[i]
-        ema_trend = ema_34_1d_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        adx_val = adx_1d_aligned[i]
         
-        # Daily close price for trend comparison
-        daily_close_price = df_1d['close'].values
-        daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_price)
-        if np.isnan(daily_close_aligned[i]):
-            signals[i] = 0.0
-            continue
-        daily_close_val = daily_close_aligned[i]
+        # Alligator signals
+        alligator_bullish = (jaw_val < teeth_val) and (teeth_val < lips_val)
+        alligator_bearish = (jaw_val > teeth_val) and (teeth_val > lips_val)
         
-        # Volume filter: volume > 1.5x average
-        vol_filter = vol_now > 1.5 * vol_ma_20[i]
+        # ADX trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_val > 25
         
-        # Ichimoku signals
-        price_above_cloud = price_now > cloud_top_val
-        price_below_cloud = price_now < cloud_bottom_val
-        tenkan_above_kijun = tenkan > kijun
-        tenkan_below_kijun = tenkan < kijun
+        # Volume filter: volume > 2x average
+        vol_filter = vol_now > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Bull conditions: price > cloud + Tenkan > Kijun + bull trend + volume
-            if (price_above_cloud and tenkan_above_kijun and 
-                daily_close_val > ema_trend and vol_filter):
+            # Bull conditions: Alligator bullish + strong trend + volume
+            if alligator_bullish and strong_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Bear conditions: price < cloud + Tenkan < Kijun + bear trend + volume
-            elif (price_below_cloud and tenkan_below_kijun and 
-                  daily_close_val < ema_trend and vol_filter):
+            # Bear conditions: Alligator bearish + strong trend + volume
+            elif alligator_bearish and strong_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price < cloud or Tenkan < Kijun or trend turns bear
-            if (price_now < cloud_top_val or tenkan < kijun or 
-                daily_close_val < ema_trend):
+            # Exit long: Alligator turns bearish or trend weakens
+            if not alligator_bullish or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price > cloud or Tenkan > Kijun or trend turns bull
-            if (price_now > cloud_bottom_val or tenkan > kijun or 
-                daily_close_val > ema_trend):
+            # Exit short: Alligator turns bullish or trend weakens
+            if not alligator_bearish or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -168,6 +189,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_1dTrend_Volume"
+name = "6h_WilliamsAlligator_1dADX_Trend_Volume"
 timeframe = "6h"
 leverage = 1.0
