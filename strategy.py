@@ -1,3 +1,9 @@
+# 1d_KAMA_Trend_Filter_v1
+# Hypothesis: KAMA adapts to market noise - in trending markets it follows price closely,
+# in ranging markets it stays flat. Combined with 1-week trend filter and volume confirmation,
+# this should capture strong trends while avoiding whipsaws in ranging markets.
+# Works in both bull (captures trends) and bear (avoids false signals in ranges).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -18,49 +24,43 @@ def generate_signals(prices):
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 50-period EMA on weekly close
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
+    # Using 10-period ER (Efficiency Ratio) and 2/30 smoothing constants
+    er_period = 10
+    fast_sc = 2 / (2 + 1)  # 2/(fast+1) where fast=2
+    slow_sc = 2 / (30 + 1)  # 2/(slow+1) where slow=30
     
-    # Calculate 20-period ATR on weekly for volatility filter
-    tr_1w = np.maximum(high_1w[1:] - low_1w[1:], 
-                       np.maximum(np.abs(high_1w[1:] - close_1w[:-1]), 
-                                  np.abs(low_1w[1:] - close_1w[:-1])))
-    tr_1w = np.concatenate([[np.nan], tr_1w])
-    atr_1w = np.full(len(tr_1w), np.nan)
-    for i in range(20, len(tr_1w)):
-        if i == 20:
-            atr_1w[i] = np.mean(tr_1w[1:21])
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_period))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    # Pad the beginning with NaN
+    change = np.concatenate([np.full(er_period, np.nan), change])
+    volatility = np.concatenate([np.full(er_period, np.nan), volatility])
+    
+    # Avoid division by zero
+    er = np.divide(change, volatility, out=np.full_like(change, np.nan, dtype=float), where=volatility!=0)
+    # Smooth the ER
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[er_period] = close[er_period]  # Initialize
+    for i in range(er_period + 1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
         else:
-            atr_1w[i] = (atr_1w[i-1] * 19 + tr_1w[i]) / 20
+            kama[i] = kama[i-1]
     
-    # Align weekly indicators to 12h
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Calculate weekly EMA50 for trend filter
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Get daily data for Donchian channel
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Align indicators to daily
+    kama_aligned = align_htf_to_ltf(prices, None, kama)  # KAMA is already on daily index
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate 20-period Donchian channels on daily
-    upper_20 = np.full(len(high_1d), np.nan)
-    lower_20 = np.full(len(low_1d), np.nan)
-    for i in range(19, len(high_1d)):
-        upper_20[i] = np.max(high_1d[i-19:i+1])
-        lower_20[i] = np.min(low_1d[i-19:i+1])
-    
-    # Align Donchian to 12h
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
@@ -70,50 +70,46 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need weekly EMA/ATR, daily Donchian, and volume MA
-    start_idx = max(50, 20, 19, vol_period) + 5
+    # Warmup: need KAMA, weekly EMA, and volume MA
+    start_idx = max(er_period + 5, 50, vol_period) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+        if (np.isnan(kama_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        atr = atr_1w_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above weekly EMA50 and Donchian upper with volume
-            if (price > ema_50_1w_aligned[i] and 
-                price > upper_20_aligned[i] and 
-                vol_ratio > 1.8):
+            # Long: Price above KAMA with weekly uptrend and volume confirmation
+            if (price > kama_aligned[i] and 
+                ema_1w_aligned[i] > ema_1w_aligned[i-1] and  # Weekly uptrend
+                vol_ratio > 1.3):
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below weekly EMA50 and Donchian lower with volume
-            elif (price < ema_50_1w_aligned[i] and 
-                  price < lower_20_aligned[i] and 
-                  vol_ratio > 1.8):
+            # Short: Price below KAMA with weekly downtrend and volume confirmation
+            elif (price < kama_aligned[i] and 
+                  ema_1w_aligned[i] < ema_1w_aligned[i-1] and  # Weekly downtrend
+                  vol_ratio > 1.3):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below weekly EMA50 or Donchian lower or ATR stop
-            if (price < ema_50_1w_aligned[i] or 
-                price < lower_20_aligned[i] or 
-                price < close[i-1] - 2.0 * atr):
+            # Long exit: Price crosses below KAMA or weekly trend turns down
+            if (price < kama_aligned[i] or 
+                ema_1w_aligned[i] < ema_1w_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above weekly EMA50 or Donchian upper or ATR stop
-            if (price > ema_50_1w_aligned[i] or 
-                price > upper_20_aligned[i] or 
-                price > close[i-1] + 2.0 * atr):
+            # Short exit: Price crosses above KAMA or weekly trend turns up
+            if (price > kama_aligned[i] or 
+                ema_1w_aligned[i] > ema_1w_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA50_Donchian20_VolumeFilter"
-timeframe = "12h"
+name = "1d_KAMA_Trend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
