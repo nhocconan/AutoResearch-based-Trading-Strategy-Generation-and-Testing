@@ -28,9 +28,9 @@ def generate_signals(prices):
     R4 = prev_close + range_hl * 1.1 / 2
     S4 = prev_close - range_hl * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
-    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
+    # Align Camarilla levels to 1d timeframe
+    R4_1d = align_htf_to_ltf(prices, df_1d, R4)
+    S4_1d = align_htf_to_ltf(prices, df_1d, S4)
     
     # Get daily EMA34 for trend filter
     close_1d = df_1d['close'].values
@@ -50,32 +50,32 @@ def generate_signals(prices):
     start_idx = max(34, 20) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(R4_4h[i]) or np.isnan(S4_4h[i]) or 
+        if (np.isnan(R4_1d[i]) or np.isnan(S4_1d[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
             # Long entry: price breaks above R4 + 1-day uptrend + volume spike
-            if (close[i] > R4_4h[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]):
+            if (close[i] > R4_1d[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
             # Short entry: price breaks below S4 + 1-day downtrend + volume spike
-            elif (close[i] < S4_4h[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]):
+            elif (close[i] < S4_1d[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long exit: price breaks below S4 (reversal) or trend changes
-            if (close[i] < S4_4h[i] or close[i] < ema34_1d_aligned[i]):
+            if (close[i] < S4_1d[i] or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price breaks above R4 (reversal) or trend changes
-            if (close[i] > R4_4h[i] or close[i] > ema34_1d_aligned[i]):
+            if (close[i] > R4_1d[i] or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_Strict"
-timeframe = "4h"
+name = "1d_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_Strict"
+timeframe = "1d"
 leverage = 1.0
