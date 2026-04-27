@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Bollinger Band squeeze breakout with 1w trend filter and volume confirmation
-# Bollinger Band squeeze (low volatility) precedes strong moves. Breakout from squeeze
-# with volume and higher timeframe trend captures momentum. Works in bull/bear by
-# filtering breakout direction with 1w EMA trend. Target: 30-100 total trades over 4 years.
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume spike
+# Donchian channels capture breakout momentum; 1d EMA filter ensures alignment with higher timeframe trend;
+# volume confirmation reduces false breakouts. Works in bull/bear markets by filtering breakout direction
+# with 1d EMA trend. Target: 50-150 total trades over 4 years (~12-37/year) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,87 +18,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands and 1w data for trend filter
+    # Get 1d data for Donchian calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 2 or len(df_1w) < 2:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    close_1w = df_1w['close'].values
     
-    # Bollinger Bands (20, 2) on 1d
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean()
-    std_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std()
-    bb_upper = (sma_20 + bb_std * std_20).values
-    bb_lower = (sma_20 - bb_std * std_20).values
-    bb_width = bb_upper - bb_lower
+    # Calculate Donchian channels for each 1d bar (20-period high/low)
+    donchian_high = np.full(len(df_1d), np.nan)
+    donchian_low = np.full(len(df_1d), np.nan)
     
-    # Bollinger Band squeeze: width below 20-period average of width
-    bb_width_ma = pd.Series(bb_width).rolling(window=bb_period, min_periods=bb_period).mean()
-    squeeze = bb_width < bb_width_ma.values
+    for i in range(20, len(df_1d)):
+        donchian_high[i] = np.max(high_1d[i-20:i])
+        donchian_low[i] = np.min(low_1d[i-20:i])
     
-    # 1w EMA trend filter (34-period)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align Donchian levels to 12h timeframe (wait for 1d close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Volume filter: volume > 1.5 x 20-period average (20 days)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # 1d EMA trend filter (50-period)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: volume > 2.0 x 12-period average (6 days of 12h bars)
+    vol_ma_12 = np.full(n, np.nan)
+    for i in range(11, n):
+        vol_ma_12[i] = np.mean(volume[i-11:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 1d data (20 for BB, 20 for BB width MA, 20 for vol MA)
-    start_idx = max(20, 20, 19)
+    # Warmup: need 1d data (20 bars for Donchian), EMA (50), volume MA (12)
+    start_idx = max(20, 50, 12)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(squeeze[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_12[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        vol_avg = vol_ma_12[i]
         
-        # Volume filter: significant volume
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Volume filter: significant volume spike
+        vol_filter = vol_now > 2.0 * vol_avg
         
-        # Trend filter from 1w EMA
-        bullish_trend = price > ema_34_1w_aligned[i]
-        bearish_trend = price < ema_34_1w_aligned[i]
+        # Trend filter from 1d EMA
+        bullish_trend = price > ema_50_aligned[i]
+        bearish_trend = price < ema_50_aligned[i]
         
         if position == 0:
-            # Long: break above upper BB with volume, bullish trend, and squeeze
-            if price > bb_upper[i] and vol_filter and bullish_trend and squeeze[i]:
+            # Long: break above Donchian high with volume and bullish trend
+            if price > donchian_high_aligned[i] and vol_filter and bullish_trend:
                 signals[i] = size
                 position = 1
-            # Short: break below lower BB with volume, bearish trend, and squeeze
-            elif price < bb_lower[i] and vol_filter and bearish_trend and squeeze[i]:
+            # Short: break below Donchian low with volume and bearish trend
+            elif price < donchian_low_aligned[i] and vol_filter and bearish_trend:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle BB or trend turns bearish
-            bb_middle = (bb_upper[i] + bb_lower[i]) / 2
-            if price <= bb_middle or not bullish_trend:
+            # Exit long: price returns to Donchian low (mean reversion) or trend turns bearish
+            if price <= donchian_low_aligned[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to middle BB or trend turns bullish
-            bb_middle = (bb_upper[i] + bb_lower[i]) / 2
-            if price >= bb_middle or not bearish_trend:
+            # Exit short: price returns to Donchian high (mean reversion) or trend turns bullish
+            if price >= donchian_high_aligned[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Bollinger_Squeeze_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
