@@ -13,89 +13,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot points
+    # Get 4h data for trend and volatility
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # 4h EMA(34) for trend filter
+    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    
+    # 4h ATR(14) for volatility filter
+    tr1_4h = df_4h['high'].values - df_4h['low'].values
+    tr2_4h = np.abs(df_4h['high'].values - np.roll(df_4h['close'].values, 1))
+    tr3_4h = np.abs(df_4h['low'].values - np.roll(df_4h['close'].values, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = tr1_4h[0]
+    atr_4h_raw = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h_raw)
+    
+    # Get 1d data for higher timeframe trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly high/low from daily data
-    weekly_high = df_1d['high'].rolling(window=5, min_periods=5).max().values
-    weekly_low = df_1d['low'].rolling(window=5, min_periods=5).min().values
+    # 1d EMA(50) for higher timeframe trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate pivot levels (using weekly high/low and close)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    weekly_close = df_1d['close'].values
+    # 1h RSI(14) for entry timing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
-    
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # 6h ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume filter: 6h volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.20   # Position size: 20% of capital
     
     # Warmup
-    start_idx = max(20, 14)
+    start_idx = max(34, 14, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(atr_6h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility and volume filters
-        vol_filter = volume[i] > vol_ma[i]
+        ema_trend = ema34_4h_aligned[i]
+        atr_4h_val = atr_4h_aligned[i]
+        ema50_trend = ema50_1d_aligned[i]
+        rsi_val = rsi[i]
+        in_session = session_filter[i]
+        
+        # Volatility filter: 4h ATR > 0.3 * price (avoid low volatility chop)
+        vol_filter = atr_4h_val > (close[i] * 0.003)
         
         if position == 0:
-            # Long: price crosses above R1 with volume
-            if close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and vol_filter:
+            # Long: price above 4h EMA, above 1d EMA, RSI not overbought, in session, volatility filter
+            if (close[i] > ema_trend and close[i] > ema50_trend and 
+                rsi_val < 70 and vol_filter and in_session):
                 signals[i] = size
                 position = 1
-            # Short: price crosses below S1 with volume
-            elif close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and vol_filter:
+            # Short: price below 4h EMA, below 1d EMA, RSI not oversold, in session, volatility filter
+            elif (close[i] < ema_trend and close[i] < ema50_trend and 
+                  rsi_val > 30 and vol_filter and in_session):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below S1 (mean reversion)
-            if close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]:
+            # Exit long: price crosses below 4h EMA or RSI overbought
+            if close[i] < ema_trend or rsi_val > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above R1 (mean reversion)
-            if close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]:
+            # Exit short: price crosses above 4h EMA or RSI oversold
+            if close[i] > ema_trend or rsi_val < 25:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_Breakout_VolumeFilter_v1"
-timeframe = "6h"
+name = "1h_EMA34_EMA50_RSI_SessionFilter_v1"
+timeframe = "1h"
 leverage = 1.0
