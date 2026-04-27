@@ -1,19 +1,35 @@
-#!/usr/bin/env python3
-"""
-1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-Long when price breaks above 20-day high + 1w trend up + volume spike.
-Short when price breaks below 20-day low + 1w trend down + volume spike.
-Exit when price returns to 10-day moving average or trend reverses.
-Designed to generate 10-25 trades/year per symbol with strong edge in bull/bear regimes.
-"""
+# 6h RSI Divergence with 1D Trend Filter and Volume Spike
+# Hypothesis: RSI divergence signals exhaustion in price momentum. Combined with 1D trend direction,
+# this captures reversals in both bull and bear markets. Volume spike confirms institutional interest.
+# Target: 15-30 trades/year per symbol with high win rate via confluence.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_rsi(prices, period=14):
+    delta = np.diff(prices, prepend=prices[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(prices)
+    avg_loss = np.zeros_like(prices)
+    
+    # Wilder's smoothing
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
+    
+    for i in range(period+1, len(prices)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,94 +37,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get daily data for trend filter and RSI divergence
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34) for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = np.empty_like(close_1w, dtype=np.float64)
-    ema_1w.fill(np.nan)
-    alpha = 2.0 / (34 + 1)
-    for i in range(len(close_1w)):
+    # Calculate 1D EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = np.zeros_like(close_1d)
+    alpha = 2.0 / (50 + 1)
+    for i in range(len(close_1d)):
         if i == 0:
-            ema_1w[i] = close_1w[i]
-        elif np.isnan(ema_1w[i-1]):
-            ema_1w[i] = close_1w[i]
+            ema_1d[i] = close_1d[i]
         else:
-            ema_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_1w[i-1]
+            ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
     
-    # Align 1w EMA to daily timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align 1D EMA to 6h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 20-day Donchian channels
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Calculate RSI on 6h data
+    rsi = calculate_rsi(close, 14)
     
-    for i in range(19, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
-    
-    # Calculate 10-day moving average for exit
-    ma_10 = np.full(n, np.nan)
-    for i in range(9, n):
-        ma_10[i] = np.mean(close[i-9:i+1])
-    
-    # Volume filter: volume > 2.0x average (to avoid false breakouts)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Volume filter: volume > 2.0x average (20-period)
+    vol_ma_20 = np.zeros_like(volume)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian (20), EMA (34), MA (10), volume MA (20)
-    start_idx = max(19, 34, 9, 19)
+    # Warmup: need RSI(14) + volume MA(20) + 1D EMA(50)
+    start_idx = max(14, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(ma_10[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         # Current price and volume
         price_now = close[i]
         vol_now = volume[i]
+        rsi_now = rsi[i]
         
-        # Current indicators
-        upper_channel = donchian_high[i]
-        lower_channel = donchian_low[i]
-        trend_1w = ema_1w_aligned[i]
-        ma_level = ma_10[i]
+        # Trend filter
+        trend_up = price_now > ema_1d_aligned[i]
+        trend_down = price_now < ema_1d_aligned[i]
         
-        # Volume filter: volume > 2.0x average
+        # Volume filter
         vol_filter = vol_now > 2.0 * vol_ma_20[i]
         
+        # RSI divergence detection (simplified: look for extreme RSI with price action)
+        # Bullish divergence: RSI oversold (<30) and rising while price makes lower low
+        # Bearish divergence: RSI overbought (>70) and falling while price makes higher high
+        
         if position == 0:
-            # Bull: price breaks above upper channel + 1w trend up + volume spike
-            if price_now > upper_channel and price_now > trend_1w and vol_filter:
-                signals[i] = size
-                position = 1
-            # Bear: price breaks below lower channel + 1w trend down + volume spike
-            elif price_now < lower_channel and price_now < trend_1w and vol_filter:
-                signals[i] = -size
-                position = -1
+            # Look for bullish setup: RSI oversold + price holding + volume spike
+            if rsi_now < 30 and vol_filter and trend_up:
+                # Additional confirmation: price above prior low
+                if i >= 2 and price_now > low[i-1]:
+                    signals[i] = size
+                    position = 1
+            # Look for bearish setup: RSI overbought + price rejecting + volume spike
+            elif rsi_now > 70 and vol_filter and trend_down:
+                # Additional confirmation: price below prior high
+                if i >= 2 and price_now < high[i-1]:
+                    signals[i] = -size
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to 10-day MA or 1w trend turns down
-            if price_now < ma_10[i] or price_now < trend_1w:
+            # Exit long: RSI overbought or trend breaks down
+            if rsi_now > 70 or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to 10-day MA or 1w trend turns up
-            if price_now > ma_10[i] or price_now > trend_1w:
+            # Exit short: RSI oversold or trend breaks up
+            if rsi_now < 30 or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_Volume"
-timeframe = "1d"
+name = "6h_RSI_Divergence_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
