@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,107 +13,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data for trend and structure
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Get 1d data for longer-term context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # 4h EMA(50) for trend
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    close_1w = df_1w['close'].values
+    # 1d EMA(200) for long-term trend
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate daily pivot points (using prior day OHLC)
-    # Pivot = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    high_prev = np.roll(high_1d, 1)
-    low_prev = np.roll(low_1d, 1)
-    close_prev = np.roll(close_1d, 1)
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
-    close_prev[0] = np.nan
+    # 4h ATR(14) for volatility filter
+    tr_4h = np.maximum(
+        high_4h[1:] - low_4h[1:],
+        np.maximum(
+            np.abs(high_4h[1:] - close_4h[:-1]),
+            np.abs(low_4h[1:] - close_4h[:-1])
+        )
+    )
+    tr_4h = np.concatenate([[np.nan], tr_4h])
+    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
     
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    r1 = 2 * pivot - low_prev
-    s1 = 2 * pivot - high_prev
-    r2 = pivot + (high_prev - low_prev)
-    s2 = pivot - (high_prev - low_prev)
-    r3 = high_prev + 2 * (pivot - low_prev)
-    s3 = low_prev - 2 * (high_prev - pivot)
+    # 4h Donchian(20) for breakout levels
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
+        return res
     
-    # Align daily pivots to 4h
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
     
-    # Weekly trend: price above/below weekly EMA(8)
-    ema_8_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
+    donch_high_20 = rolling_max(high_4h, 20)
+    donch_low_20 = rolling_min(low_4h, 20)
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
     
-    # Volume filter: volume > 1.5 x 20-period average (4h)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Volume filter: 4h volume > 1.5 x 20-period average
+    vol_4h = df_4h['volume'].values
+    vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
-    # Warmup: need pivots (1), weekly EMA (8), volume MA (20)
-    start_idx = max(1, 8, 20)
+    # Warmup: need 4h EMA(50), 1d EMA(200), ATR(14), Donchian(20), volume MA
+    start_idx = max(50, 200, 14, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(ema_8_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
+            np.isnan(atr_14_4h_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or
+            np.isnan(donch_low_20_aligned[i]) or np.isnan(vol_ma_20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
+        atr = atr_14_4h_aligned[i]
+        vol_filter = volume[i] > 1.5 * vol_ma_20_4h_aligned[i]
         
-        # Volume filter
-        vol_filter = vol_now > 1.5 * vol_avg
+        # Trend filters
+        bullish_4h = price > ema_50_4h_aligned[i]
+        bullish_1d = price > ema_200_1d_aligned[i]
         
-        # Weekly trend filter
-        bullish_weekly = price > ema_8_1w_aligned[i]
-        bearish_weekly = price < ema_8_1w_aligned[i]
+        # Breakout conditions with volatility-adjusted thresholds
+        upper_break = donch_high_20_aligned[i] + 0.5 * atr
+        lower_break = donch_low_20_aligned[i] - 0.5 * atr
         
         if position == 0:
-            # Long: price crosses above S1 with volume and bullish weekly trend
-            if price > s1_aligned[i] and vol_filter and bullish_weekly:
+            # Long: price breaks above upper Donchian with volume and bullish trend
+            if price > upper_break and vol_filter and bullish_4h and bullish_1d:
                 signals[i] = size
                 position = 1
-            # Short: price crosses below R1 with volume and bearish weekly trend
-            elif price < r1_aligned[i] and vol_filter and bearish_weekly:
+            # Short: price breaks below lower Donchian with volume and bearish trend
+            elif price < lower_break and vol_filter and not bullish_4h and not bullish_1d:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below pivot or weekly trend turns bearish
-            if price < pivot_aligned[i] or not bullish_weekly:
+            # Exit long: price breaks below lower Donchian or trend turns bearish
+            if price < donch_low_20_aligned[i] or not (bullish_4h and bullish_1d):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above pivot or weekly trend turns bullish
-            if price > pivot_aligned[i] or not bearish_weekly:
+            # Exit short: price breaks above upper Donchian or trend turns bullish
+            if price > donch_high_20_aligned[i] or (bullish_4h and bullish_1d):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_S1R1_WeeklyTrend_Volume"
-timeframe = "4h"
+name = "1h_DonchianBreakout_4h1dEMA_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
