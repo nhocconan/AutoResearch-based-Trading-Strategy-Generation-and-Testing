@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ADX_v2
-Hypothesis: Refined version with tighter entry conditions and proper risk management.
-Uses 1d EMA34 trend filter, volume spike confirmation (>1.5x average), and ADX > 25 for trending markets.
-Targets 15-25 trades/year to minimize fee drag while capturing strong institutional moves.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ADX
+Hypothesis: Combines Camarilla R3/S3 breakouts with 1d EMA34 trend filter, volume spike confirmation, and ADX regime filter to avoid false breakouts in choppy markets. Targets 20-30 trades/year on 4h to minimize fee drag while capturing strong institutional moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -87,9 +85,9 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (reduced from 2.0 to increase signal quality)
+    # Volume confirmation: volume > 2.0 * 20-period average (strong institutional interest)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -146,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ADX_v2"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ADX"
 timeframe = "4h"
 leverage = 1.0
