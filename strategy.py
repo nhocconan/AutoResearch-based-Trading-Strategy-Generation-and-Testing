@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Uses daily Camarilla pivot R1/S1 levels for breakout entries in the direction of 1d EMA34 trend.
-Enter long when price breaks above R1 AND 1d close > EMA34 (uptrend) AND volume > 2.0x 20-period average.
-Enter short when price breaks below S1 AND 1d close < EMA34 (downtrend) AND volume > 2.0x 20-period average.
-Exit when price returns to the pivot level (PP) or trend reverses.
-Designed for 4h timeframe to achieve 75-200 total trades over 4 years.
-Camarilla levels provide institutional support/resistance; volume spike confirms institutional participation.
-Works in both bull and bear markets by following 1d trend while using Camarilla for precise breakout entries.
+4h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: Uses Camarilla R3/S3 levels from daily pivots for breakout entries, filtered by weekly trend (EMA34) and volume spikes.
+Enters long when price breaks above R3 AND weekly close > EMA34 AND volume > 2.0 * 20-period average.
+Enters short when price breaks below S3 AND weekly close < EMA34 AND volume > 2.0 * 20-period average.
+Exits when price returns to the opposite Camarilla level (R3 for shorts, S3 for longs) or weekly trend reverses.
+Designed for 4h timeframe to achieve 75-200 total trades over 4 years (19-50/year) with tight entry conditions.
+Uses proven Camarilla structure that works in both bull and bear markets by following weekly trend while using daily pivots for precise swing-point entries.
 """
 
 import numpy as np
@@ -24,27 +23,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
+    # Get 1d data for Camarilla pivots and weekly for trend filter
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily Camarilla pivot levels
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    pp = typical_price.values
-    r1 = df_1d['close'].values + (df_1d['high'].values - df_1d['low'].values) * 1.1 / 12
-    s1 = df_1d['close'].values - (df_1d['high'].values - df_1d['low'].values) * 1.1 / 12
+    # Calculate Camarilla levels from previous day's OHLC
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), etc.
+    # But standard Camarilla uses: R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
+    # We'll use the more common multiplier of 1.1 for R3/S3
+    cam_multiplier = 1.1
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    camarilla_r3 = close_1d + cam_multiplier * (high_1d - low_1d)
+    camarilla_s3 = close_1d - cam_multiplier * (high_1d - low_1d)
     
     # Align Camarilla levels to 4h timeframe (wait for daily close)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # 1d EMA34 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA34 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,29 +55,30 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need 1d EMA34 (34), volume avg (20), and daily data
+    # Warmup: need daily Camarilla (requires 1d data), weekly EMA34 (34), volume avg (20)
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        pp_val = pp_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_val = ema_34_aligned[i]
+        high_val = high[i]
+        low_val = low[i]
+        r3_level = camarilla_r3_aligned[i]
+        s3_level = camarilla_s3_aligned[i]
+        ema_val = ema_34_1w_aligned[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Look for entry: breakout of Camarilla R1/S1 with 1d trend filter AND volume spike
-            # Long: price breaks above R1 AND 1d uptrend AND volume confirmation
-            long_condition = (close_val > r1_val) and (close_val > ema_val) and vol_conf
-            # Short: price breaks below S1 AND 1d downtrend AND volume confirmation
-            short_condition = (close_val < s1_val) and (close_val < ema_val) and vol_conf
+            # Look for entry: breakout of Camarilla R3/S3 with weekly trend filter AND volume
+            # Long: price breaks above R3 AND weekly uptrend AND volume confirmation
+            long_condition = (close_val > r3_level) and (close_val > ema_val) and vol_conf
+            # Short: price breaks below S3 AND weekly downtrend AND volume confirmation
+            short_condition = (close_val < s3_level) and (close_val < ema_val) and vol_conf
             
             if long_condition:
                 signals[i] = size
@@ -85,8 +87,8 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long when price returns to pivot point OR trend breaks
-            exit_condition = (close_val <= pp_val) or (close_val < ema_val)
+            # Exit long when price returns to S3 level OR weekly trend breaks
+            exit_condition = (close_val <= s3_level) or (close_val < ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -94,8 +96,8 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short when price returns to pivot point OR trend breaks
-            exit_condition = (close_val >= pp_val) or (close_val > ema_val)
+            # Exit short when price returns to R3 level OR weekly trend breaks
+            exit_condition = (close_val >= r3_level) or (close_val > ema_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -105,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
