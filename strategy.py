@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn
-Hypothesis: Uses daily Camarilla pivot levels (R3/S3) for breakout entries on 4h timeframe.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF
+Hypothesis: Uses daily Camarilla pivot levels (R3/S3) for breakout entries on 12h timeframe.
 Enter long when price breaks above daily R3 AND 1d close > EMA34 (uptrend) AND volume > 2.0 * 20-period average.
 Enter short when price breaks below daily S3 AND 1d close < EMA34 (downtrend) AND volume > 2.0 * 20-period average.
 Exit when price returns to daily pivot (PP) level OR trend reverses.
-Camarilla R3/S3 represent significant breakout levels; daily trend filter ensures alignment with higher timeframe structure.
-High volume threshold (2.0x) filters weak breakouts. Target: 75-200 total trades over 4 years (19-50/year) with 0.30 position size.
-Works in both bull and bear markets by following the daily trend while using volume confirmation to avoid false breakouts.
+Camarilla R3/S3 represent strong breakout levels; daily trend filter ensures alignment with higher timeframe structure.
+High volume threshold (2.0x) filters weak breakouts. Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position size.
+Designed to work in both bull and bear markets via trend filter and breakout logic.
 """
 
 import numpy as np
@@ -54,7 +54,7 @@ def generate_signals(prices):
     camarilla_r3 = camarilla_pp + (camarilla_range * 1.1 / 4.0)
     camarilla_s3 = camarilla_pp - (camarilla_range * 1.1 / 4.0)
     
-    # Align 1d Camarilla levels to 4h timeframe
+    # Align 1d Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
@@ -65,7 +65,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.30   # Position size: 30% of capital
+    size = 0.25   # Position size: 25% of capital
     
     # Warmup: need 1d EMA34 (34), volume avg (20), 1d data shifted (1)
     start_idx = max(34, 20, 1)
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HTF"
+timeframe = "12h"
 leverage = 1.0
