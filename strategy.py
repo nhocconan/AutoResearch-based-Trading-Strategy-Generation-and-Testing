@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_UpperBand_Touch_1wTrend_Filter
-Hypothesis: On daily timeframe, go long when price touches upper Keltner band (EMA20 + 2*ATR) only when weekly EMA50 is rising (bullish trend), and short when price touches lower Keltner band (EMA20 - 2*ATR) only when weekly EMA50 is falling (bearish trend). Exit when price crosses back below/above the EMA20 middle band. Uses volume confirmation (>1.5x 20-day average) to avoid false breakouts. Designed to capture trend continuations in both bull and bear markets with low trade frequency.
+4h_KAMA_Trend_RSI_Pullback_12hTrend_Filter
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) for 4h trend direction, RSI(14) for pullback entries, and 12h EMA50 as higher timeframe filter. Long when KAMA slopes up and RSI < 30 with 12h EMA50 uptrend; short when KAMA slopes down and RSI > 70 with 12h EMA50 downtrend. Exit on opposite RSI extreme. Designed to capture trend continuations after pullbacks in both bull and bear markets. Target 20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,79 +18,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate KAMA for trend direction (4h)
+    def kama(close, length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change.shape) > 1 else np.sum(np.abs(np.diff(close)))
+        er = np.zeros_like(close)
+        for i in range(length, len(close)):
+            if volatility[i] != 0:
+                er[i] = change[i] / volatility[i]
+            else:
+                er[i] = 0
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama_out = np.zeros_like(close)
+        kama_out[0] = close[0]
+        for i in range(1, len(close)):
+            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
+        return kama_out
+    
+    kama_val = kama(close, length=10, fast=2, slow=30)
+    kama_slope = np.diff(kama_val, prepend=0)
+    
+    # RSI for pullback entries
+    def rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).rolling(window=length, min_periods=length).mean().values
+        avg_loss = pd.Series(loss).rolling(window=length, min_periods=length).mean().values
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_out = 100 - (100 / (1 + rs))
+        return rsi_out
+    
+    rsi_val = rsi(close, length=14)
+    
+    # 12h EMA50 for higher timeframe trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter (rising/falling)
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_prev = np.roll(ema_50_1w, 1)
-    ema_50_1w_prev[0] = np.nan
-    weekly_trend_up = ema_50_1w > ema_50_1w_prev
-    weekly_trend_down = ema_50_1w < ema_50_1w_prev
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
-    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
-    
-    # Daily EMA20 for Keltner middle band
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Daily ATR(10) for Keltner bands
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Keltner Bands
-    keltner_upper = ema_20 + 2.0 * atr_10
-    keltner_lower = ema_20 - 2.0 * atr_10
-    
-    # Volume confirmation: current volume > 1.5 * 20-day average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for weekly EMA, daily EMA/ATR, volume
-    start_idx = max(50, 20, 10, 20)
+    # Warmup: need enough data for KAMA, RSI, and EMA
+    start_idx = max(50, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i]) or
-            np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
-            np.isnan(ema_20[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(kama_slope[i]) or np.isnan(rsi_val[i]) or 
+            np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        keltner_up = keltner_upper[i]
-        keltner_low = keltner_lower[i]
-        ema_20_val = ema_20[i]
-        vol_conf = volume_confirm[i]
-        weekly_up = weekly_trend_up_aligned[i]
-        weekly_down = weekly_trend_down_aligned[i]
+        kama_slope_val = kama_slope[i]
+        rsi_val_i = rsi_val[i]
+        ema_50_12h_val = ema_50_12h_aligned[i]
         
         if position == 0:
-            # Long: price touches upper Keltner band with volume confirmation AND weekly uptrend
-            if close[i] >= keltner_up and vol_conf and weekly_up:
+            # Long: KAMA up (uptrend) + RSI < 30 (pullback) + 12h EMA50 uptrend
+            if kama_slope_val > 0 and rsi_val_i < 30 and close[i] > ema_50_12h_val:
                 signals[i] = size
                 position = 1
-            # Short: price touches lower Keltner band with volume confirmation AND weekly downtrend
-            elif close[i] <= keltner_low and vol_conf and weekly_down:
+            # Short: KAMA down (downtrend) + RSI > 70 (pullback) + 12h EMA50 downtrend
+            elif kama_slope_val < 0 and rsi_val_i > 70 and close[i] < ema_50_12h_val:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below EMA20 (middle band)
-            if close[i] < ema_20_val:
+            # Exit long: RSI > 70 (overbought)
+            if rsi_val_i > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses back above EMA20 (middle band)
-            if close[i] > ema_20_val:
+            # Exit short: RSI < 30 (oversold)
+            if rsi_val_i < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_UpperBand_Touch_1wTrend_Filter"
-timeframe = "1d"
+name = "4h_KAMA_Trend_RSI_Pullback_12hTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
