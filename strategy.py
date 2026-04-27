@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index regime filter + Donchian breakout
-# Uses Choppiness Index (14) to detect trending (CHOP < 38.2) vs ranging (CHOP > 61.8) markets
-# In trending markets: break above Donchian upper (20) = long, break below Donchian lower (20) = short
-# In ranging markets: mean reversion at Donchian channels (touch upper = short, touch lower = long)
-# Volume confirmation: volume > 1.5x 24-period average (2 days of 12h bars)
-# Designed for 12h timeframe to work in both bull (trend follow) and bear (mean revert) markets
-# Target: 15-25 trades/year to minimize fee decay while capturing high-probability moves
+# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
+# Uses weekly EMA21 for trend direction (long when close > EMA21, short when close < EMA21)
+# and daily Donchian channels (20-period) for breakout entries.
+# Volume > 1.5x 20-period average confirms breakout strength.
+# Trend filter avoids counter-trend trades, reducing whipsaw in bear markets.
+# Target: 15-25 trades/year to minimize fee decay while capturing major trends.
+# Focus on BTC/ETH as primary assets with proven trend-following edge.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,53 +21,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for higher timeframe context (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get weekly data for EMA trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Calculate 1w EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate weekly EMA21 for trend filter
+    close_weekly = df_weekly['close'].values
+    ema_21_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_21_weekly)
     
-    # Calculate Donchian channels (20-period) on 1d timeframe for structure
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get daily data for Donchian channels
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Donchian channels (20-period high/low)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
     
-    # Donchian upper/lower (20-period)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Upper band: 20-period high
+    upper = np.full(len(high_daily), np.nan)
+    lower = np.full(len(low_daily), np.nan)
+    for i in range(20, len(high_daily)):
+        upper[i] = np.max(high_daily[i-20:i])
+        lower[i] = np.min(low_daily[i-20:i])
     
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower)
     
-    # Calculate Choppiness Index (14) on 1d timeframe for regime detection
-    # CHOP = 100 * log10(sum(ATR(1)) / (n * ATR(n))) / log10(n)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], 
-                     np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                                np.abs(low_1d[1:] - close_1d[:-1])))
-    tr1 = np.concatenate([[np.nan], tr1])  # align with index 0
-    
-    atr1 = tr1
-    sum_atr1 = np.nancumsum(atr1)  # cumulative sum ignoring NaN
-    
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    
-    chop = np.full(len(high_1d), np.nan)
-    for i in range(14, len(high_1d)):
-        if not np.isnan(sum_atr1[i]) and atr14[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr1[i] / (14 * atr14[i])) / np.log10(14)
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # 24-period average volume for spike detection (2 days of 12h bars)
+    # 20-period average volume for confirmation (daily)
     vol_ma = np.full(n, np.nan)
-    vol_period = 24
+    vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -79,10 +64,9 @@ def generate_signals(prices):
     start_idx = max(vol_period, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1w_aligned[i]) or
-            np.isnan(donch_high_aligned[i]) or
-            np.isnan(donch_low_aligned[i]) or
-            np.isnan(chop_aligned[i]) or
+        if (np.isnan(ema_21_weekly_aligned[i]) or
+            np.isnan(upper_aligned[i]) or
+            np.isnan(lower_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -90,63 +74,41 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine regime from Choppiness Index
-        ranging = chop_aligned[i] > 61.8
-        trending = chop_aligned[i] < 38.2
+        # Determine trend from weekly EMA21
+        uptrend = price > ema_21_weekly_aligned[i]
+        downtrend = price < ema_21_weekly_aligned[i]
         
-        # Volume confirmation
+        # Volume confirmation: > 1.5x average
         volume_confirmation = vol_ratio > 1.5
         
         if position == 0:
-            if ranging and volume_confirmation:
-                # In ranging market: mean reversion at Donchian channels
-                if price <= donch_low_aligned[i] * 1.001:  # touch lower band -> long
-                    signals[i] = size
-                    position = 1
-                elif price >= donch_high_aligned[i] * 0.999:  # touch upper band -> short
-                    signals[i] = -size
-                    position = -1
-            elif trending and volume_confirmation:
-                # In trending market: breakout direction
-                if price > donch_high_aligned[i]:  # break above upper -> long
-                    signals[i] = size
-                    position = 1
-                elif price < donch_low_aligned[i]:  # break below lower -> short
-                    signals[i] = -size
-                    position = -1
+            # Long breakout: price breaks above upper Donchian in uptrend
+            if uptrend and price > upper_aligned[i] and volume_confirmation:
+                signals[i] = size
+                position = 1
+            # Short breakdown: price breaks below lower Donchian in downtrend
+            elif downtrend and price < lower_aligned[i] and volume_confirmation:
+                signals[i] = -size
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: opposite Donchian touch or trend change
-            if ranging:
-                if price >= donch_high_aligned[i] * 0.999:  # touch upper band -> exit
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = size
-            else:  # trending
-                if price < donch_low_aligned[i]:  # break below lower -> exit
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = size
+            # Long exit: price breaks below lower Donchian or trend reverses
+            if price < lower_aligned[i] or price < ema_21_weekly_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = size
         elif position == -1:
-            # Short exit: opposite Donchian touch or trend change
-            if ranging:
-                if price <= donch_low_aligned[i] * 1.001:  # touch lower band -> exit
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -size
-            else:  # trending
-                if price > donch_high_aligned[i]:  # break above upper -> exit
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -size
+            # Short exit: price breaks above upper Donchian or trend reverses
+            if price > upper_aligned[i] or price > ema_21_weekly_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -size
     
     return signals
 
-name = "12h_ChopRegime_Donchian20_Volume"
-timeframe = "12h"
+name = "1d_Donchian_20_WeeklyEMA21_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
