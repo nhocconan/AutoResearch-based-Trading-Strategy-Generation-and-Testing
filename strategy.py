@@ -23,7 +23,7 @@ def generate_signals(prices):
     # Calculate EMA34 on daily close for trend filter
     ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align daily EMA to 12h
+    # Align daily EMA to 4h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate 14-period ATR for volatility filter
@@ -87,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_Volume_Filter"
-timeframe = "12h"
+name = "4h_EMA34_Volume_Filter_Refined_v2"
+timeframe = "4h"
 leverage = 1.0
