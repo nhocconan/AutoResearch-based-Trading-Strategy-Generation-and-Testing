@@ -30,7 +30,7 @@ def generate_signals(prices):
     pivot = (high_prev + low_prev + close_prev * 2) / 4
     range_ = high_prev - low_prev
     
-    # Resistance and Support levels (focus on R3/S3 for fading, R4/S4 for breakout)
+    # Focus on R3/S3 for fading, R4/S4 for breakout
     r3 = pivot + range_ * 1.25
     s3 = pivot - range_ * 1.25
     r4 = pivot + range_ * 1.5
