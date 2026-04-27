@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_Breakout_RegimeFilter
-Hypothesis: Camarilla pivot (R3/S3) breakout with 1d EMA34 trend filter and choppiness regime filter.
-Works in bull/bear: In trending markets (CHOP < 61.8), breakouts with volume and EMA alignment capture momentum.
-In ranging markets (CHOP >= 61.8), filter prevents false breakouts. Designed for ~20-40 trades/year on 4h.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_RegimeFilter
+Hypothesis: On 12h timeframe, Camarilla R3/S3 breakouts with 1d EMA34 trend alignment, volume spike, and choppiness regime filter capture sustained moves in both bull and bear markets. The 12h TF reduces trade frequency to avoid fee drag while allowing meaningful trends to develop. Volume confirms institutional participation, EMA ensures trend alignment, and CHOP filter avoids false breakouts in ranging markets. Designed for ~15-30 trades/year on 12h.
 """
 
 import numpy as np
@@ -31,7 +29,7 @@ def generate_signals(prices):
     r3 = prev_close + (rng * 1.1 / 4)
     s3 = prev_close - (rng * 1.1 / 4)
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 12h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -39,11 +37,11 @@ def generate_signals(prices):
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume spike: current > 2.0 * 20-period average
+    # Volume spike: current > 2.0 * 20-period average (on 12h)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_avg)
     
-    # Choppiness Index (CHOP) regime filter
+    # Choppiness Index (CHOP) regime filter on 12h
     atr_period = 14
     tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
     tr2 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
@@ -114,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_Breakout_RegimeFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_RegimeFilter"
+timeframe = "12h"
 leverage = 1.0
