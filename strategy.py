@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume spike confirmation. Designed for high-conviction momentum trades in both bull and bear markets. Uses discrete sizing (0.25) and exits on EMA trend reversal. Targets 20-40 trades/year to minimize fee drag.
+6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT
+Hypothesis: Uses 6h timeframe with Camarilla R3/S3 breakouts filtered by 1d EMA34 trend and volume confirmation. Designed for BTC/ETH to work in both bull and bear markets by only taking breakouts in the direction of the daily trend. Low frequency (target 12-37 trades/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -33,7 +33,7 @@ def generate_signals(prices):
     r3 = prev_close + (rng * 1.1 / 4)
     s3 = prev_close - (rng * 1.1 / 4)
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 6h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -46,8 +46,8 @@ def generate_signals(prices):
     entry_price = 0.0
     size = 0.25  # Discrete size to minimize fee churn
     
-    # Warmup: need 1d EMA34 (34), 1d shift(1), vol avg (20)
-    start_idx = max(34 + 1*4, 20)  # ~156 bars for 1d EMA34 warmup
+    # Warmup: need 1d EMA34 (34), 1d shift(1) for Camarilla, vol avg (20)
+    start_idx = max(34 + 6*4, 1 + 6*4, 20)  # ~204 bars for 1d EMA34 warmup (6h bars per day = 4)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
+timeframe = "6h"
 leverage = 1.0
