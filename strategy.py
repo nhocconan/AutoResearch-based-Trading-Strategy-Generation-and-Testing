@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""
+4h_1D_Camarilla_R3_S3_Breakout_VolumeSpike_v4
+Hypothesis: Breakout above/below daily Camarilla R3/S3 with volume > 2.5x average and ATR volatility filter.
+Works in both bull and bear markets by capturing strong momentum moves with volume confirmation.
+Adjusted to reduce trades: increased volume threshold to 2.5x and added stricter volatility filter.
+Target: 15-25 trades/year to minimize fee drag while capturing significant moves.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,34 +21,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 20:
-        ema_20_1w[19] = np.mean(close_1w[:20])
-        for i in range(20, len(close_1w)):
-            ema_20_1w[i] = (close_1w[i] * 2 + ema_20_1w[i-1] * 18) / 20
-    
-    # Get daily data for price action (1d)
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period)
+    # Calculate daily Camarilla levels (R3, S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = np.full(len(high_1d), np.nan)
-    donchian_low = np.full(len(low_1d), np.nan)
+    close_1d = df_1d['close'].values
     
-    for i in range(len(high_1d)):
-        if i >= 19:
-            donchian_high[i] = np.max(high_1d[i-19:i+1])
-            donchian_low[i] = np.min(low_1d[i-19:i+1])
+    # Camarilla: Range = (H-L), R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
     # Calculate ATR(14) for volatility filter
     tr1 = high[1:] - low[1:]
@@ -59,28 +53,19 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     
-    # Align weekly EMA to daily timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(df_1d['close'].values, df_1w, ema_20_1w)
-    # Align daily Donchian channels to daily timeframe (same timeframe, but using helper)
-    donchian_high_aligned = align_htf_to_ltf(df_1d['close'].values, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(df_1d['close'].values, df_1d, donchian_low)
-    
-    # Align weekly EMA to 1d timeframe (already aligned above)
-    # Now align everything to the actual price timeframe (1d)
-    ema_20_1w_final = align_htf_to_ltf(prices, df_1d, ema_20_1w_aligned)
-    donchian_high_final = align_htf_to_ltf(prices, df_1d, donchian_high_aligned)
-    donchian_low_final = align_htf_to_ltf(prices, df_1d, donchian_low_aligned)
+    # Align daily Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(20, 20)  # Donchian needs 20, volume MA needs 20
+    start_idx = max(20, 1)  # volume MA needs 20
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_final[i]) or
-            np.isnan(donchian_low_final[i]) or
-            np.isnan(ema_20_1w_final[i]) or
+        if (np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -88,34 +73,40 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Volume confirmation: > 2.0x average volume
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation: > 2.5x average volume (increased from 2.0)
+        volume_confirmation = vol_ratio > 2.5
         
-        # Trend filter: price above/below weekly EMA20
-        uptrend = price > ema_20_1w_final[i]
-        downtrend = price < ema_20_1w_final[i]
+        # ATR volatility filter: avoid low volatility periods
+        # Only trade when ATR is above 60% of its 50-period average
+        if i >= 50:
+            atr_avg = np.mean(atr[i-50:i+1])
+            vol_filter = atr[i] > atr_avg * 0.6
+        else:
+            vol_filter = True  # No filter during warmup
         
         if position == 0:
-            # Long: break above Donchian high in uptrend with volume
-            if volume_confirmation and uptrend and price > donchian_high_final[i]:
+            # Long: break above daily R3 with volume and volatility
+            if volume_confirmation and vol_filter and price > camarilla_r3_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low in downtrend with volume
-            elif volume_confirmation and downtrend and price < donchian_low_final[i]:
+            # Short: break below daily S3 with volume and volatility
+            elif volume_confirmation and vol_filter and price < camarilla_s3_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to Donchian low or trend changes
-            if price < donchian_low_final[i] or not uptrend:
+            # Long exit: price returns to daily midpoint or volatility drops significantly
+            daily_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
+            if price < daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.4:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price returns to Donchian high or trend changes
-            if price > donchian_high_final[i] or not downtrend:
+            # Short exit: price returns to daily midpoint or volatility drops significantly
+            daily_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
+            if price > daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.4:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DonchianBreakout_WeeklyEMA20_Trend_Volume"
-timeframe = "1d"
+name = "4h_1D_Camarilla_R3_S3_Breakout_VolumeSpike_v4"
+timeframe = "4h"
 leverage = 1.0
