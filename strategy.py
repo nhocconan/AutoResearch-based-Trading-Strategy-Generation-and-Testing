@@ -3,10 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA + RSI + Chop regime. KAMA adapts to market noise, reducing whipsaw in chop.
-# RSI filters overbought/oversold. Chop regime ensures we only trade in trending markets (Chop < 38.2).
-# Designed for ~20-30 trades/year with strict entry conditions to avoid overtrading.
-# Works in bull (trend following) and bear (avoids false signals in chop).
+# Hypothesis: 4h Williams Alligator with Elder Ray power confirmation and 12h trend filter.
+# Alligator (Jaw/Teeth/Lips) identifies trend direction and strength.
+# Elder Ray (Bull/Bear Power) confirms momentum behind the move.
+# Long when Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND 12h close > EMA50.
+# Short when Jaw > Teeth > Lips (bearish alignment) AND Bear Power < 0 AND 12h close < EMA50.
+# Exit when Alligator alignment breaks or power reverses.
+# Designed for ~20-30 trades/year with strong trend confirmation to avoid overtrading.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,128 +20,87 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get daily data for Chop and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 12h data for Alligator and Elder Ray calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Chop (14-period)
-    atr_1d = np.zeros(len(close_1d))
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                                  np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[np.abs(high_1d[0] - low_1d[0])], tr_1d])
-    for i in range(len(atr_1d)):
-        if i == 0:
-            atr_1d[i] = tr_1d[0]
-        else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+    # Williams Alligator: SMAs of median price
+    # Jaw (13-period, 8 bars ahead), Teeth (8-period, 5 bars ahead), Lips (5-period, 3 bars ahead)
+    median_price_12h = (high_12h + low_12h) / 2.0
     
-    # Calculate highest high and lowest low over 14 periods
-    hh_1d = np.full(len(close_1d), np.nan)
-    ll_1d = np.full(len(close_1d), np.nan)
-    for i in range(13, len(close_1d)):
-        hh_1d[i] = np.max(high_1d[i-13:i+1])
-        ll_1d[i] = np.min(low_1d[i-13:i+1])
+    jaw_12h = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_12h = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_12h = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    chop = np.full(len(close_1d), 50.0)
-    for i in range(13, len(close_1d)):
-        if hh_1d[i] - ll_1d[i] != 0:
-            chop[i] = 100 * np.log10(sum(tr_1d[i-13:i+1]) / (hh_1d[i] - ll_1d[i])) / np.log10(14)
+    # Elder Ray Power: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_12h = high_12h - ema13_12h
+    bear_power_12h = low_12h - ema13_12h
     
-    # Calculate RSI (14-period)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    avg_gain = np.full(len(close_1d), np.nan)
-    avg_loss = np.full(len(close_1d), np.nan)
-    for i in range(1, len(close_1d)):
-        if i < 14:
-            if i == 1:
-                avg_gain[i] = gain[0]
-                avg_loss[i] = loss[0]
-            else:
-                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i-1]) / i
-                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i-1]) / i
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    
-    rs = np.full(len(close_1d), np.nan)
-    rsi = np.full(len(close_1d), 50.0)
-    for i in range(14, len(close_1d)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-    
-    # Calculate KAMA (10-period ER, 2/30 fast/slow)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, k=10))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)[:len(change)]
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    
-    # KAMA
-    kama = np.full(len(close_1d), np.nan)
-    kama[9] = close_1d[9]
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Align 1d indicators to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Align all 12h indicators to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
+    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power_12h)
+    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power_12h)
+    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 10-period KAMA
-    start_idx = 10
+    # Warmup: need enough data for slowest indicator (jaw: 13+8=21 bars)
+    start_idx = 21
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(chop_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(kama_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(ema50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        chop_val = chop_aligned[i]
-        rsi_val = rsi_aligned[i]
-        kama_val = kama_aligned[i]
+        # Williams Alligator alignment
+        bullish_alignment = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
+        bearish_alignment = jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]
         
-        # Chop regime: only trade when trending (Chop < 38.2)
-        trending = chop_val < 38.2
+        # Elder Ray power
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
+        
+        # 12h trend filter
+        trend_bull = close[i] > ema50_aligned[i]
+        trend_bear = close[i] < ema50_aligned[i]
         
         if position == 0:
-            # Long: price > KAMA and RSI < 70 (not overbought) in trending market
-            if price > kama_val and rsi_val < 70 and trending:
+            # Long: bullish Alligator alignment + positive Bull Power + bullish trend
+            if bullish_alignment and bull_power > 0 and trend_bull:
                 signals[i] = size
                 position = 1
-            # Short: price < KAMA and RSI > 30 (not oversold) in trending market
-            elif price < kama_val and rsi_val > 30 and trending:
+            # Short: bearish Alligator alignment + negative Bear Power + bearish trend
+            elif bearish_alignment and bear_power < 0 and trend_bear:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price < KAMA or RSI > 70 (overbought) or chop > 61.8 (choppy)
-            if price < kama_val or rsi_val > 70 or chop_val > 61.8:
+            # Exit long: Alligator alignment breaks OR Bull Power turns negative
+            if not bullish_alignment or bull_power <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price > KAMA or RSI < 30 (oversold) or chop > 61.8 (choppy)
-            if price > kama_val or rsi_val < 30 or chop_val > 61.8:
+            # Exit short: Alligator alignment breaks OR Bear Power turns positive
+            if not bearish_alignment or bear_power >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -146,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_Chop_Trend"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_ElderRay_12hTrend"
+timeframe = "4h"
 leverage = 1.0
