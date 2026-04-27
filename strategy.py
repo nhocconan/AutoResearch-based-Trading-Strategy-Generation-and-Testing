@@ -1,7 +1,12 @@
-# 100970 - 1d_KAMA_Direction_RSI_ChopFilter
-# Hypothesis: Daily KAMA trend direction combined with RSI mean reversion and Choppiness index regime filter.
-# Works in both bull and bear markets: KAMA adapts to trend, RSI captures reversals, Chop filter avoids whipsaws in ranging markets.
-# Target: 15-25 trades/year to minimize fee drag. Uses discrete position sizing (0.25) to reduce churn.
+#!/usr/bin/env python3
+"""
+#100972 - 12h_Donchian20_WeeklyPivot_Direction_Volume
+Hypothesis: Donchian(20) breakout on 12h timeframe with weekly pivot trend filter and volume confirmation. 
+Uses 1d high/low for weekly pivot calculation and 1w high/low for trend direction. 
+Designed to capture medium-term trends with low frequency to minimize fee drag. 
+Works in bull markets (breakouts with trend) and bear markets (mean reversion after false breakouts).
+Target: 15-25 trades/year to stay well under fee drag limits.
+"""
 
 import numpy as np
 import pandas as pd
@@ -17,69 +22,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Choppiness index (regime filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate Choppiness Index (14-period)
-    atr_1w = []
-    tr_1w = []
-    for i in range(1, len(close_1w)):
-        tr = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i-1]),
-            abs(low_1w[i] - close_1w[i-1])
-        )
-        tr_1w.append(tr)
-    tr_1w = np.array(tr_1w)
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    
-    max_hh = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    min_ll = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    
-    chop_raw = 100 * np.log10(atr_1w.sum() / (max_hh - min_ll)) / np.log10(14)
-    chop = pd.Series(chop_raw).fillna(50).values  # fill NaN with neutral 50
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
-    # Get daily data for KAMA and RSI
+    # Get 1d data for weekly pivot calculation (using prior week's high/low)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Get 1w data for trend direction (weekly high/low)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Calculate KAMA (adaptive moving average)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, 10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)  # 10-period volatility
-    er = np.zeros_like(close_1d)
-    er[10:] = change[9:] / volatility[9:]
-    er[volatility == 0] = 0
+    # Calculate weekly pivot from prior week (to avoid look-ahead)
+    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
     
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate Donchian channels (20-period) on 12h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Align weekly pivot to 12h timeframe (prior week's pivot for current period)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Calculate RSI (14-period)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # neutral before enough data
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -89,54 +58,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: Chop > 50 = ranging (mean revert), Chop < 50 = trending (follow trend)
-        is_ranging = chop_aligned[i] > 50
-        
-        if is_ranging:
-            # In ranging markets: mean reversion at RSI extremes
-            if rsi_aligned[i] < 30 and close[i] > kama_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            elif rsi_aligned[i] > 70 and close[i] < kama_aligned[i]:
-                signals[i] = -0.25
-                position = -1
-            # Exit when RSI returns to neutral
-            elif position == 1 and rsi_aligned[i] > 50:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and rsi_aligned[i] < 50:
-                signals[i] = 0.0
-                position = 0
-            else:
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+        # Long condition: price breaks above Donchian high, above weekly pivot, volume spike
+        if (close[i] > high_20[i] and 
+            close[i] > weekly_pivot_aligned[i] and 
+            volume_filter[i]):
+            signals[i] = 0.25
+            position = 1
+        # Short condition: price breaks below Donchian low, below weekly pivot, volume spike
+        elif (close[i] < low_20[i] and 
+              close[i] < weekly_pivot_aligned[i] and 
+              volume_filter[i]):
+            signals[i] = -0.25
+            position = -1
+        # Exit conditions: price returns to weekly pivot (mean reversion)
+        elif position == 1 and close[i] < weekly_pivot_aligned[i]:
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and close[i] > weekly_pivot_aligned[i]:
+            signals[i] = 0.0
+            position = 0
+        # Hold position
         else:
-            # In trending markets: follow KAMA direction
-            if close[i] > kama_aligned[i]:
+            if position == 1:
                 signals[i] = 0.25
-                position = 1
-            elif close[i] < kama_aligned[i]:
+            elif position == -1:
                 signals[i] = -0.25
-                position = -1
             else:
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_KAMA_Direction_RSI_ChopFilter"
-timeframe = "1d"
+name = "12h_Donchian20_WeeklyPivot_Direction_Volume"
+timeframe = "12h"
 leverage = 1.0
