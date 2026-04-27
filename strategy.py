@@ -15,24 +15,54 @@ def generate_signals(prices):
     
     # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 1d RSI (14-period)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = (100 - (100 / (1 + rs))).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # 12-hour Donchian channels (20-period)
+    # Calculate 1d ADX (14-period) for trend strength
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # 4-hour Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 2.0x 20-period average
+    # Volume filter: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -42,19 +72,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: close above EMA34 for long, below for short
-        trend_filter_long = close[i] > ema34_1d_aligned[i]
-        trend_filter_short = close[i] < ema34_1d_aligned[i]
+        # Trend strength filter: ADX > 25
+        trend_filter = adx_1d_aligned[i] > 25
         
-        # Long conditions: price breaks above upper Donchian + trend + volume
-        long_breakout = (close[i] > highest_high[i-1] and trend_filter_long and volume_filter[i])
-        # Short conditions: price breaks below lower Donchian + trend + volume
-        short_breakout = (close[i] < lowest_low[i-1] and trend_filter_short and volume_filter[i])
+        # RSI filter: avoid extreme overbought/oversold conditions
+        rsi_filter = (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
+        
+        # Long conditions: price breaks above upper Donchian + RSI filter + volume
+        long_breakout = (close[i] > highest_high[i-1] and rsi_filter and trend_filter and volume_filter[i])
+        # Short conditions: price breaks below lower Donchian + RSI filter + volume
+        short_breakout = (close[i] < lowest_low[i-1] and rsi_filter and trend_filter and volume_filter[i])
         
         if long_breakout:
             signals[i] = 0.25
@@ -80,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian20_1dRSI_ADX_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
