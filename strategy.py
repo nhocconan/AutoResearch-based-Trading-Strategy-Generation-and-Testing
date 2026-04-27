@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,12 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and volume (HTF)
+    # Get daily data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 1w data for trend filter (HTF)
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
@@ -42,7 +42,7 @@ def generate_signals(prices):
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 4h timeframe
+    # Align indicators to daily timeframe (price timeframe)
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyTrend_VolumeVolatilityFilter"
-timeframe = "4h"
+name = "1d_WeeklyTrend_VolumeVolatilityFilter"
+timeframe = "1d"
 leverage = 1.0
