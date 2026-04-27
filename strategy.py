@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3
-Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
-Trades only in direction of daily trend to avoid counter-trend whipsaws. Volume spike confirms breakout strength.
-Uses tighter R1/S1 levels for more frequent but still controlled entries (target: 50-100/year).
-Uses discrete position sizing (0.25) and ATR-based stoploss for risk management.
-Designed to work in both bull and bear markets by aligning with intermediate-term daily trend.
+6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_HTF
+Hypothesis: Camarilla R4/S4 breakout on 6h with 1d EMA34 trend filter and volume confirmation.
+Breakouts at R4/S4 are stronger continuation signals than R1/S1, reducing false breakouts.
+Trades only in direction of daily trend to avoid counter-trend whipsaws.
+Volume spike confirms breakout strength.
+Designed for 6h timeframe with target 50-150 trades over 4 years (12-37/year).
+Uses discrete position sizing (0.25) to minimize fee churn.
+Works in both bull and bear markets by aligning with intermediate-term daily trend.
 """
 
 import numpy as np
@@ -38,7 +40,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (focus on R1/S1 for breakout entries)
+    # Calculate 1d Camarilla pivot levels (focus on R4/S4 for breakout entries)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -46,13 +48,13 @@ def generate_signals(prices):
     PP = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
-    # Key levels: R1 and S1 for breakout entries (tighter than R3/S3)
-    R1 = PP + range_1d * 1.1 / 12.0
-    S1 = PP - range_1d * 1.1 / 12.0
+    # Key levels: R4 and S4 for breakout entries (stronger continuation)
+    R4 = PP + range_1d * 1.1 / 2.0
+    S4 = PP - range_1d * 1.1 / 2.0
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align Camarilla levels to 6h timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
             np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -80,10 +82,10 @@ def generate_signals(prices):
         
         if position == 0:
             # Flat - look for entry: breakout in direction of 1d trend with volume spike
-            # Long: price breaks above R1 AND 1d trend is up (price > EMA34) AND volume spike
-            # Short: price breaks below S1 AND 1d trend is down (price < EMA34) AND volume spike
-            long_breakout = close_val > R1_aligned[i]
-            short_breakout = close_val < S1_aligned[i]
+            # Long: price breaks above R4 AND 1d trend is up (price > EMA34) AND volume spike
+            # Short: price breaks below S4 AND 1d trend is down (price < EMA34) AND volume spike
+            long_breakout = close_val > R4_aligned[i]
+            short_breakout = close_val < S4_aligned[i]
             trend_up = close_val > ema_trend
             trend_down = close_val < ema_trend
             
@@ -96,16 +98,16 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Long - exit when price breaks below S1 (failed breakout) or ATR stoploss hit
-            if close_val < S1_aligned[i] or close_val < entry_price - 2.0 * atr_val:
+            # Long - exit when price breaks below S4 (failed breakout) or ATR stoploss hit
+            if close_val < S4_aligned[i] or close_val < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short - exit when price breaks above R1 (failed breakout) or ATR stoploss hit
-            if close_val > R1_aligned[i] or close_val > entry_price + 2.0 * atr_val:
+            # Short - exit when price breaks above R4 (failed breakout) or ATR stoploss hit
+            if close_val > R4_aligned[i] or close_val > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -114,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3"
-timeframe = "4h"
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_HTF"
+timeframe = "6h"
 leverage = 1.0
