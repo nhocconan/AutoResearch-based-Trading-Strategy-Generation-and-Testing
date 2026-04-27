@@ -44,7 +44,7 @@ def generate_signals(prices):
     r4 = pivot + range_ * 1.5
     s4 = pivot - range_ * 1.5
     
-    # Align levels to 12h timeframe
+    # Align levels to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -56,7 +56,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # Position size: 25% of capital
+    size = 0.28   # Position size: 28% of capital
     
     # Warmup: need enough data for EMA, pivots, volume MA
     start_idx = max(34, 20)
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_R4S4_FadeBreakout_1d1wEMA34_Trend_VolumeSpike_v2"
-timeframe = "12h"
+name = "6h_Camarilla_R3S3_R4S4_FadeBreakout_1d1wEMA34_Trend_VolumeSpike_v2"
+timeframe = "6h"
 leverage = 1.0
