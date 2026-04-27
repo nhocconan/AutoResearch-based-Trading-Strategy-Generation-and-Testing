@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe aligned with 1d EMA34 trend and volume spikes capture high-probability moves in both bull and bear markets. The 12h timeframe reduces trade frequency to minimize fee drag while still capturing significant moves. Weekly trend filter avoids counter-trend trades. ATR-based stoploss controls risk. Discrete sizing (0.25) balances return and fee drag. Target: 50-150 total trades over 4 years.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v4
+Hypothesis: Camarilla R3/S3 breakouts with 1d EMA34 trend alignment, volume spikes, and choppiness filter capture high-probability momentum moves in both bull and bear markets. 
+Added: Weekly trend filter (price vs 1w EMA50) to avoid counter-trend trades. ATR-based trailing stop (2.5x ATR) controls risk. 
+Discrete sizing (0.30) minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -52,7 +54,7 @@ def generate_signals(prices):
     chop = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
     chop_filter = chop < 61.8  # Only allow breakouts when not strongly ranging
     
-    # Align all indicators to primary timeframe (12h)
+    # Align all indicators to primary timeframe (4h)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -63,7 +65,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.25   # Position size: 25% of capital (discrete level)
+    size = 0.30   # Position size: 30% of capital (discrete level)
     
     # Warmup: need Camarilla (1), EMA34 (34), EMA50 (50), volume avg (20), chop (14)
     start_idx = max(1, 34, 50, 20, 14)
@@ -130,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v4"
+timeframe = "4h"
 leverage = 1.0
