@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter_v4
-Hypothesis: Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spikes capture high-probability moves. 
-Added: Choppiness Index regime filter to avoid whipsaws in sideways markets (CHOP > 61.8 = range, avoid breakouts). 
-Weekly trend filter (price vs 1w EMA50) avoids counter-trend trades. ATR-based stoploss controls risk. 
-Discrete sizing (0.30) balances return and fee drag. Target: 75-200 total trades over 4 years.
+1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirm_Regime_v1
+Hypothesis: Daily Camarilla R3/S3 breakouts with weekly EMA50 trend filter, volume confirmation, and choppiness regime filter capture institutional participation in trending moves while avoiding false breakouts in ranging markets. Discrete sizing (0.25) and ATR-based stoploss control risk. Designed for BTC/ETH with sufficient trade frequency (target: 50-100 total trades over 4 years).
 """
 
 import numpy as np
@@ -21,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla and trend
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d Camarilla levels (R3, S3) from prior day
@@ -40,9 +37,9 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.8 * vol_avg)
     
     # Choppiness Index regime filter (avoid breakouts in ranging markets)
     # CHOP(14) = 100 * log10(sum(TR(14)) / (ATR(14) * 14)) / log10(14)
@@ -55,18 +52,18 @@ def generate_signals(prices):
     chop = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
     chop_filter = chop < 61.8  # Only allow breakouts when not strongly ranging
     
-    # Align all indicators to primary timeframe (4h)
+    # Align all indicators to primary timeframe (1d)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)  # volume is LTF, but confirm using 1d avg
-    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter)  # align chop filter from 1d
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
+    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.30   # Position size: 30% of capital (discrete level)
+    size = 0.25   # Position size: 25% of capital (discrete level)
     
     # Warmup: need Camarilla (1), EMA34 (34), EMA50 (50), volume avg (20), chop (14)
     start_idx = max(1, 34, 50, 20, 14)
@@ -133,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_ChopFilter_v4"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirm_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
