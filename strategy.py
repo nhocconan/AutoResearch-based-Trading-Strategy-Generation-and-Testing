@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_VolumeSpike_Regime_New
-Hypothesis: 4h timeframe strategy using Camarilla R1/S1 breakouts filtered by 12h EMA50 trend and volume spikes. Targets 75-200 trades over 4 years (19-50/year) with 0.25 position size. Uses Bollinger Bandwidth regime filter to avoid whipsaws in low volatility and capture trends. Designed to work in both bull and bear markets by aligning with the 12h trend and using volume confirmation for momentum validation. Uses tighter volume confirmation (2.5x) and adjusted regime threshold to reduce overtrading.
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike
+Hypothesis: Daily timeframe strategy using Camarilla R1/S1 breakouts filtered by 1-week EMA50 trend and volume spikes. Targets 30-100 trades over 4 years (7-25/year) with 0.25 position size. Uses 1-week trend to capture major moves in both bull and bear markets, volume confirmation for momentum validation, and Bollinger Bandwidth regime filter to avoid whipsaws in low volatility. Designed for BTC/ETH with emphasis on fewer, higher-quality trades to minimize fee drag.
 """
 
 import numpy as np
@@ -18,12 +18,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # 12h EMA50 trend filter
-    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # 1w EMA50 trend filter
+    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     # Get 1d data for Camarilla R1/S1 levels (from previous completed 1d bar)
     df_1d = get_htf_data(prices, '1d')
@@ -36,22 +36,22 @@ def generate_signals(prices):
     r1 = prev_close + (rng * 1.08)   # R1 level
     s1 = prev_close - (rng * 1.08)   # S1 level
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 1d
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 2.5 * 20-period average (tighter to reduce trades)
+    # Volume confirmation: current volume > 2.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.5 * vol_avg)
     
-    # Bollinger Bandwidth regime filter (20-period, 2 std dev) on 4h
+    # Bollinger Bandwidth regime filter (20-period, 2 std dev) on 1d
     close_series = pd.Series(close)
     ma_20 = close_series.rolling(window=20, min_periods=20).mean().values
     std_20 = close_series.rolling(window=20, min_periods=20).std().values
     upper_bb = ma_20 + (2 * std_20)
     lower_bb = ma_20 - (2 * std_20)
     bb_width = (upper_bb - lower_bb) / ma_20
-    # Regime: avoid extremely low volatility (choppy sideways) - use BW > 10th percentile (tighter)
+    # Regime: avoid extremely low volatility (choppy sideways) - use BW > 10th percentile
     bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=100).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
     ).values
@@ -62,7 +62,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Fixed position size to minimize churn
     
-    # Warmup: need 12h EMA50 (50), 1d shift(1) for Camarilla, vol avg (20), BB (100 for percentile)
+    # Warmup: need 1w EMA50 (50), 1d shift(1) for Camarilla, vol avg (20), BB (100 for percentile)
     start_idx = max(50 + 1, 1 + 1, 20, 100)
     
     for i in range(start_idx, n):
@@ -81,7 +81,7 @@ def generate_signals(prices):
         vol_reg = volatility_regime[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with 12h EMA50 alignment, volume confirmation, and volatility regime
+            # Look for entry: Camarilla R1/S1 breakout with 1w EMA50 alignment, volume confirmation, and volatility regime
             long_condition = (close_val > r1_val and 
                             close_val > ema_val and 
                             vol_conf and 
@@ -98,14 +98,14 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 12h EMA50 (trend reversal)
+            # Exit long: price crosses below 1w EMA50 (trend reversal)
             if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 12h EMA50 (trend reversal)
+            # Exit short: price crosses above 1w EMA50 (trend reversal)
             if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_VolumeSpike_Regime_New"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
