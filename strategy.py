@@ -13,7 +13,7 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get daily data for calculations
+    # Get 1d data for price channels and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -22,25 +22,39 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels (using previous day's data to avoid look-ahead)
-    high_20_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 1d Donchian channels (20-period) using previous day's data
+    prev_high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    prev_low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align Donchian levels to 1d timeframe (no alignment needed as we're on 1d timeframe)
-    donch_high = high_20_max
-    donch_low = low_20_min
+    # Align Donchian levels to 6h timeframe
+    donch_high = align_htf_to_ltf(prices, df_1d, prev_high_max)
+    donch_low = align_htf_to_ltf(prices, df_1d, prev_low_min)
     
-    # Calculate weekly trend using weekly data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate 1d ADX for trend strength (14-period)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    close_1w = df_1w['close'].values
-    # Calculate 50-period EMA on weekly close
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=np.nan)
+    down_move = -np.diff(low_1d, prepend=np.nan)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align weekly EMA to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,19 +69,19 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above Donchian high, weekly EMA trending up, volume spike
+        # Long condition: price breaks above Donchian high, ADX > 25, volume spike
         if (close[i] > donch_high[i] and 
-            close_1d[i] > ema_50_1w_aligned[i] and 
+            adx_aligned[i] > 25 and 
             volume_spike[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below Donchian low, weekly EMA trending down, volume spike
+        # Short condition: price breaks below Donchian low, ADX > 25, volume spike
         elif (close[i] < donch_low[i] and 
-              close_1d[i] < ema_50_1w_aligned[i] and 
+              adx_aligned[i] > 25 and 
               volume_spike[i]):
             signals[i] = -0.25
             position = -1
@@ -89,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_WeeklyEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_ADX25_VolumeSpike_1d"
+timeframe = "6h"
 leverage = 1.0
