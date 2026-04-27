@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2
-Hypothesis: Uses Camarilla R3/S3 levels from daily timeframe with trend filter and volume spike.
-Designed to capture strong breakouts with institutional level support, minimizing false signals.
-Optimized for low trade frequency to reduce fee drag in both bull and bear markets.
+12h_1w_SMA_Crossover_Volume_Confirmation_v1
+Hypothesis: Uses 1-week SMA crossover (SMA50/SMA200) for trend direction, 
+with 12h price action confirming breakouts above/below recent swing points,
+and volume surge for entry. Designed for low trade frequency (12-37/year) 
+to work in both bull and bear markets by capturing major trend changes 
+with institutional volume confirmation.
 """
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,81 +22,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1-week data for trend determination
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate daily pivot point and Camarilla levels
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate weekly SMAs for trend filter
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma200_1w = pd.Series(close_1w).rolling(window=200, min_periods=200).mean().values
     
-    # Camarilla levels: R3 and S3
-    r3_1d = close_1d + (range_1d * 1.1 / 2.0)
-    s3_1d = close_1d - (range_1d * 1.1 / 2.0)
+    # Align weekly SMAs to 12h timeframe
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    sma200_1w_aligned = align_htf_to_ltf(prices, df_1w, sma200_1w)
     
-    # 1d trend filter: EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 12h swing points for entry levels
+    # Use 24-period lookback for swing high/low (equivalent to 12 days on 12h)
+    lookback = 24
+    high_max = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    low_min = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
-    
-    # Align all 1d indicators to 4h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
+    # Volume confirmation: current volume > 2.5 * 30-period average
+    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (2.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for calculations
-    start_idx = 34  # EMA34 needs 34 periods
+    # Start after all indicators are ready
+    start_idx = max(200, lookback, 30)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
+        if (np.isnan(sma50_1w_aligned[i]) or np.isnan(sma200_1w_aligned[i]) or 
+            np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        ema34 = ema34_1d_aligned[i]
-        vol_conf = volume_confirm_aligned[i]
+        sma50 = sma50_1w_aligned[i]
+        sma200 = sma200_1w_aligned[i]
+        swing_high = high_max[i]
+        swing_low = low_min[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Determine trend: price vs EMA34 (1d)
-            uptrend = close_val > ema34
-            downtrend = close_val < ema34
+            # Determine trend from weekly SMA crossover
+            bullish_trend = sma50 > sma200
+            bearish_trend = sma50 < sma200
             
-            if uptrend and vol_conf:
-                # Long: break above R3 with volume
-                if close_val > r3:
+            if bullish_trend and vol_conf:
+                # Long: break above recent swing high with volume
+                if close_val > swing_high:
                     signals[i] = size
                     position = 1
                     entry_price = close_val
-            elif downtrend and vol_conf:
-                # Short: break below S3 with volume
-                if close_val < s3:
+            elif bearish_trend and vol_conf:
+                # Short: break below recent swing low with volume
+                if close_val < swing_low:
                     signals[i] = -size
                     position = -1
                     entry_price = close_val
         elif position == 1:
-            # Exit: price re-enters below R3 or trend reversal
-            if close_val < r3:  # Re-enter below R3
+            # Exit: price breaks below swing low or trend changes
+            if close_val < swing_low or sma50 < sma200:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit: price re-enters above S3 or trend reversal
-            if close_val > s3:  # Re-enter above S3
+            # Exit: price breaks above swing high or trend changes
+            if close_val > swing_high or sma50 > sma200:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
-timeframe = "4h"
+name = "12h_1w_SMA_Crossover_Volume_Confirmation_v1"
+timeframe = "12h"
 leverage = 1.0
