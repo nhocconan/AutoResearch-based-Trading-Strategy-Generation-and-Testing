@@ -13,111 +13,132 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for trend and volume context
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate Donchian(20) channels on 12h
-    donchian_high = np.full(len(df_12h), np.nan)
-    donchian_low = np.full(len(df_12h), np.nan)
-    for i in range(20, len(df_12h)):
-        donchian_high[i] = np.max(high_12h[i-20:i])
-        donchian_low[i] = np.min(low_12h[i-20:i])
-    
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    
-    # Calculate 12h EMA(50) for trend filter
-    ema_12h_50 = np.full(len(df_12h), np.nan)
-    alpha = 2 / (50 + 1)
-    for i in range(len(close_12h)):
-        if i < 49:
-            ema_12h_50[i] = np.mean(close_12h[:i+1]) if i > 0 else close_12h[i]
+    # Calculate 4h EMA(34) for trend
+    ema_34_4h = np.full(len(df_4h), np.nan)
+    alpha_4h = 2 / (34 + 1)
+    for i in range(len(close_4h)):
+        if i < 33:
+            ema_34_4h[i] = np.mean(close_4h[:i+1]) if i > 0 else close_4h[i]
         else:
-            if np.isnan(ema_12h_50[i-1]):
-                ema_12h_50[i] = np.mean(close_12h[i-49:i+1])
+            if np.isnan(ema_34_4h[i-1]):
+                ema_34_4h[i] = np.mean(close_4h[i-33:i+1])
             else:
-                ema_12h_50[i] = close_12h[i] * alpha + ema_12h_50[i-1] * (1 - alpha)
+                ema_34_4h[i] = close_4h[i] * alpha_4h + ema_34_4h[i-1] * (1 - alpha_4h)
     
-    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
+    # Calculate 4h volume SMA(20) for volume filter
+    vol_sma_20_4h = np.full(len(df_4h), np.nan)
+    for i in range(len(volume_4h)):
+        if i < 19:
+            vol_sma_20_4h[i] = np.mean(volume_4h[:i+1]) if i > 0 else volume_4h[i]
+        else:
+            vol_sma_20_4h[i] = np.mean(volume_4h[i-19:i+1])
     
-    # Get daily data for volume spike detection
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Align 4h indicators to 1h
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    vol_sma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_sma_20_4h)
     
-    volume_1d = df_1d['volume'].values
+    # Calculate 1h RSI(14) for entry timing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.maximum(delta, 0)
+    loss = np.maximum(-delta, 0)
     
-    # Calculate volume ratio: current 12h volume / average of last 20 days
-    # First, we need to aggregate 12h volume to daily equivalent
-    # Since we don't have direct aggregation, we'll use 1h volume as proxy for intraday
-    # But simpler: use current 4h volume vs 20-period average of 4h volume
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.full(n, np.nan)
+    valid_rsi = (~np.isnan(avg_gain)) & (~np.isnan(avg_loss)) & (avg_loss > 0)
+    rs[valid_rsi] = avg_gain[valid_rsi] / avg_loss[valid_rsi]
+    rsi_14 = np.full(n, np.nan)
+    rsi_14[valid_rsi] = 100 - (100 / (1 + rs[valid_rsi]))
+    
+    # Calculate 1h volume ratio for entry confirmation
+    vol_sma_20_1h = np.full(n, np.nan)
+    for i in range(n):
+        if i < 19:
+            vol_sma_20_1h[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+        else:
+            vol_sma_20_1h[i] = np.mean(volume[i-19:i+1])
     
     volume_ratio = np.full(n, np.nan)
-    valid_vol = (~np.isnan(vol_ma_20)) & (vol_ma_20 > 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma_20[valid_vol]
+    valid_vol = (~np.isnan(vol_sma_20_1h)) & (vol_sma_20_1h > 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_sma_20_1h[valid_vol]
     
     signals = np.zeros(n)
     position = 0
     
     # Warmup
-    start_idx = max(20, 50, 20)
+    start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_12h_50_aligned[i]) or
+        if (np.isnan(ema_34_4h_aligned[i]) or 
+            np.isnan(vol_sma_20_4h_aligned[i]) or
+            np.isnan(rsi_14[i]) or
             np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        in_session = 8 <= hour <= 20
         
-        # Volume spike: current volume > 1.5x 20-period average
-        vol_spike = volume_ratio[i] > 1.5
+        if not in_session:
+            signals[i] = 0.0
+            continue
+        
+        # Volume filter: current volume > 1.5 * 4h average volume
+        vol_filter = volume_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Price breaks above Donchian high + volume spike + price above EMA(50)
-            if (price > donchian_high_aligned[i] and 
-                vol_spike and 
-                price > ema_12h_50_aligned[i]):
-                signals[i] = 0.25
+            # Long: price above 4h EMA34 (uptrend) + RSI < 40 (pullback) + volume spike
+            if (close[i] > ema_34_4h_aligned[i] and 
+                rsi_14[i] < 40 and 
+                vol_filter):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below Donchian low + volume spike + price below EMA(50)
-            elif (price < donchian_low_aligned[i] and 
-                  vol_spike and 
-                  price < ema_12h_50_aligned[i]):
-                signals[i] = -0.25
+            # Short: price below 4h EMA34 (downtrend) + RSI > 60 (bounce) + volume spike
+            elif (close[i] < ema_34_4h_aligned[i] and 
+                  rsi_14[i] > 60 and 
+                  vol_filter):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below EMA(50) or Donchian low
-            if (price < ema_12h_50_aligned[i] or 
-                price < donchian_low_aligned[i]):
+            # Long exit: RSI > 60 or price crosses below 4h EMA34
+            if (rsi_14[i] > 60 or 
+                close[i] < ema_34_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Price crosses above EMA(50) or Donchian high
-            if (price > ema_12h_50_aligned[i] or 
-                price > donchian_high_aligned[i]):
+            # Short exit: RSI < 40 or price crosses above 4h EMA34
+            if (rsi_14[i] < 40 or 
+                close[i] > ema_34_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_DonchianBreakout_VolumeSpike_12hEMA50_v1"
-timeframe = "4h"
+name = "1h_EMA34_RSI_VolumeFilter_Session_v1"
+timeframe = "1h"
 leverage = 1.0
