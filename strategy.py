@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation.
-# Williams %R measures momentum and overbought/oversold conditions.
-# Long when Williams %R crosses above -20 (from oversold) with bullish 1d trend and volume spike.
-# Short when Williams %R crosses below -80 (from overbought) with bearish 1d trend and volume spike.
-# Exit when Williams %R returns to -50 (mean reversion).
-# Uses 1d timeframe for trend filter to reduce noise and improve win rate in both bull and bear markets.
-# Williams %R is effective in ranging markets (common in 2025+) and captures reversals in trends.
-# Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
+# Hypothesis: 1h timeframe with 4h/1d multi-timeframe confirmation.
+# Uses 4h ADX for trend strength filter and 1d Bollinger Bands for mean reversion zones.
+# Long when price touches lower BB in 1d, 4h ADX > 25 (trending), and closes above 1h EMA20.
+# Short when price touches upper BB in 1d, 4h ADX > 25, and closes below 1h EMA20.
+# Exit on opposite BB touch or when ADX weakens (< 20).
+# Session filter: 08-20 UTC to avoid low-volume Asian session.
+# Position size: 0.20 (discrete to minimize fee churn).
+# Target: 15-35 trades/year (60-140 over 4 years) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,79 +22,137 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Precompute hour filter for session (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for ADX trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate ADX(14) on 4h
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # align to original index
+        
+        # Directional Movement
+        plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        plus_dm = np.concatenate([[0], plus_dm])
+        minus_dm = np.concatenate([[0], minus_dm])
+        
+        # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
+        def wilder_smooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value: simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+            return result
+        
+        atr = wilder_smooth(tr, period)
+        plus_di = 100 * wilder_smooth(plus_dm, period) / atr
+        minus_di = 100 * wilder_smooth(minus_dm, period) / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = wilder_smooth(dx, period)
+        return adx
+    
+    adx_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    
+    # Get 1d data for Bollinger Bands
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period Williams %R on daily data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Bollinger Bands(20,2) on 1d
+    def calculate_bb(close, period=20, std_dev=2):
+        sma = np.full_like(close, np.nan)
+        std = np.full_like(close, np.nan)
+        for i in range(len(close)):
+            if i >= period - 1:
+                sma[i] = np.mean(close[i-period+1:i+1])
+                std[i] = np.std(close[i-period+1:i+1])
+        upper = sma + std_dev * std
+        lower = sma - std_dev * std
+        return upper, lower
     
-    # Calculate 1-day EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    bb_upper_1d, bb_lower_1d = calculate_bb(close_1d, 20, 2)
+    bb_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_upper_1d)
+    bb_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_lower_1d)
     
-    # Align Williams %R and EMA50 to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Calculate 1h EMA20 for entry timing
+    close_series = pd.Series(close)
+    ema20_1h = close_series.ewm(span=20, adjust=False, min_periods=20).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 50
+    # Start after warmup
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx_4h_aligned[i]) or np.isnan(bb_upper_1d_aligned[i]) or 
+            np.isnan(bb_lower_1d_aligned[i]) or np.isnan(ema20_1h[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: Williams %R crosses above -20 (from below), above 1d EMA50, volume spike
-        if (williams_r_aligned[i] > -20 and 
-            williams_r_aligned[i-1] <= -20 and  # crossed above -20
-            close[i] > ema50_1d_aligned[i] and 
-            volume_filter[i]):
-            signals[i] = 0.25
+        # Session filter: only trade 08-20 UTC
+        if not in_session[i]:
+            if position == 1:
+                signals[i] = 0.20
+            elif position == -1:
+                signals[i] = -0.20
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Long condition: price touches lower BB (mean reversion), 4h ADX > 25 (trending), close above EMA20
+        if (low[i] <= bb_lower_1d_aligned[i] and 
+            adx_4h_aligned[i] > 25 and 
+            close[i] > ema20_1h[i]):
+            signals[i] = 0.20
             position = 1
-        # Short condition: Williams %R crosses below -80 (from above), below 1d EMA50, volume spike
-        elif (williams_r_aligned[i] < -80 and 
-              williams_r_aligned[i-1] >= -80 and  # crossed below -80
-              close[i] < ema50_1d_aligned[i] and 
-              volume_filter[i]):
-            signals[i] = -0.25
+        # Short condition: price touches upper BB, 4h ADX > 25, close below EMA20
+        elif (high[i] >= bb_upper_1d_aligned[i] and 
+              adx_4h_aligned[i] > 25 and 
+              close[i] < ema20_1h[i]):
+            signals[i] = -0.20
             position = -1
-        # Exit conditions: Williams %R returns to -50 (mean reversion)
-        elif position == 1 and williams_r_aligned[i] >= -50:
+        # Exit conditions: price touches opposite BB or ADX weakens (< 20)
+        elif position == 1 and (high[i] >= bb_upper_1d_aligned[i] or adx_4h_aligned[i] < 20):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and williams_r_aligned[i] <= -50:
+        elif position == -1 and (low[i] <= bb_lower_1d_aligned[i] or adx_4h_aligned[i] < 20):
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_WilliamsR_OverboughtOversold_1dEMA50_VolumeFilter"
-timeframe = "6h"
+name = "1h_BB_Touch_ADXTrendFilter_EMA20"
+timeframe = "1h"
 leverage = 1.0
