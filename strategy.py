@@ -13,15 +13,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Get 1d data for pivot points
     df_1d = get_htf_data(prices, '1d')
@@ -37,7 +37,7 @@ def generate_signals(prices):
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 1h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -47,24 +47,33 @@ def generate_signals(prices):
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.20   # 20% position size
     
-    # Warmup: need 12h EMA (50 periods), daily data, volume MA (20 periods)
+    # Warmup: need 4h EMA (50 periods), daily data, volume MA (20 periods)
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
             np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Skip if outside session
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
+        
         # Current values
         price = close[i]
-        ema_trend = ema_50_12h_aligned[i]
+        ema_trend = ema_50_4h_aligned[i]
         pivot_level = pivot_aligned[i]
         r1_level = r1_aligned[i]
         s1_level = s1_aligned[i]
@@ -102,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hEMA50_Trend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
