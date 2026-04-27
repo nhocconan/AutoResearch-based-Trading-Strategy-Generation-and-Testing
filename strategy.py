@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context (1d)
+    # Get daily data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -37,9 +37,9 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily volume moving average
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate daily volume moving average (20-period)
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -55,7 +55,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -68,12 +68,16 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Volatility filter: avoid high volatility periods (ATR below median)
-        atr_median = np.nanmedian(atr_14_1d_aligned[:i+1]) if i >= 50 else atr_14_1d_aligned[i]
+        # Volatility filter: avoid high volatility periods (ATR below median of recent values)
+        if i >= 50:
+            atr_recent = atr_14_1d_aligned[max(0, i-49):i+1]
+            atr_median = np.nanmedian(atr_recent)
+        else:
+            atr_median = atr_14_1d_aligned[i]
         low_volatility = atr_14_1d_aligned[i] < atr_median
         
         # Volume filter: current volume above daily average
-        volume_filter = volume[i] > vol_ma_1d_aligned[i]
+        volume_filter = volume[i] > vol_ma_20_1d_aligned[i]
         
         # Long conditions: price above daily EMA34 + low volatility + volume
         long_condition = (price_above_ema and 
