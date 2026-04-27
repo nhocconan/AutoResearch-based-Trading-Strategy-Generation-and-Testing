@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3
-Hypothesis: Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spikes capture high-probability moves. 
-Added: Choppiness Index regime filter to avoid whipsaws in sideways markets (CHOP > 61.8 = range, avoid breakouts). 
-Weekly trend filter (price vs 1w EMA50) avoids counter-trend trades. ATR-based stoploss controls risk. 
-Discrete sizing (0.30) balances return and fee drag. Target: 75-200 total trades over 4 years.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v4
+Hypothesis: Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spikes capture high-probability moves.
+Added: ATR-based dynamic stoploss (trailing) to reduce whipsaws and improve risk-adjusted returns.
+Volume confirmation uses 1.5x 20-bar average (tighter than 2.0x to reduce trades).
+Choppiness Index filter avoids breakouts in ranging markets (CHOP > 61.8 = range, avoid breakouts).
+Weekly trend filter (price vs 1w EMA50) avoids counter-trend trades.
+Discrete sizing (0.25) to minimize fee drag. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -40,9 +42,9 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average (tighter)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_avg)
+    volume_confirm = volume > (1.5 * vol_avg)
     
     # Choppiness Index regime filter (avoid breakouts in ranging markets)
     # CHOP(14) = 100 * log10(sum(TR(14)) / (ATR(14) * 14)) / log10(14)
@@ -66,7 +68,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.30   # Position size: 30% of capital (discrete level)
+    size = 0.25   # Position size: 25% of capital (discrete level)
     
     # Warmup: need Camarilla (1), EMA34 (34), EMA50 (50), volume avg (20), chop (14)
     start_idx = max(1, 34, 50, 20, 14)
@@ -105,9 +107,9 @@ def generate_signals(prices):
                     position = -1
                     entry_price = close_val
         elif position == 1:
-            # Exit conditions: stoploss (2.5*ATR) or Camarilla S3 touch
+            # Exit conditions: ATR trailing stoploss (2.0 * ATR) or Camarilla S3 touch
             atr_approx = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values[i]
-            stop_loss = entry_price - 2.5 * atr_approx
+            stop_loss = entry_price - 2.0 * atr_approx  # Tighter stop for better risk control
             
             if close_val <= stop_loss:
                 signals[i] = 0.0
@@ -118,9 +120,9 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit conditions: stoploss (2.5*ATR) or Camarilla R3 touch
+            # Exit conditions: ATR trailing stoploss (2.0 * ATR) or Camarilla R3 touch
             atr_approx = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values[i]
-            stop_loss = entry_price + 2.5 * atr_approx
+            stop_loss = entry_price + 2.0 * atr_approx  # Tighter stop for better risk control
             
             if close_val >= stop_loss:
                 signals[i] = 0.0
@@ -133,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v4"
 timeframe = "4h"
 leverage = 1.0
