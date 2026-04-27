@@ -1,3 +1,9 @@
+# 4H_FUNDING_RATE_MEAN_REVERSION_ZSCORE_30D_12HTREND
+# Hypothesis: Funding rate mean-reversion provides edge in BTC/ETH. Extreme positive funding (longs paying shorts) 
+# precedes short-term reversals down; extreme negative funding precedes reversals up. 
+# Uses 30-day z-score of funding rate to detect extremes. Filters by 12h EMA50 trend to avoid fighting trend.
+# Works in bull (fades overextended longs) and bear (fades oversold shorts). Low turnover (~20-40 trades/year).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -8,108 +14,88 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Load funding rate data for the symbol (assuming BTC/ETH/USDT)
+    symbol = getattr(prices, 'symbol', 'BTCUSDT').replace('USDT', '')
+    funding_path = f"/var/lib/temp/data/processed/funding/{symbol}.parquet"
+    try:
+        funding_df = pd.read_parquet(funding_path)
+        # Align funding timestamps to price timestamps
+        funding_df = funding_df.set_index('funding_time')
+        # Reindex to match price index
+        funding_aligned = funding_df.reindex(prices['open_time'], method='ffill')
+        funding_rate = funding_aligned['funding_rate'].values
+    except:
+        # Fallback: use zero funding if file not found (should not happen in backtest)
+        funding_rate = np.zeros(n)
     
-    # Get daily data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 30-day z-score of funding rate
+    # 30 days = 90 funding intervals (8h each)
+    window = 90
+    funding_mean = np.full(n, np.nan)
+    funding_std = np.full(n, np.nan)
+    
+    for i in range(window, n):
+        window_data = funding_rate[i-window:i]
+        funding_mean[i] = np.mean(window_data)
+        funding_std[i] = np.std(window_data)
+    
+    # Z-score: (current - mean) / std
+    funding_zscore = np.full(n, np.nan)
+    valid_mask = (~np.isnan(funding_mean)) & (~np.isnan(funding_std)) & (funding_std > 0)
+    funding_zscore[valid_mask] = (funding_rate[valid_mask] - funding_mean[valid_mask]) / funding_std[valid_mask]
+    
+    # Get 12h data for trend filter: EMA(50) on close
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 20-day Donchian high and low
-    donch_high = np.full(len(df_1d), np.nan)
-    donch_low = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        donch_high[i] = np.max(high_1d[i-19:i+1])
-        donch_low[i] = np.min(low_1d[i-19:i+1])
-    
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    
-    # Get weekly data for trend filter: EMA(34) on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_1w_34 = np.full(len(df_1w), np.nan)
-    alpha_w = 2 / (34 + 1)
-    for i in range(len(close_1w)):
-        if i < 33:
-            ema_1w_34[i] = np.mean(close_1w[:i+1]) if i > 0 else close_1w[i]
+    close_12h = df_12h['close'].values
+    ema_12h_50 = np.full(len(df_12h), np.nan)
+    for i in range(len(close_12h)):
+        if i < 49:
+            ema_12h_50[i] = np.mean(close_12h[:i+1]) if i > 0 else close_12h[i]
         else:
-            if np.isnan(ema_1w_34[i-1]):
-                ema_1w_34[i] = np.mean(close_1w[i-33:i+1])
-            else:
-                ema_1w_34[i] = close_1w[i] * alpha_w + ema_1w_34[i-1] * (1 - alpha_w)
+            alpha = 2 / (50 + 1)
+            ema_12h_50[i] = close_12h[i] * alpha + ema_12h_50[i-1] * (1 - alpha)
     
-    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
-    
-    # Calculate weekly volume average for volume confirmation
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w_10 = np.full(len(df_1w), np.nan)
-    for i in range(len(vol_1w)):
-        if i < 9:
-            vol_ma_1w_10[i] = np.mean(vol_1w[:i+1]) if i > 0 else vol_1w[i]
-        else:
-            vol_ma_1w_10[i] = np.mean(vol_1w[i-9:i+1])
-    
-    vol_ma_1w_10_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w_10)
+    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
     
     signals = np.zeros(n)
     position = 0
     
-    # Warmup
-    start_idx = max(19, 34, 9)
+    # Start after warmup period
+    start_idx = max(window, 50)
     
     for i in range(start_idx, n):
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or
-            np.isnan(ema_1w_34_aligned[i]) or
-            np.isnan(vol_ma_1w_10_aligned[i])):
+        if np.isnan(funding_zscore[i]) or np.isnan(ema_12h_50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        vol_ma = vol_ma_1w_10_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x weekly average
-        vol_confirmed = vol > 1.5 * vol_ma
+        zscore = funding_zscore[i]
+        trend = ema_12h_50_aligned[i]
+        prev_trend = ema_12h_50_aligned[i-1] if i > 0 else trend
         
         if position == 0:
-            # Long: price breaks above Donchian high + weekly uptrend + volume
-            if (price > donch_high_aligned[i] and 
-                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1] and
-                vol_confirmed):
+            # Long when funding extremely negative (shorts paying longs) AND trend not strongly down
+            if zscore < -2.0 and trend >= prev_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + weekly downtrend + volume
-            elif (price < donch_low_aligned[i] and 
-                  ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1] and
-                  vol_confirmed):
+            # Short when funding extremely positive (longs paying shorts) AND trend not strongly up
+            elif zscore > 2.0 and trend <= prev_trend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Donchian low or weekly trend turns down
-            if (price < donch_low_aligned[i] or 
-                ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]):
+            # Exit long when funding normalizes or trend turns down
+            if zscore > -0.5 or trend < prev_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian high or weekly trend turns up
-            if (price > donch_high_aligned[i] or 
-                ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]):
+            # Exit short when funding normalizes or trend turns up
+            if zscore < 0.5 or trend > prev_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_WeeklyEMA34_VolumeConfirmed_v1"
-timeframe = "12h"
+name = "4H_FUNDING_RATE_MEAN_REVERSION_ZSCORE_30D_12HTREND"
+timeframe = "4h"
 leverage = 1.0
