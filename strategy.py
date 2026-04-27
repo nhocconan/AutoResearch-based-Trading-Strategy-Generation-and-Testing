@@ -31,50 +31,42 @@ def generate_signals(prices):
     atr_1d_raw = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
     
-    # 6h ATR(14) for volatility filter
+    # 12h ATR(14) for volatility filter
     tr1_h = high - low
     tr2_h = np.abs(high - np.roll(close, 1))
     tr3_h = np.abs(low - np.roll(close, 1))
     tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
     tr_h[0] = tr1_h[0]
-    atr_6h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
-    
-    # 6h volume moving average
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr_12h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
     # Warmup
-    start_idx = max(34, 20)
+    start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_6h[i]) or 
-            i >= len(atr_1d_aligned) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_ma_6h[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_12h[i]) or 
+            i >= len(atr_1d_aligned) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         ema_trend = ema34_1d_aligned[i]
-        atr_6h_val = atr_6h[i]
+        atr_12h_val = atr_12h[i]
         atr_1d_val = atr_1d_aligned[i]
-        vol_ratio = volume[i] / vol_ma_6h[i] if vol_ma_6h[i] > 0 else 0
         
-        # Volatility filter: 6h ATR > 0.3 * daily ATR (lower threshold for more signals)
-        vol_filter = atr_6h_val > (atr_1d_val * 0.3)
-        
-        # Volume filter: volume > 1.2 * average
-        vol_spike = vol_ratio > 1.2
+        # Volatility filter: 12h ATR > 0.5 * daily ATR (higher volatility regime)
+        vol_filter = atr_12h_val > (atr_1d_val * 0.5)
         
         if position == 0:
-            # Long: price above EMA with volatility and volume filters
-            if close[i] > ema_trend and vol_filter and vol_spike:
+            # Long: price above EMA with volatility filter
+            if close[i] > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price below EMA with volatility and volume filters
-            elif close[i] < ema_trend and vol_filter and vol_spike:
+            # Short: price below EMA with volatility filter
+            elif close[i] < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
@@ -96,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_Trend_VolumeFilter_v3"
-timeframe = "6h"
+name = "12h_EMA34_Trend_VolumeFilter_v3"
+timeframe = "12h"
 leverage = 1.0
