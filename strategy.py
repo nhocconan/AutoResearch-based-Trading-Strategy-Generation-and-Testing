@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Filter
-Hypothesis: 6s Ichimoku with daily cloud filter for trend alignment and momentum confirmation.
-- Uses Ichimoku (Tenkan/Kijun/Senkou) on 6h for momentum and support/resistance
-- Daily trend filter: price above/below daily Kumo cloud for long/short bias
-- Entry: Tenkan crosses above Kijun + price above daily cloud (long)
-         Tenkan crosses below Kijun + price below daily cloud (short)
-- Exit: Reverse cross or price crosses cloud boundary
-- Designed to capture momentum in trending markets while avoiding counter-trend noise
-- Target: 20-35 trades/year on 6h (80-140 total over 4 years)
+4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike
+Hypothesis: Camarilla pivot levels (R3, S3) from daily timeframe with 1-day EMA34 trend filter and volume confirmation.
+- Camarilla levels calculated from prior day's OHLC: R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
+- Long when price breaks above R3 with volume > 1.5x 20-period average and price > daily EMA34
+- Short when price breaks below S3 with volume > 1.5x 20-period average and price < daily EMA34
+- Exit when price returns to daily close level (pivot) or opposite Camarilla level is touched
+- Designed to capture institutional breakouts with trend alignment in both bull and bear markets
+- Target: 20-35 trades/year on 4h (80-140 total over 4 years)
 """
 
 import numpy as np
@@ -17,102 +16,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Ichimoku components on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2
-    
-    # Daily trend filter: price relative to Kumo cloud
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Daily data for Camarilla levels and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
     
-    # Daily Senkou Span A and B
-    period_tenkan_d = 9
-    period_kijun_d = 26
-    period_senkou_b_d = 52
+    # Calculate Camarilla levels from prior day's OHLC
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    max_high_tenkan_d = pd.Series(high_daily).rolling(window=period_tenkan_d, min_periods=period_tenkan_d).max().values
-    min_low_tenkan_d = pd.Series(low_daily).rolling(window=period_tenkan_d, min_periods=period_tenkan_d).min().values
-    tenkan_d = (max_high_tenkan_d + min_low_tenkan_d) / 2
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
+    camarilla_pivot = close_1d  # Pivot point is previous day's close
     
-    max_high_kijun_d = pd.Series(high_daily).rolling(window=period_kijun_d, min_periods=period_kijun_d).max().values
-    min_low_kijun_d = pd.Series(low_daily).rolling(window=period_kijun_d, min_periods=period_kijun_d).min().values
-    kijun_d = (max_high_kijun_d + min_low_kijun_d) / 2
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
+    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    senkou_a_d = (tenkan_d + kijun_d) / 2
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    max_high_senkou_b_d = pd.Series(high_daily).rolling(window=period_senkou_b_d, min_periods=period_senkou_b_d).max().values
-    min_low_senkou_b_d = pd.Series(low_daily).rolling(window=period_senkou_b_d, min_periods=period_senkou_b_d).min().values
-    senkou_b_d = (max_high_senkou_b_d + min_low_senkou_b_d) / 2
-    
-    # Align daily Ichimoku to 6h
-    senkou_a_d_aligned = align_htf_to_ltf(prices, df_daily, senkou_a_d)
-    senkou_b_d_aligned = align_htf_to_ltf(prices, df_daily, senkou_b_d)
-    
-    # Kumo cloud boundaries (Senkou A and B)
-    upper_daily = np.maximum(senkou_a_d_aligned, senkou_b_d_aligned)
-    lower_daily = np.minimum(senkou_a_d_aligned, senkou_b_d_aligned)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i+1])
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough data for Ichimoku calculations
-    start_idx = max(period_kijun, period_senkou_b) + 1
+    # Warmup: need enough data for calculations
+    start_idx = max(34, 20) + 1
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(upper_daily[i]) or np.isnan(lower_daily[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(pivot_4h[i]) or 
+            np.isnan(ema34_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: Tenkan crosses above Kijun + price above daily cloud
-            if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] and close[i] > upper_daily[i]):
+            # Long entry: price breaks above R3 with volume confirmation and uptrend
+            if (close[i] > r3_4h[i] and volume_filter[i] and close[i] > ema34_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Tenkan crosses below Kijun + price below daily cloud
-            elif (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] and close[i] < lower_daily[i]):
+            # Short entry: price breaks below S3 with volume confirmation and downtrend
+            elif (close[i] < s3_4h[i] and volume_filter[i] and close[i] < ema34_4h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Tenkan crosses below Kijun or price falls below cloud
-            if (tenkan[i] < kijun[i] or close[i] < upper_daily[i]):
+            # Long exit: price returns to pivot or touches S3 (contrarian level)
+            if (close[i] <= pivot_4h[i] or close[i] < s3_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Tenkan crosses above Kijun or price rises above cloud
-            if (tenkan[i] > kijun[i] or close[i] > lower_daily[i]):
+            # Short exit: price returns to pivot or touches R3 (contrarian level)
+            if (close[i] >= pivot_4h[i] or close[i] > r3_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
