@@ -1,13 +1,13 @@
-# 6h Institutional Flow Detector - Detects institutional accumulation/distribution
-# Uses volume-weighted price action relative to prior day VWAP to identify smart money flows
-# Combines with 1d trend filter and volume confirmation for high-probability entries
-# Designed for 6h timeframe to avoid overtrading while capturing multi-day moves
-# Works in bull/bear by following institutional flow direction aligned with higher timeframe trend
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 12h Choppiness Index (14) + 12h Donchian Breakout (20) + Volume Spike
+# In choppy markets (CHOP > 61.8), mean-reversion at Donchian bands works well.
+# Volume spike confirms breakout validity. Uses 1w trend filter to avoid counter-trend trades.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (~12-37/year).
+# Works in bull/bear via trend filter and regime adaptation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,109 +19,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for VWAP calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily VWAP
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
-    vwap_denominator = np.cumsum(volume_1d)
-    vwap_1d = np.divide(vwap_numerator, vwap_denominator, 
-                        out=np.full_like(vwap_numerator, np.nan), 
-                        where=vwap_denominator!=0)
+    # 1w EMA trend filter (50-period)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate institutional flow strength: (close - VWAP) / ATR
-    # Normalizes price deviation from VWAP by volatility
-    atr_period = 14
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(atr_period-1, len(df_1d)):
-        atr_1d[i] = np.nanmean(tr[i-atr_period+1:i+1])
+    # Choppiness Index (14-period)
+    atr = np.zeros(n)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Institutional flow: positive = buying pressure, negative = selling pressure
-    flow_strength = np.divide((close_1d - vwap_1d), atr_1d,
-                              out=np.full_like(close_1d, np.nan),
-                              where=atr_1d!=0)
+    max_h = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_l = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Smooth flow signal to reduce noise
-    flow_smooth = np.full(len(df_1d), np.nan)
-    for i in range(4, len(df_1d)):  # 5-period smoothing
-        flow_smooth[i] = np.nanmean(flow_strength[i-4:i+1])
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        if atr[i] > 0 and max_h[i] > min_l[i]:
+            chop[i] = 100 * np.log14(np.sum(atr[i-13:i+1]) / (max_h[i] - min_l[i])) / np.log14(14)
+        else:
+            chop[i] = 50.0  # neutral when undefined
     
-    # Align flow to 6h timeframe
-    flow_aligned = align_htf_to_ltf(prices, df_1d, flow_smooth)
+    # Donchian Channels (20-period)
+    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA trend filter (50-period)
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: volume > 1.8 x 24-period average (3 days of 6h bars)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(23, n):
-        vol_ma_24[i] = np.mean(volume[i-23:i+1])
+    # Volume filter: volume > 1.5 x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 1d VWAP (1 bar), EMA (50), volume MA (24), flow smoothing (4)
-    start_idx = max(1, 50, 24, 4)
+    # Warmup: need chop (14), DC (20), EMA (50), vol MA (20)
+    start_idx = max(14, 20, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(flow_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(chop[i]) or np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_24[i]
+        vol_avg = vol_ma_20[i]
         
-        # Volume filter: significant volume surge
-        vol_filter = vol_now > 1.8 * vol_avg
+        # Volume filter: significant volume spike
+        vol_filter = vol_now > 1.5 * vol_avg
         
-        # Trend filter from 1d EMA
-        bullish_trend = price > ema_50_aligned[i]
-        bearish_trend = price < ema_50_aligned[i]
+        # Trend filter from 1w EMA
+        bullish_trend = price > ema_50_1w_aligned[i]
+        bearish_trend = price < ema_50_1w_aligned[i]
         
-        # Institutional flow signals
-        strong_buying = flow_aligned[i] > 0.8   # Strong buying pressure
-        strong_selling = flow_aligned[i] < -0.8 # Strong selling pressure
+        # Regime filter: choppy market (CHOP > 61.8) for mean reversion
+        chop_filter = chop[i] > 61.8
         
         if position == 0:
-            # Long: institutional buying + volume + bullish trend
-            if strong_buying and vol_filter and bullish_trend:
+            # Long: price at lower Donchian band in choppy market with volume
+            if chop_filter and vol_filter and price <= dc_low[i]:
                 signals[i] = size
                 position = 1
-            # Short: institutional selling + volume + bearish trend
-            elif strong_selling and vol_filter and bearish_trend:
+            # Short: price at upper Donchian band in choppy market with volume
+            elif chop_filter and vol_filter and price >= dc_high[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: flow turns negative or trend breaks
-            if flow_aligned[i] < -0.2 or not bullish_trend:
+            # Exit long: price reaches middle or upper band, or trend turns bearish
+            dc_mid = (dc_high[i] + dc_low[i]) / 2
+            if price >= dc_mid or not bullish_trend or not chop_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: flow turns positive or trend breaks
-            if flow_aligned[i] > 0.2 or not bearish_trend:
+            # Exit short: price reaches middle or lower band, or trend turns bullish
+            dc_mid = (dc_high[i] + dc_low[i]) / 2
+            if price <= dc_mid or not bearish_trend or not chop_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Institutional_Flow_Detector_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Choppiness_Donchian_MeanReversion_Volume"
+timeframe = "12h"
 leverage = 1.0
