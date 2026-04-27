@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using weekly pivot points (R3/S3 levels) with volume confirmation and weekly EMA(34) trend filter.
+# Hypothesis: 4h strategy using weekly pivot points (R3/S3 levels) with volume confirmation and weekly EMA(34) trend filter.
 # Enters long when price breaks above S3 with volume, short when breaks below R3 with volume.
-# Designed for ~15-25 trades/year by requiring significant breakouts (R3/S3) rather than minor S1/R1 levels.
+# Designed for ~25-40 trades/year by requiring significant breakouts (R3/S3) rather than minor S1/R1 levels.
 # Works in bull/bear: buys support breaks, sells resistance breaks.
-# Uses weekly timeframe for pivot/trend to reduce noise and false signals.
-# Uses strict volume filter (volume > 2.5x 30-period average) to avoid false breakouts.
-# Exit when price returns to weekly pivot or trend changes.
+# Uses strict volume filter (volume > 2x 30-period average) to avoid false breakouts.
+# Exit when price returns to pivot or trend changes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -46,7 +45,7 @@ def generate_signals(prices):
     r3 = high_prev + 2 * (pivot - low_prev)
     s3 = low_prev - 2 * (high_prev - pivot)
     
-    # Align weekly pivots to 12h
+    # Align weekly pivots to 4h
     pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
@@ -55,7 +54,7 @@ def generate_signals(prices):
     ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume filter: volume > 2.5 x 30-period average (12h) for significance
+    # Volume filter: volume > 2.0 x 30-period average (4h) for significance
     vol_ma_30 = np.full(n, np.nan)
     for i in range(29, n):
         vol_ma_30[i] = np.mean(volume[i-29:i+1])
@@ -79,7 +78,7 @@ def generate_signals(prices):
         vol_avg = vol_ma_30[i]
         
         # Volume filter (strict)
-        vol_filter = vol_now > 2.5 * vol_avg
+        vol_filter = vol_now > 2.0 * vol_avg
         
         # Trend filters
         weekly_bullish = price > ema_34_1w_aligned[i]
@@ -113,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_S3R3_Volume_Trend"
-timeframe = "12h"
+name = "4h_WeeklyPivot_S3R3_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
