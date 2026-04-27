@@ -27,19 +27,19 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Donchian channels (20-period) for breakout signals
+    # Calculate 12h Donchian channels (15-period) for breakout signals
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 15:
         return np.zeros(n)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
-    donchian_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_20)
+    donchian_high_15 = pd.Series(high_12h).rolling(window=15, min_periods=15).max().values
+    donchian_low_15 = pd.Series(low_12h).rolling(window=15, min_periods=15).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_15)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_15)
     
     # Calculate 12h volume moving average for confirmation
-    vol_ma_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h = pd.Series(df_12h['volume'].values).rolling(window=15, min_periods=15).mean().values
     vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     # Precompute session filter (08-20 UTC)
@@ -71,7 +71,7 @@ def generate_signals(prices):
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
         # Volume filter: current 12h volume above average
-        volume_filter = vol_ma_12h_aligned[i] > 0 and volume[i] > vol_ma_12h_aligned[i] * 0.8
+        volume_filter = vol_ma_12h_aligned[i] > 0 and volume[i] > vol_ma_12h_aligned[i] * 0.7
         
         # Breakout signals: price breaks 12h Donchian channels
         breakout_up = close[i] > donchian_high_aligned[i]
