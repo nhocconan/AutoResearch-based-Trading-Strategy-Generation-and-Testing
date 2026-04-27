@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-#100799 - 6h_Donchian20_WeeklyPivot_Direction_Volume
-Hypothesis: Donchian(20) breakout with weekly pivot direction filter and volume confirmation on 6h timeframe.
-Rationale: Combines price breakout with weekly pivot bias to avoid counter-trend trades, works in both bull and bear markets.
-Weekly pivot provides structural bias, Donchian captures breakouts, volume confirms conviction.
-Targets 15-30 trades/year to minimize fee drag.
+#100800 - 4h_KAMA_Direction_RSI_Chop_Filter
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) to determine trend direction, RSI for momentum strength, and Choppiness Index for regime filtering. In trending markets (Chop < 38.2), follow KAMA direction with RSI confirmation. In ranging markets (Chop > 61.8), fade extreme RSI moves. Designed to work in both bull and bear markets by adapting to market regime. Targets 25-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,108 +10,164 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot direction
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Get daily data for weekly pivot calculation (using daily to build weekly pivot)
+    # Get 1d data for Choppiness Index (higher timeframe for regime)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly pivot from prior week's daily data
-    # Build weekly OHLC from daily data (simplified: use last 5 trading days)
-    weekly_high = np.zeros(len(df_1d))
-    weekly_low = np.zeros(len(df_1d))
-    weekly_close = np.zeros(len(df_1d))
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    for i in range(len(df_1d)):
-        if i < 4:
-            weekly_high[i] = np.nan
-            weekly_low[i] = np.nan
-            weekly_close[i] = np.nan
-        else:
-            # Simple weekly aggregation: last 5 days
-            weekly_high[i] = np.max(df_1d[i-4:i+1])
-            weekly_low[i] = np.min(df_1d[i-4:i+1])
-            weekly_close[i] = df_1d['close'].iloc[i] if hasattr(df_1d, 'iloc') else df_1d[i]
+    # Calculate KAMA (adaptive moving average)
+    def calculate_kama(price, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(price, n=period))
+        volatility = np.sum(np.abs(np.diff(price)), axis=0)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))**2
+        kama = np.full_like(price, np.nan, dtype=float)
+        kama[period] = price[period]
+        for i in range(period+1, len(price)):
+            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
+        return kama
     
-    # Weekly pivot points
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    kama = calculate_kama(close, period=10, fast=2, slow=30)
     
-    # Align weekly pivot to 6h timeframe (prior week's levels)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # Calculate RSI
+    def calculate_rsi(price, period=14):
+        delta = np.diff(price)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(price)
+        avg_loss = np.zeros_like(price)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(price)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Donchian channel (20-period) on 6h data
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    rsi = calculate_rsi(close, period=14)
     
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Calculate Choppiness Index on daily timeframe
+    def calculate_chop(high, low, close, period=14):
+        atr = np.zeros_like(close)
+        tr1 = np.abs(np.diff(high))
+        tr2 = np.abs(np.diff(low))
+        tr3 = np.abs(np.diff(close))
+        tr = np.maximum(np.maximum(tr1, tr2), tr3)
+        atr[1:] = tr
+        
+        # True Range for each period
+        tr_sum = np.zeros_like(close)
+        for i in range(period, len(close)):
+            tr_sum[i] = np.sum(tr[i-period+1:i+1])
+        
+        # Highest high and lowest low over period
+        max_high = np.zeros_like(close)
+        min_low = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            max_high[i] = np.max(high[i-period+1:i+1])
+            min_low[i] = np.min(low[i-period+1:i+1])
+        
+        chop = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if tr_sum[i] > 0 and (max_high[i] - min_low[i]) > 0:
+                chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
+            else:
+                chop[i] = 50  # neutral
+        return chop
     
-    # Volume filter: volume > 1.8x 24-period average (4 days worth)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, period=14)
+    chop = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Align KAMA and RSI (already calculated on 4h)
+    kama_aligned = kama  # already on 4h timeframe
+    rsi_aligned = rsi    # already on 4h timeframe
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(30, lookback-1)
+    # Start after warmup period
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above Donchian high, above weekly pivot, volume spike
-        if (close[i] > highest_high[i] and 
-            close[i] > weekly_pivot_aligned[i] and 
-            volume_filter[i]):
-            signals[i] = 0.25
-            position = 1
-        # Short condition: price breaks below Donchian low, below weekly pivot, volume spike
-        elif (close[i] < lowest_low[i] and 
-              close[i] < weekly_pivot_aligned[i] and 
-              volume_filter[i]):
-            signals[i] = -0.25
-            position = -1
-        # Exit conditions: price returns to weekly pivot (mean reversion to weekly bias)
-        elif position == 1 and close[i] < weekly_pivot_aligned[i]:
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and close[i] > weekly_pivot_aligned[i]:
-            signals[i] = 0.0
-            position = 0
-        # Hold position
-        else:
-            if position == 1:
+        # Regime-based logic
+        if chop[i] < 38.2:  # Trending market
+            # Follow KAMA direction with RSI confirmation
+            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50:
                 signals[i] = 0.25
-            elif position == -1:
+                position = 1
+            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50:
                 signals[i] = -0.25
+                position = -1
             else:
-                signals[i] = 0.0
+                # Hold current position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+        elif chop[i] > 61.8:  # Ranging market
+            # Fade extreme RSI moves
+            if rsi_aligned[i] > 70 and close[i] < kama_aligned[i]:
+                signals[i] = -0.20  # Short on overbought
+                position = -1
+            elif rsi_aligned[i] < 30 and close[i] > kama_aligned[i]:
+                signals[i] = 0.20   # Long on oversold
+                position = 1
+            else:
+                # Return to neutral
+                if position == 1 and rsi_aligned[i] >= 50:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and rsi_aligned[i] <= 50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    # Hold position if still in extreme
+                    if position == 1:
+                        signals[i] = 0.20
+                    elif position == -1:
+                        signals[i] = -0.20
+                    else:
+                        signals[i] = 0.0
+        else:  # Transition zone (38.2 <= Chop <= 61.8)
+            # Reduce position size in transition
+            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50:
+                signals[i] = 0.15
+                position = 1
+            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50:
+                signals[i] = -0.15
+                position = -1
+            else:
+                # Hold or flatten
+                if position == 1:
+                    signals[i] = 0.15
+                elif position == -1:
+                    signals[i] = -0.15
+                else:
+                    signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Direction_Volume"
-timeframe = "6h"
+name = "4h_KAMA_Direction_RSI_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
