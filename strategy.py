@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Choppiness Index regime filter + Donchian breakout with volume confirmation.
-# Long when: price breaks above Donchian(20) upper, market is trending (CHOP < 38.2), volume > 1.5x avg, and 1-day close > 1-week EMA20 (bull bias).
-# Short when: price breaks below Donchian(20) lower, market is trending (CHOP < 38.2), volume > 1.5x avg, and 1-day close < 1-week EMA20 (bear bias).
-# Exit when price crosses Donchian middle or CHOP > 61.8 (range regime).
-# Target: 12-37 trades/year to avoid fee drag. Works in bull/bear via regime-adaptive trend following.
+# Hypothesis: 4h strategy using Camarilla pivot breakout with 12h trend filter and volume spike.
+# Long when price breaks above R3 with 12h EMA50 uptrend and volume > 2x average.
+# Short when price breaks below S3 with 12h EMA50 downtrend and volume > 2x average.
+# Exit when price crosses the Camarilla Pivot (PP).
+# Uses tight entry conditions to limit trades and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,95 +19,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and chop calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter and pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Get 1w data for longer-term trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    close_1d = df_1d['close'].values
-    close_1w = df_1w['close'].values
+    # Calculate 12h EMA50 for trend filter
+    ema_period = 50
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= ema_period:
+        ema_12h[ema_period - 1] = np.mean(close_12h[:ema_period])
+        for i in range(ema_period, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * (2 / (ema_period + 1)) + 
+                         ema_12h[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate Donchian Channel (20) on 12h data
-    dc_period = 20
-    dc_upper = np.full(n, np.nan)
-    dc_lower = np.full(n, np.nan)
+    # Calculate Camarilla pivot levels from previous 12h bar
+    # PP = (H + L + C) / 3
+    # R3 = C + (H - L) * 1.1/2
+    # S3 = C - (H - L) * 1.1/2
+    typical_12h = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    pp_12h = typical_12h
+    r3_12h = close_12h + range_12h * 1.1 / 2
+    s3_12h = close_12h - range_12h * 1.1 / 2
     
-    for i in range(dc_period - 1, n):
-        dc_upper[i] = np.max(high[i - dc_period + 1:i + 1])
-        dc_lower[i] = np.min(low[i - dc_period + 1:i + 1])
+    # Align 12h indicators to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
     
-    dc_middle = (dc_upper + dc_lower) / 2
-    
-    # Calculate Choppiness Index (14) on 1d data
-    chop_period = 14
-    atr_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= chop_period:
-        # Calculate True Range for 1d
-        tr = np.zeros(len(close_1d))
-        for i in range(1, len(close_1d)):
-            hl = df_1d['high'].values[i] - df_1d['low'].values[i]
-            hc = abs(df_1d['high'].values[i] - close_1d[i-1])
-            lc = abs(df_1d['low'].values[i] - close_1d[i-1])
-            tr[i] = max(hl, hc, lc)
-        tr[0] = df_1d['high'].values[0] - df_1d['low'].values[0]
-        
-        # Calculate ATR
-        atr_1d[chop_period - 1] = np.mean(tr[1:chop_period])
-        for i in range(chop_period, len(tr)):
-            atr_1d[i] = (tr[i] + (chop_period - 1) * atr_1d[i-1]) / chop_period
-        
-        # Calculate Chop
-        sum_atr = np.full(len(close_1d), np.nan)
-        for i in range(chop_period - 1, len(close_1d)):
-            sum_atr[i] = np.sum(atr_1d[i - chop_period + 1:i + 1])
-        
-        max_high = np.full(len(close_1d), np.nan)
-        min_low = np.full(len(close_1d), np.nan)
-        for i in range(chop_period - 1, len(close_1d)):
-            max_high[i] = np.max(df_1d['high'].values[i - chop_period + 1:i + 1])
-            min_low[i] = np.min(df_1d['low'].values[i - chop_period + 1:i + 1])
-        
-        chop_1d = np.full(len(close_1d), 50.0)  # default neutral
-        for i in range(chop_period - 1, len(close_1d)):
-            if max_high[i] > min_low[i] and sum_atr[i] > 0:
-                chop_1d[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(chop_period)
-    
-    # Calculate 1-week EMA20 for trend filter
-    ema_1w_period = 20
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= ema_1w_period:
-        ema_1w[ema_1w_period - 1] = np.mean(close_1w[:ema_1w_period])
-        for i in range(ema_1w_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_1w_period + 1)) + 
-                         ema_1w[i - 1] * (1 - (2 / (ema_1w_period + 1))))
-    
-    # Get volume MA for confirmation
+    # Get volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
-    
-    # Align 1d indicators to 12h timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Align 1w EMA to 12h timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian(20), Chop(14), EMA20(1w), and volume MA20
-    start_idx = max(dc_period - 1, chop_period - 1, ema_1w_period - 1, 19)
+    # Warmup: need EMA50, pivot levels, and volume MA20
+    start_idx = max(ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
-            np.isnan(chop_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(pp_12h_aligned[i]) or 
+            np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -116,38 +77,32 @@ def generate_signals(prices):
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
-        # Volume filter
-        vol_filter = vol_now > 1.5 * vol_avg
-        
-        # Regime filters
-        trending_market = chop_1d_aligned[i] < 38.2  # CHOP < 38.2 = trending
-        ranging_market = chop_1d_aligned[i] > 61.8   # CHOP > 61.8 = ranging
-        
-        # Trend bias from 1-week EMA
-        bull_bias = close_1d[-1] > ema_1w_aligned[i] if i < len(ema_1w_aligned) else False
-        bear_bias = close_1d[-1] < ema_1w_aligned[i] if i < len(ema_1w_aligned) else False
+        # Volume filter: require significant volume spike
+        vol_filter = vol_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: break above Donchian upper + trending + volume + bull bias
-            if (price > dc_upper[i] and trending_market and vol_filter and bull_bias):
+            # Long: break above R3 with 12h EMA50 uptrend and volume spike
+            if (price > r3_12h_aligned[i] and 
+                price > ema_12h_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: break below Donchian lower + trending + volume + bear bias
-            elif (price < dc_lower[i] and trending_market and vol_filter and bear_bias):
+            # Short: break below S3 with 12h EMA50 downtrend and volume spike
+            elif (price < s3_12h_aligned[i] and 
+                  price < ema_12h_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian middle OR market becomes ranging
-            if price < dc_middle[i] or ranging_market:
+            # Exit long: price crosses below Pivot Point
+            if price < pp_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above Donchian middle OR market becomes ranging
-            if price > dc_middle[i] or ranging_market:
+            # Exit short: price crosses above Pivot Point
+            if price > pp_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -155,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ChopRegime_DonchianBreakout_Volume_1wEMA"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
