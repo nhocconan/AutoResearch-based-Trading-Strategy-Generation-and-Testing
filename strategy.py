@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R with 1w trend filter and volume spike
-# Williams %R measures overbought/oversold conditions. Works in all regimes:
-# - Bull market: Buy when %R crosses above -80 from below + price above weekly EMA20
-# - Bear market: Sell when %R crosses below -20 from above + price below weekly EMA20
-# Volume spike filters weak moves. Target: 10-20 trades/year per symbol.
+# Hypothesis: 12h Camarilla pivot R3/S3 breakout with 1d trend filter and volume spike
+# Camarilla levels identify strong support/resistance. Breakouts above R3 or below S3
+# indicate strong momentum. Works in both bull and bear:
+# - Bull market: Buy when price breaks above R3 with volume + price > 1d EMA50
+# - Bear market: Sell when price breaks below S3 with volume + price < 1d EMA50
+# Volume spike filters weak moves. Target: 20-30 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,21 +20,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1w EMA20 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Williams %R (14-period) on daily data
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Calculate Camarilla levels for current day based on previous day
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # 1d EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,23 +56,21 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: Williams %R crosses above -80 from below + uptrend + volume
-        if (williams_r[i] > -80 and 
-            williams_r[i-1] <= -80 and  # Cross above -80
-            close[i] > ema20_1w_aligned[i] and   # Uptrend filter
-            volume_filter[i]):
+        # Long conditions: Price breaks above R3 + volume + uptrend (price > EMA50)
+        if (close[i] > camarilla_r3_aligned[i] and 
+            volume_filter[i] and 
+            close[i] > ema50_1d_aligned[i]):
             signals[i] = 0.25
             position = 1
-        # Short conditions: Williams %R crosses below -20 from above + downtrend + volume
-        elif (williams_r[i] < -20 and 
-              williams_r[i-1] >= -20 and  # Cross below -20
-              close[i] < ema20_1w_aligned[i] and   # Downtrend filter
-              volume_filter[i]):
+        # Short conditions: Price breaks below S3 + volume + downtrend (price < EMA50)
+        elif (close[i] < camarilla_s3_aligned[i] and 
+              volume_filter[i] and 
+              close[i] < ema50_1d_aligned[i]):
             signals[i] = -0.25
             position = -1
         else:
@@ -72,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
