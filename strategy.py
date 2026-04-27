@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,37 +13,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for pivot calculation
+    # Get 1d data for daily trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate daily Camarilla pivot levels (R3, S3)
+    # Get 1d data for ATR calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
     
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4  # R3 = C + 1.1*(H-L)*1.1/4
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4  # S3 = C - 1.1*(H-L)*1.1/4
+    # Calculate ATR(14) on 1d data
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d_arr[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d_arr[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr_14 = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        atr_14[i] = np.nanmean(tr[i-14:i])
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Align weekly EMA200 and daily Camarilla levels to 6h timeframe
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Get 12h data for Donchian channel
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # 24-period average volume for spike detection (4 days of 6h bars)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate Donchian(20) on 12h data
+    donchian_high = np.full(len(high_12h), np.nan)
+    donchian_low = np.full(len(low_12h), np.nan)
+    for i in range(20, len(high_12h)):
+        donchian_high[i] = np.max(high_12h[i-20:i])
+        donchian_low[i] = np.min(low_12h[i-20:i])
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    
+    # 20-period average volume for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 24
+    vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -52,12 +67,13 @@ def generate_signals(prices):
     size = 0.25  # 25% position size
     
     # Warmup period
-    start_idx = max(200, vol_period, 1)
+    start_idx = max(50, vol_period, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_200_1w_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
+        if (np.isnan(ema_200_1d_aligned[i]) or
+            np.isnan(atr_14_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -65,34 +81,37 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from weekly EMA200
-        uptrend = price > ema_200_1w_aligned[i]
-        downtrend = price < ema_200_1w_aligned[i]
+        # Determine trend from 1d EMA200
+        uptrend = price > ema_200_1d_aligned[i]
+        downtrend = price < ema_200_1d_aligned[i]
         
         # Volume confirmation: spike > 2.0x average
         volume_confirmation = vol_ratio > 2.0
         
+        # ATR filter: only trade when volatility is normal (not extreme)
+        atr_normal = atr_14_aligned[i] < np.nanmedian(atr_14_aligned[max(0, i-50):i]) * 2.0
+        
         if position == 0:
-            # Long breakout: price breaks above Camarilla R3 in uptrend with volume
-            if uptrend and price > camarilla_r3_aligned[i] and volume_confirmation:
+            # Long breakout: price breaks above 12h Donchian high in uptrend with volume and normal volatility
+            if uptrend and price > donchian_high_aligned[i] and volume_confirmation and atr_normal:
                 signals[i] = size
                 position = 1
-            # Short breakdown: price breaks below Camarilla S3 in downtrend with volume
-            elif downtrend and price < camarilla_s3_aligned[i] and volume_confirmation:
+            # Short breakdown: price breaks below 12h Donchian low in downtrend with volume and normal volatility
+            elif downtrend and price < donchian_low_aligned[i] and volume_confirmation and atr_normal:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price breaks below Camarilla S3 or trend reverses
-            if price < camarilla_s3_aligned[i] or price < ema_200_1w_aligned[i]:
+            # Long exit: price breaks below 12h Donchian low or trend reverses or volatility spikes
+            if price < donchian_low_aligned[i] or price < ema_200_1d_aligned[i] or not atr_normal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: price breaks above Camarilla R3 or trend reverses
-            if price > camarilla_r3_aligned[i] or price > ema_200_1w_aligned[i]:
+            # Short exit: price breaks above 12h Donchian high or trend reverses or volatility spikes
+            if price > donchian_high_aligned[i] or price > ema_200_1d_aligned[i] or not atr_normal:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1wEMA200_Trend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA200_Volume_ATR_Filter"
+timeframe = "12h"
 leverage = 1.0
