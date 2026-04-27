@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,117 +13,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for higher timeframe context
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 100:
+    # Get daily data for higher timeframe context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 12h Williams Alligator components (Jaw=13, Teeth=8, Lips=5)
-    # Jaw: 13-period SMMA, shifted 8 bars
-    jaw_raw = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw_raw, 8)
-    jaw[:8] = np.nan
+    # Calculate 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Teeth: 8-period SMMA, shifted 5 bars
-    teeth_raw = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth_raw, 5)
-    teeth[:5] = np.nan
+    # Calculate 1d RSI(14) for overbought/oversold conditions
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Lips: 5-period SMMA, shifted 3 bars
-    lips_raw = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips_raw, 3)
-    lips[:3] = np.nan
+    # 1h Bollinger Bands (20, 2) for mean reversion signals
+    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + (2 * bb_std)
+    bb_lower = bb_middle - (2 * bb_std)
     
-    # Align to 4h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    
-    # Calculate 12h ADX for trend strength
-    tr_12h = np.maximum(
-        high_12h[1:] - low_12h[1:],
-        np.maximum(
-            np.abs(high_12h[1:] - close_12h[:-1]),
-            np.abs(low_12h[1:] - close_12h[:-1])
-        )
-    )
-    tr_12h = np.concatenate([[np.nan], tr_12h])
-    plus_dm = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    minus_dm = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).sum().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_12h = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # 4-hour Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: volume > 1.8x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Trend strength filter: ADX > 25
-        trend_filter = adx_12h_aligned[i] > 25
+        # Trend filter: price above/below daily EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Alligator alignment: Lips > Teeth > Jaw (bullish) or Lips < Teeth < Jaw (bearish)
-        bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        bearish_alignment = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+        # Mean reversion signals: price at Bollinger Bands
+        at_lower_band = close[i] <= bb_lower[i]
+        at_upper_band = close[i] >= bb_upper[i]
         
-        # Long conditions: price breaks above upper Donchian + bullish alignment + volume
-        long_breakout = (close[i] > highest_high[i-1] and bullish_alignment and trend_filter and volume_filter[i])
-        # Short conditions: price breaks below lower Donchian + bearish alignment + volume
-        short_breakout = (close[i] < lowest_low[i-1] and bearish_alignment and trend_filter and volume_filter[i])
+        # RSI conditions: oversold (<30) or overbought (>70)
+        rsi_oversold = rsi_1d_aligned[i] < 30
+        rsi_overbought = rsi_1d_aligned[i] > 70
         
-        if long_breakout:
-            signals[i] = 0.25
+        # Long conditions: price at lower BB + oversold RSI + above daily EMA + volume
+        long_signal = at_lower_band and rsi_oversold and price_above_ema and volume_filter[i]
+        # Short conditions: price at upper BB + overbought RSI + below daily EMA + volume
+        short_signal = at_upper_band and rsi_overbought and price_below_ema and volume_filter[i]
+        
+        if long_signal:
+            signals[i] = 0.20
             position = 1
-        elif short_breakout:
-            signals[i] = -0.25
+        elif short_signal:
+            signals[i] = -0.20
             position = -1
-        # Exit conditions: opposite Donchian breakout
-        elif position == 1 and close[i] < lowest_low[i-1]:
+        # Exit conditions: price crosses back to middle Bollinger Band
+        elif position == 1 and close[i] >= bb_middle[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > highest_high[i-1]:
+        elif position == -1 and close[i] <= bb_middle[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_WilliamsAlligator_12hADX_VolumeFilter"
-timeframe = "4h"
+name = "1h_BollingerRSI_1dEMA50_MeanReversion"
+timeframe = "1h"
 leverage = 1.0
