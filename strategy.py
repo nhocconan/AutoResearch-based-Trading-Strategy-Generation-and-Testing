@@ -1,35 +1,33 @@
-# 6h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance on 6-hour timeframe.
-# Breakout above R3 with daily uptrend and volume confirmation indicates bullish continuation.
-# Breakdown below S3 with daily downtrend and volume confirmation indicates bearish continuation.
-# Works in both bull and bear markets because trend direction is determined by daily trend, not price level.
-# Uses 1d trend filter to avoid counter-trend trades, volume to confirm institutional participation.
-# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+#!/usr/bin/env python3
+"""
+Hypothesis: 12-hour volume-weighted average price (VWAP) with weekly trend filter and daily volume confirmation.
+When price crosses above VWAP in a weekly uptrend with above-average volume: long.
+When price crosses below VWAP in a weekly downtrend with above-average volume: short.
+VWAP captures institutional activity, weekly trend filters direction, volume confirms participation.
+Target: 15-25 trades/year per symbol.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
+def calculate_vwap(high, low, close, volume):
+    """Volume Weighted Average Price"""
     typical_price = (high + low + close) / 3.0
-    range_val = high - low
+    vwap = np.full_like(typical_price, np.nan)
+    cum_tpv = np.zeros_like(typical_price)
+    cum_vol = np.zeros_like(typical_price)
     
-    # Camarilla levels
-    R4 = close + range_val * 1.1 / 2
-    R3 = close + range_val * 1.1 / 4
-    R2 = close + range_val * 1.1 / 6
-    R1 = close + range_val * 1.1 / 12
-    PP = typical_price
-    S1 = close - range_val * 1.1 / 12
-    S2 = close - range_val * 1.1 / 6
-    S3 = close - range_val * 1.1 / 4
-    S4 = close - range_val * 1.1 / 2
+    for i in range(len(typical_price)):
+        cum_tpv += typical_price[i] * volume[i]
+        cum_vol += volume[i]
+        if cum_vol > 0:
+            vwap[i] = cum_tpv[i] / cum_vol
     
-    return R3, S3  # Return only the levels we need
+    return vwap
 
 def calculate_ema(values, period):
-    """Exponential Moving Average with proper warmup"""
+    """Exponential Moving Average"""
     if len(values) < period:
         return np.full_like(values, np.nan, dtype=np.float64)
     
@@ -52,85 +50,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (R3, S3)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate weekly EMA34 for trend
+    wk_close = df_1w['close'].values
+    ema_34_1w = calculate_ema(wk_close, 34)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    r3_vals = np.full_like(daily_close, np.nan)
-    s3_vals = np.full_like(daily_close, np.nan)
+    # Calculate daily volume for confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    for i in range(len(daily_close)):
-        r3, s3 = calculate_camarilla(daily_high[i], daily_low[i], daily_close[i])
-        r3_vals[i] = r3
-        s3_vals[i] = s3
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3_vals)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3_vals)
-    
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = calculate_ema(daily_close, 34)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Get daily volume for confirmation
-    daily_volume = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Calculate 12h VWAP
+    vwap = calculate_vwap(high, low, close, volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need EMA (34) and volume MA (20)
+    # Warmup: need EMA (34) + volume MA (20)
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(vwap[i])):
             signals[i] = 0.0
             continue
         
-        # Current 6h price and volume
+        # Current 12h price and volume
         price_now = close[i]
         vol_now = volume[i]
         vol_ma = vol_ma_20_1d_aligned[i]
         
-        # Current levels
-        r3 = r3_6h[i]
-        s3 = s3_6h[i]
-        ema_trend = ema_34_1d_aligned[i]
+        # Current indicators
+        vwap_now = vwap[i]
+        ema_trend = ema_34_1w_aligned[i]
         
-        # Volume filter: volume > 1.5x daily average
-        vol_filter = vol_now > 1.5 * vol_ma
+        # Volume filter: volume > 1.3x daily average
+        vol_filter = vol_now > 1.3 * vol_ma
+        
+        # Trend filter: price above/below weekly EMA34
+        # Need weekly close price for comparison
+        wk_close_price = df_1w['close'].values
+        wk_close_aligned = align_htf_to_ltf(prices, df_1w, wk_close_price)
+        if np.isnan(wk_close_aligned[i]):
+            signals[i] = 0.0
+            continue
+        weekly_close = wk_close_aligned[i]
         
         if position == 0:
-            # Breakout above R3 with daily uptrend: long
-            if price_now > r3 and ema_trend > close[i-1] and vol_filter:
+            # Price crosses above VWAP with weekly uptrend: long
+            if price_now > vwap_now and weekly_close > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Breakdown below S3 with daily downtrend: short
-            elif price_now < s3 and ema_trend < close[i-1] and vol_filter:
+            # Price crosses below VWAP with weekly downtrend: short
+            elif price_now < vwap_now and weekly_close < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to R3 or trend reverses
-            if price_now < r3 or ema_trend < close[i-1]:
+            # Exit long: price crosses below VWAP or trend change
+            if price_now < vwap_now or weekly_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to S3 or trend reverses
-            if price_now > s3 or ema_trend > close[i-1]:
+            # Exit short: price crosses above VWAP or trend change
+            if price_now > vwap_now or weekly_close > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -138,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_VWAP_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
