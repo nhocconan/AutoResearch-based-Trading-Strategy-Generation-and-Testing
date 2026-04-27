@@ -1,11 +1,3 @@
-# 1d_WeeklyTrend_SMA50_Trend_50_Signal
-# Hypothesis: On daily timeframe, use weekly SMA50 trend filter with volume confirmation and low volatility filter.
-# Long when price > weekly SMA50 AND volume > 1.5x 30-day avg AND daily ATR < its 50-day median (low vol).
-# Short when price < weekly SMA50 with same filters.
-# Exit when price crosses weekly SMA50.
-# Weekly trend provides stability in both bull/bear markets; volume confirms conviction; low vol filter avoids choppy whipsaws.
-# Target: 20-40 trades/year per symbol (<160 total over 4 years) to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,35 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (HTF)
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get 1d data for calculations (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly SMA50 for trend filter
-    close_weekly = pd.Series(df_weekly['close'].values)
-    sma50_weekly = close_weekly.rolling(window=50, min_periods=50).mean().values
-    sma50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma50_weekly)
-    
-    # Weekly ATR(14) for volatility
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly_arr = df_weekly['close'].values
-    tr1 = high_weekly - low_weekly
-    tr2 = np.abs(high_weekly - np.roll(close_weekly_arr, 1))
-    tr3 = np.abs(low_weekly - np.roll(close_weekly_arr, 1))
+    # 1d ATR(20) for volatility calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr14_weekly = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr14_weekly)
+    atr_1d = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Volume filter: volume > 1.5x 30-day average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Calculate 6h ATR(20) for volatility ratio
+    tr1_6h = high - low
+    tr2_6h = np.abs(high - np.roll(close, 1))
+    tr3_6h = np.abs(low - np.roll(close, 1))
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    tr_6h[0] = tr1_6h[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=20, min_periods=20).mean().values
+    
+    # Volatility ratio: 6h ATR / 1d ATR (normalized)
+    atr_ratio = atr_6h / atr_1d
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
-    # Volatility filter: ATR below its 50-day median (low volatility regime)
-    atr_median = pd.Series(atr14_weekly_aligned).rolling(window=50, min_periods=14).median().values
-    vol_filter = atr14_weekly_aligned < atr_median
+    # Trend filter: 6h close > 6h EMA34 (trending up) or < EMA34 (trending down)
+    close_series = pd.Series(close)
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,36 +56,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma50_weekly_aligned[i]) or np.isnan(atr14_weekly_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_median[i])):
+        if (np.isnan(atr_ratio[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema34[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above weekly SMA50 + volume filter + low volatility
-            if (close[i] > sma50_weekly_aligned[i] and 
+            # Long: volatility contraction (ratio < 0.8) + volume expansion + uptrend
+            if (atr_ratio[i] < 0.8 and 
                 volume_filter[i] and 
-                vol_filter[i]):
+                close[i] > ema34[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly SMA50 + volume filter + low volatility
-            elif (close[i] < sma50_weekly_aligned[i] and 
+            # Short: volatility contraction + volume expansion + downtrend
+            elif (atr_ratio[i] < 0.8 and 
                   volume_filter[i] and 
-                  vol_filter[i]):
+                  close[i] < ema34[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below weekly SMA50 (trend change)
-            if close[i] < sma50_weekly_aligned[i]:
+            # Long exit: volatility expansion (ratio > 1.2) or trend reversal
+            if (atr_ratio[i] > 1.2 or 
+                close[i] < ema34[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above weekly SMA50 (trend change)
-            if close[i] > sma50_weekly_aligned[i]:
+            # Short exit: volatility expansion or trend reversal
+            if (atr_ratio[i] > 1.2 or 
+                close[i] > ema34[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_SMA50_Trend_50_Signal"
-timeframe = "1d"
+name = "6h_VolRatio_VolumeTrend_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
