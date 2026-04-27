@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume spike.
-# Alligator lines: Jaw (13-period SMMA, 8-bar shift), Teeth (8-period SMMA, 5-bar shift), Lips (5-period SMMA, 3-bar shift).
-# Long when Lips > Teeth > Jaw (bullish alignment) and price > Lips, with 1d uptrend and volume > 1.5x 20-period average.
-# Short when Lips < Teeth < Jaw (bearish alignment) and price < Lips, with 1d downtrend and volume > 1.5x average.
-# Williams Alligator identifies trend presence and direction; 1d trend filter ensures higher timeframe alignment.
-# Volume spike confirms institutional participation. Designed for ~20-30 trades/year per symbol.
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
+# Long when close > upper Donchian band (20-day high) and 1w EMA(34) rising and volume > 1.5x average.
+# Short when close < lower Donchian band (20-day low) and 1w EMA(34) falling and volume > 1.5x average.
+# Uses 1d timeframe for signal generation and 1w for trend filter to reduce false signals.
+# Designed for ~10-20 trades/year per symbol to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,28 +19,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: Smoothed Moving Average (SMMA) with specific periods and shifts
-    # Jaw: 13-period SMMA, 8 bars ahead
-    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean()
-    jaw = jaw_raw.shift(8)  # shift 8 bars into future
+    # 1d Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Teeth: 8-period SMMA, 5 bars ahead
-    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean()
-    teeth = teeth_raw.shift(5)  # shift 5 bars into future
-    
-    # Lips: 5-period SMMA, 3 bars ahead
-    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    lips = lips_raw.shift(3)  # shift 3 bars into future
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 34-period EMA on 1d close for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    close_1w = df_1w['close'].values
+    # 34-period EMA on 1w close for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,26 +41,24 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 40  # 20 for Donchian + buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: Lips > Teeth > Jaw (bullish alignment), price > Lips, 1d uptrend, volume filter
-        if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
-            close[i] > lips[i] and 
-            close[i] > ema34_1d_aligned[i] and 
+        # Long conditions: breakout above upper band, 1w uptrend, volume filter
+        if (close[i] > high_max[i] and 
+            ema34_1w_aligned[i] > ema34_1w_aligned[i-1] and  # rising EMA
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short conditions: Lips < Teeth < Jaw (bearish alignment), price < Lips, 1d downtrend, volume filter
-        elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
-              close[i] < lips[i] and 
-              close[i] < ema34_1d_aligned[i] and 
+        # Short conditions: breakout below lower band, 1w downtrend, volume filter
+        elif (close[i] < low_min[i] and 
+              ema34_1w_aligned[i] < ema34_1w_aligned[i-1] and  # falling EMA
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
@@ -85,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dEMA34_VolumeFilter"
-timeframe = "4h"
+name = "1d_DonchianBreakout_1wEMA34_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
