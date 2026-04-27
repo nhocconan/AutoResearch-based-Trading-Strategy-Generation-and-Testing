@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -42,16 +42,6 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily RSI(14) for momentum filter
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
@@ -60,15 +50,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_20_aligned[i]) or 
             np.isnan(donchian_low_20_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -81,26 +70,23 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Momentum filter: RSI not in extreme territory
-        rsi_ok = (rsi_14_1d_aligned[i] > 30) and (rsi_14_1d_aligned[i] < 70)
-        
         # Volatility filter: ATR not too low (avoid choppy markets)
-        atr_ma_50 = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
-        atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)
-        if np.isnan(atr_ma_50_aligned[i]):
+        atr_ma_20 = pd.Series(atr_14_1d).rolling(window=20, min_periods=20).mean().values
+        atr_ma_20_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
+        if np.isnan(atr_ma_20_aligned[i]):
             signals[i] = 0.0
             continue
-        vol_ok = atr_14_1d_aligned[i] > (atr_ma_50_aligned[i] * 0.5)
+        vol_ok = atr_14_1d_aligned[i] > (atr_ma_20_aligned[i] * 0.6)
         
         # Breakout conditions
         long_breakout = close[i] > donchian_high_20_aligned[i]
         short_breakout = close[i] < donchian_low_20_aligned[i]
         
-        # Long conditions: uptrend + RSI ok + volatility ok + long breakout
-        long_condition = uptrend and rsi_ok and vol_ok and long_breakout
+        # Long conditions: uptrend + volatility ok + long breakout
+        long_condition = uptrend and vol_ok and long_breakout
         
-        # Short conditions: downtrend + RSI ok + volatility ok + short breakout
-        short_condition = downtrend and rsi_ok and vol_ok and short_breakout
+        # Short conditions: downtrend + volatility ok + short breakout
+        short_condition = downtrend and vol_ok and short_breakout
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -108,11 +94,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite breakout or RSI extreme
-        elif position == 1 and (short_breakout or rsi_14_1d_aligned[i] >= 70):
+        # Exit conditions: opposite breakout
+        elif position == 1 and short_breakout:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (long_breakout or rsi_14_1d_aligned[i] <= 30):
+        elif position == -1 and long_breakout:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -126,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA50_RSI14_VolumeFilter_Session"
+name = "4h_Donchian20_EMA50_VolumeFilter_Session"
 timeframe = "4h"
 leverage = 1.0
