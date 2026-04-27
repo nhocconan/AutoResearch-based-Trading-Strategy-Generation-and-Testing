@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Volume-weighted Hurst Exponent + 1d Trend Filter
-# Hurst Exponent measures trend persistence (H>0.5) vs mean reversion (H<0.5).
-# Combines with 1d EMA trend filter and volume confirmation to capture strong trends.
-# Works in bull (trending up) and bear (trending down) by following the 1d trend.
-# Target: 15-25 trades/year per symbol to minimize fee drag.
+# Hypothesis: 4h Williams %R with 1d trend filter and volume spike
+# Williams %R identifies overbought/oversold conditions. Works in range-bound markets:
+# - Buy when %R crosses above -80 from below (oversold bounce) in uptrend
+# - Sell when %R crosses below -20 from above (overbought rejection) in downtrend
+# Volume spike filters weak moves. Target: 20-30 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,62 +21,22 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 12-period Hurst Exponent on 12h data
-    def hurst_exponent(price_series, lags=12):
-        """Calculate Hurst Exponent using R/S analysis"""
-        n = len(price_series)
-        if n < lags * 2:
-            return np.full(n, np.nan)
-        
-        hurst_vals = np.full(n, np.nan)
-        for i in range(lags * 2, n):
-            # Get the last 'lags' observations
-            ts = price_series[i-lags:i]
-            if len(ts) < lags:
-                continue
-                
-            # Calculate returns
-            returns = np.diff(np.log(ts))
-            if len(returns) == 0:
-                continue
-                
-            # Mean of returns
-            mu = np.mean(returns)
-            
-            # Cumulative deviations from mean
-            cum_dev = np.cumsum(returns - mu)
-            
-            # Range (max - min)
-            R = np.max(cum_dev) - np.min(cum_dev)
-            
-            # Standard deviation
-            S = np.std(returns)
-            
-            # Avoid division by zero
-            if S == 0:
-                hurst_vals[i] = 0.5
-            else:
-                # R/S ratio
-                RS = R / S
-                # Hurst exponent approximation
-                hurst_vals[i] = np.log(RS) / np.log(lags)
-        
-        return hurst_vals
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate Hurst Exponent
-    hurst = hurst_exponent(close, lags=12)
-    
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -86,20 +46,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(hurst[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i]) or highest_high[i] == lowest_low[i]):
             signals[i] = 0.0
             continue
         
-        # Long conditions: H > 0.5 (trending) AND price above EMA34 (uptrend) + volume
-        if (hurst[i] > 0.5 and 
-            close[i] > ema34_1d_aligned[i] and   # Uptrend filter
+        # Long conditions: Williams %R crosses above -80 (oversold bounce) + uptrend + volume
+        if (williams_r[i] > -80 and 
+            williams_r[i-1] <= -80 and  # Cross above -80
+            close[i] > ema50_1d_aligned[i] and   # Uptrend filter
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short conditions: H > 0.5 (trending) AND price below EMA34 (downtrend) + volume
-        elif (hurst[i] > 0.5 and 
-              close[i] < ema34_1d_aligned[i] and   # Downtrend filter
+        # Short conditions: Williams %R crosses below -20 (overbought rejection) + downtrend + volume
+        elif (williams_r[i] < -20 and 
+              williams_r[i-1] >= -20 and  # Cross below -20
+              close[i] < ema50_1d_aligned[i] and   # Downtrend filter
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
@@ -109,6 +71,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_HurstExponent_TrendFilter_Volume"
-timeframe = "12h"
+name = "4h_WilliamsR_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
