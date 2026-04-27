@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag. Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume confirmation capture high-probability moves in both bull and bear markets. Weekly trend filter avoids counter-trend trades. Discrete sizing (0.25) balances return and risk. Target: 50-150 total trades over 4 years.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_v1
+Hypothesis: Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume confirmation capture high-probability moves in both bull and bear markets. 
+Weekly trend filter (price vs 1w EMA50) avoids counter-trend trades. Discrete sizing (0.30) balances return and fee drag. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -41,7 +42,7 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
-    # Align all indicators to primary timeframe (12h)
+    # Align all indicators to primary timeframe (4h)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -51,7 +52,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.25   # Position size: 25% of capital (discrete level)
+    size = 0.30   # Position size: 30% of capital (discrete level)
     
     # Warmup: need Camarilla (1), EMA34 (34), EMA50 (50), volume avg (20)
     start_idx = max(1, 34, 50, 20)
@@ -89,9 +90,9 @@ def generate_signals(prices):
                     position = -1
                     entry_price = close_val
         elif position == 1:
-            # Exit conditions: stoploss (3.0*ATR) or Camarilla S3 touch
+            # Exit conditions: stoploss (2.5*ATR) or Camarilla S3 touch
             atr_approx = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values[i]
-            stop_loss = entry_price - 3.0 * atr_approx
+            stop_loss = entry_price - 2.5 * atr_approx
             
             if close_val <= stop_loss:
                 signals[i] = 0.0
@@ -102,9 +103,9 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit conditions: stoploss (3.0*ATR) or Camarilla R3 touch
+            # Exit conditions: stoploss (2.5*ATR) or Camarilla R3 touch
             atr_approx = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values[i]
-            stop_loss = entry_price + 3.0 * atr_approx
+            stop_loss = entry_price + 2.5 * atr_approx
             
             if close_val >= stop_loss:
                 signals[i] = 0.0
@@ -117,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
