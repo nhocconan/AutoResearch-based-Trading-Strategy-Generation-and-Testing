@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v4
-Hypothesis: Camarilla R3/S3 breakouts aligned with 1d EMA34 trend and volume spikes capture high-probability moves.
-Added: ATR-based dynamic stoploss (trailing) to reduce whipsaws and improve risk-adjusted returns.
-Volume confirmation uses 1.5x 20-bar average (tighter than 2.0x to reduce trades).
-Choppiness Index filter avoids breakouts in ranging markets (CHOP > 61.8 = range, avoid breakouts).
-Weekly trend filter (price vs 1w EMA50) avoids counter-trend trades.
-Discrete sizing (0.25) to minimize fee drag. Target: 75-150 total trades over 4 years.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe aligned with 1d EMA34 trend and volume spikes capture fewer, higher-quality moves. 
+12h reduces trade frequency vs 4h while maintaining responsiveness. Weekly trend filter (price vs 1w EMA50) avoids counter-trend trades. 
+Choppiness Index regime filter avoids whipsaws in sideways markets. Discrete sizing (0.25) manages fee drag. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -42,9 +39,9 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 1.5 * 20-period average (tighter)
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    volume_confirm = volume > (2.0 * vol_avg)
     
     # Choppiness Index regime filter (avoid breakouts in ranging markets)
     # CHOP(14) = 100 * log10(sum(TR(14)) / (ATR(14) * 14)) / log10(14)
@@ -57,7 +54,7 @@ def generate_signals(prices):
     chop = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
     chop_filter = chop < 61.8  # Only allow breakouts when not strongly ranging
     
-    # Align all indicators to primary timeframe (4h)
+    # Align all indicators to primary timeframe (12h)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -107,9 +104,9 @@ def generate_signals(prices):
                     position = -1
                     entry_price = close_val
         elif position == 1:
-            # Exit conditions: ATR trailing stoploss (2.0 * ATR) or Camarilla S3 touch
+            # Exit conditions: stoploss (2.5*ATR) or Camarilla S3 touch
             atr_approx = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values[i]
-            stop_loss = entry_price - 2.0 * atr_approx  # Tighter stop for better risk control
+            stop_loss = entry_price - 2.5 * atr_approx
             
             if close_val <= stop_loss:
                 signals[i] = 0.0
@@ -120,9 +117,9 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit conditions: ATR trailing stoploss (2.0 * ATR) or Camarilla R3 touch
+            # Exit conditions: stoploss (2.5*ATR) or Camarilla R3 touch
             atr_approx = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values[i]
-            stop_loss = entry_price + 2.0 * atr_approx  # Tighter stop for better risk control
+            stop_loss = entry_price + 2.5 * atr_approx
             
             if close_val >= stop_loss:
                 signals[i] = 0.0
@@ -135,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v4"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
