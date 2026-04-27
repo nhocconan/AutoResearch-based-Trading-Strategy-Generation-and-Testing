@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,7 +33,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -41,31 +41,31 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 2.0 x 12-period average (12h periods = 6 days)
-    vol_ma_12 = np.full(n, np.nan)
-    for i in range(11, n):
-        vol_ma_12[i] = np.mean(volume[i-11:i+1])
+    # Volume filter: volume > 2.5 x 24-period average (4h periods = 4 days)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(23, n):
+        vol_ma_24[i] = np.mean(volume[i-23:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Camarilla (1 day), EMA (34), volume MA (12)
-    start_idx = max(1, 34, 12)
+    # Warmup: need Camarilla (1 day), EMA (34), volume MA (24)
+    start_idx = max(1, 34, 24)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_12[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_12[i]
+        vol_avg = vol_ma_24[i]
         
-        # Volume filter: significant volume spike (lowered from 2.5 to 2.0 to increase trades)
-        vol_filter = vol_now > 2.0 * vol_avg
+        # Volume filter: significant volume spike (higher threshold = fewer trades)
+        vol_filter = vol_now > 2.5 * vol_avg
         
         # Trend filter from 1d EMA
         bullish_trend = price > ema_34_aligned[i]
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
