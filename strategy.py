@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Direction_RSI_Range_200MA_v1
-Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) direction on 12h timeframe
-combined with RSI range filter and 200-period MA trend filter on daily timeframe.
-Designed to capture trending moves while avoiding choppy markets, suitable for both
-bull and bear markets by following the daily trend. Targets 12-37 trades per year
-to minimize fee drag.
+4h_MACD_Signal_Crossover_RSI_Filter_Volume
+Hypothesis: Uses MACD line crossing signal line on 4h timeframe, filtered by RSI(50) for trend alignment and volume confirmation (>1.5x 20-period average). 
+Designed to capture medium-term momentum with low trade frequency (~20-30 trades/year) to minimize fee drag. 
+Works in both bull and bear markets by following momentum direction confirmed by RSI and volume.
 """
 
 import numpy as np
@@ -22,44 +20,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # MACD calculation on close prices
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    # Calculate KAMA on 12h data (using close prices)
-    # KAMA parameters: ER period=10, Fast SC=2, Slow SC=30
-    def kama(close_prices, er_period=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.diff(close_prices, prepend=close_prices[0]))
-        volatility = np.sum(np.abs(np.diff(close_prices)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        kama_vals = np.zeros_like(close_prices)
-        kama_vals[0] = close_prices[0]
-        for i in range(1, len(close_prices)):
-            kama_vals[i] = kama_vals[i-1] + sc[i] * (close_prices[i] - kama_vals[i-1])
-        return kama_vals
-    
-    # Calculate 12h KAMA
-    kama_12h = kama(close, er_period=10, fast_sc=2, slow_sc=30)
-    
-    # Calculate daily RSI (14-period)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # RSI calculation (14-period)
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Calculate daily 200-period MA
-    ma_200_1d = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
-    
-    # Align daily indicators to 12h timeframe
-    kama_12h_aligned = align_htf_to_ltf(prices, df_1d, kama_12h)  # No extra delay needed for KAMA
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    ma_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ma_200_1d)
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,41 +44,40 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need enough data for all indicators
-    start_idx = 50
+    # Warmup: need enough data for MACD, RSI, volume
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ma_200_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or 
+            np.isnan(rsi[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        kama_val = kama_12h_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
-        ma_200_val = ma_200_1d_aligned[i]
+        macd_val = macd_line[i]
+        signal_val = signal_line[i]
+        rsi_val = rsi[i]
         vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: price above KAMA, RSI in neutral/bullish range (40-80), above MA200, with volume
-            if close_val > kama_val and 40 <= rsi_val <= 80 and close_val > ma_200_val and vol_conf:
+            # Long: MACD crosses above signal line, RSI > 50 (uptrend), volume confirmation
+            if macd_val > signal_val and rsi_val > 50 and vol_conf:
                 signals[i] = size
                 position = 1
-            # Short: price below KAMA, RSI in neutral/bearish range (20-60), below MA200, with volume
-            elif close_val < kama_val and 20 <= rsi_val <= 60 and close_val < ma_200_val and vol_conf:
+            # Short: MACD crosses below signal line, RSI < 50 (downtrend), volume confirmation
+            elif macd_val < signal_val and rsi_val < 50 and vol_conf:
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below KAMA or RSI becomes overbought
-            if close_val < kama_val or rsi_val > 80:
+            # Exit long: MACD crosses below signal line
+            if macd_val < signal_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above KAMA or RSI becomes oversold
-            if close_val > kama_val or rsi_val < 20:
+            # Exit short: MACD crosses above signal line
+            if macd_val > signal_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Direction_RSI_Range_200MA_v1"
-timeframe = "12h"
+name = "4h_MACD_Signal_Crossover_RSI_Filter_Volume"
+timeframe = "4h"
 leverage = 1.0
