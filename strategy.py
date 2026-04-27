@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike
-Hypothesis: Daily timeframe strategy using Camarilla R1/S1 breakouts filtered by 1-week EMA50 trend and volume spikes. Targets 30-100 trades over 4 years (7-25/year) with 0.25 position size. Uses 1-week trend to capture major moves in both bull and bear markets, volume confirmation for momentum validation, and Bollinger Bandwidth regime filter to avoid whipsaws in low volatility. Designed for BTC/ETH with emphasis on fewer, higher-quality trades to minimize fee drag.
+6h_Donchian20_Breakout_12hTrend_VolumeSpike
+Hypothesis: 6h timeframe strategy using Donchian(20) breakouts filtered by 12h EMA50 trend and volume spikes. Targets 50-150 trades over 4 years (12-37/year) with 0.25 position size. Works in both bull and bear markets by aligning with 12h trend and using volume confirmation for momentum validation. Uses discrete position sizing to minimize fee churn.
 """
 
 import numpy as np
@@ -18,78 +18,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1w EMA50 trend filter
-    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # 12h EMA50 trend filter
+    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    # Get 1d data for Camarilla R1/S1 levels (from previous completed 1d bar)
-    df_1d = get_htf_data(prices, '1d')
+    # Donchian(20) channels from current 6h bar's high/low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 1d data for Camarilla R1/S1 levels
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    rng = prev_high - prev_low
-    r1 = prev_close + (rng * 1.08)   # R1 level
-    s1 = prev_close - (rng * 1.08)   # S1 level
-    
-    # Align Camarilla levels to 1d
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: current volume > 2.5 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.5 * vol_avg)
-    
-    # Bollinger Bandwidth regime filter (20-period, 2 std dev) on 1d
-    close_series = pd.Series(close)
-    ma_20 = close_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_series.rolling(window=20, min_periods=20).std().values
-    upper_bb = ma_20 + (2 * std_20)
-    lower_bb = ma_20 - (2 * std_20)
-    bb_width = (upper_bb - lower_bb) / ma_20
-    # Regime: avoid extremely low volatility (choppy sideways) - use BW > 10th percentile
-    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=100).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    # Only trade when volatility is above extreme lows (percentile > 0.1)
-    volatility_regime = bb_width_percentile > 0.1
+    volume_confirm = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Fixed position size to minimize churn
     
-    # Warmup: need 1w EMA50 (50), 1d shift(1) for Camarilla, vol avg (20), BB (100 for percentile)
-    start_idx = max(50 + 1, 1 + 1, 20, 100)
+    # Warmup: need 12h EMA50 (50), Donchian (20), vol avg (20)
+    start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i]) or
-            np.isnan(volatility_regime[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        upper_val = upper_channel[i]
+        lower_val = lower_channel[i]
         ema_val = ema_50_aligned[i]
         vol_conf = volume_confirm[i]
-        vol_reg = volatility_regime[i]
         
         if position == 0:
-            # Look for entry: Camarilla R1/S1 breakout with 1w EMA50 alignment, volume confirmation, and volatility regime
-            long_condition = (close_val > r1_val and 
+            # Look for entry: Donchian breakout with 12h EMA50 alignment and volume confirmation
+            long_condition = (close_val > upper_val and 
                             close_val > ema_val and 
-                            vol_conf and 
-                            vol_reg)
-            short_condition = (close_val < s1_val and 
+                            vol_conf)
+            short_condition = (close_val < lower_val and 
                              close_val < ema_val and 
-                             vol_conf and 
-                             vol_reg)
+                             vol_conf)
             
             if long_condition:
                 signals[i] = size
@@ -98,14 +71,14 @@ def generate_signals(prices):
                 signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 1w EMA50 (trend reversal)
+            # Exit long: price crosses below 12h EMA50 (trend reversal)
             if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 1w EMA50 (trend reversal)
+            # Exit short: price crosses above 12h EMA50 (trend reversal)
             if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -114,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
