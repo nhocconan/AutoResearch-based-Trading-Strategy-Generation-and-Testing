@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Williams %R reversal with 1-day trend filter and volume confirmation.
-In bull market (price > 1-day EMA34): long when Williams %R crosses above -80 (oversold) and volume > 1.2x average.
-In bear market (price < 1-day EMA34): short when Williams %R crosses below -20 (overbought) and volume > 1.2x average.
-Williams %R identifies momentum exhaustion, daily trend filters direction, volume confirms institutional participation.
-Target: 12-35 trades/year per symbol.
+Hypothesis: 4-hour 20-period Donchian breakout with 1-day ATR volatility filter and 1-day EMA34 trend filter.
+In bull market (price > 1-day EMA34): long when price breaks above 20-bar high and ATR(14) < 0.8 * ATR(50).
+In bear market (price < 1-day EMA34): short when price breaks below 20-bar low and ATR(14) < 0.8 * ATR(50).
+Breakouts in low volatility conditions are more likely to sustain, while trend filter ensures direction alignment.
+Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
@@ -13,15 +13,14 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for trend filter and Williams %R
+    # Get daily data for trend filter and ATR filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -37,98 +36,97 @@ def generate_signals(prices):
             ema_34_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema_34_1d[i-1]
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily Williams %R (14-period)
+    # Calculate daily ATR for volatility filters
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
-    daily_close_wr = df_1d['close'].values
+    daily_close_vals = df_1d['close'].values
     
-    highest_high = np.full_like(daily_high, np.nan)
-    lowest_low = np.full_like(daily_low, np.nan)
-    for i in range(13, len(daily_high)):
-        highest_high[i] = np.max(daily_high[i-13:i+1])
-        lowest_low[i] = np.min(daily_low[i-13:i+1])
+    # True Range components
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.concatenate([[daily_close_vals[0]], daily_close_vals[:-1]]))
+    tr3 = np.abs(daily_low - np.concatenate([[daily_close_vals[0]], daily_close_vals[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    williams_r = np.full_like(daily_close, np.nan)
-    for i in range(13, len(daily_close)):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = -100 * (highest_high[i] - daily_close_wr[i]) / (highest_high[i] - lowest_low[i])
-        else:
-            williams_r[i] = -50  # neutral when range is zero
+    # ATR14 and ATR50
+    atr14 = np.full_like(tr, np.nan)
+    atr50 = np.full_like(tr, np.nan)
     
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # ATR14 calculation
+    if len(tr) >= 14:
+        atr14[13] = np.mean(tr[:14])
+        for i in range(14, len(tr)):
+            atr14[i] = (13/14) * atr14[i-1] + (1/14) * tr[i]
     
-    # Get daily data for volume confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = np.empty_like(vol_1d, dtype=np.float64)
-    vol_ma_20_1d.fill(np.nan)
-    for i in range(19, len(vol_1d)):
-        vol_ma_20_1d[i] = np.mean(vol_1d[i-19:i+1])
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # ATR50 calculation
+    if len(tr) >= 50:
+        atr50[49] = np.mean(tr[:50])
+        for i in range(50, len(tr)):
+            atr50[i] = (49/50) * atr50[i-1] + (1/50) * tr[i]
+    
+    # ATR ratio: ATR14/ATR50 < 0.8 indicates low volatility
+    atr_ratio = np.full_like(tr, np.nan)
+    valid = (~np.isnan(atr14)) & (~np.isnan(atr50)) & (atr50 > 0)
+    atr_ratio[valid] = atr14[valid] / atr50[valid]
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Donchian channels (20-period)
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
+    for i in range(19, len(high)):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
+    
+    # Daily close price for trend comparison
+    daily_close_price = df_1d['close'].values
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_price)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Williams %R (14), daily EMA34 (34), daily volume MA20 (20)
-    start_idx = max(14, 34, 20)
+    # Warmup: need Donchian (20), ATR ratio (50), daily EMA34 (34)
+    start_idx = max(19, 50, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(daily_close_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current price and volume
+        # Current price
         price_now = close[i]
-        vol_now = volume[i]
         
         # Current indicators
-        wr_now = williams_r_aligned[i]
+        donchian_high = highest_high[i]
+        donchian_low = lowest_low[i]
+        vol_filter = atr_ratio_aligned[i] < 0.8  # Low volatility filter
         ema_trend = ema_34_1d_aligned[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        
-        # Daily close price for trend comparison
-        daily_close_price = df_1d['close'].values
-        daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_price)
-        if np.isnan(daily_close_aligned[i]):
-            signals[i] = 0.0
-            continue
         daily_close_val = daily_close_aligned[i]
         
-        # Volume filter: volume > 1.2x daily average
-        vol_filter = vol_now > 1.2 * vol_ma
-        
-        # Williams %R signals with crossover detection
-        if i > start_idx:
-            wr_prev = williams_r_aligned[i-1]
-            wr_cross_above_80 = (wr_prev <= -80) and (wr_now > -80)  # Oversold bounce
-            wr_cross_below_20 = (wr_prev >= -20) and (wr_now < -20)  # Overbought rejection
-        else:
-            wr_cross_above_80 = False
-            wr_cross_below_20 = False
-        
+        # Entry conditions
         if position == 0:
-            # Bull market (price > daily EMA34): look for long when WR crosses above -80
-            if daily_close_val > ema_trend and wr_cross_above_80 and vol_filter:
+            # Bull market: long on breakout above Donchian high in low vol
+            if price_now > donchian_high and daily_close_val > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Bear market (price < daily EMA34): look for short when WR crosses below -20
-            elif daily_close_val < ema_trend and wr_cross_below_20 and vol_filter:
+            # Bear market: short on breakout below Donchian low in low vol
+            elif price_now < donchian_low and daily_close_val < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: WR crosses above -20 (overbought) or trend changes to bear
-            if wr_now >= -20 or daily_close_val < ema_trend:
+            # Exit long: price breaks below Donchian low or trend turns bear
+            if price_now < donchian_low or daily_close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: WR crosses below -80 (oversold) or trend changes to bull
-            if wr_now <= -80 or daily_close_val > ema_trend:
+            # Exit short: price breaks above Donchian high or trend turns bull
+            if price_now > donchian_high or daily_close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_DailyTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_ATRVolatilityFilter_DailyTrend"
+timeframe = "4h"
 leverage = 1.0
