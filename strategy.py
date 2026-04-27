@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_AdaptiveTrend_12hVWAP_Volume
-Hypothesis: KAMA adapts to market noise - slow in ranging markets (reducing whipsaws), fast in trends.
-Combines with 12h VWAP for institutional sentiment and volume confirmation.
-Works in bull (trend following) and bear (adaptive filtering reduces losses during chop).
-Target: 20-40 trades/year to minimize fee drag.
+Hypothesis: 1-day mean reversion using RSI extremes with weekly trend filter.
+In both bull and bear markets, price tends to revert to mean when RSI reaches extremes,
+but only in the direction of the weekly trend to avoid counter-trend losses.
+Uses weekly EMA40 as trend filter and RSI(14) for entry/exit.
+Target: 10-25 trades per year with low turnover to minimize fee drag.
 """
 
 import numpy as np
@@ -13,104 +13,96 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate KAMA (adaptive moving average) on 1d
-    # Parameters: ER period=10, fast=2, slow=30
-    er_period = 10
-    fast_sc = 2
-    slow_sc = 30
+    # Calculate weekly EMA40 for trend filter
+    ema_period = 40
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
+                         ema_1w[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, er_period))  # |close - close_er_period|
-    volatility = np.zeros(len(close_1d))
-    for i in range(er_period, len(close_1d)):
-        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-er_period+1:i+1])))
+    # Calculate daily RSI(14)
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    er = np.zeros(len(close_1d))
-    er[er_period:] = change / np.where(volatility[er_period:] != 0, volatility[er_period:], 1)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
     
-    # Smoothing constant
-    sc = np.zeros(len(close_1d))
-    sc[er_period:] = (er[er_period:] * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    # First average
+    if n >= rsi_period:
+        avg_gain[rsi_period - 1] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period - 1] = np.mean(loss[:rsi_period])
+        
+        # Wilder smoothing
+        for i in range(rsi_period, n):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
     
-    # KAMA
-    kama = np.full(len(close_1d), np.nan)
-    if len(close_1d) > er_period:
-        kama[er_period] = close_1d[er_period]
-        for i in range(er_period + 1, len(close_1d)):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    rs = np.full(n, np.nan)
+    rsi = np.full(n, np.nan)
+    for i in range(rsi_period - 1, n):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100
     
-    # Get 12h data for VWAP
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3
-    vwap_num = np.cumsum(typical_price_12h * df_12h['volume'].values)
-    vwap_den = np.cumsum(df_12h['volume'].values)
-    vwap_12h = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
-    
-    # Align indicators to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
-    
-    # Volume confirmation on 4h
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Align weekly EMA to daily timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
-    position = 0
-    size = 0.25  # 25% position
+    position = 0  # 0: flat, 1: long, -1: short
+    size = 0.25   # 25% position size
     
-    start_idx = max(er_period + 1, 19)
+    # Warmup: need RSI and weekly EMA
+    start_idx = max(rsi_period, ema_period - 1)
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(vwap_12h_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        # Skip if any data not ready
+        if np.isnan(rsi[i]) or np.isnan(ema_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_now = volume[i]
-        vol_avg = vol_ma_20[i]
-        vol_filter = vol_now > 1.5 * vol_avg
+        weekly_trend_up = price > ema_1w_aligned[i]
+        weekly_trend_down = price < ema_1w_aligned[i]
         
         if position == 0:
-            # Long: price > KAMA AND price > VWAP with volume
-            if price > kama_aligned[i] and price > vwap_12h_aligned[i] and vol_filter:
+            # Long: RSI oversold (<30) in weekly uptrend
+            if rsi[i] < 30 and weekly_trend_up:
                 signals[i] = size
                 position = 1
-            # Short: price < KAMA AND price < VWAP with volume
-            elif price < kama_aligned[i] and price < vwap_12h_aligned[i] and vol_filter:
+            # Short: RSI overbought (>70) in weekly downtrend
+            elif rsi[i] > 70 and weekly_trend_down:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price < KAMA OR price < VWAP
-            if price < kama_aligned[i] or price < vwap_12h_aligned[i]:
+            # Exit long: RSI returns to neutral (>50)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price > KAMA OR price > VWAP
-            if price > kama_aligned[i] or price > vwap_12h_aligned[i]:
+            # Exit short: RSI returns to neutral (<50)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_AdaptiveTrend_12hVWAP_Volume"
-timeframe = "4h"
+name = "1d_RSI14_MeanReversion_1wEMA40_Trend"
+timeframe = "1d"
 leverage = 1.0
