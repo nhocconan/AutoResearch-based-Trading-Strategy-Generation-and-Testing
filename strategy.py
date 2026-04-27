@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot level touch with 1d trend filter and volume confirmation.
-# Long when price touches S1 support with 1d EMA34 uptrend and volume spike.
-# Short when price touches R1 resistance with 1d EMA34 downtrend and volume spike.
-# Exit when price reaches opposite pivot level (S1/R1) or closes back inside H-L range.
-# Uses proven Camarilla pivot structure with strict entry conditions to limit trades.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA20 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper channel with 12h EMA20 uptrend and volume > 1.3x average.
+# Short when price breaks below Donchian lower channel with 12h EMA20 downtrend and volume > 1.3x average.
+# Exit when price crosses back through Donchian midpoint (mean reversion).
+# Uses Donchian channels for breakout signals on 4h timeframe, targeting 20-50 trades per year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,61 +19,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_period = 34
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
-                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
+    # Calculate 12h EMA20 for trend filter
+    ema_period = 20
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= ema_period:
+        ema_12h[ema_period - 1] = np.mean(close_12h[:ema_period])
+        for i in range(ema_period, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * (2 / (ema_period + 1)) + 
+                         ema_12h[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # S1 = C - (H-L)*1.12, R1 = C + (H-L)*1.12
-    camarilla_s1 = np.full(len(close_1d), np.nan)
-    camarilla_r1 = np.full(len(close_1d), np.nan)
+    # Calculate Donchian channels (20-period)
+    donch_period = 20
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    middle_channel = np.full(n, np.nan)
     
-    for i in range(1, len(close_1d)):
-        # Use previous day's H, L, C to calculate today's levels
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        rang = phigh - plow
-        if rang > 0:
-            camarilla_s1[i] = pclose - (rang * 1.12)
-            camarilla_r1[i] = pclose + (rang * 1.12)
+    for i in range(donch_period - 1, n):
+        upper_channel[i] = np.max(high[i - donch_period + 1:i + 1])
+        lower_channel[i] = np.min(low[i - donch_period + 1:i + 1])
+        middle_channel[i] = (upper_channel[i] + lower_channel[i]) / 2
     
-    # Align 1d data to 12h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Volume spike filter (volume > 2x 20-period average)
+    # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need EMA34 and volume MA20
-    start_idx = max(ema_period - 1, 19)
+    # Warmup: need Donchian channels, EMA20, and volume MA20
+    start_idx = max(donch_period, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(middle_channel[i]) or np.isnan(ema_12h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -82,38 +73,32 @@ def generate_signals(prices):
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
-        # Volume filter: require volume spike (2x average)
-        vol_filter = vol_now > 2.0 * vol_avg
+        # Volume filter: require volume above average
+        vol_filter = vol_now > 1.3 * vol_avg
         
         if position == 0:
-            # Long: price touches S1 support with 1d EMA34 uptrend and volume spike
-            if (price <= camarilla_s1_aligned[i] * 1.001 and  # Allow small tolerance
-                price >= camarilla_s1_aligned[i] * 0.999 and
-                ema_1d_aligned[i] > ema_1d_aligned[i-1] and  # Rising EMA = uptrend
-                vol_filter):
+            # Long: price breaks above upper channel with 12h EMA20 uptrend and volume filter
+            if (price > upper_channel[i] and 
+                price > ema_12h_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price touches R1 resistance with 1d EMA34 downtrend and volume spike
-            elif (price >= camarilla_r1_aligned[i] * 0.999 and  # Allow small tolerance
-                  price <= camarilla_r1_aligned[i] * 1.001 and
-                  ema_1d_aligned[i] < ema_1d_aligned[i-1] and  # Falling EMA = downtrend
-                  vol_filter):
+            # Short: price breaks below lower channel with 12h EMA20 downtrend and volume filter
+            elif (price < lower_channel[i] and 
+                  price < ema_12h_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches R1 or closes back inside H-L range of pivot
-            if (price >= camarilla_r1_aligned[i] * 0.999 or  # Hit R1 target
-                (low[i] >= camarilla_s1_aligned[i] and high[i] <= camarilla_r1_aligned[i])):  # Back inside range
+            # Exit long: price crosses below middle channel
+            if price < middle_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price reaches S1 or closes back inside H-L range of pivot
-            if (price <= camarilla_s1_aligned[i] * 1.001 or  # Hit S1 target
-                (low[i] >= camarilla_s1_aligned[i] and high[i] <= camarilla_r1_aligned[i])):  # Back inside range
+            # Exit short: price crosses above middle channel
+            if price > middle_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_S1R1_Touch_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hEMA20_Volume"
+timeframe = "4h"
 leverage = 1.0
