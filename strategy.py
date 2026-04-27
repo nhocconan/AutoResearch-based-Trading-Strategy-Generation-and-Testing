@@ -54,15 +54,15 @@ def generate_signals(prices):
         for i in range(1, len(close_1d)):
             ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Align 1d indicators to daily timeframe (no alignment needed for 1d)
-    upper_1d_aligned = upper
-    lower_1d_aligned = lower
-    atr_14_1d_aligned = atr_14_1d
-    ema_50_1d_aligned = ema_50_1d
+    # Align 1d indicators to 12h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4-period volume average for spike detection
+    # Calculate 3-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 4
+    vol_period = 3
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_20_1dEMA50_Volume"
-timeframe = "1d"
+name = "12h_Donchian_20_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
