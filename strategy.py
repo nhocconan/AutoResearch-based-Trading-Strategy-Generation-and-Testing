@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,20 +13,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for primary trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA(34) for long-term trend
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get daily data for entry triggers
+    # Get daily data for trend and volatility filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
+    
+    # Calculate daily EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
@@ -37,15 +32,15 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily RSI(14) for overbought/oversold
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Get weekly data for higher timeframe trend confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA(34) for long-term trend
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,13 +49,13 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need weekly EMA and daily indicators
+    # Warmup: need weekly EMA, daily EMA, and ATR
     start_idx = max(34, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,8 +66,8 @@ def generate_signals(prices):
             continue
         
         weekly_trend = ema_34_1w_aligned[i]
+        daily_trend = ema_34_1d_aligned[i]
         atr_val = atr_14_1d_aligned[i]
-        rsi_val = rsi_14_1d_aligned[i]
         
         # Volatility filter: ATR > 20-period median (high volatility regime)
         if i >= 20:
@@ -81,28 +76,28 @@ def generate_signals(prices):
             atr_ma = atr_val
         vol_filter = atr_val > atr_ma
         
-        # Entry conditions: only trade in direction of weekly trend
+        # Entry conditions: only trade in direction of weekly trend with daily alignment
         if position == 0:
-            # Long: weekly uptrend + RSI oversold + volatility
-            if close[i] > weekly_trend and rsi_val < 35 and vol_filter:
+            # Long: weekly uptrend + daily uptrend + volatility
+            if close[i] > weekly_trend and close[i] > daily_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: weekly downtrend + RSI overbought + volatility
-            elif close[i] < weekly_trend and rsi_val > 65 and vol_filter:
+            # Short: weekly downtrend + daily downtrend + volatility
+            elif close[i] < weekly_trend and close[i] < daily_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: weekly trend reversal or RSI overbought
-            if close[i] < weekly_trend or rsi_val > 70:
+            # Exit long: weekly trend reversal or daily trend reversal
+            if close[i] < weekly_trend or close[i] < daily_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: weekly trend reversal or RSI oversold
-            if close[i] > weekly_trend or rsi_val < 30:
+            # Exit short: weekly trend reversal or daily trend reversal
+            if close[i] > weekly_trend or close[i] > daily_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA34_RSI14_VolatilityFilter"
-timeframe = "1d"
+name = "12h_WeeklyDailyEMA34_Trend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
