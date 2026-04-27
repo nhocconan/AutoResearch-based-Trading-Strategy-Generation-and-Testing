@@ -27,25 +27,26 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema_34_1d[i] = (close_1d[i] * multiplier) + (ema_34_1d[i-1] * (1 - multiplier))
     
-    # Calculate 1-day Bollinger Bands (20, 2.0)
-    sma_20_1d = np.full(len(close_1d), np.nan)
-    std_20_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        for i in range(19, len(close_1d)):
-            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
-            std_20_1d[i] = np.std(close_1d[i-19:i+1])
+    # Calculate 1-day ATR (14-period) for volatility filter
+    atr_14_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 14:
+        tr = np.zeros(len(close_1d))
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(close_1d)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close_1d[i-1]), abs(low[i] - close_1d[i-1]))
+        
+        # Calculate ATR using Wilder's smoothing (same as EMA with alpha=1/period)
+        atr_14_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(close_1d)):
+            atr_14_1d[i] = (tr[i] * (1/14)) + (atr_14_1d[i-1] * (13/14))
     
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
-    
-    # Align 1d indicators to 6h timeframe
+    # Align 1d indicators to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 6-period volume average for spike detection
+    # Calculate 12-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 6
+    vol_period = 12
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -58,8 +59,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(upper_bb_1d_aligned[i]) or 
-            np.isnan(lower_bb_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -70,27 +70,30 @@ def generate_signals(prices):
         # Volume spike filter: at least 1.5x average volume
         vol_filter = vol_ratio > 1.5
         
+        # Volatility filter: only trade when volatility is above average
+        vol_filter_vol = atr_14_1d_aligned[i] > np.nanmedian(atr_14_1d_aligned[:i]) if i > 34 else False
+        
         if position == 0:
-            # Long: Price above EMA34 and breaks above upper Bollinger Band with volume
-            if price > ema_34_1d_aligned[i] and price > upper_bb_1d_aligned[i] and vol_filter:
+            # Long: Price above EMA34 with volume and volatility confirmation
+            if price > ema_34_1d_aligned[i] and vol_filter and vol_filter_vol:
                 signals[i] = size
                 position = 1
-            # Short: Price below EMA34 and breaks below lower Bollinger Band with volume
-            elif price < ema_34_1d_aligned[i] and price < lower_bb_1d_aligned[i] and vol_filter:
+            # Short: Price below EMA34 with volume and volatility confirmation
+            elif price < ema_34_1d_aligned[i] and vol_filter and vol_filter_vol:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below EMA34 or volatility spike (potential reversal)
-            if price < ema_34_1d_aligned[i] or (vol_ratio > 2.5):
+            # Long exit: Price crosses below EMA34 or volatility drops significantly
+            if price < ema_34_1d_aligned[i] or (atr_14_1d_aligned[i] < 0.5 * atr_14_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price crosses above EMA34 or volatility spike (potential reversal)
-            if price > ema_34_1d_aligned[i] or (vol_ratio > 2.5):
+            # Short exit: Price crosses above EMA34 or volatility drops significantly
+            if price > ema_34_1d_aligned[i] or (atr_14_1d_aligned[i] < 0.5 * atr_14_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_BB20_Volume"
-timeframe = "6h"
+name = "12h_EMA34_ATR_Volume"
+timeframe = "12h"
 leverage = 1.0
