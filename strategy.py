@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4_S4_Breakout_1dTrend_1wPivotDir_VolumeConfirm
-Hypothesis: Uses 6h timeframe with Camarilla R4/S4 breakouts (strong momentum) filtered by 1d EMA50 trend direction and weekly pivot bias. Only takes breakouts aligned with both the 1d trend and weekly pivot direction to avoid counter-trend trades. Volume confirmation ensures momentum validity. Designed for BTC/ETH to work in both bull and bear markets by requiring trend alignment. Target 12-30 trades/year to minimize fee drag on 6h timeframe.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_Dyn
+Hypothesis: Uses 4h timeframe with Camarilla R1/S1 breakouts filtered by 1d EMA34 trend, volume confirmation, and ATR-based dynamic position sizing. Designed for BTC/ETH to work in both bull and bear markets by only taking breakouts in the direction of the 1d trend. Target ~30-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,97 +18,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter and Camarilla levels
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 trend filter
-    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # 1d EMA34 trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Camarilla levels from previous completed 1d bar (using R4/S4 for strong breakouts)
+    # Get 1d data for Camarilla levels (from previous completed 1d bar)
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     rng = prev_high - prev_low
-    r4 = prev_close + (rng * 1.1 / 2)  # R4 level
-    s4 = prev_close - (rng * 1.1 / 2)  # S4 level
+    r1 = prev_close + (rng * 1.1 / 12)
+    s1 = prev_close - (rng * 1.1 / 12)
     
-    # Align Camarilla R4/S4 levels to 6h
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Get 1w data for weekly pivot direction (HTF bias)
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Weekly pivot points from previous completed 1w bar
-    whigh = df_1w['high'].shift(1).values
-    wlow = df_1w['low'].shift(1).values
-    wclose = df_1w['close'].shift(1).values
-    
-    # Weekly pivot point and support/resistance levels
-    wpivot = (whigh + wlow + wclose) / 3.0
-    wr1 = 2 * wpivot - wlow
-    ws1 = 2 * wpivot - whigh
-    wr2 = wpivot + (whigh - wlow)
-    ws2 = wpivot - (whigh - wlow)
-    
-    # Weekly bias: price above weekly pivot = bullish bias, below = bearish bias
-    weekly_bias_bullish = wclose > wpivot
-    weekly_bias_bearish = wclose < wpivot
-    
-    # Align weekly bias to 6h
-    weekly_bias_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_bullish.astype(float))
-    weekly_bias_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_bearish.astype(float))
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average (moderate threshold)
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    volume_confirm = volume > (1.8 * vol_avg)
+    
+    # ATR for dynamic position sizing (based on 14-period ATR)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    size = 0.25  # Discrete size to minimize fee churn
     
-    # Warmup: need 1d EMA50 (50), 1d shift(1) for Camarilla, 1w shift(1) for pivot, vol avg (20)
-    start_idx = max(50 + 2*6, 1 + 2*6, 1 + 2*6, 20)  # ~112 bars for 1d EMA50 warmup (1d bars per day = 4)
+    # Warmup: need 1d EMA34 (34), 1d shift(1) for Camarilla, vol avg (20), ATR (14)
+    start_idx = max(34 + 1, 1 + 1, 20, 14)  # ~35 bars
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i]) or
-            np.isnan(weekly_bias_bullish_aligned[i]) or np.isnan(weekly_bias_bearish_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        ema_val = ema_50_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_val = ema_34_aligned[i]
         vol_conf = volume_confirm[i]
-        weekly_bull = weekly_bias_bullish_aligned[i] > 0.5
-        weekly_bear = weekly_bias_bearish_aligned[i] > 0.5
+        atr_val = atr[i]
         
         if position == 0:
-            # Look for entry: Camarilla R4/S4 breakout with 1d EMA50 alignment, weekly pivot bias, and volume confirmation
-            long_condition = (close_val > r4_val and 
+            # Look for entry: Camarilla R1/S1 breakout with 1d EMA34 alignment and volume confirmation
+            long_condition = (close_val > r1_val and 
                             close_val > ema_val and 
-                            weekly_bull and 
                             vol_conf)
-            short_condition = (close_val < s4_val and 
+            short_condition = (close_val < s1_val and 
                              close_val < ema_val and 
-                             weekly_bear and 
                              vol_conf)
             
             if long_condition:
+                # Dynamic size based on ATR (normalized to 0.25-0.35 range)
+                atr_norm = min(max(atr_val / close_val, 0.01), 0.05)  # cap between 1%-5%
+                size = 0.25 + (atr_norm - 0.01) * (0.10 / 0.04)  # scale 0.01-0.05 to 0.25-0.35
                 signals[i] = size
                 position = 1
                 entry_price = close_val
             elif short_condition:
+                atr_norm = min(max(atr_val / close_val, 0.01), 0.05)
+                size = 0.25 + (atr_norm - 0.01) * (0.10 / 0.04)
                 signals[i] = -size
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Exit long: price crosses below 1d EMA50 (trend reversal)
+            # Exit long: price crosses below 1d EMA34 (trend reversal)
             if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -116,7 +101,7 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA50 (trend reversal)
+            # Exit short: price crosses above 1d EMA34 (trend reversal)
             if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -126,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Breakout_1dTrend_1wPivotDir_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
