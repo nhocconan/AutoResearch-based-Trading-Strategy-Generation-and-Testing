@@ -44,7 +44,7 @@ def generate_signals(prices):
     vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    hours = prices.index.hour
     session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
@@ -89,10 +89,10 @@ def generate_signals(prices):
                           breakout_down)
         
         if long_condition and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_condition and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         # Exit conditions: trend reversal
         elif position == 1 and not price_above_ema:
@@ -104,9 +104,9 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
