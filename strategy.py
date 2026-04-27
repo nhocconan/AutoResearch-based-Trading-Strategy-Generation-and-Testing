@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,54 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter (1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily Bollinger Bands (20, 2.5)
-    close_1d = df_1d['close'].values
-    sma_20 = np.full(len(close_1d), np.nan)
-    std_20 = np.full(len(close_1d), np.nan)
+    # Calculate weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        ema_20_1w[19] = np.mean(close_1w[:20])
+        for i in range(20, len(close_1w)):
+            ema_20_1w[i] = (close_1w[i] * 2 + ema_20_1w[i-1] * 18) / 20
     
-    for i in range(20, len(close_1d)):
-        sma_20[i] = np.mean(close_1d[i-20:i])
-        std_20[i] = np.std(close_1d[i-20:i])
+    # Get daily data for price action (1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    upper_band = sma_20 + (std_20 * 2.5)
-    lower_band = sma_20 - (std_20 * 2.5)
+    # Calculate daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = np.full(len(high_1d), np.nan)
+    donchian_low = np.full(len(low_1d), np.nan)
     
-    # Align Bollinger Bands to 4h timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
+    for i in range(len(high_1d)):
+        if i >= 19:
+            donchian_high[i] = np.max(high_1d[i-19:i+1])
+            donchian_low[i] = np.min(low_1d[i-19:i+1])
     
-    # Calculate 4h Bollinger Bands for entry timing
-    sma_20_4h = np.full(n, np.nan)
-    std_20_4h = np.full(n, np.nan)
+    # Calculate ATR(14) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.zeros(n)
+    for i in range(n):
+        if i < 14:
+            atr[i] = np.mean(tr[:i+1]) if i > 0 else tr[0]
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    for i in range(20, n):
-        sma_20_4h[i] = np.mean(close[i-20:i])
-        std_20_4h[i] = np.std(close[i-20:i])
-    
-    upper_band_4h = sma_20_4h + (std_20_4h * 2.0)
-    lower_band_4h = sma_20_4h - (std_20_4h * 2.0)
-    
-    # Volume filter
+    # Calculate volume average (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     
+    # Align weekly EMA to daily timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(df_1d['close'].values, df_1w, ema_20_1w)
+    # Align daily Donchian channels to daily timeframe (same timeframe, but using helper)
+    donchian_high_aligned = align_htf_to_ltf(df_1d['close'].values, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(df_1d['close'].values, df_1d, donchian_low)
+    
+    # Align weekly EMA to 1d timeframe (already aligned above)
+    # Now align everything to the actual price timeframe (1d)
+    ema_20_1w_final = align_htf_to_ltf(prices, df_1d, ema_20_1w_aligned)
+    donchian_high_final = align_htf_to_ltf(prices, df_1d, donchian_high_aligned)
+    donchian_low_final = align_htf_to_ltf(prices, df_1d, donchian_low_aligned)
+    
     signals = np.zeros(n)
     position = 0
     
-    # Warmup
-    start_idx = 20
+    # Warmup: need all indicators
+    start_idx = max(20, 20)  # Donchian needs 20, volume MA needs 20
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_band_aligned[i]) or
-            np.isnan(lower_band_aligned[i]) or
+        if (np.isnan(donchian_high_final[i]) or
+            np.isnan(donchian_low_final[i]) or
+            np.isnan(ema_20_1w_final[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -71,34 +91,38 @@ def generate_signals(prices):
         # Volume confirmation: > 2.0x average volume
         volume_confirmation = vol_ratio > 2.0
         
+        # Trend filter: price above/below weekly EMA20
+        uptrend = price > ema_20_1w_final[i]
+        downtrend = price < ema_20_1w_final[i]
+        
         if position == 0:
-            # Long: price touches daily lower Bollinger Band with volume confirmation
-            if volume_confirmation and price <= lower_band_aligned[i]:
+            # Long: break above Donchian high in uptrend with volume
+            if volume_confirmation and uptrend and price > donchian_high_final[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches daily upper Bollinger Band with volume confirmation
-            elif volume_confirmation and price >= upper_band_aligned[i]:
+            # Short: break below Donchian low in downtrend with volume
+            elif volume_confirmation and downtrend and price < donchian_low_final[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to daily SMA or opposite band touched
-            if price >= sma_20_aligned[i] or price >= upper_band_aligned[i]:
+            # Long exit: price returns to Donchian low or trend changes
+            if price < donchian_low_final[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price returns to daily SMA or opposite band touched
-            if price <= sma_20_aligned[i] or price <= lower_band_aligned[i]:
+            # Short exit: price returns to Donchian high or trend changes
+            if price > donchian_high_final[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Maintain position
     
     return signals
 
-name = "4h_1D_Bollinger_Bands_Touch_Reversion"
-timeframe = "4h"
+name = "1d_DonchianBreakout_WeeklyEMA20_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
