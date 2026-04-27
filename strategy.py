@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Breakout strategy using Camarilla pivot levels from 1-day timeframe.
-Long when price breaks above R1 level with volume confirmation and 1d uptrend.
-Short when price breaks below S1 level with volume confirmation and 1d downtrend.
-Exit when price returns to the pivot point level or trend fails.
-Target: 15-30 trades/year per symbol.
+4h_Trix_Signal_Line_Crossover
+Momentum strategy using TRIX and its signal line on 4h timeframe.
+Long when TRIX crosses above its signal line with volume confirmation.
+Short when TRIX crosses below its signal line with volume confirmation.
+Exit when opposite crossover occurs.
+Uses 1d ADX > 20 to filter for trending markets only.
+Target: 20-35 trades/year per symbol.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,101 +23,182 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and trend filter
+    # TRIX parameters
+    trix_period = 15
+    signal_period = 9
+    
+    # Calculate TRIX: EMA of EMA of EMA of log(close)
+    log_close = np.log(close)
+    
+    # First EMA
+    ema1 = np.full(n, np.nan)
+    alpha1 = 2 / (trix_period + 1)
+    for i in range(trix_period - 1, n):
+        if i == trix_period - 1:
+            ema1[i] = np.mean(log_close[i - trix_period + 1:i + 1])
+        else:
+            ema1[i] = log_close[i] * alpha1 + ema1[i - 1] * (1 - alpha1)
+    
+    # Second EMA
+    ema2 = np.full(n, np.nan)
+    alpha2 = 2 / (trix_period + 1)
+    for i in range(trix_period - 1, n):
+        if i == trix_period - 1:
+            ema2[i] = np.mean(ema1[i - trix_period + 1:i + 1])
+        else:
+            ema2[i] = ema1[i] * alpha2 + ema2[i - 1] * (1 - alpha2)
+    
+    # Third EMA
+    ema3 = np.full(n, np.nan)
+    alpha3 = 2 / (trix_period + 1)
+    for i in range(trix_period - 1, n):
+        if i == trix_period - 1:
+            ema3[i] = np.mean(ema2[i - trix_period + 1:i + 1])
+        else:
+            ema3[i] = ema2[i] * alpha3 + ema3[i - 1] * (1 - alpha3)
+    
+    # TRIX = 100 * (EMA3 - previous EMA3) / previous EMA3
+    trix = np.full(n, np.nan)
+    for i in range(trix_period, n):
+        if ema3[i] != 0 and not np.isnan(ema3[i - 1]) and ema3[i - 1] != 0:
+            trix[i] = 100 * (ema3[i] - ema3[i - 1]) / ema3[i - 1]
+    
+    # Signal line: EMA of TRIX
+    trix_signal = np.full(n, np.nan)
+    alpha_signal = 2 / (signal_period + 1)
+    for i in range(signal_period - 1, n):
+        if i == signal_period - 1:
+            # Find first non-NaN TRIX value
+            start_idx = trix_period
+            while start_idx <= i and np.isnan(trix[start_idx]):
+                start_idx += 1
+            if start_idx <= i:
+                valid_trix = trix[start_idx:i+1]
+                valid_trix = valid_trix[~np.isnan(valid_trix)]
+                if len(valid_trix) > 0:
+                    trix_signal[i] = np.mean(valid_trix)
+        else:
+            if not np.isnan(trix[i]):
+                trix_signal[i] = trix[i] * alpha_signal + trix_signal[i - 1] * (1 - alpha_signal)
+    
+    # Volume average (20-period)
+    vol_ma = np.full(n, np.nan)
+    vol_period = 20
+    for i in range(vol_period - 1, n):
+        vol_ma[i] = np.mean(volume[i - vol_period + 1:i + 1])
+    
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + range_1d * 1.1 / 12.0
-    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    # Calculate ADX (14-period)
+    adx_period = 14
+    tr = np.full(len(close_1d), np.nan)
+    dm_plus = np.full(len(close_1d), np.nan)
+    dm_minus = np.full(len(close_1d), np.nan)
     
-    # Align Camarilla levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    for i in range(1, len(close_1d)):
+        tr0 = high_1d[i] - low_1d[i]
+        tr1 = abs(high_1d[i] - close_1d[i-1])
+        tr2 = abs(low_1d[i] - close_1d[i-1])
+        tr[i] = max(tr0, tr1, tr2)
+        
+        dm_plus[i] = max(0, high_1d[i] - high_1d[i-1])
+        dm_minus[i] = max(0, low_1d[i-1] - low_1d[i])
+        
+        # Apply Wilder's smoothing
+        if dm_plus[i] < 0: dm_plus[i] = 0
+        if dm_minus[i] < 0: dm_minus[i] = 0
     
-    # Calculate 1d EMA50 for trend filter
-    ema_1d_period = 50
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_1d_period:
-        ema_1d[ema_1d_period - 1] = np.mean(close_1d[:ema_1d_period])
-        for i in range(ema_1d_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * (2 / (ema_1d_period + 1)) + 
-                         ema_1d[i - 1] * (1 - (2 / (ema_1d_period + 1))))
+    # Smooth TR, DM+, DM-
+    tr_smooth = np.full(len(close_1d), np.nan)
+    dm_plus_smooth = np.full(len(close_1d), np.nan)
+    dm_minus_smooth = np.full(len(close_1d), np.nan)
     
-    # Align 1d EMA50 to 12h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    if len(close_1d) >= adx_period:
+        # Initial values
+        tr_smooth[adx_period-1] = np.nansum(tr[1:adx_period+1])
+        dm_plus_smooth[adx_period-1] = np.nansum(dm_plus[1:adx_period+1])
+        dm_minus_smooth[adx_period-1] = np.nansum(dm_minus[1:adx_period+1])
+        
+        # Wilder smoothing
+        for i in range(adx_period, len(close_1d)):
+            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1]/adx_period) + tr[i]
+            dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1]/adx_period) + dm_plus[i]
+            dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1]/adx_period) + dm_minus[i]
     
-    # Calculate volume ratio (current vs 20-period average)
-    vol_ma_period = 20
-    vol_ma = np.full(n, np.nan)
-    if n >= vol_ma_period:
-        for i in range(vol_ma_period - 1, n):
-            vol_ma[i] = np.mean(volume[i - vol_ma_period + 1:i + 1])
+    # Calculate DI+ and DI-
+    di_plus = np.full(len(close_1d), np.nan)
+    di_minus = np.full(len(close_1d), np.nan)
+    dx = np.full(len(close_1d), np.nan)
     
-    volume_ratio = np.full(n, np.nan)
-    for i in range(vol_ma_period - 1, n):
-        if vol_ma[i] > 0:
-            volume_ratio[i] = volume[i] / vol_ma[i]
-        else:
-            volume_ratio[i] = 0
+    for i in range(adx_period-1, len(close_1d)):
+        if tr_smooth[i] != 0 and not np.isnan(tr_smooth[i]):
+            di_plus[i] = 100 * dm_plus_smooth[i] / tr_smooth[i]
+            di_minus[i] = 100 * dm_minus_smooth[i] / tr_smooth[i]
+            if (di_plus[i] + di_minus[i]) != 0:
+                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+    
+    # Calculate ADX (smoothed DX)
+    adx = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 2*adx_period-1:
+        adx[2*adx_period-2] = np.nanmean(dx[adx_period-1:2*adx_period-1])
+        for i in range(2*adx_period-1, len(close_1d)):
+            adx[i] = (adx[i-1] * (adx_period-1) + dx[i]) / adx_period
+    
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 1d EMA50, volume MA
-    start_idx = max(ema_1d_period - 1, vol_ma_period - 1)
+    # Warmup: need TRIX, signal line, volume MA, and ADX
+    start_idx = max(trix_period + signal_period, vol_period - 1, 2*adx_period-1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        pivot = pivot_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        ema1d_val = ema_1d_aligned[i]
-        vol_ratio = volume_ratio[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Volume confirmation: require at least 1.5x average volume
-        volume_confirm = vol_ratio > 1.5
+        # ADX filter: trending market (ADX > 20)
+        trending = adx_aligned[i] > 20
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation and 1d uptrend
-            if (price > r1 and volume_confirm and price > ema1d_val):
+            # Long: TRIX crosses above signal line with volume and trend
+            if (trix[i] > trix_signal[i] and 
+                trix[i-1] <= trix_signal[i-1] and 
+                volume_confirmed and trending):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below S1 with volume confirmation and 1d downtrend
-            elif (price < s1 and volume_confirm and price < ema1d_val):
+            # Short: TRIX crosses below signal line with volume and trend
+            elif (trix[i] < trix_signal[i] and 
+                  trix[i-1] >= trix_signal[i-1] and 
+                  volume_confirmed and trending):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to pivot point or trend fails
-            if (price <= pivot) or (price < ema1d_val):
+            # Exit long: TRIX crosses below signal line
+            if trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to pivot point or trend fails
-            if (price >= pivot) or (price > ema1d_val):
+            # Exit short: TRIX crosses above signal line
+            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +206,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Trix_Signal_Line_Crossover"
+timeframe = "4h"
 leverage = 1.0
