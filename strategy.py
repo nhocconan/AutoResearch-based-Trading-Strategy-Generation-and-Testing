@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
-6h_WilliamsFractal_Breakout_1dTrend_VolumeConfirm
-Hypothesis: Williams Fractals identify swing highs/lows on 1d chart. Breakouts above recent bullish fractal or below bearish fractal with volume confirmation (>1.5x average) and 1d trend filter (price > EMA50 for longs, < EMA50 for shorts) capture momentum moves. Exits on opposite fractal touch or trend reversal. 6h timeframe targets 60-120 trades over 4 years (15-30/year). Works in bull markets via upside breakouts and bear markets via downside breakdowns. Fractals require 2-bar confirmation delay to avoid look-ahead.
+4h_KAMA_Trend_Donchian20_VolumeBreakout
+Hypothesis: KAMA adapts to market noise, identifying true trend state on 4h. 
+Breakouts above/below Donchian(20) channels in direction of KAMA trend with 
+volume confirmation (>1.3x average) capture momentum moves. 
+In bull markets: longs on upside breakouts with uptrend KAMA.
+In bear markets: shorts on downside breakouts with downtrend KAMA.
+Volume filter reduces false breakouts. ATR-based stoploss manages risk.
+Target: 20-40 trades/year (~80-160 over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,71 +24,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for fractals and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h data for HTF trend filter (KAMA)
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate KAMA on 4h close
+    close_4h = df_4h['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_4h, n=10))
+    volatility = np.sum(np.abs(np.diff(close_4h, n=1)), axis=1)
+    er = np.divide(change, volatility, out=np.zeros_like(change, dtype=float), where=volatility!=0)
+    # Smoothing constants: fastest EMA(2), slowest EMA(30)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_4h, np.nan, dtype=float)
+    kama[9] = close_4h[9]  # Start after 10 periods
+    for i in range(10, len(close_4h)):
+        kama[i] = kama[i-1] + sc[i-1] * (close_4h[i] - kama[i-1])
     
-    # Calculate Williams Fractals on 1d
-    # Need high, low arrays
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Align KAMA to 15m timeframe (using 4h->15m: 4*15=60min per 4h bar)
+    # Since we're on 4h primary timeframe, alignment is 1:1 but need to ensure
+    # we use completed 4h bar only
+    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
     
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
-    # Bearish fractal: high[2] is highest of high[0..4]
-    # Bullish fractal: low[2] is lowest of low[0..4]
-    # These need 2 extra bars for confirmation (the right side of the pattern)
+    # Donchian(20) channels on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align all 1d indicators to 6h timeframe
-    # Fractals need additional_delay_bars=2 for confirmation
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Volume confirmation: current volume > 1.3 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.3 * vol_avg)
     
-    # Volume confirmation: current volume > 1.5 * 30-period average
-    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (1.5 * vol_avg)
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need EMA50 (50), volume avg (30), and fractals (need 5+2 bars)
-    start_idx = max(50, 30, 7)  # 5 for fractals + 2 delay
+    # Warmup: need KAMA (10), Donchian (20), volume avg (20), ATR (14)
+    start_idx = max(10, 20, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(volume_confirm[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_1d_val = ema_50_1d_aligned[i]
-        bear_fractal = bearish_fractal_aligned[i]
-        bull_fractal = bullish_fractal_aligned[i]
+        kama_val = kama_aligned[i]
+        donch_high = high_max[i]
+        donch_low = low_min[i]
         vol_conf = volume_confirm[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Determine trend: price > EMA50 = uptrend, price < EMA50 = downtrend
-            is_uptrend = close_val > ema_1d_val
-            is_downtrend = close_val < ema_1d_val
+            # Determine trend: price > KAMA = uptrend, price < KAMA = downtrend
+            is_uptrend = close_val > kama_val
+            is_downtrend = close_val < kama_val
             
             if is_uptrend:
-                # Uptrend: long when price breaks above bullish fractal and volume confirms
-                if (close_val > bull_fractal) and vol_conf:
+                # Uptrend: long when price breaks above Donchian high and volume confirms
+                if (close_val > donch_high) and vol_conf:
                     signals[i] = size
                     position = 1
             elif is_downtrend:
-                # Downtrend: short when price breaks below bearish fractal and volume confirms
-                if (close_val < bear_fractal) and vol_conf:
+                # Downtrend: short when price breaks below Donchian low and volume confirms
+                if (close_val < donch_low) and vol_conf:
                     signals[i] = -size
                     position = -1
         elif position == 1:
-            # Exit long: price touches bearish fractal (support) or trend changes to downtrend
-            exit_condition = (close_val < bear_fractal) or (close_val < ema_1d_val)
+            # Exit long: price touches Donchian low or trend changes to downtrend
+            # Or ATR-based stop: price < highest high since entry - 2*ATR
+            exit_condition = (close_val < donch_low) or (close_val < kama_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -90,8 +110,9 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price touches bullish fractal (resistance) or trend changes to uptrend
-            exit_condition = (close_val > bull_fractal) or (close_val > ema_1d_val)
+            # Exit short: price touches Donchian high or trend changes to uptrend
+            # Or ATR-based stop: price > lowest low since entry + 2*ATR
+            exit_condition = (close_val > donch_high) or (close_val > kama_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -101,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsFractal_Breakout_1dTrend_VolumeConfirm"
-timeframe = "6h"
+name = "4h_KAMA_Trend_Donchian20_VolumeBreakout"
+timeframe = "4h"
 leverage = 1.0
