@@ -55,7 +55,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    size = 0.25   # 25% position size
+    size = 0.15   # 15% position size to reduce trade frequency
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -85,8 +85,8 @@ def generate_signals(prices):
         # Volatility filter: only trade when volatility is above average
         vol_filter = atr_now > 0  # Ensure ATR is valid
         
-        # Volume filter: volume > 1.3x 1d MA (volume breakout)
-        vol_breakout = vol_now > 1.3 * vol_ma
+        # Volume filter: volume > 1.5x 1d MA (more restrictive volume breakout)
+        vol_breakout = vol_now > 1.5 * vol_ma
         
         # Entry conditions: breakout with volume and volatility
         if position == 0:
@@ -103,7 +103,7 @@ def generate_signals(prices):
         elif position == 1:
             # Exit long: close below midpoint or volatility drops significantly
             midpoint = (upper + lower) / 2
-            if close[i] < midpoint or atr_now < 0.7 * atr_1d_aligned[i-1]:
+            if close[i] < midpoint or atr_now < 0.8 * atr_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,7 +111,7 @@ def generate_signals(prices):
         elif position == -1:
             # Exit short: close above midpoint or volatility drops significantly
             midpoint = (upper + lower) / 2
-            if close[i] > midpoint or atr_now < 0.7 * atr_1d_aligned[i-1]:
+            if close[i] > midpoint or atr_now < 0.8 * atr_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeBreakout_ATRFilter"
+name = "12h_Donchian20_VolumeBreakout_ATRFilter_v2"
 timeframe = "12h"
 leverage = 1.0
