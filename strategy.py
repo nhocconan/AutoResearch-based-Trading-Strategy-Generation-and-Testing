@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day ADX trend + Bollinger Bands mean reversion.
-In trending markets (ADX > 25): buy pullbacks to upper band in uptrend, sell rallies to lower band in downtrend.
-In ranging markets (ADX <= 25): fade extremes at Bollinger Bands (2,20) with weekly trend filter.
-Weekly trend (price > weekly EMA50) adds confluence. Target: 15-25 trades/year per symbol.
+Hypothesis: 6-hour Ichimoku Cloud with 1-day trend filter and volume confirmation.
+Long when Tenkan-sen crosses above Kijun-sen AND price above Kumo (cloud) AND price > 1-day EMA50.
+Short when Tenkan-sen crosses below Kijun-sen AND price below Kumo AND price < 1-day EMA50.
+Ichimoku provides multi-layer trend confirmation; daily EMA filters higher-timeframe trend;
+volume confirms institutional participation. Target: 12-35 trades/year per symbol.
 """
 
 import numpy as np
@@ -18,144 +19,142 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get daily data for ADX and Bollinger Bands
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate ADX (14-period) on daily
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Calculate daily EMA50 for trend
     daily_close = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(daily_high[1:] - daily_low[1:])
-    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
-    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((daily_high[1:] - daily_high[:-1]) > (daily_low[:-1] - daily_low[1:]),
-                       np.maximum(daily_high[1:] - daily_high[:-1], 0), 0)
-    dm_minus = np.where((daily_low[:-1] - daily_low[1:]) > (daily_high[1:] - daily_high[:-1]),
-                        np.maximum(daily_low[:-1] - daily_low[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values
-    def smoothed_avg(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nanmean(arr[1:period])
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    atr = smoothed_avg(tr, 14)
-    dm_plus_smooth = smoothed_avg(dm_plus, 14)
-    dm_minus_smooth = smoothed_avg(dm_minus, 14)
-    
-    # DI and DX
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smoothed_avg(dx, 14)
-    
-    # Bollinger Bands (20,2)
-    bb_period = 20
-    bb_std = 2
-    sma = np.full_like(daily_close, np.nan)
-    for i in range(bb_period-1, len(daily_close)):
-        sma[i] = np.mean(daily_close[i-bb_period+1:i+1])
-    
-    bb_std_dev = np.full_like(daily_close, np.nan)
-    for i in range(bb_period-1, len(daily_close)):
-        bb_std_dev[i] = np.std(daily_close[i-bb_period+1:i+1])
-    
-    upper_band = sma + bb_std * bb_std_dev
-    lower_band = sma - bb_std * bb_std_dev
-    
-    # Weekly EMA50 for trend filter
-    weekly_close = df_1w['close'].values
-    ema_50_1w = np.full_like(weekly_close, np.nan)
-    if len(weekly_close) >= 50:
+    ema_50_1d = np.empty_like(daily_close, dtype=np.float64)
+    ema_50_1d.fill(np.nan)
+    if len(daily_close) >= 50:
         alpha = 2.0 / (50 + 1)
-        ema_50_1w[49] = np.mean(weekly_close[:50])
-        for i in range(50, len(weekly_close)):
-            ema_50_1w[i] = alpha * weekly_close[i] + (1 - alpha) * ema_50_1w[i-1]
+        ema_50_1d[49] = np.mean(daily_close[:50])
+        for i in range(50, len(daily_close)):
+            ema_50_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema_50_1d[i-1]
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align all indicators to lower timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    sma_aligned = align_htf_to_ltf(prices, df_1d, sma)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    weekly_close_price = df_1w['close'].values
-    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close_price)
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = np.full_like(high, np.nan)
+    period9_low = np.full_like(low, np.nan)
+    for i in range(8, len(high)):
+        period9_high[i] = np.max(high[i-8:i+1])
+        period9_low[i] = np.min(low[i-8:i+1])
+    tenkan_sen = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = np.full_like(high, np.nan)
+    period26_low = np.full_like(low, np.nan)
+    for i in range(25, len(high)):
+        period26_high[i] = np.max(high[i-25:i+1])
+        period26_low[i] = np.min(low[i-25:i+1])
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = np.full_like(high, np.nan)
+    period52_low = np.full_like(low, np.nan)
+    for i in range(51, len(high)):
+        period52_high[i] = np.max(high[i-51:i+1])
+        period52_low[i] = np.min(low[i-51:i+1])
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Get daily data for volume confirmation
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = np.empty_like(vol_1d, dtype=np.float64)
+    vol_ma_20_1d.fill(np.nan)
+    for i in range(19, len(vol_1d)):
+        vol_ma_20_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ADX (14+14=28), BB (20), weekly EMA (50)
-    start_idx = max(28, 20, 50)
+    # Warmup: need Ichimoku (52), daily EMA50 (50), daily volume MA20 (20)
+    start_idx = max(52, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper_band_aligned[i]) or
-            np.isnan(lower_band_aligned[i]) or np.isnan(sma_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(weekly_close_aligned[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Current price and volume
         price_now = close[i]
-        adx_val = adx_aligned[i]
-        upper_band = upper_band_aligned[i]
-        lower_band = lower_band_aligned[i]
-        sma_val = sma_aligned[i]
-        ema_trend = ema_50_1w_aligned[i]
-        weekly_close_val = weekly_close_aligned[i]
+        vol_now = volume[i]
         
-        # Regime filter: trending if ADX > 25, ranging if ADX <= 25
-        is_trending = adx_val > 25
-        is_uptrend = weekly_close_val > ema_trend  # Weekly trend
+        # Current indicators
+        tenkan = tenkan_aligned[i]
+        kijun = kijun_aligned[i]
+        senkou_a = senkou_a_aligned[i]
+        senkou_b = senkou_b_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
+        
+        # Kumo (Cloud) boundaries
+        upper_cloud = max(senkou_a, senkou_b)
+        lower_cloud = min(senkou_a, senkou_b)
+        
+        # Price above/below cloud
+        above_cloud = price_now > upper_cloud
+        below_cloud = price_now < lower_cloud
+        
+        # Tenkan/Kijun crossover
+        if i > start_idx:
+            tenkan_prev = tenkan_aligned[i-1]
+            kijun_prev = kijun_aligned[i-1]
+            tk_cross_above = (tenkan_prev <= kijun_prev) and (tenkan > kijun)
+            tk_cross_below = (tenkan_prev >= kijun_prev) and (tenkan < kijun)
+        else:
+            tk_cross_above = False
+            tk_cross_below = False
+        
+        # Volume filter: volume > 1.2x daily average
+        vol_filter = vol_now > 1.2 * vol_ma
+        
+        # Daily close price for trend comparison
+        daily_close_price = df_1d['close'].values
+        daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_price)
+        if np.isnan(daily_close_aligned[i]):
+            signals[i] = 0.0
+            continue
+        daily_close_val = daily_close_aligned[i]
         
         if position == 0:
-            if is_trending:
-                # Trending: buy pullbacks to upper band in uptrend, sell rallies to lower band in downtrend
-                if is_uptrend and price_now <= upper_band:
-                    signals[i] = size
-                    position = 1
-                elif (not is_uptrend) and price_now >= lower_band:
-                    signals[i] = -size
-                    position = -1
+            # Long conditions: TK cross bullish + price above cloud + price > daily EMA50 + volume
+            if tk_cross_above and above_cloud and (daily_close_val > ema_trend) and vol_filter:
+                signals[i] = size
+                position = 1
+            # Short conditions: TK cross bearish + price below cloud + price < daily EMA50 + volume
+            elif tk_cross_below and below_cloud and (daily_close_val < ema_trend) and vol_filter:
+                signals[i] = -size
+                position = -1
             else:
-                # Ranging: fade extremes at Bollinger Bands
-                if price_now <= lower_band:
-                    signals[i] = size
-                    position = 1
-                elif price_now >= upper_band:
-                    signals[i] = -size
-                    position = -1
-            if signals[i] == 0.0:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses SMA (mean reversion) or trend change
-            if price_now >= sma_val or (is_trending and not is_uptrend):
+            # Exit long: TK cross bearish OR price below cloud OR trend turns bearish
+            if tk_cross_below or (price_now < upper_cloud) or (daily_close_val < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses SMA or trend change
-            if price_now <= sma_val or (is_trending and is_uptrend):
+            # Exit short: TK cross bullish OR price above cloud OR trend turns bullish
+            if tk_cross_above or (price_now > lower_cloud) or (daily_close_val > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -163,6 +162,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ADX_BB_TrendMeanRev"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
