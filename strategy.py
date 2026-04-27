@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: Weekly Bollinger Band mean reversion on 1d timeframe with volume confirmation.
+# In ranging markets (common in 2025-2026 BTC/ETH), price tends to revert to the mean after touching
+# weekly Bollinger Bands. Volume spike confirms the reversal. Works in both bull and bear markets
+# as it's a mean-reversion strategy, not trend-following. Target: 50-80 trades over 4 years.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -13,99 +18,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily trend (EMA200) - longer term bias
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # Get 1w data for weekly trend (EMA50) - very long term bias
+    # Get weekly data for Bollinger Bands (20-week, 2 std)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Bollinger Bands on weekly data
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2.0 * std_20
+    lower_band = sma_20 - 2.0 * std_20
     
-    # Get 4h data for price structure (Donchian channel breakout)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Align weekly Bollinger Bands to daily timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Donchian channel (20-period) on 4h data
-    donchian_high = np.full(len(df_4h), np.nan)
-    donchian_low = np.full(len(df_4h), np.nan)
-    for i in range(19, len(df_4h)):
-        donchian_high[i] = np.max(high_4h[i-19:i+1])
-        donchian_low[i] = np.min(low_4h[i-19:i+1])
-    
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Volume filter: volume > 1.5x 24-period average (4h)
-    vol_ma_24 = np.full(n, np.nan, dtype=np.float64)
-    for i in range(23, n):
-        vol_ma_24[i] = np.mean(volume[i-23:i+1])
+    # Volume filter: volume > 1.5x 20-day average
+    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need 1d EMA (200), 1w EMA (50), 4h Donchian (20), volume MA (24)
-    start_idx = max(200, 50, 20, 24)
+    # Warmup: need 20-week BB + 20-day volume MA
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+            np.isnan(sma_20_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
-        ema_trend_1d = ema_200_1d_aligned[i]
-        ema_trend_1w = ema_50_1w_aligned[i]
-        donch_high = donchian_high_aligned[i]
-        donch_low = donchian_low_aligned[i]
         vol_now = volume[i]
-        vol_avg = vol_ma_24[i]
+        vol_avg = vol_ma_20[i]
+        upper = upper_band_aligned[i]
+        lower = lower_band_aligned[i]
+        middle = sma_20_aligned[i]
         
         # Volume filter: volume > 1.5x average
         vol_filter = vol_now > 1.5 * vol_avg
         
-        # Trend alignment: both 1d and 1w EMAs must agree
-        bullish_trend = price > ema_trend_1d and price > ema_trend_1w
-        bearish_trend = price < ema_trend_1d and price < ema_trend_1w
-        
         if position == 0:
-            # Long: price breaks above Donchian high + bullish trend alignment + volume spike
-            if price > donch_high and bullish_trend and vol_filter:
+            # Long: price touches or goes below lower band + volume spike → expect reversion to mean
+            if price <= lower and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian low + bearish trend alignment + volume spike
-            elif price < donch_low and bearish_trend and vol_filter:
+            # Short: price touches or goes above upper band + volume spike → expect reversion to mean
+            elif price >= upper and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian low (mean reversion) or trend turns bearish
-            if price <= donch_low or not bullish_trend:
+            # Exit long: price returns to middle (SMA) or touches upper band
+            if price >= middle or price >= upper:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to Donchian high (mean reversion) or trend turns bullish
-            if price >= donch_high or not bearish_trend:
+            # Exit short: price returns to middle (SMA) or touches lower band
+            if price <= middle or price <= lower:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_1dEMA200_1wEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_Bollinger_MeanReversion_Volume"
+timeframe = "1d"
 leverage = 1.0
