@@ -38,14 +38,14 @@ def generate_signals(prices):
     upper_bb_1d = sma_20_1d + (2 * std_20_1d)
     lower_bb_1d = sma_20_1d - (2 * std_20_1d)
     
-    # Align 1d indicators to 1d timeframe (since we're using 1d as primary timeframe)
+    # Align 1d indicators to 6h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
     lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # Calculate 10-period volume average for spike detection
+    # Calculate 6-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 10
+    vol_period = 6
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_BB20_Volume"
-timeframe = "1d"
+name = "6h_EMA34_BB20_Volume"
+timeframe = "6h"
 leverage = 1.0
