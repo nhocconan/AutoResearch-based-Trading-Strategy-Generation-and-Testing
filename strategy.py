@@ -1,9 +1,3 @@
-# 1h_HTF_EMA_RSI_Volatility_Filter
-# Hypothesis: Use 4h EMA(34) for directional bias and 1d RSI(14) for mean-reversion entry within 1h bars.
-# Trade only during 08-20 UTC to avoid low-liquidity periods. Volatility filter ensures trades occur in
-# active markets. Position size fixed at 0.20 to limit drawdown. Designed to work in both bull and bear
-# markets by combining trend following (4h EMA) with mean reversion (1d RSI) and volatility regime filter.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
