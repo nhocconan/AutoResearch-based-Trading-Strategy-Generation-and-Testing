@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,82 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for higher timeframe context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for higher timeframe context (as per experiment spec)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate weekly ATR(14) for volatility filter
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
     
-    # Calculate 1d EMA(34) for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA(34) for trend direction
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1d RSI(14) for overbought/oversold
-    delta_1d = pd.Series(close_1d).diff()
-    gain_1d = delta_1d.where(delta_1d > 0, 0)
-    loss_1d = -delta_1d.where(delta_1d < 0, 0)
-    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_1d = avg_gain_1d / avg_loss_1d
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate weekly RSI(14) for overbought/oversold
+    delta_1w = pd.Series(close_1w).diff()
+    gain_1w = delta_1w.where(delta_1w > 0, 0)
+    loss_1w = -delta_1w.where(delta_1w < 0, 0)
+    avg_gain_1w = gain_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1w = loss_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1w = avg_gain_1w / avg_loss_1w
+    rsi_1w = 100 - (100 / (1 + rs_1w))
+    rsi_1w = rsi_1w.values
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Calculate 1d volume moving average
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate weekly volume moving average
+    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(atr_14_1w_aligned[i]) or 
+            np.isnan(vol_ma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA34
+        price_above_ema = close[i] > ema_34_1w_aligned[i]
+        price_below_ema = close[i] < ema_34_1w_aligned[i]
         
         # Volatility filter: ATR below median (avoid high volatility periods)
-        atr_median = np.nanmedian(atr_14_1d_aligned[:i+1]) if i >= 30 else atr_14_1d_aligned[i]
-        low_volatility = atr_14_1d_aligned[i] < atr_median
+        atr_median = np.nanmedian(atr_14_1w_aligned[:i+1]) if i >= 50 else atr_14_1w_aligned[i]
+        low_volatility = atr_14_1w_aligned[i] < atr_median
         
         # RSI filter: avoid extreme overbought/oversold conditions
-        rsi_not_overbought = rsi_1d_aligned[i] < 70
-        rsi_not_oversold = rsi_1d_aligned[i] > 30
+        rsi_not_overbought = rsi_1w_aligned[i] < 70
+        rsi_not_oversold = rsi_1w_aligned[i] > 30
         
-        # Volume filter: current volume above 1d average
-        volume_filter = volume[i] > vol_ma_1d_aligned[i]
+        # Volume filter: current volume above weekly average
+        volume_filter = volume[i] > vol_ma_1w_aligned[i]
         
-        # Long conditions: price above EMA34 + low volatility + RSI not overbought + volume
+        # Long conditions: price above weekly EMA34 + low volatility + RSI not overbought + volume
         long_condition = (price_above_ema and 
                          low_volatility and 
                          rsi_not_overbought and 
                          volume_filter)
         
-        # Short conditions: price below EMA34 + low volatility + RSI not oversold + volume
+        # Short conditions: price below weekly EMA34 + low volatility + RSI not oversold + volume
         short_condition = (price_below_ema and 
                           low_volatility and 
                           rsi_not_oversold and 
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_ATR_VolumeFilter_1dTrend"
-timeframe = "12h"
+name = "1d_EMA34_RSI_VolumeFilter_1wTrend"
+timeframe = "1d"
 leverage = 1.0
