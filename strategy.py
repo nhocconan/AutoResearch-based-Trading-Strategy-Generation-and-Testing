@@ -18,20 +18,10 @@ def generate_signals(prices):
     if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Donchian(20) for trend
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    upper = np.zeros(len(high_12h))
-    lower = np.zeros(len(low_12h))
-    for i in range(20, len(high_12h)):
-        upper[i] = np.max(high_12h[i-20:i])
-        lower[i] = np.min(low_12h[i-20:i])
-    upper[:20] = np.nan
-    lower[:20] = np.nan
-    donch_upper_12h = upper
-    donch_lower_12h = lower
-    donch_upper_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_upper_12h)
-    donch_lower_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_lower_12h)
+    # Calculate 12h EMA(50) for trend
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
@@ -53,13 +43,12 @@ def generate_signals(prices):
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Warmup: need Donchian and volume
-    start_idx = 20
+    # Warmup: need EMA and volume
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_upper_12h_aligned[i]) or np.isnan(donch_lower_12h_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -69,38 +58,35 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        upper = donch_upper_12h_aligned[i]
-        lower = donch_lower_12h_aligned[i]
+        ema_trend = ema_50_12h_aligned[i]
         vol_now = volume_now[i]
         vol_ma = vol_ma_20_1d_aligned[i]
         
         # Volume filter: volume > 1.5x 1d MA (volume breakout)
         vol_filter = vol_now > 1.5 * vol_ma
         
-        # Entry conditions: breakout with volume
+        # Entry conditions: trend + volume
         if position == 0:
-            # Long: break above upper band + volume
-            if close[i] > upper and vol_filter:
+            # Long: price above 12h EMA + volume
+            if close[i] > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: break below lower band + volume
-            elif close[i] < lower and vol_filter:
+            # Short: price below 12h EMA + volume
+            elif close[i] < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below midpoint or volume drops
-            midpoint = (upper + lower) / 2
-            if close[i] < midpoint or vol_now < vol_ma:
+            # Exit long: price crosses below EMA or volume drops
+            if close[i] < ema_trend or vol_now < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above midpoint or volume drops
-            midpoint = (upper + lower) / 2
-            if close[i] > midpoint or vol_now < vol_ma:
+            # Exit short: price crosses above EMA or volume drops
+            if close[i] > ema_trend or vol_now < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeBreakout_12h1d"
-timeframe = "12h"
+name = "4h_EMA50_12hTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
