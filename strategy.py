@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context
+    # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -22,86 +22,64 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA(50) for trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 1d RSI(14) for overbought/oversold conditions
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # 12-hour Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1h Bollinger Bands (20, 2) for mean reversion signals
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + (2 * bb_std)
-    bb_lower = bb_middle - (2 * bb_std)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA50
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: close above EMA34 for long, below for short
+        trend_filter_long = close[i] > ema34_1d_aligned[i]
+        trend_filter_short = close[i] < ema34_1d_aligned[i]
         
-        # Mean reversion signals: price at Bollinger Bands
-        at_lower_band = close[i] <= bb_lower[i]
-        at_upper_band = close[i] >= bb_upper[i]
+        # Long conditions: price breaks above upper Donchian + trend + volume
+        long_breakout = (close[i] > highest_high[i-1] and trend_filter_long and volume_filter[i])
+        # Short conditions: price breaks below lower Donchian + trend + volume
+        short_breakout = (close[i] < lowest_low[i-1] and trend_filter_short and volume_filter[i])
         
-        # RSI conditions: oversold (<30) or overbought (>70)
-        rsi_oversold = rsi_1d_aligned[i] < 30
-        rsi_overbought = rsi_1d_aligned[i] > 70
-        
-        # Long conditions: price at lower BB + oversold RSI + above daily EMA + volume
-        long_signal = at_lower_band and rsi_oversold and price_above_ema and volume_filter[i]
-        # Short conditions: price at upper BB + overbought RSI + below daily EMA + volume
-        short_signal = at_upper_band and rsi_overbought and price_below_ema and volume_filter[i]
-        
-        if long_signal:
-            signals[i] = 0.20
+        if long_breakout:
+            signals[i] = 0.25
             position = 1
-        elif short_signal:
-            signals[i] = -0.20
+        elif short_breakout:
+            signals[i] = -0.25
             position = -1
-        # Exit conditions: price crosses back to middle Bollinger Band
-        elif position == 1 and close[i] >= bb_middle[i]:
+        # Exit conditions: opposite Donchian breakout
+        elif position == 1 and close[i] < lowest_low[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] <= bb_middle[i]:
+        elif position == -1 and close[i] > highest_high[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_BollingerRSI_1dEMA50_MeanReversion"
-timeframe = "1h"
+name = "12h_Donchian20_1dEMA34_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
