@@ -1,3 +1,10 @@
+# 1d_WeeklyDonchian20_1dTrend_Volume
+# Hypothesis: Weekly Donchian breakouts combined with daily trend filter and volume confirmation
+# work across both bull and bear markets by capturing momentum after volatility compression.
+# The daily EMA50 ensures we only trade in the direction of the intermediate-term trend,
+# reducing false breakouts in ranging markets. Weekly timeframe reduces trade frequency
+# to minimize fee drag while capturing significant moves.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,81 +20,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 10-period ATR (volatility regime filter)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data for Donchian calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily ATR(10) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate weekly Donchian channels (20-period high/low)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate weekly upper band (20-period high)
+    donchian_high = np.full(len(high_1w), np.nan)
+    for i in range(19, len(high_1w)):
+        donchian_high[i] = np.max(high_1w[i-19:i+1])
+    
+    # Calculate weekly lower band (20-period low)
+    donchian_low = np.full(len(low_1w), np.nan)
+    for i in range(19, len(low_1w)):
+        donchian_low[i] = np.min(low_1w[i-19:i+1])
+    
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:],
-                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                                  np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_10_1d = np.full(len(close_1d), np.nan)
-    for i in range(10, len(close_1d)):
-        if i == 10:
-            atr_10_1d[i] = np.mean(tr_1d[1:11])
-        else:
-            atr_10_1d[i] = (atr_10_1d[i-1] * 9 + tr_1d[i]) / 10
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50  # EMA50
     
-    atr_10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
+    # Align weekly indicators to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4-period volume average for volume filter
+    # Calculate 20-period volume average
     vol_ma = np.full(n, np.nan)
-    vol_period = 4
+    vol_period = 20
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
-    
-    # Calculate 4-period high/low for breakout levels
-    high_4 = np.full(n, np.nan)
-    low_4 = np.full(n, np.nan)
-    for i in range(4, n):
-        high_4[i] = np.max(high[i-4:i])
-        low_4[i] = np.min(low[i-4:i])
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
     # Warmup period
-    start_idx = max(10, vol_period, 4) + 5
+    start_idx = max(50, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_10_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(high_4[i]) or np.isnan(low_4[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volatility filter: avoid extreme volatility (ATR > 1.5x median)
-        vol_filter = atr_10_1d_aligned[i] < np.nanmedian(atr_10_1d_aligned[:i+1]) * 1.5
+        # Volume spike filter: at least 1.5x average volume
+        vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Break above 4-period high with volume and normal volatility
-            if price > high_4[i] and vol_ratio > 1.8 and vol_filter:
+            # Long: Price breaks above weekly Donchian high with volume and above daily EMA50
+            if price > donchian_high_aligned[i] and vol_filter and price > ema_50_1d_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Break below 4-period low with volume and normal volatility
-            elif price < low_4[i] and vol_ratio > 1.8 and vol_filter:
+            # Short: Price breaks below weekly Donchian low with volume and below daily EMA50
+            elif price < donchian_low_aligned[i] and vol_filter and price < ema_50_1d_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below 4-period low or volatility spike
-            if price < low_4[i] or atr_10_1d_aligned[i] > np.nanmedian(atr_10_1d_aligned[:i+1]) * 2.0:
+            # Long exit: Price closes below weekly Donchian low or trailing stop
+            if price < donchian_low_aligned[i] or price < ema_50_1d_aligned[i] - 1.5 * np.abs(price - ema_50_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above 4-period high or volatility spike
-            if price > high_4[i] or atr_10_1d_aligned[i] > np.nanmedian(atr_10_1d_aligned[:i+1]) * 2.0:
+            # Short exit: Price closes above weekly Donchian high or trailing stop
+            if price > donchian_high_aligned[i] or price > ema_50_1d_aligned[i] + 1.5 * np.abs(price - ema_50_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Breakout_4Period_VolumeVolatilityFilter"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_1dTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
