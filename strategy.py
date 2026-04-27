@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Enter long when price breaks above daily Camarilla R1 level and short when price breaks below S1 level, with trend filter from 1d EMA34 and volume confirmation. Exit when price crosses the daily pivot point. Uses 12h timeframe to reduce trade frequency and avoid fee drag. Designed to work in both bull and bear markets by following the daily trend.
+6h_RSI_Momentum_Divergence
+Hypothesis: Enter long when price makes lower low but RSI makes higher low (bullish divergence) with volume confirmation; short when price makes higher high but RSI makes lower high (bearish divergence). Uses 6h timeframe to reduce trade frequency and avoid fee drag. Designed to work in both bull and bear markets by capturing reversals at momentum extremes.
 """
 
 import numpy as np
@@ -18,75 +18,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 1d EMA34 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Calculate Camarilla pivot levels for each day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d_arr) / 3.0
-    r1_1d = close_1d_arr + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d_arr - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # Align to 12h timeframe (previous day's levels available at open)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume filter: require volume > 1.5x 20-period average
+    # Volume filter: require volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup period
-    start_idx = 34  # need 34 for EMA34
+    start_idx = 20  # need 20 for volume MA and RSI stability
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 in uptrend with volume confirmation
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
+            # Bullish divergence: price lower low, RSI higher low
+            if (i >= 2 and low[i] < low[i-1] and low[i-1] < low[i-2] and
+                rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2] and
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 in downtrend with volume confirmation
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
+            # Bearish divergence: price higher high, RSI lower high
+            elif (i >= 2 and high[i] > high[i-1] and high[i-1] > high[i-2] and
+                  rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2] and
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below pivot point
-            if close[i] < pivot_aligned[i]:
+            # Long exit: RSI crosses above 70 (overbought) or below 40 (momentum loss)
+            if rsi[i] > 70 or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above pivot point
-            if close[i] > pivot_aligned[i]:
+            # Short exit: RSI crosses below 30 (oversold) or above 60 (momentum loss)
+            if rsi[i] < 30 or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_RSI_Momentum_Divergence"
+timeframe = "6h"
 leverage = 1.0
