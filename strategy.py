@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,59 +13,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and ATR-based volatility regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Daily ATR(14) for volatility regime
+    # 1w EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Get daily data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
+    # Donchian channels (20 periods)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # ATR(14) with Wilder's smoothing
-    atr_14 = np.full(len(tr), np.nan, dtype=np.float64)
-    atr_14[13] = np.mean(tr[:14])  # Simple average for first 14 periods
-    for i in range(14, len(tr)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Align daily levels to daily timeframe (no additional shift needed)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # ATR percentile (20-day lookback) for volatility regime
-    atr_pct = np.full(len(atr_14), np.nan, dtype=np.float64)
-    for i in range(19, len(atr_14)):
-        atr_pct[i] = (atr_14[i] - np.min(atr_14[i-19:i+1])) / (np.max(atr_14[i-19:i+1]) - np.min(atr_14[i-19:i+1]) + 1e-10)
-    
-    # Align ATR percentile to 4h timeframe
-    atr_pct_aligned = align_htf_to_ltf(prices, df_1d, atr_pct)
-    
-    # Get 4h data for price action (since we're on 4h timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Donchian channel (20-period) on 4h data
-    highest_20 = np.full(len(high_4h), np.nan, dtype=np.float64)
-    lowest_20 = np.full(len(low_4h), np.nan, dtype=np.float64)
-    
-    for i in range(19, len(high_4h)):
-        highest_20[i] = np.max(high_4h[i-19:i+1])
-        lowest_20[i] = np.min(low_4h[i-19:i+1])
-    
-    # Align Donchian levels to main timeframe (4h->4h is 1:1, but keep for consistency)
-    highest_20_aligned = align_htf_to_ltf(prices, df_4h, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_4h, lowest_20)
-    
-    # Volume filter: volume > 1.8x 20-period average (more selective)
+    # Volume filter: volume > 2.0x 20-period average
     vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -74,53 +48,48 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ATR percentile (20-period), Donchian (20-period), volume MA (20-period)
-    start_idx = max(20, 20)
+    # Warmup: need 1w EMA200 (200 periods), daily Donchian (20 periods), volume MA (20 periods)
+    start_idx = max(200, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_pct_aligned[i]) or np.isnan(highest_20_aligned[i]) or 
-            np.isnan(lowest_20_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
         price = close[i]
-        atr_regime = atr_pct_aligned[i]  # 0 = low volatility, 1 = high volatility
-        upper_channel = highest_20_aligned[i]
-        lower_channel = lowest_20_aligned[i]
+        ema_trend = ema_200_1w_aligned[i]
+        upper_channel = donchian_high_aligned[i]
+        lower_channel = donchian_low_aligned[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
-        # Volatility filter: only trade in high volatility regimes (ATR percentile > 0.6)
-        vol_filter = atr_regime > 0.6
-        
-        # Volume filter: volume > 1.8x average
-        vol_spike = vol_now > 1.8 * vol_avg
+        # Volume filter: volume > 2.0x average
+        vol_filter = vol_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: price breaks above upper Donchian + volatility regime + volume spike
-            if price > upper_channel and vol_filter and vol_spike:
+            # Long: price breaks above upper Donchian + bullish trend + volume spike
+            if price > upper_channel and price > ema_trend and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below lower Donchian + volatility regime + volume spike
-            elif price < lower_channel and vol_filter and vol_spike:
+            # Short: price breaks below lower Donchian + bearish trend + volume spike
+            elif price < lower_channel and price < ema_trend and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle of channel or volatility drops
-            middle_channel = (upper_channel + lower_channel) / 2
-            if price <= middle_channel or atr_regime <= 0.4:
+            # Exit long: price returns to lower Donchian (mean reversion) or trend turns bearish
+            if price <= lower_channel or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to middle of channel or volatility drops
-            middle_channel = (upper_channel + lower_channel) / 2
-            if price >= middle_channel or atr_regime <= 0.4:
+            # Exit short: price returns to upper Donchian (mean reversion) or trend turns bullish
+            if price >= upper_channel or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_VolRegime_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian_20_Breakout_1wEMA200_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
