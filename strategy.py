@@ -1,3 +1,6 @@
+# 4h_Donchian20_Breakout_1dEMA50_VolumeFilter
+# Hypothesis: 4-hour Donchian channel breakouts with 1-day EMA trend filter and volume confirmation work across bull and bear markets by capturing strong directional moves while avoiding chop. Breakouts signal institutional interest; EMA50 filters direction; volume confirms validity. Targets 20-40 trades/year to minimize fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,30 +18,17 @@ def generate_signals(prices):
     
     # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA 34 for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA 50 for trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d RSI for overbought/oversold conditions
-    delta_1d = pd.Series(close_1d).diff()
-    gain_1d = delta_1d.where(delta_1d > 0, 0)
-    loss_1d = -delta_1d.where(delta_1d < 0, 0)
-    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_1d = avg_gain_1d / avg_loss_1d
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Calculate 1d volume moving average
+    # Calculate 1d volume moving average (20-period)
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
@@ -46,36 +36,34 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Calculate Donchian channel (20-period) using only data up to i
+        lookback = min(20, i+1)
+        highest_high = np.max(high[i-lookback+1:i+1])
+        lowest_low = np.min(low[i-lookback+1:i+1])
         
-        # RSI filter: avoid extreme overbought/oversold conditions
-        rsi_not_overbought = rsi_1d_aligned[i] < 70
-        rsi_not_oversold = rsi_1d_aligned[i] > 30
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
         # Volume filter: current volume above 1d average
         volume_filter = volume[i] > vol_ma_1d_aligned[i]
         
-        # Long conditions: price above EMA34 + RSI not overbought + volume
-        long_condition = (price_above_ema and 
-                         rsi_not_overbought and 
-                         volume_filter)
+        # Long conditions: price breaks above Donchian high + above EMA50 + volume
+        long_breakout = close[i] > highest_high
+        long_condition = long_breakout and price_above_ema and volume_filter
         
-        # Short conditions: price below EMA34 + RSI not oversold + volume
-        short_condition = (price_below_ema and 
-                          rsi_not_oversold and 
-                          volume_filter)
+        # Short conditions: price breaks below Donchian low + below EMA50 + volume
+        short_breakout = close[i] < lowest_low
+        short_condition = short_breakout and price_below_ema and volume_filter
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -83,7 +71,7 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal
+        # Exit conditions: trend reversal (price crosses EMA50)
         elif position == 1 and not price_above_ema:
             signals[i] = 0.0
             position = 0
@@ -101,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_RSI14_VolumeFilter_1dTrend"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
