@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout (R1/S1) with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above R1 with bullish trend and volume > 2x average.
-# Short when price breaks below S1 with bearish trend and volume > 2x average.
-# Exit when price re-enters between R3 and S3 (wider band to reduce whipsaw).
-# Uses 12h timeframe for trend filter to reduce noise and improve win rate.
-# Target: 20-50 trades/year to minimize fee drag while capturing strong moves.
+# Hypothesis: 1h momentum with 4h trend filter and volume confirmation for balanced performance in bull/bear.
+# Long when RSI(14) < 30 (oversold) and price > 4h EMA50 and volume > 1.5x average.
+# Short when RSI(14) > 70 (overbought) and price < 4h EMA50 and volume > 1.5x average.
+# Exit when RSI returns to neutral zone (40-60) to avoid whipsaw.
+# Uses 4h EMA50 for trend filter to align with higher timeframe bias.
+# Target: 60-150 total trades over 4 years (~15-37/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,94 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
     
-    # 12-hour EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 4-hour EMA50 for trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Get 1d data for Camarilla pivot calculation (standard pivot points)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # RSI(14) calculation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels from previous day
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    # R3 = C + (H - L) * 1.1 / 4
-    # S3 = C - (H - L) * 1.1 / 4
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    r1_1d = close_1d + range_1d * 1.1 / 12
-    s1_1d = close_1d - range_1d * 1.1 / 12
-    r3_1d = close_1d + range_1d * 1.1 / 4
-    s3_1d = close_1d - range_1d * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Volume filter: volume > 2x 20-period average (strict to reduce trades)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above R1, above 12h EMA50, volume spike
-        if (close[i] > r1_aligned[i] and 
-            close[i] > ema50_12h_aligned[i] and 
+        # Long condition: RSI oversold, above 4h EMA50, volume spike
+        if (rsi_values[i] < 30 and 
+            close[i] > ema50_4h_aligned[i] and 
             volume_filter[i]):
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
-        # Short condition: price breaks below S1, below 12h EMA50, volume spike
-        elif (close[i] < s1_aligned[i] and 
-              close[i] < ema50_12h_aligned[i] and 
+        # Short condition: RSI overbought, below 4h EMA50, volume spike
+        elif (rsi_values[i] > 70 and 
+              close[i] < ema50_4h_aligned[i] and 
               volume_filter[i]):
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
-        # Exit conditions: price re-enters between S3 and R3 (wider band)
-        elif position == 1 and close[i] < r3_aligned[i]:
+        # Exit conditions: RSI returns to neutral zone (40-60)
+        elif position == 1 and rsi_values[i] > 40:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > s3_aligned[i]:
+        elif position == -1 and rsi_values[i] < 60:
             signals[i] = 0.0
             position = 0
         # Hold position
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_R1S1_12hEMA50_VolumeFilter"
-timeframe = "4h"
+name = "1h_RSI14_4hEMA50_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
