@@ -13,97 +13,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for price channels and volume
+    # Get 1d data for ATR and close
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
     
-    # Calculate 20-day Donchian channels
-    upper_20 = np.full(len(high_1d), np.nan)
-    lower_20 = np.full(len(low_1d), np.nan)
+    # Calculate 14-period ATR
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                               np.abs(low_1d[1:] - close_1d[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr_1d = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        atr_1d[i] = np.mean(tr[i-14:i])
     
-    for i in range(19, len(high_1d)):
-        upper_20[i] = np.max(high_1d[i-19:i+1])
-        lower_20[i] = np.min(low_1d[i-19:i+1])
+    # Get 1w data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
     
-    # Calculate 20-day average volume for volume filter
-    vol_avg_20 = np.full(len(vol_1d), np.nan)
-    for i in range(19, len(vol_1d)):
-        vol_avg_20[i] = np.mean(vol_1d[i-19:i+1])
+    close_1w = df_1w['close'].values
     
-    # Calculate 10-day RSI for momentum filter
-    delta = np.diff(close_1d)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full(len(gain), np.nan)
-    avg_loss = np.full(len(loss), np.nan)
+    # Calculate weekly EMA200
+    ema_period = 200
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
+                        ema_1w[i-1] * (1 - (2 / (ema_period + 1))))
     
-    for i in range(10, len(gain)):
-        if i == 10:
-            avg_gain[i] = np.mean(gain[1:11])
-            avg_loss[i] = np.mean(loss[1:11])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 9 + gain[i]) / 10
-            avg_loss[i] = (avg_loss[i-1] * 9 + loss[i]) / 10
+    # Align indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_10 = 100 - (100 / (1 + rs))
-    
-    # Align indicators to 12h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    rsi_10_aligned = align_htf_to_ltf(prices, df_1d, rsi_10)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    vol_period = 20
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need Donchian channels, volume average, and RSI
-    start_idx = max(19, 10) + 1
+    # Warmup: need ATR, EMA, and volume MA
+    start_idx = max(14, 200, vol_period) + 10  # extra buffer
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or np.isnan(rsi_10_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_avg_20_aligned[i] if vol_avg_20_aligned[i] > 0 else 0
-        rsi = rsi_10_aligned[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        atr = atr_1d_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 20-day high + volume confirmation + RSI > 50
-            if (price > upper_20_aligned[i] and 
+            # Long: Price > weekly EMA200 + volume spike + price > recent high
+            if (price > ema_1w_aligned[i] and 
                 vol_ratio > 1.5 and 
-                rsi > 50):
+                price > high[i-1]):
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below 20-day low + volume confirmation + RSI < 50
-            elif (price < lower_20_aligned[i] and 
+            # Short: Price < weekly EMA200 + volume spike + price < recent low
+            elif (price < ema_1w_aligned[i] and 
                   vol_ratio > 1.5 and 
-                  rsi < 50):
+                  price < low[i-1]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price breaks below 20-day low OR RSI < 30
-            if (price < lower_20_aligned[i] or rsi < 30):
+            # Long exit: Price < weekly EMA200 OR ATR-based stop
+            if (price < ema_1w_aligned[i] or 
+                price < high[i-1] - 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price breaks above 20-day high OR RSI > 70
-            if (price > upper_20_aligned[i] or rsi > 70):
+            # Short exit: Price > weekly EMA200 OR ATR-based stop
+            if (price > ema_1w_aligned[i] or 
+                price > low[i-1] + 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_RSI"
-timeframe = "12h"
+name = "4h_WeeklyEMA200_Breakout_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
