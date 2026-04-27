@@ -54,7 +54,7 @@ def generate_signals(prices):
         for i in range(1, len(close_1d)):
             ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to daily timeframe
     upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper)
     lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_1dEMA50_Volume"
-timeframe = "4h"
+name = "1d_Donchian_20_1dEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
