@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations (HTF)
+    # Get 1d data for calculations (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_Vol_LowVol_Filter_v1"
-timeframe = "6h"
+name = "1d_EMA34_Vol_LowVol_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
