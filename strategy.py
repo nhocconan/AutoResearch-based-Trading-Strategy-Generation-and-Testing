@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Daily EMA34 for trend filter
