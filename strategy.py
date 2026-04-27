@@ -29,16 +29,16 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # first period
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 12h data for Donchian channel (price channel) - primary timeframe
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Donchian channel (price channel) - primary timeframe
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12h Donchian(20) channel
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # 4h Donchian(20) channel
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # Get 1h data for momentum filter
     df_1h = get_htf_data(prices, '1h')
@@ -55,10 +55,10 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_1h = 100 - (100 / (1 + rs))
     
-    # Align indicators to 12h timeframe
+    # Align indicators to 4h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower)
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower)
     rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
     signals = np.zeros(n)
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_RSI14_ATR_Vol_Filter"
-timeframe = "12h"
+name = "4h_Donchian20_RSI14_ATR_Vol_Filter"
+timeframe = "4h"
 leverage = 1.0
