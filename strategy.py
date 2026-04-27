@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_R3_S3_Breakout_VolumeSpike
-Hypothesis: Breakout above/below daily Camarilla R3/S3 with volume > 2x average and ATR volatility filter on 12h timeframe.
-Captures strong momentum moves with volume confirmation. Works in both bull and bear markets by targeting significant breakouts.
-Targets 12-37 trades/year to minimize fee drag while capturing significant moves.
+4h_1D_Camarilla_R3_S3_Breakout_RSI_Filter
+Hypothesis: Breakout above/below daily Camarilla R3/S3 with RSI momentum filter (2-period RSI > 80 for long, < 20 for short) and volume confirmation.
+Works in both bull and bear markets by capturing strong momentum moves with confirmation. Targets 25-35 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -35,24 +34,35 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Calculate ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
+    # Calculate 2-period RSI for momentum filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing (equivalent to RMA)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
     for i in range(n):
-        if i < 14:
-            atr[i] = np.mean(tr[:i+1]) if i > 0 else tr[0]
+        if i < 2:
+            if i == 0:
+                avg_gain[i] = gain[0]
+                avg_loss[i] = loss[0]
+            else:
+                avg_gain[i] = (avg_gain[i-1] + gain[i]) / 2
+                avg_loss[i] = (avg_loss[i-1] + loss[i]) / 2
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
+            avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
     # Calculate volume average (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -60,7 +70,7 @@ def generate_signals(prices):
     position = 0
     
     # Warmup: need all indicators
-    start_idx = max(20, 1)  # volume MA needs 20
+    start_idx = max(20, 2)  # volume MA needs 20, RSI needs 2
     
     for i in range(start_idx, n):
         if (np.isnan(camarilla_r3_aligned[i]) or
@@ -72,35 +82,36 @@ def generate_signals(prices):
         price = close[i]
         vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
-        # Volume confirmation: > 2x average volume
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation: > 1.5x average volume (reduced from 2.0 to increase signal quality)
+        volume_confirmation = vol_ratio > 1.5
         
-        # ATR volatility filter: avoid low volatility periods
-        vol_filter = atr[i] > np.mean(atr[max(0, i-50):i+1]) * 0.5 if i >= 50 else True
+        # RSI momentum filter: > 80 for long, < 20 for short
+        rsi_long_filter = rsi[i] > 80
+        rsi_short_filter = rsi[i] < 20
         
         if position == 0:
-            # Long: break above daily R3 with volume and volatility
-            if volume_confirmation and vol_filter and price > camarilla_r3_aligned[i]:
+            # Long: break above daily R3 with volume and RSI momentum
+            if volume_confirmation and rsi_long_filter and price > camarilla_r3_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below daily S3 with volume and volatility
-            elif volume_confirmation and vol_filter and price < camarilla_s3_aligned[i]:
+            # Short: break below daily S3 with volume and RSI momentum
+            elif volume_confirmation and rsi_short_filter and price < camarilla_s3_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price returns to daily midpoint or volatility drops
+            # Long exit: price returns to daily midpoint or RSI loses momentum
             daily_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
-            if price < daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
+            if price < daily_mid or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # Short exit: price returns to daily midpoint or volatility drops
+            # Short exit: price returns to daily midpoint or RSI loses momentum
             daily_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
-            if price > daily_mid or atr[i] < np.mean(atr[max(0, i-50):i+1]) * 0.3:
+            if price > daily_mid or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1D_Camarilla_R3_S3_Breakout_VolumeSpike"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R3_S3_Breakout_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
