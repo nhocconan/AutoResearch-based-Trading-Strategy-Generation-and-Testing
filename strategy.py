@@ -1,18 +1,18 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Exponential Moving Average Crossover with 1-week ADX trend filter and 1-day volume confirmation
-# Uses 12/26 EMA crossovers for momentum signals, weekly ADX(14) > 25 to ensure trending markets,
-# and daily volume > 1.5x 20-period average to confirm institutional participation.
-# Works in both bull and bear markets by only taking trades when ADX confirms strong trend.
-# Target: 20-30 trades/year to minimize fee decay while capturing strong trending moves.
-# Focus on BTC/ETH pairs with proven trend-following edge.
+# Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume confirmation
+# Uses 1d EMA50 for trend direction, 12h Donchian(20) breakouts for entry signals,
+# and volume spikes (1.5x 20-period average) to confirm breakouts. Works in both bull and bear
+# markets by following the 1d trend while entering on Donchian breakouts. Target: 20-30 trades/year
+# to minimize fee decay while capturing trend continuation moves. Focus on BTC/ETH with ETH as primary.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,163 +20,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Calculate 12/26 EMA on 6h for crossover signals
-    fast_len = 12
-    slow_len = 26
-    ema_fast = np.full(n, np.nan)
-    ema_slow = np.full(n, np.nan)
-    
-    if n >= slow_len:
-        # Initialize EMAs
-        ema_fast[fast_len-1] = np.mean(close[:fast_len])
-        ema_slow[slow_len-1] = np.mean(close[:slow_len])
-        
-        # Calculate multipliers
-        multiplier_fast = 2 / (fast_len + 1)
-        multiplier_slow = 2 / (slow_len + 1)
-        
-        # Calculate EMAs
-        for i in range(fast_len, n):
-            ema_fast[i] = (close[i] * multiplier_fast) + (ema_fast[i-1] * (1 - multiplier_fast))
-        for i in range(slow_len, n):
-            ema_slow[i] = (close[i] * multiplier_slow) + (ema_slow[i-1] * (1 - multiplier_slow))
-    
-    # Calculate ADX on 1w for trend strength
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    n_1w = len(high_1w)
-    
-    # Calculate True Range
-    tr = np.zeros(n_1w)
-    for i in range(n_1w):
-        if i == 0:
-            tr[i] = high_1w[i] - low_1w[i]
-        else:
-            tr[i] = max(high_1w[i] - low_1w[i], 
-                       abs(high_1w[i] - close_1w[i-1]),
-                       abs(low_1w[i] - close_1w[i-1]))
-    
-    # Calculate Directional Movement
-    plus_dm = np.zeros(n_1w)
-    minus_dm = np.zeros(n_1w)
-    for i in range(1, n_1w):
-        up_move = high_1w[i] - high_1w[i-1]
-        down_move = low_1w[i-1] - low_1w[i]
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        else:
-            plus_dm[i] = 0
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-        else:
-            minus_dm[i] = 0
-    
-    # Smooth TR, +DM, -DM using Wilder's smoothing (period=14)
-    adx_len = 14
-    atr = np.zeros(n_1w)
-    plus_dm_smooth = np.zeros(n_1w)
-    minus_dm_smooth = np.zeros(n_1w)
-    
-    if n_1w >= adx_len:
-        # Initial values
-        atr[adx_len-1] = np.mean(tr[:adx_len])
-        plus_dm_smooth[adx_len-1] = np.mean(plus_dm[:adx_len])
-        minus_dm_smooth[adx_len-1] = np.mean(minus_dm[:adx_len])
-        
-        # Wilder's smoothing
-        for i in range(adx_len, n_1w):
-            atr[i] = (atr[i-1] * (adx_len - 1) + tr[i]) / adx_len
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (adx_len - 1) + plus_dm[i]) / adx_len
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (adx_len - 1) + minus_dm[i]) / adx_len
-    
-    # Calculate DI and DX
-    plus_di = np.zeros(n_1w)
-    minus_di = np.zeros(n_1w)
-    dx = np.zeros(n_1w)
-    
-    for i in range(adx_len, n_1w):
-        if atr[i] != 0:
-            plus_di[i] = (plus_dm_smooth[i] / atr[i]) * 100
-            minus_di[i] = (minus_dm_smooth[i] / atr[i]) * 100
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
-    
-    # Calculate ADX (smoothed DX)
-    adx = np.zeros(n_1w)
-    if n_1w >= 2 * adx_len - 1:
-        adx[2*adx_len-2] = np.mean(dx[adx_len-1:2*adx_len-1])
-        for i in range(2*adx_len-1, n_1w):
-            adx[i] = (adx[i-1] * (adx_len - 1) + dx[i]) / adx_len
-    
-    # Calculate 20-period average volume on 1d for spike detection
-    vol_ma_1d = np.full(len(df_1d), np.nan)
-    vol_period = 20
+    # Calculate 50-period EMA on 1d for trend
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    if len(volume_1d) >= vol_period:
-        for i in range(vol_period, len(volume_1d)):
-            vol_ma_1d[i] = np.mean(volume_1d[i-vol_period:i])
+    ema_len = 50
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_len:
+        multiplier = 2 / (ema_len + 1)
+        ema_1d[ema_len-1] = np.mean(close_1d[:ema_len])
+        for i in range(ema_len, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Align HTF indicators to 6s timeframe
-    ema_fast_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), ema_fast)
-    ema_slow_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), ema_slow)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Get 12h data for Donchian channel (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    n_12h = len(high_12h)
+    
+    # Calculate 20-period Donchian channels on 12h
+    donchian_period = 20
+    upper_12h = np.full(n_12h, np.nan)
+    lower_12h = np.full(n_12h, np.nan)
+    
+    for i in range(donchian_period - 1, n_12h):
+        upper_12h[i] = np.max(high_12h[i-donchian_period+1:i+1])
+        lower_12h[i] = np.min(low_12h[i-donchian_period+1:i+1])
+    
+    # Align HTF indicators to LTF
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    
+    # Calculate 20-period average volume on 12h for spike detection
+    vol_ma = np.full(n, np.nan)
+    vol_period = 20
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0
     size = 0.25
     
-    # Warmup period - ensure all indicators are ready
-    start_idx = max(slow_len, adx_len*2, vol_period) + 5
+    # Warmup period
+    start_idx = max(50, 20) + 20  # EMA50 needs 50, Donchian needs 20, vol needs 20
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_fast_aligned[i]) or 
-            np.isnan(ema_slow_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(upper_12h_aligned[i]) or 
+            np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ratio = volume[i] / vol_ma_1d_aligned[i] if vol_ma_1d_aligned[i] > 0 else 0
+        price = close[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        
+        # Volume confirmation: at least 1.5x average volume
         volume_confirmation = vol_ratio > 1.5
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
-        
         if position == 0:
-            # Long: Fast EMA crosses above Slow EMA with trend and volume
-            if ema_fast_aligned[i] > ema_slow_aligned[i] and strong_trend and volume_confirmation:
+            # Long: Donchian upper breakout with uptrend and volume
+            if price > upper_12h_aligned[i] and price > ema_1d_aligned[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short: Fast EMA crosses below Slow EMA with trend and volume
-            elif ema_fast_aligned[i] < ema_slow_aligned[i] and strong_trend and volume_confirmation:
+            # Short: Donchian lower breakdown with downtrend and volume
+            elif price < lower_12h_aligned[i] and price < ema_1d_aligned[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Fast EMA crosses below Slow EMA or trend weakens
-            if ema_fast_aligned[i] < ema_slow_aligned[i] or not strong_trend:
+            # Long exit: Price closes below Donchian lower or trend reversal
+            if price < lower_12h_aligned[i] or price < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Fast EMA crosses above Slow EMA or trend weakens
-            if ema_fast_aligned[i] > ema_slow_aligned[i] or not strong_trend:
+            # Short exit: Price closes above Donchian upper or trend reversal
+            if price > upper_12h_aligned[i] or price > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -184,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA_Crossover_1wADX_1dVolume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
