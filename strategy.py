@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,33 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for higher timeframe context (1d)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate daily EMA(34) for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate 4h Donchian channels (20-period) for breakout signals
+    # Get 4h data for higher timeframe context
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 30:
         return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate 4h EMA(50) for trend direction
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Calculate 4h ATR(14) for volatility
+    tr = np.maximum(high_4h - low_4h, np.maximum(abs(high_4h - np.roll(close_4h, 1)), abs(low_4h - np.roll(close_4h, 1))))
+    tr[0] = high_4h[0] - low_4h[0]
+    atr_14_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
     
     # Calculate 4h volume moving average for confirmation
-    vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     # Precompute session filter (08-20 UTC)
@@ -50,13 +45,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(atr_14_4h_aligned[i]) or
             np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
@@ -66,26 +60,19 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 4h EMA50
+        price_above_ema = close[i] > ema_50_4h_aligned[i]
+        price_below_ema = close[i] < ema_50_4h_aligned[i]
         
-        # Volume filter: current 4h volume above average
-        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 0.8
+        # Volume filter: current volume above average
+        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > vol_ma_4h_aligned[i] * 1.2
         
-        # Breakout signals: price breaks 4h Donchian channels
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        # Volatility filter: current ATR above average (avoid low volatility chop)
+        volatility_filter = atr_14_4h_aligned[i] > 0 and atr_14_4h_aligned[i] > np.nanmean(atr_14_4h_aligned[max(0, i-50):i+1]) * 0.8
         
-        # Long conditions: bullish trend + volume + upward breakout
-        long_condition = (price_above_ema and 
-                         volume_filter and 
-                         breakout_up)
-        
-        # Short conditions: bearish trend + volume + downward breakout
-        short_condition = (price_below_ema and 
-                          volume_filter and 
-                          breakout_down)
+        # Entry conditions: trend + volume + volatility
+        long_condition = (price_above_ema and volume_filter and volatility_filter)
+        short_condition = (price_below_ema and volume_filter and volatility_filter)
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -93,11 +80,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal
-        elif position == 1 and not price_above_ema:
+        # Exit conditions: trend reversal or low volatility
+        elif position == 1 and (not price_above_ema or not volatility_filter):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and not price_below_ema:
+        elif position == -1 and (not price_below_ema or not volatility_filter):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -111,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_4hDonchianBreakout_VolumeFilter"
+name = "4h_EMA50_VolumeVolatilityFilter"
 timeframe = "4h"
 leverage = 1.0
