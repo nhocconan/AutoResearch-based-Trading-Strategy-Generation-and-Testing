@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-#100742 - 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_HT
-Hypothesis: Tight breakout strategy using daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike on 12h timeframe.
-Rationale: Combines daily trend filter with 1d pivot levels for better trend alignment across market cycles. Targets 12-37 trades/year to minimize fee drift. Works in bull (breakouts with trend) and bear (mean reversion to pivot).
+#100743 - 4h_PriceChannel_1dTrend_VolumeFilter
+Hypothesis: Price channel breakout with 1d trend filter and volume confirmation works in both bull and bear markets.
+In bull: breaks above upper channel with up trend = momentum continuation.
+In bear: breaks below lower channel with down trend = continuation of downtrend.
+Uses 4h price channels (Donchian-like) with 1d EMA50 trend filter and volume spike.
+Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -11,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,66 +22,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and pivot levels
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels from previous day (to avoid look-ahead)
-    daily_pivot = (high_1d + low_1d + close_1d) / 3
-    daily_range = high_1d - low_1d
-    daily_r1 = close_1d + daily_range * 1.1 / 12
-    daily_s1 = close_1d - daily_range * 1.1 / 12
-    daily_pivot_point = (high_1d + low_1d + close_1d) / 3  # Classic pivot
+    # Calculate 40-period high/low for price channel (4h timeframe)
+    high_max = pd.Series(high).rolling(window=40, min_periods=40).max().values
+    low_min = pd.Series(low).rolling(window=40, min_periods=40).min().values
     
-    # Align to 12h timeframe (previous day's levels for current period)
-    camarilla_r1 = align_htf_to_ltf(prices, df_1d, daily_r1)
-    camarilla_s1 = align_htf_to_ltf(prices, df_1d, daily_s1)
-    camarilla_pivot = align_htf_to_ltf(prices, df_1d, daily_pivot_point)
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Volume filter: volume > 1.8x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1[i]) or 
-            np.isnan(camarilla_s1[i]) or np.isnan(camarilla_pivot[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above R1, above 1d EMA34, volume spike
-        if (close[i] > camarilla_r1[i] and 
-            close[i] > ema34_1d_aligned[i] and 
+        # Long condition: price breaks above 40-period high, above 1d EMA50, volume spike
+        if (close[i] > high_max[i] and 
+            close[i] > ema50_1d_aligned[i] and 
             volume_filter[i]):
             signals[i] = 0.25
             position = 1
-        # Short condition: price breaks below S1, below 1d EMA34, volume spike
-        elif (close[i] < camarilla_s1[i] and 
-              close[i] < ema34_1d_aligned[i] and 
+        # Short condition: price breaks below 40-period low, below 1d EMA50, volume spike
+        elif (close[i] < low_min[i] and 
+              close[i] < ema50_1d_aligned[i] and 
               volume_filter[i]):
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to Camarilla Pivot (mean reversion)
-        elif position == 1 and close[i] < camarilla_pivot[i]:
+        # Exit conditions: price returns to opposite channel boundary (mean reversion)
+        elif position == 1 and close[i] < low_min[i]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > camarilla_pivot[i]:
+        elif position == -1 and close[i] > high_max[i]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -92,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_HT"
-timeframe = "12h"
+name = "4h_PriceChannel_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
