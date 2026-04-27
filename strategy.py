@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla breakout on 12h with 1d trend filter and volume confirmation works in both bull/bear markets.
-Uses strict volume threshold (3x average) and price close beyond pivot to reduce false breaks.
-Target: 12-37 trades/year on 12h timeframe.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
+Hypothesis: Use median price instead of typical price for Camarilla calculation
+and require volume spike > 4x average to reduce trade frequency further.
+Maintains daily trend filter for robustness across market regimes.
+Target: 10-20 trades/year.
 """
 
 import numpy as np
@@ -29,21 +30,21 @@ def generate_signals(prices):
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla levels from previous day
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Calculate Camarilla levels from previous day using median price
+    median_price = (df_1d['high'] + df_1d['low']) / 2
     range_ = df_1d['high'] - df_1d['low']
     
     # Camarilla R1 and S1 (most important levels)
-    r1 = typical_price + (range_ * 1.0 / 12)
-    s1 = typical_price - (range_ * 1.0 / 12)
+    r1 = median_price + (range_ * 1.0 / 12)
+    s1 = median_price - (range_ * 1.0 / 12)
     
-    # Align levels to 12h timeframe (use previous day's levels)
+    # Align levels to 4h timeframe (use previous day's levels)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Volume confirmation: volume > 3.0 * 20-period average (stricter)
+    # Volume confirmation: volume > 4.0 * 20-period average (stricter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 3.0)
+    vol_spike = volume > (vol_ma * 4.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -91,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
