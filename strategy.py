@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_S4_S5_Range_Reversion
-Mean reversion on Camarilla pivot S4/S5 levels with 1w trend filter.
-Long when price touches S4 in 1w uptrend, short when touches S5 in 1w downtrend.
-Exit at S3 or R3 respectively, or when trend fails.
-Target: 10-25 trades/year per symbol.
+6h_RSI_Trend_Pullback
+Trend-following pullback strategy using RSI(14) and EMA(50) on 6h timeframe.
+Long when RSI < 40 (pullback) and price > EMA50 (uptrend).
+Short when RSI > 60 (pullback) and price < EMA50 (downtrend).
+Uses 1d ADX(14) > 25 to confirm strong trend and avoid range-bound whipsaws.
+Exit when RSI returns to neutral (40-60) or trend filter fails.
+Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
@@ -20,99 +22,144 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # 1d data for Camarilla pivots
+    # RSI(14) calculation
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(rsi_period, n):
+        if i == rsi_period:
+            avg_gain[i] = np.mean(gain[rsi_period:i+1])
+            avg_loss[i] = np.mean(loss[rsi_period:i+1])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    rsi = np.full(n, np.nan)
+    for i in range(rsi_period, n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+    
+    # EMA50 for trend filter
+    ema_period = 50
+    ema = np.full(n, np.nan)
+    if n >= ema_period:
+        ema[ema_period-1] = np.mean(close[:ema_period])
+        for i in range(ema_period, n):
+            ema[i] = (close[i] * (2 / (ema_period + 1)) + 
+                      ema[i-1] * (1 - (2 / (ema_period + 1))))
+    
+    # Get 1d data for ADX trend strength filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # S1 = C - (Range * 1.1 / 12)
-    # S2 = C - (Range * 1.1 / 6)
-    # S3 = C - (Range * 1.1 / 4)
-    # S4 = C - (Range * 1.1 / 2)
-    # S5 = C - (Range * 1.1)
-    # R3 = C + (Range * 1.1 / 4)
-    # R4 = C + (Range * 1.1 / 2)
-    # R5 = C + (Range * 1.1)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    s4_1d = close_1d - (range_1d * 1.1 / 2)
-    s5_1d = close_1d - (range_1d * 1.1)
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
+    # ADX(14) calculation
+    adx_period = 14
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]  # First TR
     
-    # Align 1d Camarilla levels to 1d timeframe (no shift needed as we use previous day's levels)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    s5_1d_aligned = align_htf_to_ltf(prices, df_1d, s5_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Smooth TR, +DM, -DM
+    atr = np.full(len(tr), np.nan)
+    plus_di = np.full(len(tr), np.nan)
+    minus_di = np.full(len(tr), np.nan)
     
-    close_1w = df_1w['close'].values
-    ema_1w_period = 50
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= ema_1w_period:
-        ema_1w[ema_1w_period - 1] = np.mean(close_1w[:ema_1w_period])
-        for i in range(ema_1w_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_1w_period + 1)) + 
-                         ema_1w[i - 1] * (1 - (2 / (ema_1w_period + 1))))
+    for i in range(adx_period, len(tr)):
+        if i == adx_period:
+            atr[i] = np.sum(tr[adx_period:i+1])
+            plus_dm_sum = np.sum(plus_dm[adx_period:i+1])
+            minus_dm_sum = np.sum(minus_dm[adx_period:i+1])
+        else:
+            atr[i] = atr[i-1] - (atr[i-1] / adx_period) + tr[i]
+            plus_dm_sum = plus_di[i-1] * (adx_period-1) + plus_dm[i]
+            minus_dm_sum = minus_di[i-1] * (adx_period-1) + minus_dm[i]
+        
+        if atr[i] != 0:
+            plus_di[i] = 100 * (plus_dm_sum / atr[i])
+            minus_di[i] = 100 * (minus_dm_sum / atr[i])
+        else:
+            plus_di[i] = 0
+            minus_di[i] = 0
     
-    # Align 1w EMA50 to 1d timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate DX and ADX
+    dx = np.full(len(tr), np.nan)
+    adx = np.full(len(tr), np.nan)
+    
+    for i in range(adx_period, len(tr)):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum != 0:
+            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
+        else:
+            dx[i] = 0
+    
+    for i in range(2*adx_period-1, len(tr)):
+        if i == 2*adx_period-1:
+            adx[i] = np.mean(dx[adx_period:i+1])
+        else:
+            adx[i] = (adx[i-1] * (adx_period-1) + dx[i]) / adx_period
+    
+    # Align 1d ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need at least 1 day of data
-    start_idx = 1
+    # Warmup: need RSI, EMA50, and ADX
+    start_idx = max(rsi_period, ema_period, 2*adx_period-1)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(s4_1d_aligned[i]) or np.isnan(s5_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        s4 = s4_1d_aligned[i]
-        s5 = s5_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        ema1w = ema_1w_aligned[i]
+        rsi_val = rsi[i]
+        ema_val = ema[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Long: price touches or goes below S4 in 1w uptrend
-            if price <= s4 and price > ema1w:
+            # Long: RSI < 40 (pullback) and price > EMA50 (uptrend) and ADX > 25 (strong trend)
+            if (rsi_val < 40 and price > ema_val and adx_val > 25):
                 signals[i] = size
                 position = 1
-            # Short: price touches or goes above S5 in 1w downtrend
-            elif price >= s5 and price < ema1w:
+            # Short: RSI > 60 (pullback) and price < EMA50 (downtrend) and ADX > 25 (strong trend)
+            elif (rsi_val > 60 and price < ema_val and adx_val > 25):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches S3 or trend fails
-            if price >= s3 or price <= ema1w:
+            # Exit long: RSI returns to neutral (40-60) or trend fails
+            if (rsi_val >= 40 and rsi_val <= 60) or price < ema_val or adx_val < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price reaches R3 or trend fails
-            if price <= r3 or price >= ema1w:
+            # Exit short: RSI returns to neutral (40-60) or trend fails
+            if (rsi_val >= 40 and rsi_val <= 60) or price > ema_val or adx_val < 25:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +167,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_Pivot_S4_S5_Range_Reversion"
-timeframe = "1d"
+name = "6h_RSI_Trend_Pullback"
+timeframe = "6h"
 leverage = 1.0
