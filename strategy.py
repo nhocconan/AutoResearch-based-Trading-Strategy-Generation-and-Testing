@@ -13,7 +13,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and close
+    # Get weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA50
+    ema_period = 50
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
+                        ema_1w[i-1] * (1 - (2 / (ema_period + 1))))
+    
+    # Align weekly EMA to daily timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Get daily data for ATR and RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
@@ -31,27 +50,28 @@ def generate_signals(prices):
     for i in range(14, len(tr)):
         atr_1d[i] = np.mean(tr[i-14:i])
     
-    # Get 1w data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
+    # Calculate 14-period RSI
+    delta = np.diff(close_1d)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(len(gain), np.nan)
+    avg_loss = np.full(len(loss), np.nan)
+    for i in range(14, len(gain)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA200
-    ema_period = 200
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= ema_period:
-        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
-        for i in range(ema_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
-                        ema_1w[i-1] * (1 - (2 / (ema_period + 1))))
-    
-    # Align indicators to 4h timeframe
+    # Align daily indicators to daily timeframe (no shift needed)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2.0x 20-period average
     vol_ma = np.full(n, np.nan)
     vol_period = 20
     for i in range(vol_period, n):
@@ -61,13 +81,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need ATR, EMA, and volume MA
-    start_idx = max(14, 200, vol_period) + 10  # extra buffer
+    # Warmup: need ATR, RSI, EMA, and volume MA
+    start_idx = max(14, 50, vol_period) + 20  # extra buffer
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -76,32 +96,32 @@ def generate_signals(prices):
         atr = atr_1d_aligned[i]
         
         if position == 0:
-            # Long: Price > weekly EMA200 + volume spike + price > recent high
-            if (price > ema_1w_aligned[i] and 
-                vol_ratio > 1.5 and 
-                price > high[i-1]):
+            # Long: RSI < 30 (oversold) + volume spike + price > weekly EMA50
+            if (rsi_1d_aligned[i] < 30 and 
+                vol_ratio > 2.0 and 
+                price > ema_1w_aligned[i]):
                 signals[i] = size
                 position = 1
-            # Short: Price < weekly EMA200 + volume spike + price < recent low
-            elif (price < ema_1w_aligned[i] and 
-                  vol_ratio > 1.5 and 
-                  price < low[i-1]):
+            # Short: RSI > 70 (overbought) + volume spike + price < weekly EMA50
+            elif (rsi_1d_aligned[i] > 70 and 
+                  vol_ratio > 2.0 and 
+                  price < ema_1w_aligned[i]):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price < weekly EMA200 OR ATR-based stop
-            if (price < ema_1w_aligned[i] or 
-                price < high[i-1] - 2.0 * atr):
+            # Long exit: RSI > 50 (mean reversion) OR ATR-based stop
+            if (rsi_1d_aligned[i] > 50 or 
+                price < close[i-1] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price > weekly EMA200 OR ATR-based stop
-            if (price > ema_1w_aligned[i] or 
-                price > low[i-1] + 2.0 * atr):
+            # Short exit: RSI < 50 (mean reversion) OR ATR-based stop
+            if (rsi_1d_aligned[i] < 50 or 
+                price > close[i-1] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyEMA200_Breakout_Volume_Spike"
-timeframe = "4h"
+name = "1d_RSI_MeanReversion_VolumeSpike_WeeklyEMA50"
+timeframe = "1d"
 leverage = 1.0
