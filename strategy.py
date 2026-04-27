@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Camarilla R3/S3 breakout with 1-week trend filter and volume confirmation.
-Trades only during high-volume breakouts in the direction of the 1-week trend.
-Designed to work in both bull and bear markets by using the 1-week trend as filter.
-Target: 12-37 trades/year per symbol (48-148 total over 4 years) to minimize fee drift.
+Hypothesis: Daily Bollinger Band squeeze breakout with weekly trend filter and volume confirmation.
+Trades only during low volatility (BB squeeze) followed by expansion breakout in the direction of the weekly trend.
+Designed to capture volatility breakouts in both bull and bear markets by using the weekly trend as filter.
+Target: 10-25 trades/year per symbol (40-100 total over 4 years) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -11,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,100 +19,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-week data for trend filter
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1-week EMA(50) for trend
+    # Calculate weekly EMA(34) for trend
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Get 1-day data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate daily Bollinger Bands (20, 2)
+    close_d = pd.Series(close)
+    ma_20 = close_d.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_d.rolling(window=20, min_periods=20).std().values
+    upper = ma_20 + 2 * std_20
+    lower = ma_20 - 2 * std_20
     
-    # Calculate Camarilla pivot levels (R3, S3) from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily Bollinger Band width for squeeze detection
+    bb_width = (upper - lower) / ma_20
+    bb_width_ma_50 = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
     
-    # Pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 2)
-    s3 = pivot - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels (use previous day's levels for current 12h bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3, additional_delay_bars=1)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3, additional_delay_bars=1)
-    
-    # Get 12-hour data for volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12-hour volume MA(20)
-    vol_12h = df_12h['volume'].values
-    vol_ma_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    # Calculate daily volume MA(20)
+    volume_d = pd.Series(volume)
+    vol_ma_20 = volume_d.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # Warmup: need Camarilla levels, volume MA, and 1w EMA
-    start_idx = max(2, 20, 50)  # max of lookbacks
+    # Warmup: need BB width MA, volume MA, and weekly EMA
+    start_idx = max(50, 20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(ma_20[i]) or np.isnan(std_20[i]) or 
+            np.isnan(bb_width_ma_50[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
+        upper_band = upper[i]
+        lower_band = lower[i]
+        ma = ma_20[i]
+        bb_width_now = bb_width[i]
+        bb_width_ma = bb_width_ma_50[i]
         vol_now = volume[i]
-        vol_ma = vol_ma_20_12h_aligned[i]
-        trend_1w = ema_50_1w_aligned[i]
+        vol_ma = vol_ma_20[i]
+        trend_1w = ema_34_1w_aligned[i]
         
-        # Volume filter: volume > 2.0x 12h average (strict to reduce trades)
-        vol_filter = vol_now > 2.0 * vol_ma
+        # Squeeze condition: BB width below 50-day average (low volatility)
+        squeeze = bb_width_now < bb_width_ma
         
-        # Entry conditions: Camarilla R3/S3 breakout with volume and 1w trend alignment
+        # Volume filter: volume > 1.5x daily average
+        vol_filter = vol_now > 1.5 * vol_ma
+        
+        # Entry conditions: Bollinger Band breakout after squeeze with volume and weekly trend alignment
         if position == 0:
-            # Long: break above R3 + volume + 1w uptrend
-            if close[i] > r3_level and vol_filter and close[i] > trend_1w:
+            # Long: break above upper band after squeeze + volume + weekly uptrend
+            if close[i] > upper_band and squeeze and vol_filter and close[i] > trend_1w:
                 signals[i] = size
                 position = 1
-            # Short: break below S3 + volume + 1w downtrend
-            elif close[i] < s3_level and vol_filter and close[i] < trend_1w:
+            # Short: break below lower band after squeeze + volume + weekly downtrend
+            elif close[i] < lower_band and squeeze and vol_filter and close[i] < trend_1w:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: close below 1w EMA or S3 level
-            if close[i] < trend_1w or close[i] < s3_level:
+            # Exit long: close below weekly EMA or Bollinger mid-band
+            if close[i] < trend_1w or close[i] < ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: close above 1w EMA or R3 level
-            if close[i] > trend_1w or close[i] > r3_level:
+            # Exit short: close above weekly EMA or Bollinger mid-band
+            if close[i] > trend_1w or close[i] > ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1wTrendFilter_Volume"
-timeframe = "12h"
+name = "1d_BollingerSqueezeBreakout_WeeklyTrendFilter_Volume"
+timeframe = "1d"
 leverage = 1.0
