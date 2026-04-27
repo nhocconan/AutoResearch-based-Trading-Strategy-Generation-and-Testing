@@ -1,3 +1,9 @@
+# USDC/USDT Parity Mean Reversion with Bollinger Bands
+# Strategy exploits temporary deviations from 1:1 parity between USDC and USDT
+# Uses Bollinger Bands on the price ratio to identify mean reversion opportunities
+# Works in both bull and bear markets as it's market-neutral
+# Target: Low frequency, high win rate trades with minimal drawdown
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,91 +11,74 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
+    # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate deviation from 1.0 parity
+    # For stablecoin pairs, we expect price to oscillate around 1.0
+    deviation = close - 1.0
     
-    # 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Bollinger Bands on deviation (20-period, 2 standard deviations)
+    dev_series = pd.Series(deviation)
+    bb_middle = dev_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = dev_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    # Get daily data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Donchian channels (20 periods)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align daily levels to daily timeframe (no additional shift needed)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Volume filter: volume > 2.0x 20-period average
-    vol_ma_20 = np.full(n, np.nan, dtype=np.float64)
+    # Volume filter: avoid low liquidity periods
+    vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long (price > 1), -1: short (price < 1)
     size = 0.25   # 25% position size
     
-    # Warmup: need 1w EMA200 (200 periods), daily Donchian (20 periods), volume MA (20 periods)
-    start_idx = max(200, 20)
+    # Start after warmup period
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if data not ready
+        if (np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current values
-        price = close[i]
-        ema_trend = ema_200_1w_aligned[i]
-        upper_channel = donchian_high_aligned[i]
-        lower_channel = donchian_low_aligned[i]
+        dev = deviation[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
-        # Volume filter: volume > 2.0x average
-        vol_filter = vol_now > 2.0 * vol_avg
+        # Volume filter: require sufficient liquidity
+        vol_filter = vol_now > 0.5 * vol_avg  # Low threshold for stablecoins
         
         if position == 0:
-            # Long: price breaks above upper Donchian + bullish trend + volume spike
-            if price > upper_channel and price > ema_trend and vol_filter:
+            # Enter long when price significantly below 1.0 (undervalued USDC)
+            if dev < bb_lower[i] and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below lower Donchian + bearish trend + volume spike
-            elif price < lower_channel and price < ema_trend and vol_filter:
+            # Enter short when price significantly above 1.0 (overvalued USDC)
+            elif dev > bb_upper[i] and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to lower Donchian (mean reversion) or trend turns bearish
-            if price <= lower_channel or price < ema_trend:
+            # Exit long when price returns to mean (1.0) or crosses above
+            if dev >= bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price returns to upper Donchian (mean reversion) or trend turns bullish
-            if price >= upper_channel or price > ema_trend:
+            # Exit short when price returns to mean (1.0) or crosses below
+            if dev <= bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_20_Breakout_1wEMA200_Trend_Volume"
-timeframe = "1d"
+name = "USDC_USDT_Pairs_MeanReversion_BB20_2"
+timeframe = "1h"  # 1h provides good balance for mean reversion
 leverage = 1.0
