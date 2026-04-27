@@ -20,23 +20,23 @@ def generate_signals(prices):
     
     close_1d = df_1d['close'].values
     
-    # Calculate 34-period EMA for trend filter (1d) - shorter for more responsiveness
+    # Calculate 34-period EMA for trend filter (1d)
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34 = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: volume > 1.5x 20-period average (12h)
+    # Volume filter: volume > 1.5x 20-period average (4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 1.5)
     
-    # Donchian channels (15-period) on 12h
-    highest_high = pd.Series(high).rolling(window=15, min_periods=15).max().values
-    lowest_low = pd.Series(low).rolling(window=15, min_periods=15).min().values
+    # Donchian channels (20-period) on 4h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 34
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -73,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian15_Breakout_VolumeSpike_TrendFilter_1dEMA34"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_VolumeSpike_TrendFilter_1d_EMA34"
+timeframe = "4h"
 leverage = 1.0
