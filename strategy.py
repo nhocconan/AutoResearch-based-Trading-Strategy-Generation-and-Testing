@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA (adaptive moving average) with weekly RSI filter and volume confirmation.
-# Long when price crosses above KAMA with weekly RSI < 50 (avoiding overbought) and volume > 1.5x average.
-# Short when price crosses below KAMA with weekly RSI > 50 (avoiding oversold) and volume > 1.5x average.
-# Exit when price crosses back through KAMA.
-# KAMA adapts to market noise, reducing whipsaws in choppy markets. Weekly RSI avoids trend exhaustion.
-# Target: 10-25 trades per year on 1d timeframe.
+# Hypothesis: 6h Elder Ray Power with 1d EMA50 trend filter and volume confirmation.
+# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (low < EMA13) with 1d EMA50 uptrend and volume > 1.5x average.
+# Short when Bear Power > 0 (low > EMA13) AND Bull Power < 0 (close < EMA13) with 1d EMA50 downtrend and volume > 1.5x average.
+# Exit when either power crosses zero (market returns to equilibrium).
+# Uses Elder Ray to measure bull/bear strength relative to EMA, effective in both trending and ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,87 +19,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly RSI (14-period)
-    def calculate_rsi(prices, period):
-        delta = np.diff(prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(prices, np.nan)
-        avg_loss = np.full_like(prices, np.nan)
-        
-        if len(prices) >= period + 1:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-            
-            for i in range(period + 1, len(prices)):
-                avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate 1d EMA50 for trend filter
+    ema_period = 50
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
+                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    rsi_1w = calculate_rsi(close_1w, 14)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate EMA13 for Elder Ray (6-period EMA for responsiveness)
+    ema13_period = 13
+    ema13 = np.full(n, np.nan)
+    if n >= ema13_period:
+        ema13[ema13_period - 1] = np.mean(close[:ema13_period])
+        for i in range(ema13_period, n):
+            ema13[i] = (close[i] * (2 / (ema13_period + 1)) + 
+                        ema13[i - 1] * (1 - (2 / (ema13_period + 1))))
     
-    # Calculate KAMA (adaptive moving average) on daily close
-    def calculate_kama(prices, er_period=10, fast_sc=2, slow_sc=30):
-        if len(prices) < er_period:
-            return np.full_like(prices, np.nan)
-        
-        change = np.abs(np.diff(prices, er_period))
-        volatility = np.sum(np.abs(np.diff(prices)), axis=0) if len(prices) > 1 else 0
-        
-        # Vectorized calculation
-        er = np.zeros_like(prices)
-        for i in range(er_period, len(prices)):
-            if volatility[i-er_period:i].sum() > 0:
-                er[i] = change[i] / volatility[i-er_period:i].sum()
-            else:
-                er[i] = 0
-        
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        
-        kama = np.full_like(prices, np.nan)
-        kama[er_period] = prices[er_period]
-        
-        for i in range(er_period + 1, len(prices)):
-            kama[i] = kama[i-1] + sc[i] * (prices[i] - kama[i-1])
-        
-        return kama
+    # Calculate Elder Ray components
+    bull_power = close - ema13  # Bull Power = Close - EMA13
+    bear_power = low - ema13    # Bear Power = Low - EMA13
     
-    kama = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
+    # Align 1d EMA50 to 6h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        vol_ma_20[i] = np.mean(volume[i - 19:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need KAMA, weekly RSI, and volume MA20
-    start_idx = max(30, 20)  # KAMA needs ~30 bars, volume MA20 needs 19
+    # Warmup: need EMA13, EMA50, and volume MA20
+    start_idx = max(ema13_period, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        rsi_val = rsi_1w_aligned[i]
         vol_now = volume[i]
         vol_avg = vol_ma_20[i]
         
@@ -108,28 +78,28 @@ def generate_signals(prices):
         vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price crosses above KAMA with weekly RSI < 50 and volume filter
-            if (close[i-1] <= kama[i-1] and price > kama_val and 
-                rsi_val < 50 and vol_filter):
+            # Long: Bull Power > 0 AND Bear Power < 0 with 1d EMA50 uptrend and volume filter
+            if (bull_power[i] > 0 and bear_power[i] < 0 and 
+                price > ema_1d_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price crosses below KAMA with weekly RSI > 50 and volume filter
-            elif (close[i-1] >= kama[i-1] and price < kama_val and 
-                  rsi_val > 50 and vol_filter):
+            # Short: Bear Power > 0 AND Bull Power < 0 with 1d EMA50 downtrend and volume filter
+            elif (bear_power[i] > 0 and bull_power[i] < 0 and 
+                  price < ema_1d_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close[i-1] >= kama[i-1] and price < kama_val:
+            # Exit long: Bull Power <= 0 OR Bear Power >= 0 (loss of bullish bias)
+            if bull_power[i] <= 0 or bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close[i-1] <= kama[i-1] and price > kama_val:
+            # Exit short: Bull Power >= 0 OR Bear Power <= 0 (loss of bearish bias)
+            if bull_power[i] >= 0 or bear_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_WklyRSI_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_Power_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
