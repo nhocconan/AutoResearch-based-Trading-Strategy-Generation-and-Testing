@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolume
-Hypothesis: 1h timeframe with 4h trend filter and 1d volume confirmation captures breakouts with controlled frequency. 
-Uses Camarilla R3/S3 levels from 1h for entry, 4h EMA50 for trend, 1d volume spike for confirmation. 
-Session filter (08-20 UTC) reduces noise. Target: 60-150 trades over 4 years.
+6h_OrderBookImbalance_Reversal_v1
+Hypothesis: In 6B timeframe, extreme order book imbalances (proxy via volume-price divergence) 
+signal short-term reversals. Buy when selling pressure exhausts (price down but volume up < average), 
+sell when buying pressure exhausts (price up but volume down < average). 
+Uses 1d trend filter to avoid counter-trend trades and 1w volatility filter to adapt position size.
+Designed for low trade frequency (~15-25/year) to minimize fee drag in ranging markets.
 """
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,92 +22,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for Camarilla levels
-    df_1h = get_htf_data(prices, '1h')
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
-    range_1h = high_1h - low_1h
-    camarilla_r3 = close_1h + 1.125 * range_1h
-    camarilla_s3 = close_1h - 1.125 * range_1h
+    # Volume-price divergence: volume change vs price change
+    # Normalized volume change: (V[t] - V[t-1]) / V[t-1]
+    vol_change = np.diff(volume, prepend=volume[0])
+    vol_change_pct = np.where(volume != 0, vol_change / volume, 0)
     
-    # Get 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Price change
+    price_change = np.diff(close, prepend=close[0])
+    price_change_pct = np.where(close != 0, price_change / close, 0)
     
-    # Get 1d data for volume confirmation (volume > 2.0 * 20-period average)
+    # Divergence signal: when price and volume move opposite directions
+    # Negative divergence (price down, volume up) = buying pressure
+    # Positive divergence (price up, volume down) = selling pressure
+    divergence = -price_change_pct * vol_change_pct  # Negative when price and volume move opposite
+    
+    # Smooth divergence to reduce noise
+    div_smooth = pd.Series(divergence).ewm(span=5, adjust=False, min_periods=5).mean().values
+    
+    # Extreme divergence thresholds (top/bottom 10%)
+    div_pos_threshold = np.nanpercentile(div_smooth, 90)
+    div_neg_threshold = np.nanpercentile(div_smooth, 10)
+    
+    # 1d trend filter: only trade in direction of higher timeframe trend
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume_1d > (2.0 * vol_avg_1d)
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align all indicators to primary timeframe (1h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1h, camarilla_s3)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
+    # 1w volatility filter: reduce size in high volatility
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    atr_1w = pd.Series(high_1w - low_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma_1w = pd.Series(atr_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Volatility regime: high volatility when current ATR > 1.5 * MA ATR
+    vol_regime = atr_1w > (1.5 * atr_ma_1w)
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_regime)
+    
+    # Base position size
+    base_size = 0.25
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    size = 0.20   # Position size: 20% of capital
     
-    # Warmup: need Camarilla (1), EMA50 (50), volume avg (20)
-    start_idx = max(1, 50, 20)
+    # Warmup
+    start_idx = max(5, 50, 50)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_confirm_aligned[i]) or
-            not session_mask[i]):
+        # Skip if any data not ready
+        if (np.isnan(div_smooth[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(atr_ma_1w_aligned[i]) or 
+            np.isnan(vol_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        ema50 = ema50_4h_aligned[i]
-        vol_conf = volume_confirm_aligned[i]
+        # Volatility-adjusted size
+        size = base_size * 0.5 if vol_regime_aligned[i] else base_size
         
-        if position == 0:
-            # Determine trend: price vs 4h EMA50
-            uptrend = close_val > ema50
-            downtrend = close_val < ema50
-            
-            if uptrend and vol_conf:
-                # Long bias: long when price breaks above R3 with volume confirmation
-                if close_val > r3:
-                    signals[i] = size
-                    position = 1
-                    entry_price = close_val
-            elif downtrend and vol_conf:
-                # Short bias: short when price breaks below S3 with volume confirmation
-                if close_val < s3:
-                    signals[i] = -size
-                    position = -1
-                    entry_price = close_val
-        elif position == 1:
-            # Exit: price touches S3 (opposite Camarilla level)
-            if close_val < s3:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = size
-        elif position == -1:
-            # Exit: price touches R3 (opposite Camarilla level)
-            if close_val > r3:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -size
+        div_val = div_smooth[i]
+        close_val = close[i]
+        ema50 = ema50_1d_aligned[i]
+        
+        # Determine trend
+        uptrend = close_val > ema50
+        downtrend = close_val < ema50
+        
+        if div_val > div_pos_threshold and downtrend:
+            # Extreme selling pressure exhaustion -> potential long
+            signals[i] = size
+        elif div_val < div_neg_threshold and uptrend:
+            # Extreme buying pressure exhaustion -> potential short
+            signals[i] = -size
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_OrderBookImbalance_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
