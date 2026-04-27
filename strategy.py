@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_RSI_Range_200MA_v1
-Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) for trend direction, RSI for momentum confirmation, and 200-day MA for long-term bias. This combination aims to capture trending moves while avoiding false signals in ranging markets. Designed for low trade frequency (20-50 trades/year) to minimize fee drag.
+4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Combines Camarilla pivot levels (R3/S3) with 1d trend filter and volume spike.
+Targets institutional levels with trend alignment and volume confirmation to capture
+strong directional moves while minimizing false breakouts. Designed for low trade frequency
+(20-50 trades/year) to reduce fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,60 +13,41 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA for trend direction
-    def kama(close, length=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.zeros_like(close)
-        for i in range(len(close)):
-            if volatility[i] != 0:
-                er[i] = change[i] / volatility[i]
-            else:
-                er[i] = 0
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
-    
-    # Calculate RSI
-    def rsi(close, length=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        for i in range(1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
-            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
-        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    # Get 1d data for 200-day MA
+    # Calculate daily pivot points and Camarilla levels
+    # Use 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 200-day MA
-    ma200_1d = np.full_like(close_1d, np.nan)
-    for i in range(199, len(close_1d)):
-        ma200_1d[i] = np.mean(close_1d[i-199:i+1])
+    # Calculate pivot point and Camarilla levels for each day
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Calculate indicators on 4h data
-    kama_val = kama(close, length=10, fast=2, slow=30)
-    rsi_val = rsi(close, length=14)
+    # Camarilla levels
+    r3_1d = close_1d + (range_1d * 1.1 / 2.0)  # R3 = C + (H-L)*1.1/2
+    s3_1d = close_1d - (range_1d * 1.1 / 2.0)  # S3 = C - (H-L)*1.1/2
     
-    # Align 1d MA200 to 4h
-    ma200_1d_aligned = align_htf_to_ltf(prices, df_1d, ma200_1d)
+    # 1d trend filter: EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
+    
+    # Align all 1d indicators to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,40 +55,48 @@ def generate_signals(prices):
     size = 0.25   # Position size: 25% of capital
     
     # Warmup: need enough data for calculations
-    start_idx = 200  # MA200 needs 200 periods
+    start_idx = 34  # EMA34 needs 34 periods
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(kama_val[i]) or np.isnan(rsi_val[i]) or np.isnan(ma200_1d_aligned[i]):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        kama_val_i = kama_val[i]
-        rsi_val_i = rsi_val[i]
-        ma200 = ma200_1d_aligned[i]
+        r3 = r3_1d_aligned[i]
+        s3 = s3_1d_aligned[i]
+        ema34 = ema34_1d_aligned[i]
+        vol_conf = volume_confirm_aligned[i]
         
         if position == 0:
-            # Long conditions: price above KAMA, RSI > 50, price above 200-day MA
-            if close_val > kama_val_i and rsi_val_i > 50 and close_val > ma200:
-                signals[i] = size
-                position = 1
-                entry_price = close_val
-            # Short conditions: price below KAMA, RSI < 50, price below 200-day MA
-            elif close_val < kama_val_i and rsi_val_i < 50 and close_val < ma200:
-                signals[i] = -size
-                position = -1
-                entry_price = close_val
+            # Determine trend: price vs EMA34 (1d)
+            uptrend = close_val > ema34
+            downtrend = close_val < ema34
+            
+            if uptrend and vol_conf:
+                # Long: break above R3 with volume
+                if close_val > r3:
+                    signals[i] = size
+                    position = 1
+                    entry_price = close_val
+            elif downtrend and vol_conf:
+                # Short: break below S3 with volume
+                if close_val < s3:
+                    signals[i] = -size
+                    position = -1
+                    entry_price = close_val
         elif position == 1:
-            # Exit long: price crosses below KAMA or RSI < 40
-            if close_val < kama_val_i or rsi_val_i < 40:
+            # Exit: price re-enters below R3 or trend reversal
+            if close_val < r3:  # Re-enter below R3
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above KAMA or RSI > 60
-            if close_val > kama_val_i or rsi_val_i > 60:
+            # Exit: price re-enters above S3 or trend reversal
+            if close_val > s3:  # Re-enter above S3
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Direction_RSI_Range_200MA_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
