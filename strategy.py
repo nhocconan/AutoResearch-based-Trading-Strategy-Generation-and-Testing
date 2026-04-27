@@ -36,13 +36,9 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 6h ATR(14) for position sizing (adjust based on volatility)
-    tr1_6h = high - low
-    tr2_6h = np.abs(high - np.roll(close, 1))
-    tr3_6h = np.abs(low - np.roll(close, 1))
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    tr_6h[0] = tr1_6h[0]
-    atr_14_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily volume average for volume spike detection
+    vol_ma_14_1d = pd.Series(volume_1d).rolling(window=14, min_periods=14).mean().values
+    vol_ma_14_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_14_1d)
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -58,7 +54,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(atr_14_6h[i])):
+            np.isnan(vol_ma_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,12 +70,8 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely high volatility periods
         vol_filter = atr_14_1d_aligned[i] > 0 and atr_14_1d_aligned[i] < np.median(atr_14_1d_aligned[:i+1]) * 3
         
-        # Volume filter: above average volume (using 6h volume)
-        vol_ma_14_6h = pd.Series(volume).rolling(window=14, min_periods=14).mean().values
-        if np.isnan(vol_ma_14_6h[i]):
-            signals[i] = 0.0
-            continue
-        vol_spike = volume[i] > vol_ma_14_6h[i]
+        # Volume filter: above average volume
+        vol_spike = volume[i] > vol_ma_14_1d_aligned[i]
         
         # Long conditions: bullish trend + volatility filter + volume spike
         long_condition = (price_above_ema and vol_filter and vol_spike)
@@ -87,19 +79,11 @@ def generate_signals(prices):
         # Short conditions: bearish trend + volatility filter + volume spike
         short_condition = (price_below_ema and vol_filter and vol_spike)
         
-        # Dynamic position sizing based on volatility (inverse volatility scaling)
-        # Higher volatility = smaller position
-        vol_ratio = atr_14_6h[i] / np.median(atr_14_6h[:i+1]) if np.median(atr_14_6h[:i+1]) > 0 else 1.0
-        vol_ratio = np.clip(vol_ratio, 0.5, 2.0)  # Limit the range
-        base_size = 0.25
-        position_size = base_size / vol_ratio  # Inverse scaling
-        position_size = np.clip(position_size, 0.15, 0.35)  # Keep within reasonable bounds
-        
         if long_condition and position <= 0:
-            signals[i] = position_size
+            signals[i] = 0.25
             position = 1
         elif short_condition and position >= 0:
-            signals[i] = -position_size
+            signals[i] = -0.25
             position = -1
         # Exit conditions: trend reversal
         elif position == 1 and not price_above_ema:
@@ -111,14 +95,14 @@ def generate_signals(prices):
         # Hold position
         else:
             if position == 1:
-                signals[i] = position_size
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -position_size
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_DailyEMA34_VolumeFilter_Session_DynamicSize"
-timeframe = "6h"
+name = "4h_DailyEMA34_VolumeFilter_Session"
+timeframe = "4h"
 leverage = 1.0
