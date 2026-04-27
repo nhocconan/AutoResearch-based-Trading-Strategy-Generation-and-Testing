@@ -13,78 +13,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Weekly EMA(50) for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Get daily data for Donchian channel
+    # Get daily data for ATR and Bollinger Bands (volatility regime)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily Donchian channel (20-period)
-    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Daily ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get daily volume average
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    # Get 4h data for Donchian channel (price channel)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # Align weekly EMA to daily timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 4h Donchian(20) channel
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align daily Donchian and volume to daily timeframe (no shift needed as already daily)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Get 1h data for momentum filter
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 14:
+        return np.zeros(n)
+    
+    # 1h RSI(14) for momentum
+    close_1h = df_1h['close'].values
+    delta = np.diff(close_1h, prepend=close_1h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1h = 100 - (100 / (1 + rs))
+    
+    # Align indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital
     
-    # Warmup: need weekly EMA, daily Donchian, and volume data
-    start_idx = max(50, 20, 20)
+    # Warmup: need all indicators
+    start_idx = max(30, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or np.isnan(rsi_1h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        ema_trend = ema50_1w_aligned[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
-        vol_ma_val = vol_ma_1d_aligned[i]
-        vol_current = df_1d['volume'].iloc[i] if i < len(df_1d) else 0
+        atr_val = atr_1d_aligned[i]
+        upper_val = upper_aligned[i]
+        lower_val = lower_aligned[i]
+        rsi_val = rsi_1h_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-day average
-        vol_filter = vol_current > (vol_ma_val * 1.5)
+        # Volatility filter: ATR > 20-period median (high volatility regime)
+        atr_ma = pd.Series(atr_1d_aligned[:i+1]).rolling(window=20, min_periods=20).median().iloc[-1] if i >= 20 else atr_val
+        vol_filter = atr_val > atr_ma
         
         if position == 0:
-            # Long: price breaks above Donchian high with weekly uptrend and volume
-            if close[i] > donch_high_val and close[i] > ema_trend and vol_filter:
+            # Long: price breaks above upper Donchian with RSI > 50 and high volatility
+            if close[i] > upper_val and rsi_val > 50 and vol_filter:
                 signals[i] = size
                 position = 1
-            # Short: price breaks below Donchian low with weekly downtrend and volume
-            elif close[i] < donch_low_val and close[i] < ema_trend and vol_filter:
+            # Short: price breaks below lower Donchian with RSI < 50 and high volatility
+            elif close[i] < lower_val and rsi_val < 50 and vol_filter:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian low or weekly trend turns down
-            if close[i] < donch_low_val or close[i] < ema_trend:
+            # Exit long: price crosses below lower Donchian or RSI < 30
+            if close[i] < lower_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above Donchian high or weekly trend turns up
-            if close[i] > donch_high_val or close[i] > ema_trend:
+            # Exit short: price crosses above upper Donchian or RSI > 70
+            if close[i] > upper_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_WeeklyEMA50_VolumeFilter"
-timeframe = "1d"
+name = "4h_Donchian20_RSI14_ATR_Vol_Filter"
+timeframe = "4h"
 leverage = 1.0
