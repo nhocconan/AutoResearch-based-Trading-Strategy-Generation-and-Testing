@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
+    # Get 1d data for calculations (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -35,8 +35,8 @@ def generate_signals(prices):
     atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: volume > 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
     # Volatility filter: ATR below its 50-period median (low volatility regime)
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_Vol_LowVol_Filter_v4"
-timeframe = "1d"
+name = "4h_EMA34_Vol_LowVol_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
