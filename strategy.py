@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_ChopRegime
-Hypothesis: Camarilla R3/S3 breakouts aligned with 1d trend, volume confirmation, and choppiness regime filter capture sustained moves while avoiding whipsaws. Uses chop > 61.8 for ranging (exit) and chop < 38.2 for trending (entry). Discrete sizing (0.25) limits fee churn. Target: 75-200 total trades over 4 years.
+1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirm_ChopRegime
+Hypothesis: On daily timeframe, Camarilla R3/S3 breakouts aligned with weekly trend, volume confirmation, and choppiness regime filter capture sustained moves while avoiding whipsaws. Uses chop < 38.2 for trending regime (entry allowed) and chop > 61.8 for ranging (exit). Discrete sizing (0.25) limits fee churn. Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
@@ -18,29 +18,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    close_1w_series = pd.Series(close_1w)
+    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from previous 1d bar
+    # Calculate Camarilla R3, S3 levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Camarilla R3, S3 levels: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
     rng_1d = high_1d - low_1d
     camarilla_r3 = close_1d + 1.1 * rng_1d / 2
     camarilla_s3 = close_1d - 1.1 * rng_1d / 2
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align all indicators to primary timeframe (4h)
+    # Align all indicators to primary timeframe (1d)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 2.0 * 24-period average (6h equivalent)
+    # Volume confirmation: current volume > 2.0 * 24-period average (equivalent to 24 * 1h = 1d)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_confirm = volume > (2.0 * vol_avg)
     
@@ -57,13 +59,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # Position size: 25% of capital (discrete level)
     
-    # Warmup: need 1d EMA34 (34), volume avg (24), chop (14)
+    # Warmup: need weekly EMA34 (34), volume avg (24), chop (14)
     start_idx = max(34, 24, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_confirm[i]) or 
             np.isnan(chop_filter[i])):
             signals[i] = 0.0
             continue
@@ -71,7 +73,7 @@ def generate_signals(prices):
         close_val = close[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
-        ema_1d_val = ema_34_1d_aligned[i]
+        ema_1w_val = ema_34_1w_aligned[i]
         vol_conf = volume_confirm[i]
         is_trending = chop_filter[i]
         
@@ -86,9 +88,9 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Determine trend: price relative to 1d EMA34
-            is_uptrend = close_val > ema_1d_val
-            is_downtrend = close_val < ema_1d_val
+            # Determine trend: price relative to weekly EMA34
+            is_uptrend = close_val > ema_1w_val
+            is_downtrend = close_val < ema_1w_val
             
             if is_uptrend:
                 # Uptrend: long when price breaks above R3 and volume confirms
@@ -102,7 +104,7 @@ def generate_signals(prices):
                     position = -1
         elif position == 1:
             # Exit long: price touches S3 (support) or trend changes to downtrend
-            exit_condition = (close_val < s3_val) or (close_val < ema_1d_val)
+            exit_condition = (close_val < s3_val) or (close_val < ema_1w_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -111,7 +113,7 @@ def generate_signals(prices):
                 signals[i] = size
         elif position == -1:
             # Exit short: price touches R3 (resistance) or trend changes to uptrend
-            exit_condition = (close_val > r3_val) or (close_val > ema_1d_val)
+            exit_condition = (close_val > r3_val) or (close_val > ema_1w_val)
             
             if exit_condition:
                 signals[i] = 0.0
@@ -121,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirm_ChopRegime"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirm_ChopRegime"
+timeframe = "1d"
 leverage = 1.0
