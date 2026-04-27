@@ -1,66 +1,75 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R3_S3_Breakout_1dTrend_Volume
-Long when price breaks above weekly R3 with 1d uptrend and volume > 1.5x average.
-Short when price breaks below weekly S3 with 1d downtrend and volume > 1.5x average.
-Exit when price crosses back through weekly pivot point.
-Uses weekly pivot levels for institutional support/resistance targeting 15-25 trades per year.
+12h_WilliamsAlligator_Jaw_Volume
+Long when Alligator Jaw (13-period smoothed median) crosses above Teeth (8-period smoothed median) on 12h with 1w EMA50 uptrend and volume > 1.5x average.
+Short when Jaw crosses below Teeth with 1w EMA50 downtrend and volume > 1.5x average.
+Exit when Jaw crosses back through Teeth.
+Uses Williams Alligator for trend detection with volume confirmation and weekly trend filter.
+Designed for 12h timeframe to capture multi-day trends with minimal trades.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 4:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    close_1w = df_1w['close'].values
     
-    pivot = (high_weekly + low_weekly + close_weekly) / 3.0
-    r1 = 2 * pivot - low_weekly
-    s1 = 2 * pivot - high_weekly
-    r2 = pivot + (high_weekly - low_weekly)
-    s2 = pivot - (high_weekly - low_weekly)
-    r3 = high_weekly + 2 * (pivot - low_weekly)
-    s3 = low_weekly - 2 * (high_weekly - pivot)
-    
-    # Align weekly pivots to 6h
-    pivot_6h = align_htf_to_ltf(prices, df_weekly, pivot)
-    r3_6h = align_htf_to_ltf(prices, df_weekly, r3)
-    s3_6h = align_htf_to_ltf(prices, df_weekly, s3)
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1w EMA50 for trend filter
     ema_period = 50
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1)) + 
-                         ema_1d[i - 1] * (1 - (2 / (ema_period + 1))))
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * (2 / (ema_period + 1)) + 
+                         ema_1w[i - 1] * (1 - (2 / (ema_period + 1))))
     
-    # Align 1d EMA to 6h
-    ema_1d_6h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate Williams Alligator on 12h
+    jaw_period = 13  # Jaw (blue line)
+    teeth_period = 8  # Teeth (red line)
+    jaw_shift = 8    # Jaw shifted by 8 bars
+    teeth_shift = 5  # Teeth shifted by 5 bars
+    
+    # Median price
+    median_price = (high + low) / 2
+    
+    # Smoothed median price (SMMA)
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            result[period - 1] = np.mean(arr[:period])
+            for i in range(period, len(arr)):
+                result[i] = (result[i - 1] * (period - 1) + arr[i]) / period
+        return result
+    
+    jaw_raw = smma(median_price, jaw_period)
+    teeth_raw = smma(median_price, teeth_period)
+    
+    # Apply shifts (Jaw shifted 8 bars forward, Teeth shifted 5 bars forward)
+    jaw = np.full_like(jaw_raw, np.nan)
+    teeth = np.full_like(teeth_raw, np.nan)
+    
+    for i in range(jaw_shift, len(jaw)):
+        jaw[i] = jaw_raw[i - jaw_shift]
+    for i in range(teeth_shift, len(teeth)):
+        teeth[i] = teeth_raw[i - teeth_shift]
+    
+    # Align 1w EMA to 12h timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume MA for confirmation (20-period)
     vol_ma_20 = np.full(n, np.nan)
@@ -71,14 +80,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     size = 0.25   # 25% position size
     
-    # Warmup: need weekly pivots, EMA1d, and volume MA20
-    start_idx = max(19, 4)  # volume MA20 and weekly data
+    # Warmup: need jaw, teeth, EMA1w, and volume MA20
+    start_idx = max(jaw_period + jaw_shift, teeth_period + teeth_shift, ema_period - 1, 19)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(pivot_6h[i]) or np.isnan(r3_6h[i]) or 
-            np.isnan(s3_6h[i]) or np.isnan(ema_1d_6h[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -90,28 +98,28 @@ def generate_signals(prices):
         vol_filter = vol_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price breaks above weekly R3 with 1d uptrend and volume filter
-            if (price > r3_6h[i] and close[i - 1] <= r3_6h[i - 1] and 
-                price > ema_1d_6h[i] and vol_filter):
+            # Long: Jaw crosses above Teeth with 1w EMA50 uptrend and volume filter
+            if (jaw[i] > teeth[i] and jaw[i - 1] <= teeth[i - 1] and 
+                price > ema_1w_aligned[i] and vol_filter):
                 signals[i] = size
                 position = 1
-            # Short: price breaks below weekly S3 with 1d downtrend and volume filter
-            elif (price < s3_6h[i] and close[i - 1] >= s3_6h[i - 1] and 
-                  price < ema_1d_6h[i] and vol_filter):
+            # Short: Jaw crosses below Teeth with 1w EMA50 downtrend and volume filter
+            elif (jaw[i] < teeth[i] and jaw[i - 1] >= teeth[i - 1] and 
+                  price < ema_1w_aligned[i] and vol_filter):
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back below weekly pivot
-            if price < pivot_6h[i] and close[i - 1] >= pivot_6h[i - 1]:
+            # Exit long: Jaw crosses below Teeth
+            if jaw[i] < teeth[i] and jaw[i - 1] >= teeth[i - 1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses back above weekly pivot
-            if price > pivot_6h[i] and close[i - 1] <= pivot_6h[i - 1]:
+            # Exit short: Jaw crosses above Teeth
+            if jaw[i] > teeth[i] and jaw[i - 1] <= teeth[i - 1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_Jaw_Volume"
+timeframe = "12h"
 leverage = 1.0
