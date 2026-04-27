@@ -3,11 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Choppiness Index regime filter with 1-week EMA34 trend and volume confirmation.
-# Long when: CHOP > 61.8 (ranging market) + price near lower Bollinger Band + EMA34 rising + volume spike.
-# Short when: CHOP > 61.8 + price near upper Bollinger Band + EMA34 falling + volume spike.
-# Exit when: CHOP < 38.2 (trending market) or opposite signal.
-# Designed for ~10-25 trades/year per symbol to avoid fee drag in low-volatility regimes.
+# Hypothesis: 12h Choppiness Index with 1d EMA trend filter and volume spike.
+# Choppiness Index (CHOP) measures market choppiness vs trending.
+# CHOP > 61.8 = ranging market (mean reversion opportunity)
+# CHOP < 38.2 = trending market (trend following)
+# Strategy: In ranging markets (CHOP > 61.8), buy near support (low of day) and sell near resistance (high of day)
+# In trending markets (CHOP < 38.2), follow 1d EMA trend with pullback entries
+# Volume spike confirms institutional participation in both regimes.
+# Designed for ~20-30 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,77 +22,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Choppiness Index (14-period)
-    atr14 = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean()
-    sum_atr14 = atr14.rolling(window=14, min_periods=14).sum()
-    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(sum_atr14 / (highest_high14 - lowest_low14)) / np.log10(14)
-    chop = chop.values
+    # Choppiness Index calculation
+    # ATR component
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Bollinger Bands (20, 2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    lower_bb = sma20 - 2 * std20
-    upper_bb = sma20 + 2 * std20
-    lower_bb = lower_bb.values
-    upper_bb = upper_bb.values
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # 1-week EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # High-Low range over period
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    hl_range = highest_high - lowest_low
+    
+    # Avoid division by zero
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
+    
+    chop = 100 * np.log10(atr_sum / hl_range) / np.log10(14)
+    
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Volume filter: volume > 2x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_filter = volume > (vol_ma20 * 2.0)
-    vol_ma20 = vol_ma20.values
+    close_1d = df_1d['close'].values
+    # 34-period EMA on 1d close for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Get daily high/low for support/resistance levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(chop[i]) or np.isnan(lower_bb[i]) or np.isnan(upper_bb[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(chop[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: ranging market (CHOP > 61.8), price near lower BB, EMA34 rising, volume spike
-        if (chop[i] > 61.8 and 
-            close[i] <= lower_bb[i] * 1.02 and  # within 2% of lower BB
-            ema34_1w_aligned[i] > ema34_1w_aligned[i-1] and  # EMA rising
-            volume_filter[i]):
-            signals[i] = 0.25
-            position = 1
-        # Short conditions: ranging market, price near upper BB, EMA34 falling, volume spike
-        elif (chop[i] > 61.8 and 
-              close[i] >= upper_bb[i] * 0.98 and  # within 2% of upper BB
-              ema34_1w_aligned[i] < ema34_1w_aligned[i-1] and  # EMA falling
-              volume_filter[i]):
-            signals[i] = -0.25
-            position = -1
-        # Exit conditions: trending market (CHOP < 38.2) or opposite signal
-        elif chop[i] < 38.2:
-            signals[i] = 0.0
-            position = 0
-        else:
-            # Hold current position
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
+        # Chop > 61.8 = ranging market (mean reversion)
+        # Chop < 38.2 = trending market (trend following)
+        if chop[i] > 61.8:  # Ranging market
+            # Buy near support (low of day), sell near resistance (high of day)
+            if close[i] <= low_1d_aligned[i] * 1.002 and close[i] >= low_1d_aligned[i] * 0.998:  # Near support
+                if close[i] > ema34_1d_aligned[i] and volume_filter[i]:  # Only long in uptrend
+                    signals[i] = 0.25
+                    position = 1
+            elif close[i] >= high_1d_aligned[i] * 0.998 and close[i] <= high_1d_aligned[i] * 1.002:  # Near resistance
+                if close[i] < ema34_1d_aligned[i] and volume_filter[i]:  # Only short in downtrend
+                    signals[i] = -0.25
+                    position = -1
+        else:  # Trending market (chop < 38.2) or neutral
+            # Follow 1d EMA trend with pullback entries
+            if close[i] > ema34_1d_aligned[i] and volume_filter[i]:  # Uptrend
+                # Buy on pullback to EMA
+                if close[i] <= ema34_1d_aligned[i] * 1.01 and close[i] >= ema34_1d_aligned[i] * 0.99:
+                    signals[i] = 0.25
+                    position = 1
+            elif close[i] < ema34_1d_aligned[i] and volume_filter[i]:  # Downtrend
+                # Sell on rally to EMA
+                if close[i] >= ema34_1d_aligned[i] * 0.99 and close[i] <= ema34_1d_aligned[i] * 1.01:
+                    signals[i] = -0.25
+                    position = -1
             else:
-                signals[i] = 0.0
+                # Hold current position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
     
     return signals
 
-name = "1d_ChoppinessIndex_1wEMA34_VolumeFilter_BB"
-timeframe = "1d"
+name = "12h_ChoppinessIndex_1dEMA34_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
