@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_PriceAction_Reversal_at_DailyPivots
-Hypothesis: Price reversals at daily pivot points (PP, R1, S1) with volume exhaustion and 1d trend filter capture mean-reversion moves in ranging markets and pullbacks in trends. Works in both bull (sell at resistance) and bear (buy at support) markets. Target: 15-30 trades/year per symbol.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h chart with Camarilla R3/S3 breakouts, confirmed by 1d trend and volume spikes, captures institutional moves while minimizing overtrading. Works in bull/bear via trend filter.
 """
 
 import numpy as np
@@ -18,34 +18,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot levels and trend
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
+    # 1d EMA34 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Daily pivot points from previous day
-    high_prev = df_1d['high'].values
-    low_prev = df_1d['low'].values
-    close_prev = df_1d['close'].values
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pivot Point (PP), Resistance 1 (R1), Support 1 (S1)
-    PP = (high_prev + low_prev + close_prev) / 3
-    R1 = 2 * PP - low_prev
-    S1 = 2 * PP - high_prev
+    # Camarilla R3, S3 levels: H/L from previous day
+    R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align to 6h timeframe (previous day's pivots available at open)
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align to 12h timeframe (previous day's levels available at open)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume exhaustion: current volume < 50% of 20-period average
+    # Volume spike detection (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_exhaustion = volume < (vol_ma * 0.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,36 +53,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(PP_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price at or below S1 with volume exhaustion and above 1d EMA50 (buy pullback in uptrend)
-            if (close[i] <= S1_aligned[i] and volume_exhaustion[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long: price breaks above R3 with volume spike and uptrend on 1d
+            if (close[i] > R3_aligned[i] and volume_spike[i] and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price at or above R1 with volume exhaustion and below 1d EMA50 (sell rally in downtrend)
-            elif (close[i] >= R1_aligned[i] and volume_exhaustion[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: price breaks below S3 with volume spike and downtrend on 1d
+            elif (close[i] < S3_aligned[i] and volume_spike[i] and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price reaches PP or trend fails
-            if (close[i] >= PP_aligned[i] or 
-                close[i] < ema50_1d_aligned[i]):
+            # Long exit: price returns below S3 or trend fails
+            if (close[i] < S3_aligned[i] or 
+                close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches PP or trend fails
-            if (close[i] <= PP_aligned[i] or 
-                close[i] > ema50_1d_aligned[i]):
+            # Short exit: price returns above R3 or trend fails
+            if (close[i] > R3_aligned[i] or 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_PriceAction_Reversal_at_DailyPivots"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
