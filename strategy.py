@@ -1,10 +1,8 @@
-# %pip install git+https://github.com/ta-lib/ta-lib-python.git
-
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 4h Vortex indicator for trend direction + 1d volume spike filter.
-Vortex captures trend strength and direction, effective in both bull and bear markets.
-Volume > 2x average confirms trend strength. Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
+Hypothesis: 4h strategy using 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+Breakouts aligned with daily EMA50 trend (bullish above, bearish below) tend to continue in both bull and bear markets.
+Volume > 1.7x average confirms breakout strength. Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
 Target: 20-50 trades/year (80-200 over 4 years). Includes ATR-based stoploss to limit drawdown.
 """
 
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,105 +20,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume spike filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d average volume (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(vol_1d), np.nan)
-    for i in range(20, len(vol_1d)):
-        vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
+    # Calculate EMA50 on 1d close
+    close_1d = df_1d['close'].values
+    ema_50 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[:50])  # SMA seed
+        multiplier = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema_50[i] = (close_1d[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
     
-    # Align 1d volume average to 4h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Align 1d EMA50 to 4h timeframe (waits for 1d bar close)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate Vortex indicator on 4h data
-    # True Range
+    # Calculate 20-period Donchian channels on 4h data
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
+    
+    # 20-period average volume for spike detection
+    vol_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    
+    # ATR for stoploss
+    atr_period = 14
     tr = np.zeros(n)
+    atr = np.full(n, np.nan)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Vortex components
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = 0
-    vm_minus[0] = 0
-    
-    # Sum over 14 periods
-    period = 14
-    sum_tr = np.full(n, np.nan)
-    sum_vm_plus = np.full(n, np.nan)
-    sum_vm_minus = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        sum_tr[i] = np.sum(tr[i-period+1:i+1])
-        sum_vm_plus[i] = np.sum(vm_plus[i-period+1:i+1])
-        sum_vm_minus[i] = np.sum(vm_minus[i-period+1:i+1])
-    
-    # VI+ and VI-
-    vi_plus = np.full(n, np.nan)
-    vi_minus = np.full(n, np.nan)
-    for i in range(period, n):
-        if sum_tr[i] > 0:
-            vi_plus[i] = sum_vm_plus[i] / sum_tr[i]
-            vi_minus[i] = sum_vm_minus[i] / sum_tr[i]
-    
-    # ATR for stoploss
-    atr = np.full(n, np.nan)
-    for i in range(period, n):
-        if i == period:
-            atr[i] = np.mean(tr[1:period+1])
+    for i in range(atr_period, n):
+        if i == atr_period:
+            atr[i] = np.mean(tr[1:atr_period+1])
         else:
-            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
     signals = np.zeros(n)
     position = 0
     size = 0.25  # 25% position size
     
-    # Warmup: need 14 for Vortex/ATR, 20 for 1d volume
-    start_idx = max(period, 20)
+    # Warmup: need 20 for Donchian, 20 for volume, 50 for EMA50 seed
+    start_idx = max(lookback, vol_period, 50)
     
     for i in range(start_idx, n):
-        if (np.isnan(vi_plus[i]) or
-            np.isnan(vi_minus[i]) or
-            np.isnan(vol_ma_1d_aligned[i]) or
+        if (np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ma[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_1d_aligned[i] if vol_ma_1d_aligned[i] > 0 else 0
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Determine trend from Vortex: VI+ > VI- = bullish, VI- > VI+ = bearish
-        bullish = vi_plus[i] > vi_minus[i]
-        bearish = vi_minus[i] > vi_plus[i]
+        # Determine trend from 1d EMA50
+        bullish = price > ema_50_aligned[i]
+        bearish = price < ema_50_aligned[i]
         
-        # Volume confirmation: > 2x average daily volume
-        volume_confirmation = vol_ratio > 2.0
+        # Volume confirmation: > 1.7x average volume
+        volume_confirmation = vol_ratio > 1.7
         
         if position == 0:
-            # Long entry: bullish Vortex + volume confirmation
-            if bullish and volume_confirmation:
+            # Long breakout: price breaks above Donchian high in bullish trend with volume
+            if bullish and price > highest_high[i] and volume_confirmation:
                 signals[i] = size
                 position = 1
-            # Short entry: bearish Vortex + volume confirmation
-            elif bearish and volume_confirmation:
+            # Short breakdown: price breaks below Donchian low in bearish trend with volume
+            elif bearish and price < lowest_low[i] and volume_confirmation:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: bearish Vortex or stoploss hit
-            if bearish or price < (entry_price - 2.0 * atr[i]):
+            # Long exit: price breaks below Donchian low or trend turns bearish or stoploss hit
+            if price < lowest_low[i] or bearish or price < (entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: bullish Vortex or stoploss hit
-            if bullish or price > (entry_price + 2.0 * atr[i]):
+            # Short exit: price breaks above Donchian high or trend turns bullish or stoploss hit
+            if price > highest_high[i] or bullish or price > (entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Vortex_1dVolumeSpike"
+name = "4h_Donchian20_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
