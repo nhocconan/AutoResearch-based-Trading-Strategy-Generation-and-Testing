@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_HT
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1-week EMA50 trend filter and volume confirmation.
-Designed for 12h timeframe targeting 50-150 total trades over 4 years.
-Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets:
-In trending regimes (price > weekly EMA50 for longs, < weekly EMA50 for shorts),
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA34 trend filter and volume confirmation.
+Designed for 4h timeframe targeting 75-200 total trades over 4 years.
+In trending regimes (price > EMA34 for longs, < EMA34 for shorts),
 breakouts at R3/S3 with volume spike capture strong momentum continuations.
-Exit on trend reversal (close crosses weekly EMA50).
+Exit on trend reversal (close crosses EMA34).
+Works in bull/bear markets by requiring trend alignment.
 """
 
 import numpy as np
@@ -23,8 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter and 1d for Camarilla
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla and EMA
     df_1d = get_htf_data(prices, '1d')
     
     # Camarilla levels from previous 1d bar (completed)
@@ -35,13 +34,13 @@ def generate_signals(prices):
     r3 = prev_close + (rng * 1.1 / 4)
     s3 = prev_close - (rng * 1.1 / 4)
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 1-week EMA50 trend filter
-    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # 1d EMA34 trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Volume spike: current > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,24 +51,24 @@ def generate_signals(prices):
     entry_price = 0.0
     size = 0.25  # Discrete size to reduce fee churn
     
-    # Warmup: need 1d shift (1), 1w EMA50 (50), vol avg (20)
-    start_idx = max(30, 50, 20)
+    # Warmup: need 1d shift, EMA34, vol avg
+    start_idx = max(30, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
-        ema_val = ema_50_aligned[i]
+        ema_val = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Look for entry: Camarilla R3/S3 breakout with weekly EMA alignment and volume spike
+            # Look for entry: Camarilla R3/S3 breakout with EMA alignment and volume spike
             long_condition = (close_val > r3_val and 
                             close_val > ema_val and 
                             vol_spike)
@@ -86,7 +85,7 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close_val
         elif position == 1:
-            # Exit long: price crosses below weekly EMA50 (trend reversal)
+            # Exit long: price crosses below EMA34 (trend reversal)
             if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -94,7 +93,7 @@ def generate_signals(prices):
             else:
                 signals[i] = size
         elif position == -1:
-            # Exit short: price crosses above weekly EMA50 (trend reversal)
+            # Exit short: price crosses above EMA34 (trend reversal)
             if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
@@ -104,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_HT"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
