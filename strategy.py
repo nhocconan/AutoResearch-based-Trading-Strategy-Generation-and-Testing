@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,15 +15,15 @@ def generate_signals(prices):
     
     # Get 1d data for calculations (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
+    # 1d EMA200 for long-term trend
     close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d = close_1d.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 1d ATR(14) for volatility
+    # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_arr = df_1d['close'].values
@@ -35,36 +35,36 @@ def generate_signals(prices):
     atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Volume filter: volume > 2x 50-period average (stricter to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    # 60-period median of ATR for volatility regime filter (use 1d ATR)
+    atr_median = pd.Series(atr14_1d_aligned).rolling(window=60, min_periods=14).median().values
+    vol_filter = atr14_1d_aligned < atr_median  # low volatility regime
     
-    # Volatility filter: ATR below its 100-period median (low volatility regime)
-    atr_median = pd.Series(atr14_1d_aligned).rolling(window=100, min_periods=14).median().values
-    vol_filter = atr14_1d_aligned < atr_median
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(atr_median[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above EMA50 + volume filter + low volatility
-            if (close[i] > ema50_1d_aligned[i] and 
+            # Long: price above EMA200 + volume filter + low volatility
+            if (close[i] > ema200_1d_aligned[i] and 
                 volume_filter[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA50 + volume filter + low volatility
-            elif (close[i] < ema50_1d_aligned[i] and 
+            # Short: price below EMA200 + volume filter + low volatility
+            elif (close[i] < ema200_1d_aligned[i] and 
                   volume_filter[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
@@ -72,15 +72,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: price crosses below EMA50 (trend change)
-            if close[i] < ema50_1d_aligned[i]:
+            # Long exit: price crosses below EMA200 (trend change)
+            if close[i] < ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above EMA50 (trend change)
-            if close[i] > ema50_1d_aligned[i]:
+            # Short exit: price crosses above EMA200 (trend change)
+            if close[i] > ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_Vol_LowVol_Filter_v1"
-timeframe = "1d"
+name = "6h_EMA200_Vol_LowVol_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
