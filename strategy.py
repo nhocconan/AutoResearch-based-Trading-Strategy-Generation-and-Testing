@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,20 +18,18 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d Close prices for calculations
-    close_1d = df_1d['close'].values
-    
     # 1d EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    close_1d = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # 1d ATR(14) for volatility
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
@@ -90,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_Vol_LowVol_Filter_v1"
-timeframe = "4h"
+name = "6h_EMA34_Vol_LowVol_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
