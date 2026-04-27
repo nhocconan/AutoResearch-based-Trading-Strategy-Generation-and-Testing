@@ -13,51 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations (called ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 12h data for calculations (called ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility filter (vectorized)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h Donchian channels (20-period high/low)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    # Calculate rolling max/min with proper handling
+    donchian_high = np.full(len(high_12h), np.nan)
+    donchian_low = np.full(len(low_12h), np.nan)
     
-    atr_14 = np.full(len(close_1d), np.nan)
-    if len(tr) >= 14:
-        # Wilder's smoothing
-        atr_14[13] = np.mean(tr[1:14])  # First ATR
-        for i in range(14, len(tr)):
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    for i in range(19, len(high_12h)):  # 20-period window
+        donchian_high[i] = np.max(high_12h[i-19:i+1])
+        donchian_low[i] = np.min(low_12h[i-19:i+1])
     
-    # Calculate previous day's OHLC for Camarilla (avoid look-ahead)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
+        alpha = 2 / (50 + 1)
+        ema_50_12h[0] = close_12h[0]
+        for i in range(1, len(close_12h)):
+            ema_50_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_50_12h[i-1]
     
-    # Camarilla R3 and S3 calculation (tighter levels)
-    range_hl = prev_high - prev_low
-    camarilla_factor = range_hl * 1.1 / 4
-    r3 = prev_close + camarilla_factor
-    s3 = prev_close - camarilla_factor
+    # Align 12h indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align daily indicators to 12h timeframe
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate 2-period volume average for spike detection (12h x 2 = 1 day)
+    # Calculate 4-period volume average for spike detection
     vol_ma = np.full(n, np.nan)
-    vol_period = 2
+    vol_period = 4
     for i in range(vol_period, n):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
@@ -66,44 +55,41 @@ def generate_signals(prices):
     size = 0.25
     
     # Warmup period
-    start_idx = max(14, vol_period) + 2
+    start_idx = max(19, vol_period) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
-        # Volume spike filter: at least 1.8x average volume (stricter to reduce trades)
-        vol_filter = vol_ratio > 1.8
-        
-        # Volatility filter: only trade when ATR is above average (avoid low volatility whipsaws)
-        vol_filter_2 = atr_14_1d_aligned[i] > np.nanmedian(atr_14_1d_aligned[max(0, i-50):i]) if i >= 50 else True
+        # Volume spike filter: at least 1.5x average volume
+        vol_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: Price breaks above R3 with volume and volatility
-            if price > r3_aligned[i] and vol_filter and vol_filter_2:
+            # Long: Price breaks above Donchian high with volume and above 12h EMA50
+            if price > donchian_high_aligned[i] and vol_filter and price > ema_50_12h_aligned[i]:
                 signals[i] = size
                 position = 1
-            # Short: Price breaks below S3 with volume and volatility
-            elif price < s3_aligned[i] and vol_filter and vol_filter_2:
+            # Short: Price breaks below Donchian low with volume and below 12h EMA50
+            elif price < donchian_low_aligned[i] and vol_filter and price < ema_50_12h_aligned[i]:
                 signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price closes below S3
-            if price < s3_aligned[i]:
+            # Long exit: Price closes below Donchian low or below 12h EMA50
+            if price < donchian_low_aligned[i] or price < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = size
         elif position == -1:
-            # Short exit: Price closes above R3
-            if price > r3_aligned[i]:
+            # Short exit: Price closes above Donchian high or above 12h EMA50
+            if price > donchian_high_aligned[i] or price > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dATR14_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
