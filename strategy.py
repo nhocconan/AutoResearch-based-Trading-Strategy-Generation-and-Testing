@@ -13,7 +13,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR-based volatility filter
+    # Get weekly data for trend context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Get daily data for 6h chart alignment
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -22,63 +31,24 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on daily
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14 = np.zeros_like(close_1d)
-    atr14[14] = np.mean(tr[1:15])
-    for i in range(15, len(tr)):
-        atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
+    # Calculate weekly EMA(21) for trend filter
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # ATR-based volatility filter: only trade when volatility is elevated
-    atr_ma = np.zeros_like(atr14)
-    for i in range(len(atr_ma)):
-        if i < 10:
-            atr_ma[i] = np.nan
-        else:
-            atr_ma[i] = np.mean(atr14[max(0, i-9):i+1])
-    vol_filter = atr14 > atr_ma  # Trade when current ATR > 10-period MA of ATR
+    # Calculate daily Donchian(20) channels
+    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align volatility filter to 4h
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter.astype(float))
+    # Align weekly EMA to 6h timeframe
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    # Calculate 4-period RSI on 4h for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align daily Donchian to 6h timeframe
+    high_max_20_aligned = align_htf_to_ltf(prices, df_1d, high_max_20)
+    low_min_20_aligned = align_htf_to_ltf(prices, df_1d, low_min_20)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[3] = np.mean(gain[1:4])
-    avg_loss[3] = np.mean(loss[1:4])
+    # Calculate average volume over 10 periods
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
-    for i in range(4, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 3 + gain[i]) / 4
-        avg_loss[i] = (avg_loss[i-1] * 3 + loss[i]) / 4
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate 20-period SMA for trend filter
-    sma20 = np.zeros_like(close)
-    for i in range(len(sma20)):
-        if i < 19:
-            sma20[i] = np.nan
-        else:
-            sma20[i] = np.mean(close[i-19:i+1])
-    
-    # Mean reversion signals: RSI extremes with trend filter
-    rsi_oversold = rsi < 30
-    rsi_overbought = rsi > 70
-    uptrend = close > sma20
-    downtrend = close < sma20
-    
-    long_signal = rsi_oversold & uptrend
-    short_signal = rsi_overbought & downtrend
-    
-    # Combine with volatility filter and session
+    # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
@@ -86,13 +56,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(sma20[i]) or
-            np.isnan(vol_filter_aligned[i])):
+        if (np.isnan(ema21_1w_aligned[i]) or 
+            np.isnan(high_max_20_aligned[i]) or
+            np.isnan(low_min_20_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -101,18 +72,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when volatility is elevated
-        if not vol_filter_aligned[i]:
-            signals[i] = 0.0
-            continue
+        # Trend filter: price above/below weekly EMA21
+        uptrend = close[i] > ema21_1w_aligned[i]
+        downtrend = close[i] < ema21_1w_aligned[i]
         
-        # Entry conditions
-        long_entry = long_signal[i]
-        short_entry = short_signal[i]
+        # Volume filter: current volume above average
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Exit conditions: RSI returns to neutral zone
-        long_exit = rsi[i] >= 50
-        short_exit = rsi[i] <= 50
+        # Breakout conditions: price breaks daily Donchian(20) with volume and weekly trend
+        long_breakout = close[i] > high_max_20_aligned[i]
+        short_breakout = close[i] < low_min_20_aligned[i]
+        
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
+        
+        # Exit conditions: price returns to opposite Donchian band or trend reverses
+        long_exit = close[i] < low_min_20_aligned[i] or not uptrend
+        short_exit = close[i] > high_max_20_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -137,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_MeanReversion_VolatilityFilter"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyEMA21_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
