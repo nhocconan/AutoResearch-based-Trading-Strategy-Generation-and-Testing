@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Breakouts of daily Camarilla R3/S3 levels with 12-hour EMA trend filter and volume spike confirmation.
-Targets 12-37 trades/year by requiring volume > 2x 20-period average and clear trend alignment.
-Works in bull markets (buy R3 breakouts in uptrend) and bear markets (sell S3 breakdowns in downtrend).
-Uses proper daily pivots (not weekly) to match 12h timeframe and reduce noise.
+4h_InsideBar_Breakout_1dTrend_VolumeFilter
+Hypothesis: Inside bars on 4h indicate consolidation. Breakouts of inside bar high/low with 1-day EMA trend filter and volume spike capture explosive moves in both bull and bear markets. Inside bar reduces false breakouts, and volume filter ensures momentum. Targets 20-40 trades/year.
 """
 
 import numpy as np
@@ -21,32 +18,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    # Inside bar detection: current high < previous high AND current low > previous low
+    inside_bar = (high < np.roll(high, 1)) & (low > np.roll(low, 1))
     
-    # Camarilla formulas:
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    camarilla_r3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
+    # Inside bar high and low (use previous bar's high/low as the inside bar boundaries)
+    inside_high = np.roll(high, 1)
+    inside_low = np.roll(low, 1)
     
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align inside bar levels to current timeframe (they are already 4h, no need to align from HTF)
+    # But we need to ensure we use the inside bar from the bar that just closed
+    inside_high_aligned = inside_high  # already at 4h resolution
+    inside_low_aligned = inside_low
     
-    # Volume confirmation: >2x 20-period MA
+    # Volume confirmation: >1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,9 +51,9 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(inside_high_aligned[i]) or
+            np.isnan(inside_low_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -67,20 +61,20 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_r3 = close[i] > camarilla_r3_aligned[i]
-        breakdown_s3 = close[i] < camarilla_s3_aligned[i]
+        # Breakout conditions: break of inside bar high/low
+        breakout_high = close[i] > inside_high_aligned[i]
+        breakdown_low = close[i] < inside_low_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
         # Entry logic: breakout in direction of trend with volume
-        long_entry = vol_confirm and uptrend and breakout_r3
-        short_entry = vol_confirm and downtrend and breakdown_s3
+        long_entry = vol_confirm and uptrend and breakout_high
+        short_entry = vol_confirm and downtrend and breakdown_low
         
         # Exit logic: opposite breakout or trend change
-        long_exit = breakdown_s3 or (not uptrend)
-        short_exit = breakout_r3 or (not downtrend)
+        long_exit = breakdown_low or (not uptrend)
+        short_exit = breakout_high or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -105,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_InsideBar_Breakout_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
