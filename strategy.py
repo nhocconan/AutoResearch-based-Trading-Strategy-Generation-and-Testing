@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,26 +13,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for HTF context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data once for HTF context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly high/low/close for pivot calculations
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily high/low/close for calculations
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly range for pivot calculations
-    weekly_range = high_1w - low_1w
+    # Calculate daily range for pivot calculations
+    daily_range = high_1d - low_1d
     
-    # Camarilla pivot levels (based on previous week)
-    camarilla_r4 = close_1w + weekly_range * 1.1 / 2
-    camarilla_s4 = close_1w - weekly_range * 1.1 / 2
+    # Camarilla pivot levels (based on previous day)
+    camarilla_r4 = close_1d + daily_range * 1.1 / 2
+    camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align Camarilla levels to daily timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # Align Camarilla levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,7 +43,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -68,20 +68,20 @@ def generate_signals(prices):
         vol_filter = volume[i] > vol_ma[i]
         
         # Entry conditions: 
-        # Long: price breaks above weekly R4 with volume
-        # Short: price breaks below weekly S4 with volume
+        # Long: price breaks above daily R4 with volume
+        # Short: price breaks below daily S4 with volume
         long_entry = (close[i] > r4_aligned[i]) and vol_filter
         short_entry = (close[i] < s4_aligned[i]) and vol_filter
         
-        # Exit conditions: price returns to opposite weekly S4/R4 levels
+        # Exit conditions: price returns to opposite daily S4/R4 levels
         long_exit = (close[i] < s4_aligned[i])
         short_exit = (close[i] > r4_aligned[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -92,14 +92,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyCamarilla_R4S4_Breakout_Volume_Session"
-timeframe = "1d"
+name = "12h_Camarilla_R4S4_Breakout_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
