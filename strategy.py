@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_Breakout_Trend_Filter
-Hypothesis: Weekly pivot points (R2/S2) on daily chart provide strong support/resistance.
-Breakouts above R2 or below S2 with volume confirmation and trend alignment (using 200-day EMA)
-capture significant moves in both bull and bear markets. Uses weekly pivot calculation for
-higher timeframe structure. Designed for low-frequency, high-quality trades (target: 10-20/year)
-to minimize fee drag while capturing sustained trends.
+4h_21HMA_Trend_BollingerBreakout_12hVolume
+Hypothesis: Use 21-period Hull Moving Average on 4h for trend direction, breakout from Bollinger Bands on 4h for entry, 
+and volume spike on 12h as confirmation. Designed to work in both bull and bear markets by following the trend 
+with volatility-based entries and volume confirmation to avoid false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean()
+    wma_full = pd.Series(series).ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma_half - wma_full
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
+    return hma.values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:  # Need sufficient data for 200 EMA
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,65 +32,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h and 12h data
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
+    
+    if len(df_4h) < 30 or len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from previous week
-    # Use previous week's high, low, close
-    prev_week_high = df_1d['high'].rolling(window=5, min_periods=5).max().shift(5).values
-    prev_week_low = df_1d['low'].rolling(window=5, min_periods=5).min().shift(5).values
-    prev_week_close = df_1d['close'].rolling(window=5, min_periods=5).last().shift(5).values
+    # Calculate 21-period HMA on 4h close
+    hma_21_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_21_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_21_4h)
     
-    # Weekly pivot point (P)
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    # Weekly R2 and S2
-    R2 = pivot + (prev_week_high - prev_week_low)
-    S2 = pivot - (prev_week_high - prev_week_low)
+    # Calculate Bollinger Bands on 4h (20-period, 2 std dev)
+    sma_20_4h = pd.Series(df_4h['close']).rolling(window=20, min_periods=20).mean().values
+    std_20_4h = pd.Series(df_4h['close']).rolling(window=20, min_periods=20).std().values
+    upper_bb_4h = sma_20_4h + (2 * std_20_4h)
+    lower_bb_4h = sma_20_4h - (2 * std_20_4h)
+    upper_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h)
+    lower_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h)
     
-    # 200-day EMA for trend filter
-    ema_200 = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align weekly pivot data to daily
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    # Calculate volume spike on 12h (current volume > 2.0x 20-period average)
+    vol_ma_20_12h = pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).mean().values
+    volume_spike_12h = df_12h['volume'].values > (vol_ma_20_12h * 2.0)
+    volume_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 250  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or 
-            np.isnan(ema_200_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(hma_21_4h_aligned[i]) or np.isnan(upper_bb_4h_aligned[i]) or 
+            np.isnan(lower_bb_4h_aligned[i]) or np.isnan(volume_spike_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price > EMA200 = bullish bias, < EMA200 = bearish bias
-        bullish_bias = close[i] > ema_200_aligned[i]
-        bearish_bias = close[i] < ema_200_aligned[i]
+        # Trend filter: price above/below HMA
+        price_above_hma = close[i] > hma_21_4h_aligned[i]
+        price_below_hma = close[i] < hma_21_4h_aligned[i]
+        
+        # Bollinger Band breakout conditions
+        breakout_above = close[i] > upper_bb_4h_aligned[i]
+        breakout_below = close[i] < lower_bb_4h_aligned[i]
+        
+        # Volume confirmation
+        vol_spike = volume_spike_12h_aligned[i]
         
         # Entry conditions
-        # Long: price breaks above R2 + bullish bias + volume surge
-        long_entry = (close[i] > R2_aligned[i] and 
-                     bullish_bias and 
-                     volume_surge[i])
+        long_entry = breakout_above and price_above_hma and vol_spike
+        short_entry = breakout_below and price_below_hma and vol_spike
         
-        # Short: price breaks below S2 + bearish bias + volume surge
-        short_entry = (close[i] < S2_aligned[i] and 
-                      bearish_bias and 
-                      volume_surge[i])
-        
-        # Exit on opposite pivot level
-        long_exit = close[i] < S2_aligned[i]
-        short_exit = close[i] > R2_aligned[i]
+        # Exit conditions: opposite Bollinger Band touch
+        long_exit = close[i] < lower_bb_4h_aligned[i]
+        short_exit = close[i] > upper_bb_4h_aligned[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -89,11 +94,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
+            signals[i] = 0.0  # Exit to flat
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+            signals[i] = 0.0  # Exit to flat
+            position = 0
         else:
             # Hold current position
             if position == 1:
@@ -105,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "4h_21HMA_Trend_BollingerBreakout_12hVolume"
+timeframe = "4h"
 leverage = 1.0
