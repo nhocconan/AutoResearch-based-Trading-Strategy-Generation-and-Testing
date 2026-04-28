@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla R3/S3 levels with 1d EMA50 trend filter and volume confirmation.
-# Enter long when price breaks above 1d Camarilla R3 level with volume > 2.0x average and close > 1d EMA50 (bullish bias).
-# Enter short when price breaks below 1d Camarilla S3 level with volume > 2.0x average and close < 1d EMA50 (bearish bias).
-# Exit when price returns to the 1d Camarilla midpoint (P) or opposite level (S3 for long exit, R3 for short exit).
-# Uses Camarilla structure for pivot points, higher timeframe EMA for trend filter, and volume for confirmation.
-# Works in bull markets (breakouts continue up with trend) and bear markets (breakdowns continue down with trend).
-# Uses discrete position sizing (0.25) to control risk. Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume confirmation.
+# Enter long when price breaks above 20-bar Donchian high with volume > 1.5x average and 1d ATR(14) < 0.03*close (low volatility breakout).
+# Enter short when price breaks below 20-bar Donchian low with volume > 1.5x average and 1d ATR(14) < 0.03*close.
+# Exit when price returns to the 20-bar Donchian midpoint or opposite band touched.
+# Uses Donchian structure for breakouts, volatility filter to avoid choppy markets, and volume for confirmation.
+# Works in bull markets (breakouts continue up) and bear markets (breakdowns continue down).
+# Uses discrete position sizing (0.25) to control risk. Target: 75-200 total trades over 4 years.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dATR_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,76 +25,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and EMA50 trend filter (HTF)
+    # Get 1d data for ATR filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (using previous day's OHLC)
+    # Calculate 1d ATR(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
     
-    # True range for Camarilla calculation
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - close_1d)
-    tr3 = np.abs(low_1d - close_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first bar TR
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(true_range).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Camarilla levels (based on previous day's close and range)
-    camarilla_pivot = close_1d  # Pivot is previous close
-    camarilla_range = high_1d - low_1d
+    # Calculate 4h Donchian(20) channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # R3 and S3 levels
-    r3 = camarilla_pivot + camarilla_range * 1.1 / 4
-    s3 = camarilla_pivot - camarilla_range * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 12h volume confirmation: >2.0x 20-bar average volume
+    # Calculate 4h volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
+    
+    # Volatility filter: 1d ATR < 3% of price (low volatility breakout)
+    vol_filter = atr_14_1d_aligned < 0.03 * close
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure sufficient history for indicators
+    start_idx = 40  # Ensure sufficient history for Donchian(20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(volume_ma_20[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
+        # Conditions
         vol_confirm = volume_confirm[i]
+        vol_filt = vol_filter[i]
         
-        # Trend filter: 1d EMA50 bias
-        bullish_bias = close[i] > ema_50_1d_aligned[i]
-        bearish_bias = close[i] < ema_50_1d_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high[i]
+        short_breakout = close[i] < donchian_low[i]
         
-        # Camarilla breakout conditions
-        long_breakout = close[i] > r3_aligned[i]
-        short_breakout = close[i] < s3_aligned[i]
-        
-        # Exit conditions: return to pivot or opposite level touched
-        long_exit = close[i] < pivot_aligned[i]
-        short_exit = close[i] > pivot_aligned[i]
+        # Exit conditions: return to midpoint or opposite band
+        long_exit = close[i] < donchian_mid[i]
+        short_exit = close[i] > donchian_mid[i]
         
         # Entry conditions
-        long_entry = long_breakout and vol_confirm and bullish_bias
-        short_entry = short_breakout and vol_confirm and bearish_bias
+        long_entry = long_breakout and vol_confirm and vol_filt
+        short_entry = short_breakout and vol_confirm and vol_filt
         
         # Handle entries and exits
         if long_entry and position <= 0:
