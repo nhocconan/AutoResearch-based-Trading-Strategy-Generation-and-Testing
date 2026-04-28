@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h EMA trend filter and volume spike confirmation.
-# Enter long when price breaks above Camarilla R3 level and 12h EMA50 > EMA200 and volume > 1.5x 20-bar average.
-# Enter short when price breaks below Camarilla S3 level and 12h EMA50 < EMA200 and volume > 1.5x 20-bar average.
-# Exit when price crosses Camarilla pivot point (PP) or 12h EMA50/EMA200 crossover reverses.
-# Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 80-150 total trades over 4 years (20-38/year) to avoid fee drag.
-# Camarilla levels provide intraday support/resistance, EMA filters for trend alignment, volume confirms conviction.
-# Works in both bull and bear markets by trading with the intermediate-term trend.
+# Hypothesis: 1d strategy using weekly Donchian channel breakouts with weekly ADX trend filter and volume confirmation.
+# Enter long when price breaks above weekly Donchian(20) upper band and weekly ADX > 25 and volume > 2x 20-bar average.
+# Enter short when price breaks below weekly Donchian(20) lower band and weekly ADX > 25 and volume > 2x 20-bar average.
+# Exit when price crosses weekly Donchian midpoint or weekly ADX < 20 (trend weakening).
+# Uses discrete position sizing (0.25) to balance risk and reward.
+# Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
+# Weekly timeframe provides clean breakout levels, ADX filters for trending markets, volume confirms conviction.
+# Works in both bull and bear markets by capturing strong directional moves.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_DonchianBreakout_1wADX25_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,61 +26,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter (MTF structure)
-    df_12h = get_htf_data(prices, '12h')
+    # Get weekly data for trend filter and Donchian channels (MTF structure)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 50:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 and EMA200
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate weekly ADX
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 12h EMAs to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    ema_200_aligned = align_htf_to_ltf(prices, df_12h, ema_200)
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Calculate Camarilla levels from previous 1d bar (using get_htf_data for 1d)
-    df_1d = get_htf_data(prices, '1d')
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    # Get previous 1d OHLC (Camarilla uses previous day's range)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # DI values
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
     
-    # Calculate Camarilla levels for each 1d bar
-    # R4 = close + ((high-low)*1.1/2)
-    # R3 = close + ((high-low)*1.1/4)
-    # S3 = close - ((high-low)*1.1/4)
-    # PP = (high + low + close)/3
-    rng = high_1d - low_1d
-    r3 = close_1d + (rng * 1.1 / 4)
-    s3 = close_1d - (rng * 1.1 / 4)
-    pp = (high_1d + low_1d + close_1d) / 3
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 4h timeframe (use previous completed 1d bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Align weekly ADX to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Weekly Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high_1w).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low_1w).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
+    
+    # Align weekly Donchian levels to daily timeframe
+    highest_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    
+    # Volume confirmation: >2x 20-bar average volume on daily timeframe
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 50)  # Ensure sufficient history for EMAs
+    start_idx = max(100, lookback)  # Ensure sufficient history
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pp_aligned[i]) or
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high_aligned[i]) or 
+            np.isnan(lowest_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -88,23 +100,23 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 12h EMA50 > EMA200 for long, < for short
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Trend filter: weekly ADX > 25
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20  # Exit condition
         
-        # Camarilla breakout conditions
-        breakout_up = close[i] > r3_aligned[i]  # Break above R3
-        breakout_down = close[i] < s3_aligned[i]  # Break below S3
+        # Weekly Donchian breakout conditions
+        breakout_up = close[i] > highest_high_aligned[i-1]  # Break above previous week's high
+        breakout_down = close[i] < lowest_low_aligned[i-1]  # Break below previous week's low
         
         # Exit conditions
-        exit_long = close[i] < pp_aligned[i] or (uptrend and not downtrend and ema_50_aligned[i] < ema_200_aligned[i])
-        exit_short = close[i] > pp_aligned[i] or (downtrend and not uptrend and ema_50_aligned[i] > ema_200_aligned[i])
+        exit_long = close[i] < donchian_mid_aligned[i] or weak_trend
+        exit_short = close[i] > donchian_mid_aligned[i] or weak_trend
         
         # Handle entries and exits
-        if breakout_up and uptrend and vol_confirm and position <= 0:
+        if breakout_up and strong_trend and vol_confirm and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif breakout_down and downtrend and vol_confirm and position >= 0:
+        elif breakout_down and strong_trend and vol_confirm and position >= 0:
             signals[i] = -0.25
             position = -1
         elif position == 1 and exit_long:
