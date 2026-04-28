@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,7 +36,7 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2
     s4 = close_1d - range_ * 1.1 / 2
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -48,8 +48,8 @@ def generate_signals(prices):
     ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Volume filter: above average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: above average volume (30-period for 12h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -57,7 +57,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume_Session"
-timeframe = "6h"
+name = "12h_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
