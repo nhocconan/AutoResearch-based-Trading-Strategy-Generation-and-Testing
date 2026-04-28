@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian channels capture volatility breakouts. EMA50 on daily timeframe provides robust
-# trend filter to avoid counter-trend trades. Volume confirmation ensures conviction.
-# Designed for 4h timeframe targeting 20-50 trades/year. Works in bull (breakouts with trend)
-# and bear (avoids false breakouts via trend filter, captures breakdowns).
+# Hypothesis: 4h Donchian(20) breakout with daily trend filter and volume confirmation
+# Donchian channel breakouts capture strong momentum moves. Daily EMA(50) trend filter
+# avoids counter-trend trades. Volume confirmation ensures conviction. Designed for 4h
+# timeframe to target 20-50 trades/year, balancing signal quality and fee drag.
 
 name = "4h_Donchian20_Breakout_1dEMA50_Trend_Volume_v1"
 timeframe = "4h"
@@ -42,10 +41,10 @@ def generate_signals(prices):
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: >1.8x 20-bar average volume
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.8 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
