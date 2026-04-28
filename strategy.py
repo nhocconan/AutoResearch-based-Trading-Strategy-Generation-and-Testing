@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla pivot R3/S3 breakout with volume confirmation and chop regime filter.
+# Hypothesis: 4h strategy using 1d Camarilla pivot R3/S3 breakout with volume confirmation and chop regime filter.
 # Enter long when price breaks above 1d Camarilla R3 with volume spike and chop < 61.8 (trending regime).
 # Enter short when price breaks below 1d Camarilla S3 with volume spike and chop < 61.8.
-# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 12-37 trades/year.
+# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 20-50 trades/year.
 # Camarilla levels provide structure from higher timeframe, volume confirms breakout strength, chop filter avoids ranging markets.
 # Works in bull (breakouts with trend) and bear (failed breaks reverse via exits) markets.
 
-name = "12h_Camarilla_R3S3_Breakout_Volume_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_Volume_ChopFilter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,11 +53,11 @@ def generate_signals(prices):
     camarilla_r3 = pd.Series(camarilla_r3).ffill().values
     camarilla_s3 = pd.Series(camarilla_s3).ffill().values
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate 12h chop regime: EHLERS CHOPPINESS INDEX (14)
+    # Calculate 4h chop regime: EHLERS CHOPPINESS INDEX (14)
     def choppiness_index(high, low, close, length=14):
         atr_sum = np.zeros_like(close)
         true_range = np.zeros_like(close)
@@ -89,7 +89,7 @@ def generate_signals(prices):
     chop = choppiness_index(high, low, close, 14)
     chop_trending = chop < 61.8  # Trending regime when chop < 61.8
     
-    # Calculate 12h volume spike: >2.0x 20-bar average volume
+    # Calculate 4h volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
