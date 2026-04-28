@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Ichimoku_Kumo_Breakout_12hTrend_Volume
-Hypothesis: On 4-hour timeframe, enter long when price breaks above Kumo cloud with volume surge and 12h uptrend (price above Kumo top), short when price breaks below Kumo cloud with volume surge and 12h downtrend. Exit on opposite Kumo break. Uses 12h Kumo trend filter to avoid counter-trend trades. Designed for low trade frequency (~20-40/year) to minimize fee decay in both bull and bear markets. Ichimoku Kumo provides dynamic support/resistance that adapts to volatility, working well in trending and ranging conditions.
+1h_Donchian20_Breakout_4hTrend_Volume
+Hypothesis: On 1-hour timeframe, enter long when price breaks above 4h Donchian(20) high with volume surge and 4h uptrend (close > SMA50), short when price breaks below 4h Donchian(20) low with volume surge and 4h downtrend. Exit on opposite Donchian break. Uses 4h trend filter to avoid counter-trend trades. Designed for moderate trade frequency (~15-30/year) to minimize fee decay. Volume surge filters breakouts for institutional participation. Works in bull via trend-following and in bear via short signals during downtrends.
 """
 
 import numpy as np
@@ -18,41 +18,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Kumo cloud (trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 52:
+    # Get 4h data for trend filter and Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    tenkan_sen = (pd.Series(high_12h).rolling(window=9, min_periods=9).max() + 
-                  pd.Series(low_12h).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    kijun_sen = (pd.Series(high_12h).rolling(window=26, min_periods=26).max() + 
-                 pd.Series(low_12h).rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(2)
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    senkou_span_b = ((pd.Series(high_12h).rolling(window=52, min_periods=52).max() + 
-                      pd.Series(low_12h).rolling(window=52, min_periods=52).min()) / 2).shift(2)
+    # 4h Donchian(20) channels
+    donch_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align Ichimoku components to 4h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_12h, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_12h, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_b.values)
+    # 4h SMA(50) for trend filter
+    sma_50_4h = pd.Series(close_4h).rolling(window=50, min_periods=50).mean().values
     
-    # Kumo cloud boundaries
-    kumo_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
-    kumo_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
-    
-    # 12h trend: bullish when price > Kumo top, bearish when price < Kumo bottom
-    # Note: Using close price for trend determination
-    twelve_h_uptrend = close > kumo_top
-    twelve_h_downtrend = close < kumo_bottom
+    # Align 4h indicators to 1h timeframe
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
+    sma_50_4h_aligned = align_htf_to_ltf(prices, df_4h, sma_50_4h)
     
     # Volume confirmation: current volume > 2.0x 24-period average
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -65,42 +50,42 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or 
-            np.isnan(volume_surge[i])):
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
+            np.isnan(sma_50_4h_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with 12h Kumo trend alignment and volume surge
-        long_entry = close[i] > kumo_top[i] and twelve_h_uptrend[i] and volume_surge[i]
-        short_entry = close[i] < kumo_bottom[i] and twelve_h_downtrend[i] and volume_surge[i]
+        # Entry conditions with 4h trend alignment and volume surge
+        long_entry = close[i] > donch_high_20_aligned[i] and close[i] > sma_50_4h_aligned[i] and volume_surge[i]
+        short_entry = close[i] < donch_low_20_aligned[i] and close[i] < sma_50_4h_aligned[i] and volume_surge[i]
         
-        # Exit on opposite Kumo break with volume surge
-        long_exit = close[i] < kumo_bottom[i] and volume_surge[i]
-        short_exit = close[i] > kumo_top[i] and volume_surge[i]
+        # Exit on opposite Donchian break with volume surge
+        long_exit = close[i] < donch_low_20_aligned[i] and volume_surge[i]
+        short_exit = close[i] > donch_high_20_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
+            signals[i] = -0.20  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
+            signals[i] = 0.20   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Ichimoku_Kumo_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Donchian20_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
