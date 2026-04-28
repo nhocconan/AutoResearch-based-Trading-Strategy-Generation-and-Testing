@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams %R extreme reversal with volume confirmation and chop regime filter.
-# Enter long when 1d Williams %R < -80 (oversold) with volume spike and chop > 61.8 (ranging regime) for mean reversion bounce.
-# Enter short when 1d Williams %R > -20 (overbought) with volume spike and chop > 61.8 for mean reversion fade.
-# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 12-37 trades/year.
-# Williams %R identifies overextended moves, volume confirms participation, chop filter ensures mean-reverting environment.
-# Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
+# Hypothesis: 4h strategy using 1w Supertrend trend filter + 1d Donchian(20) breakout with volume confirmation.
+# Enter long when price breaks above 1d Donchian upper band, 1w Supertrend is bullish, and volume > 1.5x 20-bar average.
+# Enter short when price breaks below 1d Donchian lower band, 1w Supertrend is bearish, and volume > 1.5x 20-bar average.
+# Uses discrete position sizing (0.25) to limit fee churn. Target: 20-40 trades/year.
+# Supertrend provides higher timeframe trend bias, Donchian gives clear breakout levels, volume confirms momentum.
+# Works in bull (trend-aligned breakouts) and bear (counter-trend breaks fail due to Supertrend filter).
 
-name = "12h_WilliamsR_Volume_ChopFilter_v2"
-timeframe = "12h"
+name = "4h_Supertrend1w_Donchian20_Breakout_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,70 +24,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 20:
+    # Get 1w data for Supertrend (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R (14-period)
+    # Calculate 1w Supertrend (ATR=10, multiplier=3.0)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = 0  # first bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR
+    atr_period = 10
+    atr = np.zeros_like(close_1w)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    
+    # Supertrend calculation
+    multiplier = 3.0
+    hl2 = (high_1w + low_1w) / 2.0
+    upperband = hl2 + multiplier * atr
+    lowerband = hl2 - multiplier * atr
+    
+    supertrend = np.zeros_like(close_1w)
+    uptrend = np.ones_like(close_1w, dtype=bool)
+    
+    supertrend[0] = upperband[0]
+    uptrend[0] = True
+    
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > supertrend[i-1]:
+            uptrend[i] = True
+        elif close_1w[i] < supertrend[i-1]:
+            uptrend[i] = False
+        else:
+            uptrend[i] = uptrend[i-1]
+            if uptrend[i] and lowerband[i] < supertrend[i-1]:
+                lowerband[i] = supertrend[i-1]
+            if not uptrend[i] and upperband[i] > supertrend[i-1]:
+                upperband[i] = supertrend[i-1]
+        
+        if uptrend[i]:
+            supertrend[i] = lowerband[i]
+        else:
+            supertrend[i] = upperband[i]
+    
+    # Align 1w Supertrend to 4h timeframe (uptrend=True means bullish)
+    supertrend_uptrend_aligned = align_htf_to_ltf(prices, df_1w, uptrend.astype(float))
+    
+    # Get 1d data for Donchian channels (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    n_1d = len(high_1d)
-    williams_r = np.full(n_1d, np.nan)
+    donchian_period = 20
+    donchian_high = np.full_like(high_1d, np.nan)
+    donchian_low = np.full_like(low_1d, np.nan)
     
-    for i in range(14, n_1d):
-        highest_high = np.max(high_1d[i-13:i+1])
-        lowest_low = np.min(low_1d[i-13:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50.0
+    for i in range(donchian_period-1, len(high_1d)):
+        donchian_high[i] = np.max(high_1d[i-donchian_period+1:i+1])
+        donchian_low[i] = np.min(low_1d[i-donchian_period+1:i+1])
     
-    # Forward fill Williams %R
-    williams_r = pd.Series(williams_r).ffill().values
+    # Forward fill Donchian levels
+    donchian_high = pd.Series(donchian_high).ffill().values
+    donchian_low = pd.Series(donchian_low).ffill().values
     
-    # Align 1d indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align 1d Donchian to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Calculate 12h chop regime: EHLERS CHOPPINESS INDEX (14)
-    def choppiness_index(high, low, close, length=14):
-        atr_sum = np.zeros_like(close)
-        true_range = np.zeros_like(close)
-        for i in range(1, len(close)):
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-            true_range[i] = tr
-            if i >= length:
-                atr_sum[i] = atr_sum[i-1] + tr - true_range[i-length+1]
-            else:
-                atr_sum[i] = atr_sum[i-1] + tr
-        atr = atr_sum / length
-        max_high = np.zeros_like(close)
-        min_low = np.zeros_like(close)
-        for i in range(len(close)):
-            if i < length:
-                max_high[i] = np.max(high[:i+1])
-                min_low[i] = np.min(low[:i+1])
-            else:
-                max_high[i] = np.max(high[i-length+1:i+1])
-                min_low[i] = np.min(low[i-length+1:i+1])
-        chop = np.zeros_like(close)
-        for i in range(length-1, len(close)):
-            if max_high[i] != min_low[i]:
-                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(length)
-            else:
-                chop[i] = 50.0
-        return chop
-    
-    chop = choppiness_index(high, low, close, 14)
-    chop_ranging = chop > 61.8  # Ranging regime when chop > 61.8
-    
-    # Calculate 12h volume spike: >1.5x 30-bar average volume (less frequent for 12h)
+    # Calculate 4h volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_30 = volume_series.rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > 1.5 * volume_ma_30
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -96,23 +119,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_30[i]) or np.isnan(chop[i])):
+        if (np.isnan(supertrend_uptrend_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R extreme reversal conditions with volume confirmation and chop filter
-        long_setup = williams_r_aligned[i] < -80 and volume_spike[i] and chop_ranging[i]
-        short_setup = williams_r_aligned[i] > -20 and volume_spike[i] and chop_ranging[i]
+        # Determine trend bias from Supertrend (1 = bullish/uptrend, 0 = bearish/downtrend)
+        is_bullish_trend = supertrend_uptrend_aligned[i] > 0.5
         
-        # Exit conditions: Williams %R returns to neutral zone (-50)
-        long_exit = williams_r_aligned[i] > -50
-        short_exit = williams_r_aligned[i] < -50
+        # Donchian breakout conditions with volume confirmation and trend filter
+        long_breakout = close[i] > donchian_high_aligned[i] and volume_confirm[i] and is_bullish_trend
+        short_breakout = close[i] < donchian_low_aligned[i] and volume_confirm[i] and (not is_bullish_trend)
+        
+        # Exit conditions: opposite Donchian level
+        long_exit = close[i] < donchian_low_aligned[i]
+        short_exit = close[i] > donchian_high_aligned[i]
         
         # Handle entries and exits
-        if long_setup and position <= 0:
+        if long_breakout and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_setup and position >= 0:
+        elif short_breakout and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
