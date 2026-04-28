@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian_Breakout_TrendFilter
-Hypothesis: Uses weekly Donchian channel (20-week period) breakouts with weekly EMA trend filter on the daily timeframe.
-Trades only in the direction of the weekly trend with no volume requirement to avoid overtrading.
-Designed for low trade frequency (target: 10-30 trades per year) to minimize fee drag in bear markets.
-Works in both bull and bear markets by following the weekly trend direction.
+4h_Camarilla_Pivot_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses 1-day Camarilla pivot levels (R1/S1 for mean reversion, R4/S4 for breakout) on the 4-hour timeframe.
+Trades in the direction of the 1-day EMA50 trend with volume spike confirmation to filter false breakouts.
+Designed to work in both bull and bear markets by adapting to price action relative to daily pivots and trend.
+Targets 20-50 trades per year to minimize fee dust.
 """
 
 import numpy as np
@@ -13,63 +13,95 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels and trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get 1-day data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    # Calculate 1-day EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian upper (20-week high)
-    donch_high = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
-    # Donchian lower (20-week low)
-    donch_low = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous 1-day bar
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_1d = df_1d['high'] - df_1d['low']
     
-    # Weekly EMA50 for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Camarilla levels
+    R4 = typical_price + (range_1d * 1.1 / 2)
+    R3 = typical_price + (range_1d * 1.1 / 4)
+    R1 = typical_price + (range_1d * 1.1 / 12)
+    S1 = typical_price - (range_1d * 1.1 / 12)
+    S3 = typical_price - (range_1d * 1.1 / 4)
+    S4 = typical_price - (range_1d * 1.1 / 2)
     
-    # Align weekly indicators to daily timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_weekly, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_weekly, donch_low)
-    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    # Align Camarilla levels to 4h timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4.values)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4.values)
+    
+    # Calculate volume spike (>1.8x 20-period MA for stricter filtering)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(ema_50_weekly_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend direction
-        trend_up = close[i] > ema_50_weekly_aligned[i]
-        trend_down = close[i] < ema_50_weekly_aligned[i]
+        # Trend direction from 1-day EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > donch_high_aligned[i]
-        breakout_down = close[i] < donch_low_aligned[i]
+        # Volume confirmation
+        vol_confirm = vol_spike[i]
         
-        # Entry logic: Breakout in direction of weekly trend
-        long_entry = breakout_up and trend_up
-        short_entry = breakout_down and trend_down
+        # Price relative to Camarilla levels
+        price_above_R1 = close[i] > R1_aligned[i]
+        price_below_S1 = close[i] < S1_aligned[i]
+        price_above_R3 = close[i] > R3_aligned[i]
+        price_below_S3 = close[i] < S3_aligned[i]
+        price_above_R4 = close[i] > R4_aligned[i]
+        price_below_S4 = close[i] < S4_aligned[i]
         
-        # Exit logic: Opposite breakout or trend reversal
-        long_exit = breakout_down or not trend_up
-        short_exit = breakout_up or not trend_down
+        # Entry logic:
+        # Long: Mean reversion from S1/S3 OR breakout above R4 in uptrend
+        long_entry = vol_confirm and trend_up and (
+            (price_below_S1 and close[i] > S1_aligned[i-1]) or  # Rejection of S1
+            (price_below_S3 and close[i] > S3_aligned[i-1]) or  # Rejection of S3
+            (price_above_R4 and close[i-1] <= R4_aligned[i-1])   # Breakout above R4
+        )
+        
+        # Short: Mean reversion from R1/R3 OR breakdown below S4 in downtrend
+        short_entry = vol_confirm and trend_down and (
+            (price_above_R1 and close[i] < R1_aligned[i-1]) or  # Rejection of R1
+            (price_above_R3 and close[i] < R3_aligned[i-1]) or  # Rejection of R3
+            (price_below_S4 and close[i-1] >= S4_aligned[i-1])   # Breakdown below S4
+        )
+        
+        # Exit logic: Opposite level rejection or trend reversal
+        long_exit = (price_above_R3 and close[i] < R3_aligned[i-1]) or not trend_up
+        short_exit = (price_below_S1 and close[i] > S1_aligned[i-1]) or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -94,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_TrendFilter"
-timeframe = "1d"
+name = "4h_Camarilla_Pivot_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
