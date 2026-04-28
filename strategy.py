@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-Hypothesis: Camarilla pivot levels (R1/S1) from 1-day act as intraday support/resistance. Breakouts of these levels with 12-hour EMA50 trend filter and volume spike capture explosive moves. Works in bull/bear by following the 12h trend. Targets 20-40 trades/year.
+6h_RSI_4H_Slope_PriceAction
+Hypothesis: On 6h timeframe, use 4-hour RSI slope to detect momentum exhaustion in strong trends, combined with price action rejection at Bollinger Bands on 6h. This captures mean reversion in overextended moves while avoiding chop. Works in both bull (fade rallies) and bear (fade crashes) by fading momentum extremes. Targets 15-25 trades/year.
 """
 
 import numpy as np
@@ -10,77 +10,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get 4h data for RSI slope calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each 1-day bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate RSI(14) on 4h close
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Wilder's smoothing
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 4h timeframe (wait for daily close)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate RSI slope (3-period linear regression slope)
+    def rolling_slope(arr, window):
+        slopes = np.full_like(arr, np.nan, dtype=np.float64)
+        for i in range(window-1, len(arr)):
+            y = arr[i-window+1:i+1]
+            x = np.arange(window)
+            if np.all(np.isnan(y)):
+                continue
+            # Use only valid points
+            mask = ~np.isnan(y)
+            if np.sum(mask) < 2:
+                continue
+            x_valid = x[mask]
+            y_valid = y[mask]
+            slope = np.polyfit(x_valid, y_valid, 1)[0]
+            slopes[i] = slope
+        return slopes
     
-    # Get 12-hour data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    rsi_slope = rolling_slope(rsi_4h, 3)
+    rsi_slope_aligned = align_htf_to_ltf(prices, df_4h, rsi_slope)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume confirmation: >1.5x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Bollinger Bands on 6h (20, 2)
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma_20 + (2 * std_20)
+    lower_bb = ma_20 - (2 * std_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_slope_aligned[i]) or 
+            np.isnan(ma_20[i]) or
+            np.isnan(std_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # RSI slope conditions: negative slope = bearish momentum, positive = bullish
+        rsi_slope_neg = rsi_slope_aligned[i] < -0.15  # weakening momentum
+        rsi_slope_pos = rsi_slope_aligned[i] > 0.15   # strengthening momentum
         
-        # Breakout conditions: break of Camarilla R1/S1
-        breakout_r1 = close[i] > camarilla_r1_aligned[i]
-        breakdown_s1 = close[i] < camarilla_s1_aligned[i]
+        # Price action rejection at Bollinger Bands
+        near_upper = close[i] > upper_bb[i] * 0.998  # within 0.2% of upper band
+        near_lower = close[i] < lower_bb[i] * 1.002  # within 0.2% of lower band
         
-        # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        # Entry logic: fade momentum extremes at BB
+        long_entry = rsi_slope_neg and near_lower  # weakening bearish momentum at lower BB
+        short_entry = rsi_slope_pos and near_upper  # weakening bullish momentum at upper BB
         
-        # Entry logic: breakout in direction of trend with volume
-        long_entry = vol_confirm and uptrend and breakout_r1
-        short_entry = vol_confirm and downtrend and breakdown_s1
-        
-        # Exit logic: opposite breakout or trend change
-        long_exit = breakdown_s1 or (not uptrend)
-        short_exit = breakout_r1 or (not downtrend)
+        # Exit logic: momentum resets or price moves to middle
+        long_exit = rsi_slope_pos or close[i] > ma_20[i]
+        short_exit = rsi_slope_neg or close[i] < ma_20[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -105,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "6h_RSI_4H_Slope_PriceAction"
+timeframe = "6h"
 leverage = 1.0
