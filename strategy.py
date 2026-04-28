@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Williams %R extremes with 1d trend filter and volume confirmation.
-# Enter long when weekly %R < -80 (oversold) and price > 1d EMA34 with volume > 1.5x 20-bar average.
-# Enter short when weekly %R > -20 (overbought) and price < 1d EMA34 with volume > 1.5x 20-bar average.
-# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 12-37 trades/year.
-# Weekly %R provides mean reversion edge in ranging markets, 1d EMA34 filters for trend alignment,
-# volume confirmation ensures breakout/continuation strength. Works in bull (buy dips in uptrend) 
-# and bear (sell rallies in downtrend) markets by trading extremes with trend filter.
+# Hypothesis: 12h strategy using 1w Camarilla pivot R4/S4 breakout with volume confirmation and chop regime filter.
+# Enter long when price breaks above 1w Camarilla R4 with volume spike and chop < 61.8 (trending regime).
+# Enter short when price breaks below 1w Camarilla S4 with volume spike and chop < 61.8.
+# Uses discrete position sizing (0.30) to balance return and drawdown. Target: 12-37 trades/year.
+# Weekly Camarilla levels provide strong structure from higher timeframe, volume confirms breakout strength,
+# chop filter avoids ranging markets. Works in bull (breakouts with trend) and bear (failed breaks reverse via exits).
 
-name = "6h_WilliamsR_Weekly_Overextended_1dEMA34_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R4S4_Breakout_Volume_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,44 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Williams %R (HTF)
+    # Get 1w data for Camarilla pivots (HTF)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Get 1d data for EMA34 (MTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
-        return np.zeros(n)
-    
-    # Calculate weekly Williams %R (14-period)
+    # Calculate 1w Camarilla pivots (using previous bar's high, low, close)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
     n_1w = len(high_1w)
-    williams_r = np.full(n_1w, np.nan)
+    camarilla_r4 = np.full(n_1w, np.nan)
+    camarilla_s4 = np.full(n_1w, np.nan)
     
-    for i in range(14, n_1w):
-        highest_high = np.max(high_1w[i-14:i+1])
-        lowest_low = np.min(low_1w[i-14:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_1w[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50.0
+    for i in range(1, n_1w):
+        # Use previous bar to avoid look-ahead
+        phigh = high_1w[i-1]
+        plow = low_1w[i-1]
+        pclose = close_1w[i-1]
+        pivot = (phigh + plow + pclose) / 3.0
+        rng = phigh - plow
+        camarilla_r4[i] = pivot + rng * 1.1 / 2.0  # R4 level
+        camarilla_s4[i] = pivot - rng * 1.1 / 2.0  # S4 level
     
-    # Align weekly Williams %R to 6h timeframe (with extra delay for indicator confirmation)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r, additional_delay_bars=1)
+    # Forward fill Camarilla levels
+    camarilla_r4 = pd.Series(camarilla_r4).ffill().values
+    camarilla_s4 = pd.Series(camarilla_s4).ffill().values
     
-    # Calculate 1d EMA34
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1w indicators to 12h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
-    # Calculate 6h volume confirmation: >1.5x 20-bar average volume
+    # Calculate 12h chop regime: EHLERS CHOPPINESS INDEX (14)
+    def choppiness_index(high, low, close, length=14):
+        atr_sum = np.zeros_like(close)
+        true_range = np.zeros_like(close)
+        for i in range(1, len(close)):
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            true_range[i] = tr
+            if i >= length:
+                atr_sum[i] = atr_sum[i-1] + tr - true_range[i-length+1]
+            else:
+                atr_sum[i] = atr_sum[i-1] + tr
+        atr = atr_sum / length
+        max_high = np.zeros_like(close)
+        min_low = np.zeros_like(close)
+        for i in range(len(close)):
+            if i < length:
+                max_high[i] = np.max(high[:i+1])
+                min_low[i] = np.min(low[:i+1])
+            else:
+                max_high[i] = np.max(high[i-length+1:i+1])
+                min_low[i] = np.min(low[i-length+1:i+1])
+        chop = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            if max_high[i] != min_low[i]:
+                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(length)
+            else:
+                chop[i] = 50.0
+        return chop
+    
+    chop = choppiness_index(high, low, close, 14)
+    chop_trending = chop < 61.8  # Trending regime when chop < 61.8
+    
+    # Calculate 12h volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,25 +101,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly Williams %R conditions with 1d trend filter and volume confirmation
-        long_signal = williams_r_aligned[i] < -80 and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]
-        short_signal = williams_r_aligned[i] > -20 and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]
+        # Camarilla breakout conditions with volume confirmation and chop filter
+        long_breakout = close[i] > camarilla_r4_aligned[i] and volume_spike[i] and chop_trending[i]
+        short_breakout = close[i] < camarilla_s4_aligned[i] and volume_spike[i] and chop_trending[i]
         
-        # Exit conditions: opposite Williams %R extreme or trend reversal
-        long_exit = williams_r_aligned[i] > -20 or close[i] < ema_34_1d_aligned[i]
-        short_exit = williams_r_aligned[i] < -80 or close[i] > ema_34_1d_aligned[i]
+        # Exit conditions: opposite Camarilla level
+        long_exit = close[i] < camarilla_s4_aligned[i]
+        short_exit = close[i] > camarilla_r4_aligned[i]
         
         # Handle entries and exits
-        if long_signal and position <= 0:
-            signals[i] = 0.25
+        if long_breakout and position <= 0:
+            signals[i] = 0.30
             position = 1
-        elif short_signal and position >= 0:
-            signals[i] = -0.25
+        elif short_breakout and position >= 0:
+            signals[i] = -0.30
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -97,9 +127,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
