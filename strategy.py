@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1-day ADX trend filter and volume confirmation.
-# Camarilla levels provide precise intraday support/resistance. Breakout of R3 (resistance 3) or S3 (support 3) with volume and ADX>25 indicates strong momentum.
-# Works in both bull and bear markets by filtering for strong trends via ADX. Target: 20-50 trades per year.
+# Hypothesis: 1d Bollinger Band squeeze breakout with weekly ADX trend filter and volume confirmation.
+# In low volatility regimes (BB width < 20th percentile), price often breaks out with strong momentum.
+# Weekly ADX > 25 ensures we only trade in strong trending markets, avoiding whipsaws in ranges.
+# Volume confirmation validates breakout authenticity. Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
+# Works in both bull and bear markets by filtering for strong trends via weekly ADX and only trading breakouts from low volatility.
 
 import numpy as np
 import pandas as pd
@@ -17,58 +19,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
-    
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.25*(high-low), S3 = close - 1.25*(high-low), S4 = close - 1.5*(high-low)
-    # We use R3 and S3 for breakouts
-    high_low = high_prev - low_prev
-    r3 = close_prev + 1.25 * high_low
-    s3 = close_prev - 1.25 * high_low
-    
-    # Calculate daily ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly ADX (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First period
     
     # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
     up_move[0] = 0
     down_move[0] = 0
     
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smoothed values (using Wilder's smoothing: alpha = 1/period)
-    def _wilder_smoothing(array, period):
-        if len(array) < period:
-            return np.full_like(array, np.nan, dtype=float)
-        result = np.full_like(array, np.nan, dtype=float)
+    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
         # First value is simple average
-        result[period-1] = np.mean(array[:period])
-        # Wilder smoothing: today = (yesterday * (period-1) + today) / period
-        for i in range(period, len(array)):
-            result[i] = (result[i-1] * (period-1) + array[i]) / period
+        result[period-1] = np.mean(data[:period])
+        # Wilder smoothing: new_value = prev_value - (prev_value/period) + current_value/period
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + (data[i] / period)
         return result
     
-    atr = _wilder_smoothing(tr, 14)
-    plus_di_smoothed = _wilder_smoothing(plus_dm, 14)
-    minus_di_smoothed = _wilder_smoothing(minus_dm, 14)
+    atr = wilders_smoothing(tr, 14)
+    plus_di_smoothed = wilders_smoothing(plus_dm, 14)
+    minus_di_smoothed = wilders_smoothing(minus_dm, 14)
     
     # DI values
     plus_di = np.where(atr != 0, plus_di_smoothed / atr * 100, 0)
@@ -76,12 +67,28 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = _wilder_smoothing(dx, 14)
+    adx = wilders_smoothing(dx, 14)
     
-    # Align Camarilla and ADX to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align ADX to 1d timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Bollinger Bands (20, 2) on daily data
+    bb_period = 20
+    bb_std = 2
+    
+    # Calculate rolling mean and std
+    close_series = pd.Series(close)
+    bb_mid = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_mid + (bb_std_dev * bb_std)
+    bb_lower = bb_mid - (bb_std_dev * bb_std)
+    bb_width = bb_upper - bb_lower
+    
+    # Calculate percentile of BB width (20-period lookback for percentile)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else np.nan, raw=False
+    ).values
     
     # Volume filter: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -90,30 +97,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Wait for sufficient warmup
+    start_idx = max(50, 20)  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(bb_mid[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or np.isnan(bb_width_percentile[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
+        # Trend filter: weekly ADX > 25 indicates strong trend
         strong_trend = adx_aligned[i] > 25
         
+        # Squeeze condition: BB width below 20th percentile indicates low volatility
+        squeeze_condition = bb_width_percentile[i] < 20
+        
         # Breakout conditions
-        long_breakout = close[i] > r3_aligned[i]
-        short_breakout = close[i] < s3_aligned[i]
+        breakout_up = close[i] > bb_upper[i]
+        breakout_down = close[i] < bb_lower[i]
         
         # Entry conditions with volume confirmation
-        long_entry = strong_trend and long_breakout and volume_filter[i]
-        short_entry = strong_trend and short_breakout and volume_filter[i]
+        long_entry = strong_trend and squeeze_condition and breakout_up and volume_filter[i]
+        short_entry = strong_trend and squeeze_condition and breakout_down and volume_filter[i]
         
-        # Exit conditions: when trend weakens or price returns to midpoint
-        midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
-        long_exit = (not strong_trend) or (position == 1 and close[i] < midpoint)
-        short_exit = (not strong_trend) or (position == -1 and close[i] > midpoint)
+        # Exit conditions: return to middle band or trend weakness
+        long_exit = (not strong_trend) or (close[i] < bb_mid[i]) or (position == 1 and close[i] < bb_lower[i])
+        short_exit = (not strong_trend) or (close[i] > bb_mid[i]) or (position == -1 and close[i] > bb_upper[i])
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -139,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dADX_TrendFilter_Volume"
-timeframe = "4h"
+name = "1d_BollingerSqueeze_1wADX_TrendFilter_Volume"
+timeframe = "1d"
 leverage = 1.0
