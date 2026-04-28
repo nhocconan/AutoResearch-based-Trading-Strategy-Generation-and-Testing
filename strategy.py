@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R reversal with 1d EMA34 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. EMA34 on 1d ensures trading with daily trend.
-# Volume spike (>1.8x 20-bar avg) confirms reversal strength. Works in bull (oversold bounces above EMA34)
-# and bear (overbought rejections below EMA34). Discrete sizing (0.0, ±0.25) minimizes fee churn.
-# Target: 80-180 trades over 4 years (20-45/year).
+# Hypothesis: 1d Camarilla H4/L4 breakout with 1w EMA34 trend filter and volume spike confirmation.
+# Camarilla pivot levels provide strong intraday support/resistance that often holds in ranging markets
+# and breaks with conviction in trending markets. 1w EMA34 ensures we trade with the weekly trend.
+# Volume spike (>2.0x 20-bar average) confirms breakout significance. Works in both bull (long above EMA34)
+# and bear (short below EMA34) regimes by filtering breakout direction. Target: 30-100 trades over 4 years (7-25/year).
+# Size: 0.25.
 
-name = "4h_WilliamsR_1dEMA34_Trend_Volume_v1"
-timeframe = "4h"
+name = "1d_Camarilla_H4L4_Breakout_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,57 +24,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 (trend filter)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for EMA34 (trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA34
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # 4h Williams %R(14)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    williams_r[highest_high_14 == lowest_low_14] = -50  # avoid division by zero
+    # Calculate 1d Camarilla levels (H4, L4) from previous day
+    # H4 = Close + 1.1/2 * (High - Low)
+    # L4 = Close - 1.1/2 * (High - Low)
+    # Using previous day's OHLC to avoid look-ahead
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # first bar uses current close as previous (no prior data)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    # 4h volume spike: >1.8x 20-bar average volume
+    camarilla_h4 = prev_close + 1.1/2 * (prev_high - prev_low)
+    camarilla_l4 = prev_close - 1.1/2 * (prev_high - prev_low)
+    
+    # 1d ATR(14) for volume confirmation context (not used directly)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 1d volume spike: >2.0x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.8 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # need Williams %R(14) + EMA34 warmup
+    start_idx = 20  # Need 20 bars for volume MA and 1 for previous day
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(williams_r[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(camarilla_h4[i]) or
+            np.isnan(camarilla_l4[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1d EMA34 direction
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: 1w EMA34 direction
+        price_above_ema = close[i] > ema_34_1w_aligned[i]
+        price_below_ema = close[i] < ema_34_1w_aligned[i]
         
-        # Williams %R conditions
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # Breakout conditions at Camarilla H4/L4 levels
+        long_breakout = close[i] > camarilla_h4[i]
+        short_breakout = close[i] < camarilla_l4[i]
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        long_entry = price_above_ema and oversold and vol_confirm
-        short_entry = price_below_ema and overbought and vol_confirm
+        long_entry = price_above_ema and long_breakout and vol_confirm
+        short_entry = price_below_ema and short_breakout and vol_confirm
         
-        # Exit: opposite Williams %R level
-        long_exit = williams_r[i] > -50  # exit long when momentum turns down
-        short_exit = williams_r[i] < -50  # exit short when momentum turns up
+        # Exit: opposite Camarilla level touch (H4 for long exit, L4 for short exit)
+        long_exit = close[i] < camarilla_h4[i]
+        short_exit = close[i] > camarilla_l4[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
