@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d data for ATR and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -34,27 +34,28 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h Donchian channels (20-period)
+    # 4h Donchian channels (10-period)
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 10:
         return np.zeros(n)
     
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     
-    highest_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # 4h Donchian channels (10-period)
+    highest_high_4h = pd.Series(high_4h).rolling(window=10, min_periods=10).max().values
+    lowest_low_4h = pd.Series(low_4h).rolling(window=10, min_periods=10).min().values
     highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
     lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
     
-    # Volume confirmation: current volume > 1.3x average volume (4h average)
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > vol_ma_4h * 1.3
+    # Volume confirmation: current volume > 1.5x average volume (4h average)
+    vol_ma_4h = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_confirm = volume > vol_ma_4h * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 20)
+    start_idx = max(34, 10, 10)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -106,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeConfirm"
+name = "4h_Donchian10_1dEMA34_Trend_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
