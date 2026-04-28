@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for regime and volatility filters
+    # Get 1d data for trend and volatility filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -35,20 +35,22 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # 4h Donchian(20) for breakout signals
+    # Get 4h data for breakout and volume confirmation
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 20:
         return np.zeros(n)
     
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
+    
+    # 4h Donchian(20) for breakout signals
     donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # 4h volume confirmation
-    volume_4h = df_4h['volume'].values
+    # 4h volume confirmation (20-period average)
     volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     volume_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
     
