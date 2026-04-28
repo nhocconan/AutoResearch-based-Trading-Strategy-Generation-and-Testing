@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Enter long when price breaks above Donchian upper band, 1d EMA34 trending up, and volume > 1.5x 20-bar average.
-# Enter short when price breaks below Donchian lower band, 1d EMA34 trending down, and volume > 1.5x 20-bar average.
-# Exit when price reaches the opposite Donchian band.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Enter long when price breaks above Camarilla R3, 1d EMA34 trending up, and volume > 1.8x 20-bar average.
+# Enter short when price breaks below Camarilla S3, 1d EMA34 trending down, and volume > 1.8x 20-bar average.
+# Exit when price reaches opposite Camarilla level (R2/S2) or crosses 1d EMA34.
 # Uses discrete position sizing (0.25) to minimize fee drag and manage drawdown.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid excessive fee churn.
-# Donchian provides clear trend structure; 1d EMA34 filters for higher timeframe trend alignment; volume confirms breakout strength.
+# Target: 80-160 total trades over 4 years (20-40/year) to avoid excessive fee churn.
+# Camarilla levels provide precise intraday support/resistance; EMA34 filters for 1d trend alignment; volume confirms breakout strength.
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,26 +36,41 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate Donchian(20) from 12h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from 1d data (using previous day's OHLC)
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), etc.
+    # We use the previous day's data to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Calculate Camarilla levels for each 1d bar
+    range_1d = prev_high - prev_low
+    camarilla_r3 = prev_close + 1.125 * range_1d
+    camarilla_s3 = prev_close - 1.125 * range_1d
+    camarilla_r2 = prev_close + 1.0 * range_1d
+    camarilla_s2 = prev_close - 1.0 * range_1d
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    
+    # Volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure sufficient history for indicators
+    start_idx = max(50, 34)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r2_aligned[i]) or
+            np.isnan(camarilla_s2_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -71,13 +86,13 @@ def generate_signals(prices):
             ema_trend_up = False
             ema_trend_down = False
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_upper[i]
-        breakout_down = close[i] < donchian_lower[i]
+        # Camarilla breakout conditions
+        breakout_up = close[i] > camarilla_r3_aligned[i]
+        breakout_down = close[i] < camarilla_s3_aligned[i]
         
-        # Exit conditions: price reaches opposite Donchian band
-        exit_long = close[i] < donchian_lower[i]
-        exit_short = close[i] > donchian_upper[i]
+        # Exit conditions: price reaches opposite Camarilla level (R2/S2) or crosses 1d EMA34
+        exit_long = close[i] < camarilla_s2_aligned[i] or close[i] < ema_34_aligned[i]
+        exit_short = close[i] > camarilla_r2_aligned[i] or close[i] > ema_34_aligned[i]
         
         # Handle entries and exits
         if breakout_up and ema_trend_up and vol_confirm and position <= 0:
