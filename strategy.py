@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams %R extreme readings (overbought/oversold) 
-# combined with 1w Supertrend for trend direction and volume confirmation.
-# Williams %R > -20 = overbought (short signal), < -80 = oversold (long signal).
-# Only take signals in direction of 1w Supertrend to avoid counter-trend trades.
-# Volume > 1.5x 20-bar average confirms breakout/continuation strength.
+# Hypothesis: 12h strategy using 1w Supertrend trend filter with 1d Camarilla R3/S3 breakout and volume confirmation.
+# Uses weekly Supertrend for strong trend filter (works in both bull/bear markets).
+# Breakout at 1d Camarilla R3/S3 levels (strong support/resistance with fewer false breakouts than R4/S4).
+# Volume spike (>2.0x 20-bar average) confirms breakout strength to reduce whipsaws.
 # Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
-# Target: 50-120 total trades over 4 years = 12-30/year for 6h.
+# Target: 80-120 total trades over 4 years = 20-30/year for 12h.
 
-name = "6h_WilliamsR_Extreme_1wSupertrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1wSupertrend_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,10 +24,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Get 1w data for Supertrend trend filter
@@ -74,33 +73,31 @@ def generate_signals(prices):
         else:
             supertrend[i] = min(upper_band[i], supertrend[i-1])
     
-    # Align Supertrend and direction to 6h timeframe
+    # Align Supertrend and direction to 12h timeframe
     supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
     direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
     
-    # Calculate 1d Williams %R (14-period)
+    # Calculate 1d Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_prev = df_1d['close'].values
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Pivot point = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # Camarilla levels (R3/S3 provide good breakout structure with reasonable frequency)
+    R3 = pivot + range_1d * 1.1 / 4.0
+    S3 = pivot - range_1d * 1.1 / 4.0
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close_1d) / (highest_high - lowest_low)) * -100,
-        -50  # Neutral value when range is zero
-    )
+    # Align to 12h timeframe (use previous 1d bar's levels)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Align Williams %R to 6h timeframe (use previous 1d bar's value)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Calculate 6h volume spike: >1.5x 20-bar average volume
+    # Calculate 12h volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -111,7 +108,8 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(supertrend_aligned[i]) or 
             np.isnan(direction_aligned[i]) or 
-            np.isnan(williams_r_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -120,22 +118,19 @@ def generate_signals(prices):
         uptrend = direction_aligned[i] == 1
         downtrend = direction_aligned[i] == -1
         
-        # Williams %R extreme conditions
-        williams_oversold = williams_r_aligned[i] < -80  # Oversold = long opportunity
-        williams_overbought = williams_r_aligned[i] > -20  # Overbought = short opportunity
+        # Camarilla breakout conditions with volume confirmation
+        long_breakout = close[i] > R3_aligned[i] and volume_spike[i]
+        short_breakout = close[i] < S3_aligned[i] and volume_spike[i]
         
-        # Volume confirmation
-        vol_confirm = volume_spike[i]
-        
-        # Exit conditions: Williams %R returns to neutral zone or trend reversal
-        long_exit = williams_r_aligned[i] > -50 or direction_aligned[i] == -1
-        short_exit = williams_r_aligned[i] < -50 or direction_aligned[i] == 1
+        # Exit conditions: opposite Camarilla level or trend reversal
+        long_exit = close[i] < S3_aligned[i] or direction_aligned[i] == -1
+        short_exit = close[i] > R3_aligned[i] or direction_aligned[i] == 1
         
         # Handle entries and exits
-        if williams_oversold and uptrend and vol_confirm and position <= 0:
+        if long_breakout and uptrend and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif williams_overbought and downtrend and vol_confirm and position >= 0:
+        elif short_breakout and downtrend and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
