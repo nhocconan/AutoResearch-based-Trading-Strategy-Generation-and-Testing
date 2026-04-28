@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (price > 200 EMA) and volume confirmation.
-# Uses 4h primary timeframe to balance trade frequency (~25-50 trades/year) and capture medium-term trends.
-# Donchian channels provide objective breakout levels, filtered by 1d EMA200 trend and volume spikes (>1.5x 20-bar avg).
-# Designed to work in both bull and bear markets by following the 1d trend while using Donchian breakouts as entry signals.
-# Target: 75-200 total trades over 4 years (19-50/year). Size: 0.30.
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter (price > 200 EMA) and volume confirmation.
+# Uses 1d primary timeframe for lower trade frequency (~7-25/year) to minimize fee drag.
+# Donchian channels provide dynamic support/resistance, filtered by 1w EMA200 trend and volume spikes.
+# Designed to work in both bull and bear markets by following the 1w trend while using Donchian levels as entry signals.
+# Target: 30-100 total trades over 4 years (7-25/year). Size: 0.25.
 
-name = "4h_Donchian20_Breakout_1dEMA200_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA200_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,35 +28,33 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA200 (trend filter)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get 1w data for EMA200 (trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA200
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate 1w EMA200
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # 4h volume spike: >1.5x 20-bar average volume
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * volume_ma_20
-    
-    # Calculate 4h Donchian(20) channels
+    # Calculate 1d Donchian channels (20-period)
     high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 1d volume spike: >1.5x 20-bar average volume
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # EMA200 needs 200 bars, volume MA needs 20, use 200 for safety
+    start_idx = 200  # EMA200 needs 200 bars, Donchian/volume MA need 20, use 200 for safety
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_1d_aligned[i]) or
+        if (np.isnan(ema_200_1w_aligned[i]) or
             np.isnan(high_ma_20[i]) or
             np.isnan(low_ma_20[i]) or
             np.isnan(volume_ma_20[i])):
@@ -68,9 +66,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1d EMA200 direction
-        price_above_ema = close[i] > ema_200_1d_aligned[i]
-        price_below_ema = close[i] < ema_200_1d_aligned[i]
+        # Trend filter: 1w EMA200 direction
+        price_above_ema = close[i] > ema_200_1w_aligned[i]
+        price_below_ema = close[i] < ema_200_1w_aligned[i]
         
         # Breakout conditions
         long_breakout = close[i] > high_ma_20[i]
@@ -88,10 +86,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -99,9 +97,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
