@@ -13,61 +13,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Choppiness Index and ADX
+    # Get daily data for Donchian and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-day ATR for Choppiness Index
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate daily Donchian channels (20-period)
+    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate daily ATR (14-period) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]  # first period
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Sum of true ranges over 14 periods
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Calculate daily EMA(50) for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Max(high) - Min(low) over 14 periods
-    max_h_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_l_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14 = max_h_14 - min_l_14
+    # Align daily indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Choppiness Index: 100 * log10(sum_tr_14 / range_14) / log10(14)
-    chop = 100 * np.log10(sum_tr_14 / range_14) / np.log10(14)
-    
-    # Calculate ADX components
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    atr_14_smooth = pd.Series(atr_14).rolling(window=14, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr_14_smooth * 100)
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr_14_smooth * 100)
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align daily indicators to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 12-period RSI for entry signal
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=12, min_periods=12).mean().values
-    avg_loss = pd.Series(loss).rolling(window=12, min_periods=12).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[np.nan] * 12, rsi])
+    # Calculate average volume over 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -81,9 +58,16 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(atr_aligned[i]) or
+            np.isnan(ema50_aligned[i]) or
+            np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Skip if ATR is too low (avoid choppy markets)
+        if atr_aligned[i] < 0.001 * close[i]:  # ATR less than 0.1% of price
             signals[i] = 0.0
             continue
         
@@ -92,22 +76,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Chop regime filter: range-bound market (Chop > 61.8)
-        chop_filter = chop_aligned[i] > 61.8
+        # Trend filter: price above/below EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
-        # ADX filter: weak trend (ADX < 25)
-        adx_filter = adx_aligned[i] < 25
+        # Volume filter: current volume above average
+        vol_filter = volume[i] > vol_ma[i]
         
-        # RSI mean reversion: oversold/overbought with chop
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Breakout conditions: price breaks Donchian levels with volume and trend
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
         
-        long_entry = chop_filter and adx_filter and rsi_oversold
-        short_entry = chop_filter and adx_filter and rsi_overbought
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit when RSI returns to neutral zone
-        long_exit = rsi[i] >= 50
-        short_exit = rsi[i] <= 50
+        # Exit conditions: price returns to opposite Donchian level or trend reverses
+        long_exit = close[i] < donchian_low_aligned[i] or not uptrend
+        short_exit = close[i] > donchian_high_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -132,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Chop_ADX_RSI_MeanReversion"
-timeframe = "12h"
+name = "4h_Donchian20_EMA50_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
