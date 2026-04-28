@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_GoldenRatio_StopReversal_12hTrend
-Hypothesis: Uses 12h EMA for trend filter, golden ratio (0.618) retracement levels from swing highs/lows for entries, and volume confirmation. Designed for low trade frequency (<20/year) with high win rate by entering only at key retracement levels in trending markets. Works in bull/bear by following 12h trend direction.
+4h_KAMA_Direction_RSI_Momentum
+Hypothesis: Combines KAMA trend direction with RSI momentum and volume confirmation. 
+KAMA adapts to market conditions, providing reliable trend signals in both trending and ranging markets. 
+RSI filters for momentum strength, while volume confirms institutional participation. 
+Designed for low trade frequency (<30/year) to minimize fee burn while capturing strong moves.
 """
 
 import numpy as np
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,81 +21,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Get 4h data for KAMA calculation (using same timeframe as primary)
+    # We'll calculate KAMA on 4h closes directly
     
-    # Calculate swing points (simplified: local highs/lows over 5 periods)
-    def find_swing_points(arr, window=5):
-        highs = np.full_like(arr, np.nan)
-        lows = np.full_like(arr, np.nan)
-        for i in range(window, len(arr) - window):
-            if arr[i] == np.max(arr[i-window:i+window+1]):
-                highs[i] = arr[i]
-            if arr[i] == np.min(arr[i-window:i+window+1]):
-                lows[i] = arr[i]
-        return highs, lows
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    def calculate_kama(close_prices, length=10, fast=2, slow=30):
+        # Calculate efficiency ratio
+        change = np.abs(np.diff(close_prices, prepend=close_prices[0]))
+        volatility = np.abs(np.diff(close_prices))
+        
+        # Avoid division by zero
+        er = np.zeros_like(close_prices)
+        for i in range(1, len(close_prices)):
+            if volatility[i] != 0:
+                er[i] = change[i] / volatility[i]
+            else:
+                er[i] = 0
+        
+        # Smooth ER
+        er_smoothed = np.zeros_like(close_prices)
+        er_smoothed[0] = er[0]
+        for i in range(1, len(close_prices)):
+            er_smoothed[i] = 0.1 * er[i] + 0.9 * er_smoothed[i-1]
+        
+        # Calculate smoothing constant
+        sc = (er_smoothed * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # Calculate KAMA
+        kama = np.zeros_like(close_prices)
+        kama[0] = close_prices[0]
+        for i in range(1, len(close_prices)):
+            kama[i] = kama[i-1] + sc[i] * (close_prices[i] - kama[i-1])
+        
+        return kama
     
-    # Find swing highs and lows on close prices
-    swing_highs, swing_lows = find_swing_points(close, 5)
+    # Calculate KAMA on 4h closes
+    kama = calculate_kama(close, length=10, fast=2, slow=30)
     
-    # Forward fill swing points to get most recent levels
-    def ffill_nan(arr):
-        mask = np.isnan(arr)
-        if not np.any(mask):
-            return arr
-        idx = np.where(~mask, np.arange(len(arr)), 0)
-        np.maximum.accumulate(idx, out=idx)
-        return arr[idx]
+    # Calculate RSI
+    def calculate_rsi(close_prices, period=14):
+        delta = np.diff(close_prices, prepend=close_prices[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Calculate average gain and loss
+        avg_gain = np.zeros_like(close_prices)
+        avg_loss = np.zeros_like(close_prices)
+        
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        for i in range(period+1, len(close_prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        # Calculate RS and RSI
+        rs = np.zeros_like(close_prices)
+        rsi = np.zeros_like(close_prices)
+        for i in range(period, len(close_prices)):
+            if avg_loss[i] != 0:
+                rs[i] = avg_gain[i] / avg_loss[i]
+                rsi[i] = 100 - (100 / (1 + rs[i]))
+            else:
+                rsi[i] = 100
+        
+        return rsi
     
-    swing_highs_ff = ffill_nan(swing_highs)
-    swing_lows_ff = ffill_nan(swing_lows)
+    rsi = calculate_rsi(close, period=14)
     
-    # Calculate golden ratio retracement levels (0.618)
-    # For uptrend: retracement from swing low to swing high
-    # For downtrend: retracement from swing high to swing low
-    diff = swing_highs_ff - swing_lows_ff
-    retracement_618 = swing_lows_ff + 0.618 * diff
-    
-    # Volume confirmation: volume > 1.5x average volume over 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    # Volume confirmation: volume above 20-period average
+    volume_ma = np.zeros_like(volume)
+    for i in range(20, len(volume)):
+        volume_ma[i] = np.mean(volume[i-20:i])
+    volume_ma[:20] = volume_ma[20]  # Fill initial values
+    volume_confirm = volume > volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 30  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(swing_highs_ff[i]) or
-            np.isnan(swing_lows_ff[i]) or
-            np.isnan(retracement_618[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price relative to KAMA
+        uptrend = close[i] > kama[i]
+        downtrend = close[i] < kama[i]
+        
+        # Momentum filter: RSI in productive range (not overbought/oversold extremes)
+        rsi_momentum = (rsi[i] > 40) & (rsi[i] < 80)  # Avoid extremes
         
         # Volume confirmation
-        vol_conf = vol_confirm[i]
+        vol_confirm = volume_confirm[i]
         
-        # Entry conditions: golden ratio retracement with trend and volume
-        long_entry = (close[i] <= retracement_618[i]) and uptrend and vol_conf
-        short_entry = (close[i] >= retracement_618[i]) and downtrend and vol_conf
+        # Entry conditions: KAMA direction with momentum and volume
+        long_entry = uptrend & rsi_momentum & vol_confirm
+        short_entry = downtrend & rsi_momentum & vol_confirm
         
-        # Exit conditions: opposite retracement level or trend reversal
-        long_exit = (close[i] >= swing_highs_ff[i]) or (not uptrend)
-        short_exit = (close[i] <= swing_lows_ff[i]) or (not downtrend)
+        # Exit conditions: trend reversal or momentum exhaustion
+        long_exit = (~uptrend) | (rsi[i] > 75)  # Exit on trend change or overbought
+        short_exit = (~downtrend) | (rsi[i] < 25)  # Exit on trend change or oversold
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -117,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_GoldenRatio_StopReversal_12hTrend"
+name = "4h_KAMA_Direction_RSI_Momentum"
 timeframe = "4h"
 leverage = 1.0
