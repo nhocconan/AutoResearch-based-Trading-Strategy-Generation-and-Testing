@@ -1,10 +1,3 @@
-# 12h_WeeklyGapFill_Momentum
-# Hypothesis: Price gaps from weekly open to Friday close often fill on Monday/Tuesday due to weekend liquidity rebalancing. 
-# Uses weekly gap as mean-reversion signal with 1d trend filter and volume confirmation to avoid false fills in strong trends.
-# Works in bull/bear: gaps fill in ranging markets, trend filter prevents counter-trend trades during strong moves.
-# Target: 20-40 trades/year on 12h timeframe to minimize fee drag.
-# Uses weekly open/close and 1d EMA50, aligned to 12h chart. No look-ahead bias.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -20,29 +13,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for gap calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly gap percentage (close - open) / open
-    weekly_gap_pct = (weekly_close - weekly_open) / weekly_open
+    # Calculate Donchian channels (20-period)
+    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align daily Donchian to daily timeframe (no extra delay needed)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
-    # Align weekly and daily indicators to 12h timeframe
-    gap_aligned = align_htf_to_ltf(prices, df_1w, weekly_gap_pct)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate daily EMA(200) for trend filter
+    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Calculate average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,8 +48,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(gap_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or
+            np.isnan(ema200_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -70,23 +60,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        uptrend = close[i] > ema50_aligned[i]
-        downtrend = close[i] < ema50_aligned[i]
+        # Trend filter: price above/below EMA200
+        uptrend = close[i] > ema200_aligned[i]
+        downtrend = close[i] < ema200_aligned[i]
         
         # Volume filter: current volume above average
         vol_filter = volume[i] > vol_ma[i]
         
-        # Gap fill conditions: large weekly gap (>1.5%) with mean reversion
-        gap_long = gap_aligned[i] < -0.015  # Weekly gap down >1.5% -> expect fill up
-        gap_short = gap_aligned[i] > 0.015   # Weekly gap up >1.5% -> expect fill down
+        # Breakout conditions: price breaks Donchian levels with volume and trend
+        long_breakout = close[i] > upper_aligned[i]
+        short_breakout = close[i] < lower_aligned[i]
         
-        long_entry = gap_long and uptrend and vol_filter
-        short_entry = gap_short and downtrend and vol_filter
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: gap filled or trend reverses
-        long_exit = gap_aligned[i] > -0.005 or not uptrend  # Gap nearly filled or trend change
-        short_exit = gap_aligned[i] < 0.005 or not downtrend
+        # Exit conditions: price returns to opposite Donchian level or trend reverses
+        long_exit = close[i] < lower_aligned[i] or not uptrend
+        short_exit = close[i] > upper_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -111,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyGapFill_Momentum"
-timeframe = "12h"
+name = "1d_Donchian20_EMA200_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
