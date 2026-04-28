@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF context (Camarilla levels and volatility)
+    # Get daily data for HTF context (Camarilla levels)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -23,65 +23,77 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily range for pivot calculations
+    # Calculate daily range for pivot calculations (use previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     daily_range = high_1d - low_1d
     
-    # Daily Camarilla pivot levels (based on previous day)
+    # Calculate Camarilla levels from previous day
     camarilla_r3 = close_1d + daily_range * 1.1 / 4
     camarilla_s3 = close_1d - daily_range * 1.1 / 4
+    camarilla_r4 = close_1d + daily_range * 1.1 / 2
+    camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align Daily Camarilla levels to 12h timeframe
+    # Align Daily Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Weekly trend filter: price above/below weekly SMA20
     close_1w_series = pd.Series(df_1w['close'].values)
     sma20_1w = close_1w_series.rolling(window=20, min_periods=20).mean().values
     sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
     
-    # Volatility filter: daily ATR ratio (current vs 20-day average)
-    high_low = df_1d['high'] - df_1d['low']
-    high_close = np.abs(df_1d['high'] - df_1d['close'].shift())
-    low_close = np.abs(df_1d['low'] - df_1d['close'].shift())
-    tr_1d = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_1d = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_1d / atr_ma_1d
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Volume filter: above average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Hour filter: 0-24 UTC (trade all hours for 12h timeframe)
+    # Hour filter: 8-20 UTC (most active trading hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(sma20_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(sma20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when volatility is elevated (above average)
-        vol_filter = atr_ratio_aligned[i] > 1.0
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            # Outside session: flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume filter: above average volume
+        vol_filter = volume[i] > vol_ma[i]
         
         # Trend filter: price above/below weekly SMA20
         trend_up = close[i] > sma20_1w_aligned[i]
         trend_down = close[i] < sma20_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: price breaks above daily R3 with volatility and trend up
-        # Short: price breaks below daily S3 with volatility and trend down
+        # Long: price breaks above daily R3 with volume and trend up
+        # Short: price breaks below daily S3 with volume and trend down
         long_entry = (close[i] > r3_aligned[i]) and vol_filter and trend_up
         short_entry = (close[i] < s3_aligned[i]) and vol_filter and trend_down
         
-        # Exit conditions: price returns to opposite daily S3/R3 levels
-        long_exit = (close[i] < s3_aligned[i])
-        short_exit = (close[i] > r3_aligned[i])
+        # Exit conditions: price returns to opposite S4/R4 levels (wider bands)
+        long_exit = (close[i] < s4_aligned[i])
+        short_exit = (close[i] > r4_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -106,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyCamarilla_R3S3_WeeklyTrend_VolatilityFilter"
-timeframe = "12h"
+name = "4h_DailyCamarilla_R3S3_R4S4_WeeklyTrend_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
