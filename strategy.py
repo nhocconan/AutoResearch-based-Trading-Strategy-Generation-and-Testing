@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_RSI_Filter_VolumeSpike
-Hypothesis: Uses KAMA (Kaufman Adaptive Moving Average) to capture trend direction,
-filtered by RSI(14) for momentum and volume spike for confirmation. KAMA adapts
-to market noise, reducing whipsaw in ranging markets while capturing trends.
-Volume spike ensures participation. Designed for 4h timeframe to balance trade
-frequency and signal quality. Targets 20-40 trades/year.
+1d_Camarilla_Pivot_R1S1_R4S4_Breakout_VolumeSpike
+Hypothesis: Combines daily R1/S1 mean-reversion with weekly R4/S4 breakout continuation.
+Filters with volume spike and session filter to avoid false signals.
+Designed to work in both bull and bear markets by fading extremes and riding breakouts.
+Target: 15-25 trades/year (60-100 total over 4 years).
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,75 +21,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_len = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    # Get daily and weekly data
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 12:
+        return np.zeros(n)
     
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None
-    # Manual calculation for efficiency
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.zeros_like(close)
-    for i in range(1, len(close)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-        if i >= er_len:
-            volatility[i] -= np.abs(close[i-er_len] - close[i-er_len-1])
+    # Daily data for R1/S1
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Weekly data for R4/S4
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate daily Camarilla R1/S1
+    hl_range_1d = high_1d - low_1d
+    r1_1d = close_1d + hl_range_1d * 1.1 / 12.0
+    s1_1d = close_1d - hl_range_1d * 1.1 / 12.0
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate weekly Camarilla R4/S4
+    hl_range_1w = high_1w - low_1w
+    r4_1w = close_1w + hl_range_1w * 1.1 / 2.0  # R4 = C + (H-L)*1.1/2
+    s4_1w = close_1w - hl_range_1w * 1.1 / 2.0  # S4 = C - (H-L)*1.1/2
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align to daily timeframe (since timeframe=1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
-    # Volume spike (2x 20-period MA)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
+    # Daily volume spike (>2x 20-period MA)
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_ma_20_1d)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    # Signals
-    kama_up = kama > np.roll(kama, 1)
-    kama_down = kama < np.roll(kama, 1)
-    rsi_long = rsi > 50
-    rsi_short = rsi < 50
-    
-    # Entry conditions
-    long_entry = kama_up & rsi_long & vol_spike
-    short_entry = kama_down & rsi_short & vol_spike
-    
-    # Exit conditions (opposite signal)
-    long_exit = kama_down
-    short_exit = kama_up
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14, 20)  # max of lookback periods
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if long_entry[i] and position <= 0:
+        # Skip if any required data is NaN
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter
+        if not session_mask[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Price levels
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        r4 = r4_aligned[i]
+        s4 = s4_aligned[i]
+        vol_spike = vol_spike_aligned[i] > 0.5
+        
+        # Midpoint for exits (daily close)
+        midpoint_1d = close_1d
+        midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
+        midpoint_val = midpoint_aligned[i]
+        
+        # Entry logic:
+        # Long: Price > R1 AND < R4 with volume spike (fade at R1, but not beyond R4)
+        # Short: Price < S1 AND > S4 with volume spike (fade at S1, but not beyond S4)
+        # Breakout continuation: Price > R4 OR < S4 with volume spike (trend continuation)
+        long_fade = (close[i] > r1) and (close[i] < r4) and vol_spike
+        short_fade = (close[i] < s1) and (close[i] > s4) and vol_spike
+        long_breakout = (close[i] > r4) and vol_spike
+        short_breakout = (close[i] < s4) and vol_spike
+        
+        # Exit: price returns to daily midpoint
+        long_exit = close[i] < midpoint_val
+        short_exit = close[i] > midpoint_val
+        
+        if (long_fade or long_breakout) and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_entry[i] and position >= 0:
+        elif (short_fade or short_breakout) and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif long_exit[i] and position == 1:
+        elif long_exit and position == 1:
             signals[i] = 0.0
             position = 0
-        elif short_exit[i] and position == -1:
+        elif short_exit and position == -1:
             signals[i] = 0.0
             position = 0
         else:
@@ -104,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_RSI_Filter_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_R1S1_R4S4_Breakout_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
