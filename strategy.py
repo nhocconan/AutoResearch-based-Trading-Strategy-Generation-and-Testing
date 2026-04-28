@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams Fractal breakouts with volume confirmation and 1w EMA50 trend filter.
-# Enter long when price breaks above the most recent 1d bearish Williams Fractal with volume > 1.5x 24-bar average and close > 1w EMA50.
-# Enter short when price breaks below the most recent 1d bullish Williams Fractal with volume > 1.5x average and close < 1w EMA50.
-# Exit when price crosses the 1w EMA50 in the opposite direction.
+# Hypothesis: 4h strategy using 12h Donchian(20) breakouts with 1d EMA50 trend filter and volume confirmation.
+# Enter long when price breaks above 12h Donchian upper channel with volume > 1.5x 20-bar average and close > 1d EMA50.
+# Enter short when price breaks below 12h Donchian lower channel with volume > 1.5x average and close < 1d EMA50.
+# Exit when price returns to the 12h Donchian midpoint.
 # Uses discrete position sizing (0.25) to control risk and minimize fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
-# Williams Fractals identify significant swing points that act as support/resistance.
-# In bear markets, price often respects these levels as continuation patterns.
-# In bull markets, breakouts above recent highs (fractals) capture momentum.
-# The 1w EMA50 filter ensures we only trade with the higher timeframe trend.
+# Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag.
+# Donchian channels provide clear structure, EMA50 filters trend direction, volume confirms breakout strength.
+# Works in bull markets (breakouts continue up with trend) and bear markets (breakdowns continue down with trend).
 
-name = "12h_WilliamsFractal_Breakout_1wEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian_20_1dEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,48 +26,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Fractals (MTF structure)
+    # Get 12h data for Donchian channel calculation (MTF structure)
+    df_12h = get_htf_data(prices, '12h')
+    
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Donchian upper and lower channels
+    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    midpoint_12h = (upper_12h + lower_12h) / 2.0
+    
+    # Align Donchian levels to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    midpoint_aligned = align_htf_to_ltf(prices, df_12h, midpoint_12h)
+    
+    # Get 1d data for EMA50 trend filter (MTF trend)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 5:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Williams Fractals on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Bearish fractal: high[n] > high[n-2] and high[n] > high[n-1] and high[n] > high[n+1] and high[n] > high[n+2]
-    # Bullish fractal: low[n] < low[n-2] and low[n] < low[n-1] and low[n] < low[n+1] and low[n] < low[n+2]
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
-    
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and 
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and 
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
-    
-    # Align Williams Fractals to 12h timeframe with additional delay (fractals need confirmation)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # Get 1w data for EMA50 trend filter (MTF trend)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate volume confirmation: >1.5x 24-bar average volume (2x 12h = 1 day)
+    # Calculate volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_24
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,25 +69,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_24[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(midpoint_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1w EMA50 bias
-        bullish_bias = close[i] > ema_50_1w_aligned[i]
-        bearish_bias = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: 1d EMA50 bias
+        bullish_bias = close[i] > ema_50_1d_aligned[i]
+        bearish_bias = close[i] < ema_50_1d_aligned[i]
         
-        # Williams Fractal breakout conditions
-        long_breakout = close[i] > bearish_fractal_aligned[i]
-        short_breakout = close[i] < bullish_fractal_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper_aligned[i]
+        short_breakout = close[i] < lower_aligned[i]
         
-        # Exit condition: cross 1w EMA50 in opposite direction
-        long_exit = close[i] < ema_50_1w_aligned[i]
-        short_exit = close[i] > ema_50_1w_aligned[i]
+        # Exit condition: return to midpoint
+        long_exit = close[i] < midpoint_aligned[i]
+        short_exit = close[i] > midpoint_aligned[i]
         
         # Entry conditions
         long_entry = long_breakout and vol_confirm and bullish_bias
