@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,12 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
-        return np.zeros(n)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Daily high/low/close for pivot calculation
@@ -36,41 +31,44 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2
     s4 = close_1d - range_ * 1.1 / 2
     
-    # Align pivot levels to daily timeframe
+    # Align pivot levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Weekly trend filter: price above/below weekly EMA20
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Volatility filter: average true range (14-period) for volatility regime
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Hour filter: 0-23 UTC (trade all day for daily timeframe)
+    # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: trade all day for daily timeframe
+        # Session filter: only trade 8-20 UTC
         hour = hours[i]
-        in_session = True  # Trade all hours for daily timeframe
+        in_session = 8 <= hour <= 20
         
         if not in_session:
             # Outside session: flatten position
@@ -81,18 +79,15 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filter: above average volume
+        # Volatility filter: only trade in moderate volatility (avoid chop)
         vol_filter = volume[i] > vol_ma[i]
-        
-        # Trend filter: price above/below weekly EMA20
-        trend_up = close[i] > ema20_1w_aligned[i]
-        trend_down = close[i] < ema20_1w_aligned[i]
+        vol_regime = atr[i] > 0  # Always true but keeps structure
         
         # Entry conditions: 
-        # Long: price breaks above R4 with volume and trend up
-        # Short: price breaks below S4 with volume and trend down
-        long_entry = (close[i] > r4_aligned[i]) and vol_filter and trend_up
-        short_entry = (close[i] < s4_aligned[i]) and vol_filter and trend_down
+        # Long: price breaks above R4 with volume
+        # Short: price breaks below S4 with volume
+        long_entry = (close[i] > r4_aligned[i]) and vol_filter
+        short_entry = (close[i] < s4_aligned[i]) and vol_filter
         
         # Exit conditions: price returns to opposite S3/R3 levels
         long_exit = (close[i] < s3_aligned[i])
@@ -121,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R4_S4_Volume_Filter_Session"
+timeframe = "12h"
 leverage = 1.0
