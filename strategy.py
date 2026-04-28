@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,103 +13,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once
+    # Get 1d data once for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 1d indicators
+    # Calculate weekly pivot points using 1d high/low/close
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # ATR(14) on 1d for volatility filter
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # ATR(14) on 1h for entry timing
-    tr = np.maximum(high - low, 
-                    np.maximum(np.abs(high - np.roll(close, 1)), 
-                               np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # EMA20 on 1d for trend filter
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 6-period RSI on 6h for overbought/oversold conditions
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align to 1h
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average (stricter)
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
-    
-    # Session filter: 08-20 UTC (precomputed)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 30  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(volume_surge[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Skip outside session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
+        # Fade at R3/S3 with RSI confirmation and volume surge
+        # Short at R3 resistance when RSI > 60 (overbought) with volume
+        short_signal = (close[i] >= r3_aligned[i]) and (rsi[i] > 60) and volume_surge[i]
+        # Long at S3 support when RSI < 40 (oversold) with volume
+        long_signal = (close[i] <= s3_aligned[i]) and (rsi[i] < 40) and volume_surge[i]
         
-        # Volatility filter: only trade when 1h ATR > 0.5 * 1d ATR (avoid chop)
-        vol_filter = atr_14[i] > (0.5 * atr_14_1d_aligned[i])
+        # Exit when price crosses pivot or RSI returns to neutral zone
+        exit_long = (close[i] <= pivot_aligned[i]) or (rsi[i] >= 50)
+        exit_short = (close[i] >= pivot_aligned[i]) or (rsi[i] <= 50)
         
-        # Trend filter: price relative to 1d EMA20
-        trend_up = close[i] > ema_20_1d_aligned[i]
-        trend_down = close[i] < ema_20_1d_aligned[i]
-        
-        # Entry conditions with stricter thresholds
-        # Long: uptrend + volume surge + volatility filter
-        long_entry = trend_up and volume_surge[i] and vol_filter
-        # Short: downtrend + volume surge + volatility filter
-        short_entry = trend_down and volume_surge[i] and vol_filter
-        
-        # Exit conditions: trend reversal or volatility drop
-        long_exit = not trend_up or not vol_filter
-        short_exit = not trend_down or not vol_filter
-        
-        if long_entry and position <= 0:
-            signals[i] = 0.20
+        if long_signal and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
-            signals[i] = -0.20
+        elif short_signal and position >= 0:
+            signals[i] = -0.25
             position = -1
-        elif long_exit and position == 1:
-            signals[i] = -0.20  # Reverse to short
+        elif exit_long and position == 1:
+            signals[i] = -0.25  # Reverse to short
             position = -1
-        elif short_exit and position == -1:
-            signals[i] = 0.20   # Reverse to long
+        elif exit_short and position == -1:
+            signals[i] = 0.25   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_ATR14_VolumeSurge_EMA20_Trend"
-timeframe = "1h"
+name = "6h_PivotR3S3_Fade_RSI_Volume"
+timeframe = "6h"
 leverage = 1.0
