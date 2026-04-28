@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and ATR-based stoploss.
-# Enter long when price breaks above 12h Donchian(20) upper band and volume > 1.5x 20-bar average.
-# Enter short when price breaks below 12h Donchian(20) lower band and volume > 1.5x 20-bar average.
-# Exit when price crosses back inside the Donchian bands.
-# Donchian channels provide clear structure, volume confirms breakout strength, ATR stoploss controls risk.
-# Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
-# Uses discrete position sizing (0.30) to control risk. Target: 75-200 total trades over 4 years.
+# Hypothesis: 1h strategy using 4h Camarilla pivot breakout with volume confirmation and session filter (08-20 UTC).
+# Enter long when price breaks above R1 with volume > 1.5x 20-bar average and price > 4h EMA50.
+# Enter short when price breaks below S1 with volume > 1.5x 20-bar average and price < 4h EMA50.
+# Exit when price returns to pivot point (PP) or opposite breakout occurs.
+# Uses 4h for signal direction (trend + structure), 1h only for entry timing precision.
+# Session filter reduces noise trades outside active hours.
+# Discrete position sizing (0.20) controls risk. Target: 60-150 total trades over 4 years.
 
-name = "4h_Donchian20_12h_VolumeBreakout_ATRStop_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hEMA50_Volume_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,38 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian calculation (HTF)
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for Camarilla pivot and EMA calculation (HTF)
+    df_4h = get_htf_data(prices, '4h')
     
-    if len(df_12h) < 20:
+    if len(df_4h) < 60:
         return np.zeros(n)
     
-    # Calculate 12h Donchian(20) channels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 4h Camarilla pivot points (based on previous day's OHLC)
+    # For intraday, we use the previous 4h bar's high, low, close
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Upper band: 20-period high
-    upper_band = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower band: 20-period low
-    lower_band = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    pp = (high_4h + low_4h + close_4h) / 3.0
     
-    # Align Donchian bands to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_band)
+    # Camarilla levels
+    r1 = pp + (high_4h - low_4h) * 1.1 / 12
+    s1 = pp - (high_4h - low_4h) * 1.1 / 12
     
-    # Calculate ATR for stoploss (using 4h data)
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align length with prices
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Calculate 4h EMA50 for trend filter
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 4h volume confirmation: >1.5x 20-bar average volume
+    # Align 4h indicators to 1h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_4h, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    
+    # Calculate 1h volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 1.5 * volume_ma_20
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,57 +68,45 @@ def generate_signals(prices):
     start_idx = 100  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ma_20[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > upper_aligned[i]
-        short_breakout = close[i] < lower_aligned[i]
+        # Determine breakout conditions
+        long_breakout = close[i] > r1_aligned[i]
+        short_breakout = close[i] < s1_aligned[i]
         
-        # Re-entry conditions (price back inside bands)
-        long_exit = close[i] < upper_aligned[i]
-        short_exit = close[i] > lower_aligned[i]
-        
-        # ATR-based stoploss conditions
-        if position == 1:  # Long position
-            stoploss_level = close[i - position_change] - 2.5 * atr[i] if 'position_change' in locals() else close[i] - 2.5 * atr[i]
-            stoploss_hit = close[i] < stoploss_level
-        elif position == -1:  # Short position
-            stoploss_level = close[i - position_change] + 2.5 * atr[i] if 'position_change' in locals() else close[i] + 2.5 * atr[i]
-            stoploss_hit = close[i] > stoploss_level
-        else:
-            stoploss_hit = False
+        # Trend filter: price > EMA50 for long, price < EMA50 for short
+        long_trend = close[i] > ema_50_aligned[i]
+        short_trend = close[i] < ema_50_aligned[i]
         
         # Entry conditions
-        long_entry = long_breakout and volume_confirm[i]
-        short_entry = short_breakout and volume_confirm[i]
+        long_entry = long_breakout and long_trend and volume_confirm[i]
+        short_entry = short_breakout and short_trend and volume_confirm[i]
         
-        # Exit conditions
-        long_exit_signal = long_exit or stoploss_hit
-        short_exit_signal = short_exit or stoploss_hit
+        # Exit conditions: price returns to pivot point (PP) or opposite breakout
+        long_exit = close[i] < pp_aligned[i]
+        short_exit = close[i] > pp_aligned[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.20
             position = 1
-            position_change = i
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.20
             position = -1
-            position_change = i
-        elif (position == 1 and long_exit_signal) or (position == -1 and short_exit_signal):
+        elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
             position = 0
-            position_change = i
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
