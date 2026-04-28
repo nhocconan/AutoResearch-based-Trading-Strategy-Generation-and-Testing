@@ -40,7 +40,7 @@ def generate_signals(prices):
     camarilla_r4 = close_1w + weekly_range * 1.1 / 2
     camarilla_s4 = close_1w - weekly_range * 1.1 / 2
     
-    # Align Weekly Camarilla levels to 6h timeframe
+    # Align Weekly Camarilla levels to 1d timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
@@ -120,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyCamarilla_R4S4_DailyTrend_Volume_Session"
-timeframe = "6h"
+name = "1d_WeeklyCamarilla_R4S4_DailyTrend_Volume_Session"
+timeframe = "1d"
 leverage = 1.0
