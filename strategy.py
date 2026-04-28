@@ -13,9 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and EMA (HTF)
+    # Get 1d data for trend filter and pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -26,40 +26,43 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ATR(14) for volatility and stop loss
+    # Calculate 1d ATR(14) for volatility filter
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d = np.concatenate([[np.nan], tr_1d])  # Align with original index
+    tr_1d = np.concatenate([[np.nan], tr_1d])
     atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 4h high/low channels for breakout (using 4h data)
+    # Get 4h data for ATR calculation (used for stop loss)
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 14:
         return np.zeros(n)
     
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 4h Donchian channel (20-period high/low)
-    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    highest_20_aligned = align_htf_to_ltf(prices, df_4h, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_4h, lowest_20)
+    # Calculate ATR(14) on 4h
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_4h = np.concatenate([[np.nan], tr_4h])
+    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 20)
+    start_idx = max(100, 34, 14)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or
-            np.isnan(highest_20_aligned[i]) or
-            np.isnan(lowest_20_aligned[i])):
+            np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -67,19 +70,39 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Entry conditions: Donchian breakout with trend filter
-        long_entry = uptrend and close[i] > highest_20_aligned[i]
-        short_entry = downtrend and close[i] < lowest_20_aligned[i]
+        # Volatility filter: only trade when volatility is above average
+        vol_filter = atr_1d_aligned[i] > 0.8 * np.nanmedian(atr_1d_aligned[max(0,i-20):i])
         
-        # Exit conditions: ATR-based stop loss (1.5 * ATR from entry)
+        # Entry conditions: breakout of recent range with volume confirmation
+        lookback = 10
+        if i >= lookback:
+            recent_high = np.nanmax(high[i-lookback:i])
+            recent_low = np.nanmin(low[i-lookback:i])
+            
+            # Volume filter: current volume above recent average
+            vol_ma = np.nanmean(volume[max(0,i-5):i]) if i >= 5 else volume[i]
+            volume_filter = volume[i] > 1.3 * vol_ma
+            
+            long_breakout = close[i] > recent_high
+            short_breakout = close[i] < recent_low
+            
+            long_entry = uptrend and long_breakout and vol_filter and volume_filter
+            short_entry = downtrend and short_breakout and vol_filter and volume_filter
+        else:
+            long_entry = False
+            short_entry = False
+        
+        # Exit conditions: ATR-based trailing stop
         if position == 1:
-            # Trail stop: exit if price drops 1.5*ATR from highest high since entry
-            recent_high = np.nanmax(high[max(0,i-10):i+1]) if i >= 10 else high[i]
-            exit_condition = close[i] < recent_high - 1.5 * atr_1d_aligned[i]
+            # Trail stop: exit if price drops 2.5*ATR from highest high since entry
+            lookback_stop = min(20, i+1)
+            recent_high = np.nanmax(high[i-lookback_stop:i+1])
+            exit_condition = close[i] < recent_high - 2.5 * atr_4h_aligned[i]
         elif position == -1:
-            # Trail stop: exit if price rises 1.5*ATR from lowest low since entry
-            recent_low = np.nanmin(low[max(0,i-10):i+1]) if i >= 10 else low[i]
-            exit_condition = close[i] > recent_low + 1.5 * atr_1d_aligned[i]
+            # Trail stop: exit if price rises 2.5*ATR from lowest low since entry
+            lookback_stop = min(20, i+1)
+            recent_low = np.nanmin(low[i-lookback_stop:i+1])
+            exit_condition = close[i] > recent_low + 2.5 * atr_4h_aligned[i]
         else:
             exit_condition = False
         
@@ -104,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_ATRStop"
+name = "4h_Breakout_Volume_Trend_ATRStop"
 timeframe = "4h"
 leverage = 1.0
