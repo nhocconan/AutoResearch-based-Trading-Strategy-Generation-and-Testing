@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_Volume_Spike_1dTrend_HTF
-Hypothesis: TRIX (triple smoothed EMA) crosses signal line with volume spike confirmation and 1d EMA trend filter. Works in bull markets (long when TRIX crosses above signal) and bear markets (short when TRIX crosses below signal). Target: 20-30 trades/year to minimize fee drag while capturing momentum shifts.
+6h_Ichimoku_TK_Cross_CloudFilter_1dTrend
+Hypothesis: 6h Ichimoku Tenkan-Kijun cross with 1d cloud filter (above/below cloud) and volume confirmation.
+Works in bull markets (long when price above cloud, TK cross up) and bear markets (short when price below cloud, TK cross down).
+Target: 15-30 trades/year to minimize fee drift while capturing strong directional moves.
 """
 
 import numpy as np
@@ -10,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,24 +20,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Ichimoku cloud and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # TRIX calculation (15-period triple EMA)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = pd.Series(ema3).pct_change(1) * 100  # Percentage change
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
     
     # Volume confirmation: >1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,35 +64,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix[i]) or 
-            np.isnan(trix_signal[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(cloud_top[i]) or
+            np.isnan(cloud_bottom[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Price above/below cloud
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
         
-        # TRIX signals
-        trix_cross_above = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]
-        trix_cross_below = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]
+        # TK cross signals
+        tk_cross_up = tenkan_sen_aligned[i] > kijun_sen_aligned[i] and tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]
+        tk_cross_down = tenkan_sen_aligned[i] < kijun_sen_aligned[i] and tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]
         
         # Volume confirmation
         vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Entry logic: TRIX cross in direction of trend with volume
-        long_entry = vol_confirm and uptrend and trix_cross_above
-        short_entry = vol_confirm and downtrend and trix_cross_below
+        # Entry logic: TK cross in direction of cloud with volume
+        long_entry = vol_confirm and price_above_cloud and tk_cross_up
+        short_entry = vol_confirm and price_below_cloud and tk_cross_down
         
-        # Exit logic: opposite TRIX cross or trend change
-        long_exit = trix_cross_below or (not uptrend)
-        short_exit = trix_cross_above or (not downtrend)
+        # Exit logic: opposite TK cross or price crosses cloud
+        long_exit = tk_cross_down or close[i] < cloud_top[i]
+        short_exit = tk_cross_up or close[i] > cloud_bottom[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -96,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_Volume_Spike_1dTrend_HTF"
-timeframe = "4h"
+name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend"
+timeframe = "6h"
 leverage = 1.0
