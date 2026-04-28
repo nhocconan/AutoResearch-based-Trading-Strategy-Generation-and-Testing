@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for trend and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -32,7 +32,7 @@ def generate_signals(prices):
     # Calculate daily SMA(50) for trend filter
     sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
-    # Align daily indicators to 6h
+    # Align daily indicators to 4h
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
@@ -47,7 +47,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_SMA50_ATR14_Volume_Trend_Session"
-timeframe = "6h"
+name = "4h_SMA50_ATR14_Volume_Trend_Session"
+timeframe = "4h"
 leverage = 1.0
