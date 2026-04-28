@@ -13,42 +13,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF trend and pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data for pivot points and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h EMA(50) for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily pivot points (standard floor trader method)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2.0 * pivot_1d - low_1d
+    s1_1d = 2.0 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r3_1d = high_1d + 2.0 * (pivot_1d - low_1d)
+    s3_1d = low_1d - 2.0 * (high_1d - pivot_1d)
     
-    # Align 12h EMA50 to 4h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align daily pivot levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Calculate 12h volume moving average (20-period)
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    
-    # Align 12h volume MA to 4h timeframe
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
-    
-    # Calculate 12h volume spike (current volume > 2x 20-period MA)
-    vol_spike_12h = volume_12h > (2.0 * vol_ma_20_12h)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h.astype(float))
-    
-    # Calculate 12h Pivot Points (standard floor trader method)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    r1_12h = 2.0 * pivot_12h - low_12h
-    s1_12h = 2.0 * pivot_12h - high_12h
-    
-    # Align 12h pivot levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Calculate daily volume spike (current volume > 2.5x 20-period MA)
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2.5 * vol_ma_20_1d)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     # Calculate 4h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -66,9 +58,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or
             np.isnan(highest_high[i]) or
             np.isnan(lowest_low[i]) or
             np.isnan(vol_spike_aligned[i])):
@@ -80,30 +72,17 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema50_12h_aligned[i]
-        downtrend = close[i] < ema50_12h_aligned[i]
-        
-        # 12h pivot levels
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        
-        # Volume spike confirmation from 12h timeframe
-        vol_spike = vol_spike_aligned[i] > 0.5
-        
         # Entry conditions: 
-        # Long: Price breaks above 12h R1 with volume spike and uptrend
-        # Short: Price breaks below 12h S1 with volume spike and downtrend
-        long_entry = (close[i] > r1) and vol_spike and uptrend
-        short_entry = (close[i] < s1) and vol_spike and downtrend
+        # Long: Price breaks above daily R3 with volume spike
+        # Short: Price breaks below daily S3 with volume spike
+        long_entry = (close[i] > r3_aligned[i]) and vol_spike_aligned[i]
+        short_entry = (close[i] < s3_aligned[i]) and vol_spike_aligned[i]
         
         # Exit conditions: 
-        # Long exit: price returns below 12h pivot or trend reversal
-        # Short exit: price returns above 12h pivot or trend reversal
-        pivot_val = (r1 + s1) / 2.0  # Pivot level
-        
-        long_exit = (close[i] < pivot_val) or (not uptrend)
-        short_exit = (close[i] > pivot_val) or (not downtrend)
+        # Long exit: price returns below daily pivot
+        # Short exit: price returns above daily pivot
+        long_exit = close[i] < pivot_aligned[i]
+        short_exit = close[i] > pivot_aligned[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -128,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12hPivot_R1S1_Breakout_12hEMA50_VolumeSpike_v1"
+name = "4h_DailyPivot_R3S3_Breakout_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
