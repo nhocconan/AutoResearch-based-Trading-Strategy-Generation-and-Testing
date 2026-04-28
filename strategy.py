@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_Volume
-Hypothesis: On 12-hour timeframe, enter long when price breaks above Camarilla R3 level with volume surge and weekly uptrend (price above weekly EMA34), short when price breaks below S3 level with volume surge and weekly downtrend. Exit on opposite breakout. Uses weekly trend filter to avoid counter-trend trades. Designed for low trade frequency (~15-30/year) to minimize fee decay in both bull and bear markets. Targets BTC/ETH primarily with proven edge from Camarilla structure + volume + trend alignment.
+4h_Ichimoku_Kumo_Breakout_12hTrend_Volume
+Hypothesis: On 4-hour timeframe, enter long when price breaks above Kumo cloud with volume surge and 12h uptrend (price above Kumo top), short when price breaks below Kumo cloud with volume surge and 12h downtrend. Exit on opposite Kumo break. Uses 12h Kumo trend filter to avoid counter-trend trades. Designed for low trade frequency (~20-40/year) to minimize fee decay in both bull and bear markets. Ichimoku Kumo provides dynamic support/resistance that adapts to volatility, working well in trending and ranging conditions.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,40 +18,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 34:
+    # Get 12h data for Kumo cloud (trend filter)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 52:
         return np.zeros(n)
     
-    # Calculate weekly 34 EMA for trend filter
-    close_weekly = df_weekly['close'].values
-    ema34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Ichimoku components on 12h
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Align weekly EMA to 12h timeframe
-    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    tenkan_sen = (pd.Series(high_12h).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_12h).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    kijun_sen = (pd.Series(high_12h).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_12h).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(2)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    senkou_span_b = ((pd.Series(high_12h).rolling(window=52, min_periods=52).max() + 
+                      pd.Series(low_12h).rolling(window=52, min_periods=52).min()) / 2).shift(2)
     
-    # Weekly trend: bullish when price > EMA34, bearish when price < EMA34
-    weekly_uptrend = close > ema34_weekly_aligned
-    weekly_downtrend = close < ema34_weekly_aligned
+    # Align Ichimoku components to 4h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_12h, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_12h, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_b.values)
     
-    # Get daily data for Camarilla levels (using previous day's data)
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
-        return np.zeros(n)
+    # Kumo cloud boundaries
+    kumo_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    kumo_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_daily['high'].shift(1).values
-    low_prev = df_daily['low'].shift(1).values
-    close_prev = df_daily['close'].shift(1).values
-    
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    R3 = close_prev + range_prev * 1.1 / 2
-    S3 = close_prev - range_prev * 1.1 / 2
-    
-    # Align daily Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_daily, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_daily, S3)
+    # 12h trend: bullish when price > Kumo top, bearish when price < Kumo bottom
+    # Note: Using close price for trend determination
+    twelve_h_uptrend = close > kumo_top
+    twelve_h_downtrend = close < kumo_bottom
     
     # Volume confirmation: current volume > 2.0x 24-period average
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -60,22 +61,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_weekly_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or 
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with weekly trend alignment and volume surge
-        long_entry = close[i] > R3_aligned[i] and weekly_uptrend[i] and volume_surge[i]
-        short_entry = close[i] < S3_aligned[i] and weekly_downtrend[i] and volume_surge[i]
+        # Entry conditions with 12h Kumo trend alignment and volume surge
+        long_entry = close[i] > kumo_top[i] and twelve_h_uptrend[i] and volume_surge[i]
+        short_entry = close[i] < kumo_bottom[i] and twelve_h_downtrend[i] and volume_surge[i]
         
-        # Exit on opposite Camarilla level break with volume surge
-        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
+        # Exit on opposite Kumo break with volume surge
+        long_exit = close[i] < kumo_bottom[i] and volume_surge[i]
+        short_exit = close[i] > kumo_top[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -100,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Ichimoku_Kumo_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
