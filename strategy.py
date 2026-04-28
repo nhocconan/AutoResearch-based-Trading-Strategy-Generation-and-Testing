@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Bollinger Bands (20,2) for mean reversion with volume spike confirmation.
-# Enter long when price touches lower BB and volume > 2x 20-bar average, short when price touches upper BB with volume confirmation.
-# Exit when price reverts to middle BB (20-period SMA) or opposite BB touch occurs.
-# Weekly Bollinger Bands provide dynamic support/resistance on higher timeframe, reducing false signals.
-# Volume spike confirms institutional interest at key levels. Works in ranging markets (mean reversion) and 
-# during trending markets (pullbacks to weekly mean). Uses discrete position sizing (0.25) to control risk.
-# Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h strategy using Elder Ray Index (Bull/Bear Power) from 1d timeframe with EMA trend filter and volume confirmation.
+# Bull Power = High - EMA(13), Bear Power = Low - EMA(13). 
+# Enter long when Bull Power > 0 and increasing, price > EMA(34), and volume > 1.5x 20-bar average.
+# Enter short when Bear Power < 0 and decreasing, price < EMA(34), and volume > 1.5x 20-bar average.
+# Exit when power reverses or price crosses EMA(34).
+# Elder Ray measures bull/bear strength relative to trend. Works in bull markets (strong Bull Power) and bear markets (strong Bear Power).
+# Uses discrete position sizing (0.25) to control risk. Target: 50-150 total trades over 4 years.
 
-name = "1d_WeeklyBollinger_MeanReversion_Volume_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_EMA34_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,38 +25,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands calculation (HTF)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Elder Ray calculation (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Bollinger Bands (20,2)
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1d Elder Ray components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Middle Band: 20-period SMA
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    # EMA(13) for Elder Ray power calculation
+    close_series_1d = pd.Series(close_1d)
+    ema13_1d = close_series_1d.ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Standard Deviation: 20-period
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    # Bull Power = High - EMA(13)
+    bull_power = high_1d - ema13_1d
     
-    # Upper Band: SMA + (2 * std)
-    upper_bb = sma_20 + (2 * std_20)
+    # Bear Power = Low - EMA(13)
+    bear_power = low_1d - ema13_1d
     
-    # Lower Band: SMA - (2 * std)
-    lower_bb = sma_20 - (2 * std_20)
+    # EMA(34) for trend filter
+    ema34_1d = close_series_1d.ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align weekly Bollinger Bands to daily timeframe
-    sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)
+    # Align Elder Ray components and EMA34 to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily volume confirmation: >2x 20-bar average volume
+    # Calculate 6h volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2 * volume_ma_20)
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,23 +66,26 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma_20_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Bollinger Band conditions
-        price_at_upper = close[i] >= upper_bb_aligned[i]
-        price_at_lower = close[i] <= lower_bb_aligned[i]
-        price_at_middle = abs(close[i] - sma_20_aligned[i]) < (0.001 * sma_20_aligned[i])  # Within 0.1% of middle band
+        # Elder Ray conditions
+        bull_power_positive = bull_power_aligned[i] > 0
+        bull_power_increasing = bull_power_aligned[i] > bull_power_aligned[i-1]
+        bear_power_negative = bear_power_aligned[i] < 0
+        bear_power_decreasing = bear_power_aligned[i] < bear_power_aligned[i-1]
+        price_above_ema34 = close[i] > ema34_aligned[i]
+        price_below_ema34 = close[i] < ema34_aligned[i]
         
         # Entry conditions
-        long_entry = price_at_lower and volume_confirm[i]
-        short_entry = price_at_upper and volume_confirm[i]
+        long_entry = bull_power_positive and bull_power_increasing and price_above_ema34 and volume_confirm[i]
+        short_entry = bear_power_negative and bear_power_decreasing and price_below_ema34 and volume_confirm[i]
         
-        # Exit conditions: price reverts to middle band or opposite BB touch
-        long_exit = price_at_middle or price_at_upper
-        short_exit = price_at_middle or price_at_lower
+        # Exit conditions: power reverses or price crosses EMA34
+        long_exit = not (bull_power_positive and bull_power_increasing) or not price_above_ema34
+        short_exit = not (bear_power_negative and bear_power_decreasing) or not price_below_ema34
         
         # Handle entries and exits
         if long_entry and position <= 0:
