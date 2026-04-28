@@ -13,40 +13,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get daily data for HTF context (trend and volatility)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Calculate daily range for pivot calculations
+    # Calculate daily ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    daily_range = high_1d - low_1d
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily Camarilla pivot levels (based on previous day)
-    camarilla_r4 = close_1d + daily_range * 1.1 / 2
-    camarilla_s4 = close_1d - daily_range * 1.1 / 2
+    # Calculate daily EMA20 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Daily Camarilla levels to 1d timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align daily indicators to 12h timeframe
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Weekly trend filter: price above/below weekly SMA20
-    close_1w_series = pd.Series(df_1w['close'].values)
-    sma20_1w = close_1w_series.rolling(window=20, min_periods=20).mean().values
-    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
+    # 12h ATR for stop loss
+    tr_12h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_12h[0] = high[0] - low[0]
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Hour filter: 8-20 UTC (most active trading hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Hour filter: 0-23 UTC (12h bars cover full day, no session filter needed)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,40 +54,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(sma20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(atr_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 8-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Volatility filter: only trade when ATR is above average (avoid choppy markets)
+        vol_filter = atr_12h[i] > atr_1d_aligned[i] * 0.8
         
-        if not in_session:
-            # Outside session: flatten position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume filter: above average volume
-        vol_filter = volume[i] > vol_ma[i]
-        
-        # Trend filter: price above/below weekly SMA20
-        trend_up = close[i] > sma20_1w_aligned[i]
-        trend_down = close[i] < sma20_1w_aligned[i]
+        # Trend filter: price above/below daily EMA20
+        trend_up = close[i] > ema20_1d_aligned[i]
+        trend_down = close[i] < ema20_1d_aligned[i]
         
         # Entry conditions: 
-        # Long: price breaks above daily R4 with volume and trend up
-        # Short: price breaks below daily S4 with volume and trend down
-        long_entry = (close[i] > r4_aligned[i]) and vol_filter and trend_up
-        short_entry = (close[i] < s4_aligned[i]) and vol_filter and trend_down
+        # Long: price above daily EMA20 with volume and volatility
+        # Short: price below daily EMA20 with volume and volatility
+        long_entry = trend_up and vol_filter
+        short_entry = trend_down and vol_filter
         
-        # Exit conditions: price returns to opposite daily S4/R4 levels
-        long_exit = (close[i] < s4_aligned[i])
-        short_exit = (close[i] > r4_aligned[i])
+        # Exit conditions: 
+        # Long exit: price crosses below daily EMA20 OR ATR drops (range market)
+        long_exit = not trend_up or (atr_12h[i] < atr_1d_aligned[i] * 0.5)
+        # Short exit: price crosses above daily EMA20 OR ATR drops (range market)
+        short_exit = not trend_down or (atr_12h[i] < atr_1d_aligned[i] * 0.5)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -113,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DailyCamarilla_R4S4_WeeklyTrend_Volume_Session"
-timeframe = "1d"
+name = "12h_DailyEMA20_Trend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
