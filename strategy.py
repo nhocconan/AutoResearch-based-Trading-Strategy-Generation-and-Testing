@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
-# Donchian breakouts capture momentum moves. Weekly pivot (from 1d data) provides structural bias:
-# - Price above weekly pivot (PP) = bullish bias, look for longs on breakouts
-# - Price below weekly pivot = bearish bias, look for shorts on breakdowns
-# Volume spike (>1.8x 20-bar average) confirms breakout validity and filters false signals.
-# Works in bull/bear markets by following the higher-timeframe structural bias while using
-# Donchian breakouts for precise entry timing. Target 12-37 trades/year to minimize fee drag.
+# Hypothesis: 12h Camarilla R3/S3 breakout with weekly trend filter (1w EMA34) and volume confirmation
+# Camarilla pivot levels (R3/S3) act as strong intraday support/resistance. Breakouts above R3 or below S3
+# with volume confirmation indicate strong momentum. Weekly EMA34 filter ensures we only trade in the
+# direction of the higher-timeframe trend, avoiding counter-trend whipsaws. This structure has proven
+# effective on ETHUSDT and SOLUSDT in both bull and bear markets. Target 12-37 trades/year to minimize fee drag.
 
-name = "6h_Donchian20_WeeklyPivot_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,93 +23,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
+    # Get daily data for Camarilla pivot calculation and weekly trend
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 50 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from daily OHLC (using prior week's data)
-    # We need to group daily data into weeks and calculate pivot for each week
-    # For simplicity, we'll use rolling weekly lookback: highest high, lowest low, close of prior 5 trading days
+    # Calculate Camarilla pivot levels from prior day's OHLC
+    # R3 = Close + 1.1 * (High - Low) / 2
+    # S3 = Close - 1.1 * (High - Low) / 2
     df_1d = df_1d.copy()
-    df_1d['weekly_high'] = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1)  # prior week high
-    df_1d['weekly_low'] = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1)    # prior week low
-    df_1d['weekly_close'] = df_1d['close'].rolling(window=5, min_periods=5).mean().shift(1)  # prior week close
+    df_1d['R3'] = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 2.0
+    df_1d['S3'] = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 2.0
+    R3_vals = df_1d['R3'].values
+    S3_vals = df_1d['S3'].values
     
-    # Weekly pivot point: (H + L + C) / 3
-    weekly_pp = (df_1d['weekly_high'] + df_1d['weekly_low'] + df_1d['weekly_close']) / 3.0
-    weekly_pp_vals = weekly_pp.values
+    # Align Camarilla levels to 12h timeframe (completed prior day only)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3_vals)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3_vals)
     
-    # Align weekly pivot to 6h timeframe (completed weekly pivot only)
-    weekly_pp_aligned = align_htf_to_ltf(prices, df_1d, weekly_pp_vals)
+    # Weekly trend filter: EMA34 on weekly close
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Donchian channel (20-period) on 6h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Volume confirmation: >1.8x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.8 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 20)  # Donchian20, volume MA20
+    start_idx = max(20, 34)  # volume MA20, weekly EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_pp_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
         price = close[i]
-        weekly_pp_val = weekly_pp_aligned[i]
-        upper_channel = donchian_high[i]
-        lower_channel = donchian_low[i]
+        R3_val = R3_aligned[i]
+        S3_val = S3_aligned[i]
+        weekly_ema = ema_34_1w_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper channel AND price > weekly pivot (bullish bias) AND volume spike
-            if price > upper_channel and price > weekly_pp_val and vol_confirm:
+            # Long entry: price breaks above R3 AND price > weekly EMA34 (bullish trend) AND volume spike
+            if price > R3_val and price > weekly_ema and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: price breaks below Donchian lower channel AND price < weekly pivot (bearish bias) AND volume spike
-            elif price < lower_channel and price < weekly_pp_val and vol_confirm:
+            # Short entry: price breaks below S3 AND price < weekly EMA34 (bearish trend) AND volume spike
+            elif price < S3_val and price < weekly_ema and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or breakdown below lower channel
-            # ATR-based stoploss: 2.5 * ATR below entry (using 6h ATR)
+        elif position == 1:  # Long - exit on stoploss or breakdown below S3 (trend reversal)
+            # ATR-based stoploss: 2.0 * ATR below entry (using 12h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.5 * atr_val
-            # Exit on stoploss or price breaks below Donchian lower channel (trend reversal)
-            if price < stop_loss or price < lower_channel:
+            stop_loss = entry_price - 2.0 * atr_val
+            # Exit on stoploss or price breaks below S3 (trend reversal)
+            if price < stop_loss or price < S3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or breakout above upper channel
-            # ATR-based stoploss: 2.5 * ATR above entry
+        elif position == -1:  # Short - exit on stoploss or breakout above R3 (trend reversal)
+            # ATR-based stoploss: 2.0 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.5 * atr_val
-            # Exit on stoploss or price breaks above Donchian upper channel (trend reversal)
-            if price > stop_loss or price > upper_channel:
+            stop_loss = entry_price + 2.0 * atr_val
+            # Exit on stoploss or price breaks above R3 (trend reversal)
+            if price > stop_loss or price > R3_val:
                 signals[i] = 0.0
                 position = 0
             else:
