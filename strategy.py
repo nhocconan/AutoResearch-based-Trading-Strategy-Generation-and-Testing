@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_PriceChannel_Breakout_VolumeTrend
-Hypothesis: Uses 12-hour price channels (20-period high/low) with volume confirmation and 1-day trend filter.
-Trades breakouts above channel high in uptrend and breakdowns below channel low in downtrend.
-Volume spike filters false breakouts. Designed for trending markets with controlled frequency.
-Targets 12-30 trades per year to minimize fee drag while capturing significant moves.
-Works in both bull and bear markets by following the 1-day trend direction.
+4h_Donchian20_1dTrend_VolumeSpike
+Hypothesis: Uses 4-hour Donchian channel breakout (20-period) with 1-day trend filter and volume spike confirmation.
+Trades in the direction of the daily trend, entering on Donchian breakouts confirmed by volume spikes.
+Designed to work in both bull and bear markets by following the higher timeframe trend.
+Targets 20-50 trades per year to minimize fee drift while capturing significant market moves.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,13 +31,13 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12-hour price channel (20-period high/low)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4-hour Donchian channels (20-period)
+    high_4h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_4h = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate volume spike (>2.0x 20-period MA for strict filtering)
+    # Calculate volume spike (>1.8x 20-period MA)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
+    vol_spike = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,7 +46,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+        if (np.isnan(high_4h[i]) or np.isnan(low_4h[i]) or 
             np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -59,20 +58,17 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = vol_spike[i]
         
-        # Price relative to 12-hour channel
-        price_above_channel = close[i] > high_max_20[i-1]
-        price_below_channel = close[i] < low_min_20[i-1]
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_4h[i-1]  # Break above previous high
+        breakout_down = close[i] < low_4h[i-1]  # Break below previous low
         
-        # Entry logic:
-        # Long: Breakout above channel high in uptrend with volume
-        long_entry = vol_confirm and trend_up and price_above_channel
+        # Entry logic: Breakout in direction of trend with volume confirmation
+        long_entry = vol_confirm and trend_up and breakout_up
+        short_entry = vol_confirm and trend_down and breakout_down
         
-        # Short: Breakdown below channel low in downtrend with volume
-        short_entry = vol_confirm and trend_down and price_below_channel
-        
-        # Exit logic: Opposite channel touch or trend reversal
-        long_exit = (close[i] < low_min_20[i-1]) or not trend_up
-        short_exit = (close[i] > high_max_20[i-1]) or not trend_down
+        # Exit logic: Opposite Donchian break
+        long_exit = breakout_down
+        short_exit = breakout_up
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -97,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_PriceChannel_Breakout_VolumeTrend"
-timeframe = "12h"
+name = "4h_Donchian20_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
