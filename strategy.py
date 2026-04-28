@@ -1,11 +1,3 @@
-# 4H CAMARILLA R3-S3 BREAKOUT WITH VOLUME FILTER
-# Based on top-performing patterns: Camarilla pivot levels from daily data + volume spike + trend filter
-# Strategy targets 20-40 trades/year (80-160 over 4 years) to avoid fee drag
-# Works in both bull/bear markets: breaks key intraday resistance/support with institutional volume confirmation
-# Uses 1d Camarilla levels (R3/S3) as breakout levels, volume > 1.5x average, and price > EMA50 for trend filter
-# Entry: break above R3 with volume + uptrend OR break below S3 with volume + downtrend
-# Exit: return to pivot point (P) or opposite Camarilla level
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,58 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels (HIGHER TIMEFRAME)
+    # Get daily data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily 144-period EMA for trend filter (longer term trend)
+    ema144_1d = pd.Series(close_1d).ewm(span=144, adjust=False, min_periods=144).mean().values
     
-    # Calculate Camarilla levels for previous day (using OHLC from prior day)
-    # Camarilla formulas: 
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # R2 = C + ((H-L) * 1.1/6)
-    # R1 = C + ((H-L) * 1.1/12)
-    # PP = (H+L+C)/3
-    # S1 = C - ((H-L) * 1.1/12)
-    # S2 = C - ((H-L) * 1.1/6)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate for each day using previous day's OHLC
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Align daily indicators to 6h timeframe
+    ema144_aligned = align_htf_to_ltf(prices, df_1d, ema144_1d)
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
     
-    # First day will have NaN due to roll, handle it
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Calculate 6h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    rang = prev_high - prev_low
-    
-    # Calculate Camarilla levels
-    R3 = prev_close + (rang * 1.1 / 4)
-    S3 = prev_close - (rang * 1.1 / 4)
-    PP = (prev_high + prev_low + prev_close) / 3
-    
-    # Align daily indicators to 4h timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma20 * 1.5)
+    vol_ratio = volume / (vol_ma20 + 1e-10)
     
-    # Precompute session filter (08-20 UTC) for better liquidity
+    # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
@@ -80,15 +54,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or
-            np.isnan(S3_aligned[i]) or
-            np.isnan(PP_aligned[i]) or
-            np.isnan(vol_filter[i])):
+        if (np.isnan(ema144_aligned[i]) or 
+            np.isnan(atr14_aligned[i]) or
+            np.isnan(high_20[i]) or
+            np.isnan(low_20[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -97,20 +71,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA50
-        uptrend = close[i] > ema50_aligned[i]
-        downtrend = close[i] < ema50_aligned[i]
+        # Trend filter: price above/below daily EMA144
+        uptrend = close[i] > ema144_aligned[i]
+        downtrend = close[i] < ema144_aligned[i]
         
-        # Entry conditions: Camarilla R3/S3 breakout with volume and trend
-        long_breakout = close[i] > R3_aligned[i]
-        short_breakout = close[i] < S3_aligned[i]
+        # Volatility filter: current ATR below 2x average (avoid extremely volatile markets)
+        vol_filter = atr14_aligned[i] < (np.nanmean(atr14_aligned[max(0, i-50):i+1]) * 2.0)
         
-        long_entry = long_breakout and vol_filter[i] and uptrend
-        short_entry = short_breakout and vol_filter[i] and downtrend
+        # Entry conditions: Donchian breakout with volume and trend
+        long_breakout = close[i] > high_20[i]
+        short_breakout = close[i] < low_20[i]
         
-        # Exit conditions: return to pivot point (P) or opposite level
-        long_exit = close[i] < PP_aligned[i]  # Return to pivot
-        short_exit = close[i] > PP_aligned[i]  # Return to pivot
+        long_entry = long_breakout and uptrend and vol_filter and (vol_ratio[i] > 1.5)
+        short_entry = short_breakout and downtrend and vol_filter and (vol_ratio[i] > 1.5)
+        
+        # Exit conditions: return to opposite Donchian level or trend reversal
+        long_exit = close[i] < low_20[i] or not uptrend
+        short_exit = close[i] > high_20[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -135,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_VolumeFilter_EMA50"
-timeframe = "4h"
+name = "6h_Donchian20_1dEMA144_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
