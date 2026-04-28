@@ -13,50 +13,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR-based volatility regime filter
+    # Get 1d data for daily pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period ATR on daily timeframe
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily pivot using previous day (daily timeframe)
+    # Pivot = (High + Low + Close) / 3
+    pivot_daily = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_daily = pivot_daily + (range_1d * 0.382)  # R1 = Pivot + 0.382 * Range
+    s1_daily = pivot_daily - (range_1d * 0.382)  # S1 = Pivot - 0.382 * Range
     
-    # Calculate 50-period SMA on daily timeframe for trend filter
-    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    # Calculate daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily indicators to 12h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)
+    # Align daily indicators to 4h timeframe (wait for daily bar to close)
+    r1_daily_aligned = align_htf_to_ltf(prices, df_1d, r1_daily)
+    s1_daily_aligned = align_htf_to_ltf(prices, df_1d, s1_daily)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    pivot_daily_aligned = align_htf_to_ltf(prices, df_1d, pivot_daily)
     
-    # Calculate 12h price range (high-low) for volatility regime
-    price_range_12h = high - low
-    range_ma20 = pd.Series(price_range_12h).rolling(window=20, min_periods=20).mean().values
-    
-    # Volatility regime: current range > 1.5x 20-period average range AND ATR > 0
-    vol_regime = (price_range_12h > 1.5 * range_ma20) & (atr_14_aligned > 0)
-    
-    # Trend filter: price above/below daily SMA50
-    uptrend = close > sma_50_aligned
-    downtrend = close < sma_50_aligned
-    
-    # Breakout conditions: price breaks 12-period high/low on 12h chart
-    high_12 = pd.Series(high).rolling(window=12, min_periods=12).max().values
-    low_12 = pd.Series(low).rolling(window=12, min_periods=12).min().values
-    
-    breakout_up = close > high_12
-    breakout_down = close < low_12
-    
-    # Volume filter: current volume > 1.5x 20-period average volume
+    # Calculate volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma20
+    vol_ratio = volume / (vol_ma20 + 1e-10)
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -66,14 +50,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_aligned[i]) or 
-            np.isnan(sma_50_aligned[i]) or
-            np.isnan(range_ma20[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_daily_aligned[i]) or 
+            np.isnan(s1_daily_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or
+            np.isnan(vol_ratio[i]) or
+            np.isnan(pivot_daily_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -82,13 +67,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: breakout + volatility regime + volume filter + trend alignment
-        long_entry = breakout_up[i] and vol_regime[i] and vol_filter[i] and uptrend[i]
-        short_entry = breakout_down[i] and vol_regime[i] and vol_filter[i] and downtrend[i]
+        # Trend filter: price above/below EMA34
+        uptrend = close[i] > ema34_aligned[i]
+        downtrend = close[i] < ema34_aligned[i]
         
-        # Exit conditions: opposite breakout or loss of trend
-        long_exit = breakout_down[i] or not uptrend[i]
-        short_exit = breakout_up[i] or not downtrend[i]
+        # Volume filter: current volume above 1.5x average
+        vol_filter = vol_ratio[i] > 1.5
+        
+        # Breakout conditions: price touches daily S1/R1 with volume and trend
+        long_breakout = close[i] <= s1_daily_aligned[i]  # Touch or go below S1
+        short_breakout = close[i] >= r1_daily_aligned[i]  # Touch or go above R1
+        
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
+        
+        # Exit conditions: price returns to daily pivot level or trend reverses
+        long_exit = close[i] >= pivot_daily_aligned[i] or not uptrend
+        short_exit = close[i] <= pivot_daily_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -113,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolRegime_Breakout_SMA50_Trend_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_DailyPivot_S1R1_Touch_1dEMA34_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
