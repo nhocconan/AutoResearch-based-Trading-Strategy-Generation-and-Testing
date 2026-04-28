@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
-Hypothesis: Tightening the previous version by requiring stronger volume confirmation (>3x 20-period average) and adding a 4-hour EMA50 trend filter to reduce false breakouts. Targets 25-35 trades/year with improved BTC/ETH performance.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
+Hypothesis: Reduce trade frequency by tightening volume confirmation to >4x 20-period average and adding a 1d ADX > 25 trend filter. This targets 15-25 trades/year with improved risk-adjusted returns in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
+    # Get 1d data for Camarilla pivots, trend filter, and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -27,6 +27,46 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d ADX for trend strength filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed values
+    def WilderSmoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    tr_period = 14
+    atr_1d = WilderSmoothing(tr, tr_period)
+    plus_di_1d = 100 * WilderSmoothing(plus_dm, tr_period) / atr_1d
+    minus_di_1d = 100 * WilderSmoothing(minus_dm, tr_period) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = WilderSmoothing(dx_1d, tr_period)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Calculate 4h EMA50 for additional trend filter
     ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -41,7 +81,7 @@ def generate_signals(prices):
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
     
-    # Volume confirmation: >3.0x 20-period MA (stricter than before)
+    # Volume confirmation: >4.0x 20-period MA (tighter than before)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,7 +95,8 @@ def generate_signals(prices):
             np.isnan(ema_50_4h[i]) or
             np.isnan(R1_aligned[i]) or
             np.isnan(S1_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -63,12 +104,15 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i] and close[i] > ema_50_4h[i]
         downtrend = close[i] < ema_34_1d_aligned[i] and close[i] < ema_50_4h[i]
         
-        # Volume confirmation (>3x average)
-        vol_confirm = volume[i] > (3.0 * vol_ma_20[i])
+        # Strong trend filter: ADX > 25
+        strong_trend = adx_1d_aligned[i] > 25
+        
+        # Volume confirmation (>4x average - tighter)
+        vol_confirm = volume[i] > (4.0 * vol_ma_20[i])
         
         # Breakout conditions
-        long_breakout = close[i] > R1_aligned[i] and vol_confirm and uptrend
-        short_breakout = close[i] < S1_aligned[i] and vol_confirm and downtrend
+        long_breakout = close[i] > R1_aligned[i] and vol_confirm and uptrend and strong_trend
+        short_breakout = close[i] < S1_aligned[i] and vol_confirm and downtrend and strong_trend
         
         # Exit conditions: return to midpoint
         midpoint = (R1_aligned[i] + S1_aligned[i]) / 2
@@ -98,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
