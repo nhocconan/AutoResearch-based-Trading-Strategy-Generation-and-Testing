@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d SuperTrend (ATR=10, mult=3.0) for trend direction,
-# combined with 6h RSI(14) extremes and volume confirmation (>1.5x 20-bar average).
-# Enter long when 1d SuperTrend is bullish (close > upper band) AND 6h RSI < 30 (oversold) AND volume spike.
-# Enter short when 1d SuperTrend is bearish (close < lower band) AND 6h RSI > 70 (overbought) AND volume spike.
-# Exit when RSI crosses 50 (mean reversion completion) or SuperTrend flips.
+# Hypothesis: 12h strategy using 1d Williams %R extremes with 1d EMA50 trend filter and volume confirmation.
+# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Enter long when Williams %R < -80 (oversold) and rising and close > 1d EMA50 and volume > 1.5x 20-bar average.
+# Enter short when Williams %R > -20 (overbought) and falling and close < 1d EMA50 and volume > 1.5x 20-bar average.
+# Exit when Williams %R crosses above -50 for long or below -50 for short (mean reversion midpoint).
 # Uses discrete position sizing (0.25) to control risk and minimize fee churn.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
-# SuperTrend effectively captures trend in both bull/bear markets; RSI extremes provide mean-reversion entries within trend.
+# Williams %R identifies overextended moves; mean reversion from extremes works in both bull and bear markets.
+# 1d EMA50 filter ensures trades align with higher timeframe trend, reducing whipsaws.
+# Volume confirmation adds conviction to reversal signals.
 
-name = "6h_SuperTrend_RSIExtremes_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extremes_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,69 +28,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for SuperTrend (trend filter)
+    # Get 1d data for Williams %R and EMA50 (MTF structure/trend)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 10:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(10)
+    # Calculate 1d Williams %R (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
     
-    # ATR(10) using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    atr_10_1d = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # SuperTrend: Upper Band = (high+low)/2 + mult*ATR, Lower Band = (high+low)/2 - mult*ATR
-    hl2 = (high_1d + low_1d) / 2
-    mult = 3.0
-    upper_band = hl2 + mult * atr_10_1d
-    lower_band = hl2 - mult * atr_10_1d
-    
-    # SuperTrend direction: initialize
-    supertrend = np.zeros_like(close_1d)
-    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_1d)):
-        if close_1d[i-1] > supertrend[i-1]:
-            supertrend[i] = max(upper_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(lower_band[i], supertrend[i-1])
-        
-        # Update direction
-        if close_1d[i] > supertrend[i]:
-            direction[i] = 1
-        else:
-            direction[i] = -1
-    
-    # Calculate 6h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align 1d indicators to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 1.5 * volume_ma_20
-    
-    # Align 1d SuperTrend direction to 6h timeframe
-    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -97,7 +62,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(direction_aligned[i]) or np.isnan(rsi_values[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -105,24 +70,24 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1d SuperTrend direction
-        bullish_trend = direction_aligned[i] == 1
-        bearish_trend = direction_aligned[i] == -1
+        # Trend filter: 1d EMA50 bias
+        bullish_bias = close[i] > ema_50_1d_aligned[i]
+        bearish_bias = close[i] < ema_50_1d_aligned[i]
         
-        # RSI extremes
-        rsi_val = rsi_values[i]
-        rsi_oversold = rsi_val < 30
-        rsi_overbought = rsi_val > 70
-        rsi_exit_long = rsi_val > 50  # exit long when RSI > 50
-        rsi_exit_short = rsi_val < 50  # exit short when RSI < 50
+        # Williams %R conditions with momentum (rising/falling)
+        williams_r_current = williams_r_aligned[i]
+        williams_r_previous = williams_r_aligned[i-1]
+        
+        williams_r_rising = williams_r_current > williams_r_previous
+        williams_r_falling = williams_r_current < williams_r_previous
         
         # Entry conditions
-        long_entry = bullish_trend and rsi_oversold and vol_confirm
-        short_entry = bearish_trend and rsi_overbought and vol_confirm
+        long_entry = (williams_r_current < -80) and williams_r_rising and bullish_bias and vol_confirm
+        short_entry = (williams_r_current > -20) and williams_r_falling and bearish_bias and vol_confirm
         
-        # Exit conditions
-        long_exit = (not bullish_trend) or rsi_exit_long
-        short_exit = (not bearish_trend) or rsi_exit_short
+        # Exit conditions: Williams %R crosses -50 (mean reversion midpoint)
+        long_exit = williams_r_current > -50
+        short_exit = williams_r_current < -50
         
         # Handle entries and exits
         if long_entry and position <= 0:
