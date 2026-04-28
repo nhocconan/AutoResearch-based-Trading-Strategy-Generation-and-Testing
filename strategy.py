@@ -38,7 +38,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 1h timeframe
+    # Align HTF indicators to 12h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
@@ -67,7 +67,7 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely low volatility periods
         vol_filter = atr_14_aligned[i] > 0.008 * close[i]  # ATR > 0.8% of price
         
-        # Entry conditions - balanced for 1h timeframe
+        # Entry conditions - balanced for 12h timeframe
         # Long: upward breakout + uptrend + vol filter
         long_entry = breakout_up and trend_up and vol_filter
         # Short: downward breakout + downtrend + vol filter
@@ -78,28 +78,28 @@ def generate_signals(prices):
         short_exit = breakout_up or not trend_down
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.20  # Reverse to short
+            signals[i] = -0.25  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.20   # Reverse to long
+            signals[i] = 0.25   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Donchian20_Breakout_1dEMA50_Volume_Filter"
-timeframe = "1h"
+name = "12h_Donchian20_Breakout_1dEMA50_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
