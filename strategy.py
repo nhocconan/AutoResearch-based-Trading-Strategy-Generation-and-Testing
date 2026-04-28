@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,9 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and ATR calculation
+    # Get 1d data for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -26,47 +26,55 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ATR(14) for volatility filter
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate 1d Camarilla pivot levels (H4/L4 for entries, H3/L3 for exits)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    H4 = close_1d + (range_hl * 1.1 / 2)
+    L4 = close_1d - (range_hl * 1.1 / 2)
+    H3 = close_1d + (range_hl * 1.1 / 4)
+    L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Get 6h data for Donchian channel and volume
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Align pivot levels to 4h
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Get 4h data for volume and volatility
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    volume_6h = df_6h['volume'].values
+    volume_4h = df_4h['volume'].values
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # 6h Donchian(20) breakout levels
-    highest_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    highest_20_aligned = align_htf_to_ltf(prices, df_6h, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_6h, lowest_20)
+    # Volume ratio (current 4h volume / 20-period average)
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     
-    # 6h volume ratio (current volume / 20-period average)
-    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20)
+    # ATR(14) for volatility filter
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_4h = np.concatenate([[np.nan], tr_4h])
+    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34, 14, 20)
+    start_idx = max(100, 34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(highest_20_aligned[i]) or
-            np.isnan(lowest_20_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i])):
+            np.isnan(H4_aligned[i]) or 
+            np.isnan(L4_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,24 +82,22 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volatility filter: ATR > 0.5% of price
-        vol_filter = atr_1d_aligned[i] > 0.005 * close[i]
+        # Volume filter: current 4h volume above average
+        volume_filter = volume_4h[i] > vol_ma_20_aligned[i]
         
-        # Volume filter: current 6h volume above average
-        volume_filter = volume_6h[i] > vol_ma_20_aligned[i]
+        # Volatility filter: avoid extremely low volatility periods
+        vol_filter = atr_4h_aligned[i] > 0.001 * close[i]  # At least 0.1% ATR
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > highest_20_aligned[i]
-        short_breakout = close[i] < lowest_20_aligned[i]
+        # Entry conditions: Camarilla H4/L4 breakout with volume and trend
+        long_breakout = close[i] > H4_aligned[i]
+        short_breakout = close[i] < L4_aligned[i]
         
-        # Entry conditions: Donchian breakout with 1d trend, volume, and volatility
         long_entry = uptrend and long_breakout and volume_filter and vol_filter
         short_entry = downtrend and short_breakout and volume_filter and vol_filter
         
-        # Exit conditions: Donchian midpoint retracement
-        midpoint = (highest_20_aligned[i] + lowest_20_aligned[i]) / 2
-        long_exit = close[i] < midpoint
-        short_exit = close[i] > midpoint
+        # Exit conditions: Camarilla H3/L3 retracement
+        long_exit = close[i] < H3_aligned[i]
+        short_exit = close[i] > L3_aligned[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -114,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dTrend_VolumeVolatilityFilter"
-timeframe = "6h"
+name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_v3"
+timeframe = "4h"
 leverage = 1.0
