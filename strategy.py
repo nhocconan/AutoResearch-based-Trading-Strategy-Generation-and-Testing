@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and price channel
+    # Get daily data for HTF context (Camarilla levels)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -23,26 +23,24 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate daily range for pivot calculations (previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr = np.concatenate([[np.nan], tr2])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    daily_range = high_1d - low_1d
     
-    # Calculate 6-period high/low channel for breakout detection
-    high_6 = pd.Series(high).rolling(window=6, min_periods=6).max().values
-    low_6 = pd.Series(low).rolling(window=6, min_periods=6).min().values
+    # Daily Camarilla pivot levels (based on previous day)
+    camarilla_r4 = close_1d + daily_range * 1.1 / 2
+    camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Calculate weekly EMA20 for trend filter
+    # Align Daily Camarilla levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Weekly trend filter: price above/below weekly SMA20
     close_1w_series = pd.Series(df_1w['close'].values)
-    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Align daily ATR to 6h
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    sma20_1w = close_1w_series.rolling(window=20, min_periods=20).mean().values
+    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(high_6[i]) or np.isnan(low_6[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(sma20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -78,24 +76,19 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Volatility filter: ATR > 0 (avoid dead markets)
-        vol_filter = vol_filter and (atr_1d_aligned[i] > 0)
+        # Trend filter: price above/below weekly SMA20
+        trend_up = close[i] > sma20_1w_aligned[i]
+        trend_down = close[i] < sma20_1w_aligned[i]
         
-        # Trend filter: price above/below weekly EMA20
-        trend_up = close[i] > ema20_1w_aligned[i]
-        trend_down = close[i] < ema20_1w_aligned[i]
+        # Entry conditions: 
+        # Long: price breaks above daily R4 with volume and trend up
+        # Short: price breaks below daily S4 with volume and trend down
+        long_entry = (close[i] > r4_aligned[i]) and vol_filter and trend_up
+        short_entry = (close[i] < s4_aligned[i]) and vol_filter and trend_down
         
-        # Breakout conditions:
-        # Long: price breaks above 6-period high with volume and trend up
-        # Short: price breaks below 6-period low with volume and trend down
-        long_entry = (close[i] > high_6[i]) and vol_filter and trend_up
-        short_entry = (close[i] < low_6[i]) and vol_filter and trend_down
-        
-        # Exit conditions: 
-        # Long exit: price closes below 6-period low
-        # Short exit: price closes above 6-period high
-        long_exit = close[i] < low_6[i]
-        short_exit = close[i] > high_6[i]
+        # Exit conditions: price returns to opposite daily S4/R4 levels
+        long_exit = (close[i] < s4_aligned[i])
+        short_exit = (close[i] > r4_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -120,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_6PeriodBreakout_WeeklyEMA20_Volume_Session"
-timeframe = "6h"
+name = "4h_DailyCamarilla_R4S4_WeeklyTrend_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
