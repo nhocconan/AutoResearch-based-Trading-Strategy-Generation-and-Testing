@@ -1,7 +1,8 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_DonchianBreakout_1dTrend
-Hypothesis: On 6-hour timeframe, enter long when price breaks above 20-period Donchian high with weekly pivot support and 1d uptrend; short when price breaks below 20-period Donchian low with weekly pivot resistance and 1d downtrend. Uses weekly pivot levels as dynamic support/resistance and Donchian breakouts for momentum. Designed for low trade frequency (~15-25/year) to minimize fee decay while capturing trend continuation in both bull and bear markets.
+1d_KAMA_Trend_RSI_Chop
+Hypothesis: On daily timeframe, enter long when KAMA indicates uptrend, RSI is not overbought, and market is not choppy. Enter short when KAMA indicates downtrend, RSI is not oversold, and market is not choppy. Uses Choppiness Index as regime filter to avoid whipsaws in sideways markets. Designed for low trade frequency (~10-20/year) to minimize fee decay and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -17,74 +18,111 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
-        return np.zeros(n)
-    
-    # Get weekly data for pivot points
+    # Get 1w data for trend filter and regime
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate KAMA on weekly data
+    def calculate_kama(close_prices, length=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close_prices, n=length))
+        volatility = np.sum(np.abs(np.diff(close_prices)), axis=0)
+        er = np.zeros_like(close_prices)
+        er[length:] = change / np.where(volatility[length:] == 0, 1, volatility[length:])
+        
+        # Smoothing Constant
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # KAMA
+        kama = np.zeros_like(close_prices)
+        kama[0] = close_prices[0]
+        for i in range(1, len(close_prices)):
+            kama[i] = kama[i-1] + sc[i] * (close_prices[i] - kama[i-1])
+        return kama
     
-    # Weekly pivot points (using prior week's OHLC)
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_close = df_1w['close'].shift(1).values
+    # Calculate Choppiness Index on weekly data
+    def calculate_chop(high_prices, low_prices, close_prices, length=14):
+        atr = np.zeros_like(close_prices)
+        tr1 = high_prices[1:] - low_prices[1:]
+        tr2 = np.abs(high_prices[1:] - close_prices[:-1])
+        tr3 = np.abs(low_prices[1:] - close_prices[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        
+        # ATR calculation
+        atr[length:] = np.nansum(tr.reshape(-1, length), axis=1) / length
+        
+        # Chop calculation
+        max_high = np.zeros_like(close_prices)
+        min_low = np.zeros_like(close_prices)
+        for i in range(length, len(close_prices)):
+            max_high[i] = np.max(high_prices[i-length+1:i+1])
+            min_low[i] = np.min(low_prices[i-length+1:i+1])
+        
+        chop = np.full_like(close_prices, 50.0)
+        for i in range(length, len(close_prices)):
+            if np.sum(atr[i-length+1:i+1]) > 0:
+                chop[i] = 100 * np.log10(np.sum(atr[i-length+1:i+1]) / 
+                                          (max_high[i] - min_low[i])) / np.log10(length)
+        return chop
     
-    # Weekly pivot levels
-    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
-    weekly_r1 = 2 * weekly_pivot - prev_week_low
-    weekly_s1 = 2 * weekly_pivot - prev_week_high
-    weekly_r2 = weekly_pivot + (prev_week_high - prev_week_low)
-    weekly_s2 = weekly_pivot - (prev_week_high - prev_week_low)
+    # Calculate indicators on weekly data
+    kama = calculate_kama(df_1w['close'].values, length=10, fast=2, slow=30)
+    chop = calculate_chop(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, length=14)
     
-    # Align 1d and weekly data to 6h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    # Calculate RSI on daily data for entry timing
+    def calculate_rsi(close_prices, length=14):
+        delta = np.diff(close_prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close_prices)
+        avg_loss = np.zeros_like(close_prices)
+        avg_gain[length:] = np.nanmean(gain.reshape(-1, length), axis=1)
+        avg_loss[length:] = np.nanmean(loss.reshape(-1, length), axis=1)
+        
+        rs = np.where(avg_loss[length:] == 0, 100, avg_gain[length:] / avg_loss[length:])
+        rsi = np.full_like(close_prices, 50.0)
+        rsi[length:] = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Trend: bullish when price > EMA50, bearish when price < EMA50
-    d1_uptrend = close > ema_50_aligned
-    d1_downtrend = close < ema_50_aligned
+    rsi = calculate_rsi(close, length=14)
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align all weekly data to daily timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
-            np.isnan(weekly_r2_aligned[i]) or np.isnan(weekly_s2_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Long: Donchian breakout above weekly S2 (strong support) with 1d uptrend
-        long_entry = (close[i] > donchian_high[i] and 
-                     close[i] > weekly_s2_aligned[i] and 
-                     d1_uptrend[i])
+        # Trend condition: price relative to KAMA
+        price_above_kama = close[i] > kama_aligned[i]
+        price_below_kama = close[i] < kama_aligned[i]
         
-        # Short: Donchian breakdown below weekly R2 (strong resistance) with 1d downtrend
-        short_entry = (close[i] < donchian_low[i] and 
-                      close[i] < weekly_r2_aligned[i] and 
-                      d1_downtrend[i])
+        # RSI conditions: not overbought/oversold
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
         
-        # Exit: reverse when opposite Donchian level is breached
-        long_exit = close[i] < donchian_low[i]
-        short_exit = close[i] > donchian_high[i]
+        # Regime filter: not choppy (Choppiness Index < 61.8 = trending)
+        not_choppy = chop_aligned[i] < 61.8
+        
+        # Entry conditions
+        long_entry = price_above_kama and rsi_not_overbought and not_choppy
+        short_entry = price_below_kama and rsi_not_oversold and not_choppy
+        
+        # Exit conditions: opposite signal or choppy market
+        long_exit = price_below_kama or chop_aligned[i] >= 61.8
+        short_exit = price_above_kama or chop_aligned[i] >= 61.8
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -109,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_DonchianBreakout_1dTrend"
-timeframe = "6h"
+name = "1d_KAMA_Trend_RSI_Chop"
+timeframe = "1d"
 leverage = 1.0
