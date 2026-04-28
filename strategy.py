@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: 4h price breaking above/below daily Camarilla R1/S1 levels with 1d EMA50 trend filter and volume spike confirmation.
-Uses tighter R1/S1 levels for earlier entry while maintaining trend alignment.
-Designed to work in bull markets (long breakouts in uptrend) and bear markets (short breakdowns in downtrend).
-Target: 20-40 trades/year to minimize fee drift while capturing strong directional moves.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: 12h price breaking above/below daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
+Works in bull markets (long breakouts in uptrend) and bear markets (short breakdowns in downtrend).
+Target: 15-30 trades/year on 12h timeframe to minimize fee drag while capturing strong directional moves.
 """
 
 import numpy as np
@@ -26,23 +25,23 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate daily Camarilla levels (using previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla formulas:
+    # Camarilla formulas for R1/S1 (inner levels):
     # R1 = close + 1.1 * (high - low) / 12
     # S1 = close - 1.1 * (high - low) / 12
-    camarilla_r1 = close_1d + (1.1 * (high_1d - low_1d)) / 12
-    camarilla_s1 = close_1d - (1.1 * (high_1d - low_1d)) / 12
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -56,16 +55,16 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Breakout conditions
         breakout_r1 = close[i] > camarilla_r1_aligned[i]
@@ -83,10 +82,10 @@ def generate_signals(prices):
         short_exit = breakout_r1 or (not downtrend)
         
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -97,14 +96,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
