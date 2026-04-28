@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and volume spike confirmation
-# Elder Ray measures bull/bear power relative to EMA13. In bull markets: buy when bear power turns up from below zero with volume.
-# In bear markets: sell when bull power turns down from above zero with volume. Uses 1d EMA34 for higher-timeframe trend.
-# Target: 12-37 trades/year via strict Elder Ray zero-cross + volume + trend filter.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume spike confirmation
+# Uses 1w EMA34 to capture long-term trend direction. Breaks above R3 in uptrend or below S3 in downtrend
+# with volume confirmation provide high-probability entries. Target: 12-37 trades/year via tight R3/S3 breakout
+# conditions + volume + trend filter. Works in both bull (breakouts with trend) and bear (mean reversion at extremes).
 
-name = "6h_ElderRay_BullBearPower_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,26 +22,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate EMA13 and EMA34 on 6h for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema34_6h = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA34 on 1w close for trend filter
+    close_1w = pd.Series(df_1w['close'])
+    ema34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Bull Power (high - EMA13) and Bear Power (low - EMA13)
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Get 12h data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Calculate EMA34 on 1d for trend filter
-    close_1d = pd.Series(df_1d['close'])
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Camarilla levels from previous 12h bar's OHLC
+    typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
+    hl_range = df_12h['high'] - df_12h['low']
+    r3 = typical_price + hl_range * 1.1 / 4
+    s3 = typical_price - hl_range * 1.1 / 4
     
-    # Align 1d EMA34 to 6h timeframe (completed 1d candles only)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1w EMA34 to 12h timeframe (completed 1w candles only)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Align 12h Camarilla levels to 12h timeframe (completed 12h levels only)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3.values)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -52,51 +58,50 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(34, 20)  # EMA34 and volume MA20 need sufficient history
+    start_idx = max(20, 34)  # volume MA20 and 1w EMA34 need sufficient history
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
-        ema34_trend = ema34_1d_aligned[i]
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
         price = close[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        ema34_val = ema34_1w_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: bear power crosses above zero (turning up from below) AND 1d EMA34 uptrend AND volume spike
-            if bear_val > 0 and bear_power[i-1] <= 0 and close > ema34_trend and vol_confirm:
+            # Long entry: price breaks above R3 AND 1w EMA34 uptrend AND volume spike
+            if price > r3_val and price > ema34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: bull power crosses below zero (turning down from above) AND 1d EMA34 downtrend AND volume spike
-            elif bull_val < 0 and bull_power[i-1] >= 0 and close < ema34_trend and vol_confirm:
+            # Short entry: price breaks below S3 AND 1w EMA34 downtrend AND volume spike
+            elif price < s3_val and price < ema34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or bear power turns negative
-            # ATR-based stoploss: 2.0 * ATR below entry (using 6h ATR)
+        elif position == 1:  # Long - exit on stoploss or price falls below S3 (reversal)
+            # ATR-based stoploss: 2.0 * ATR below entry (using 12h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
             stop_loss = entry_price - 2.0 * atr_val
-            # Exit on stoploss or bear power < 0 (momentum loss)
-            if price < stop_loss or bear_val < 0:
+            # Exit on stoploss or price < S3 (reversal below support)
+            if price < stop_loss or price < s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or bull power turns positive
+        elif position == -1:  # Short - exit on stoploss or price rises above R3 (reversal)
             # ATR-based stoploss: 2.0 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
@@ -104,8 +109,8 @@ def generate_signals(prices):
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
             stop_loss = entry_price + 2.0 * atr_val
-            # Exit on stoploss or bull power > 0 (momentum loss)
-            if price > stop_loss or bull_val > 0:
+            # Exit on stoploss or price > R3 (reversal above resistance)
+            if price > stop_loss or price > r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
