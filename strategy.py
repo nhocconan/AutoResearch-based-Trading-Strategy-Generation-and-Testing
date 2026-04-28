@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Keltner_Breakout_1dTrend_WeeklyATR_Volume
-Hypothesis: Uses Keltner Channel breakouts on 6h with 1d EMA50 trend filter and weekly ATR volume confirmation.
-Works in both bull and bear markets by taking breakouts in direction of 1d trend, filtered by weekly ATR-based volume spikes.
-Targets ~15-25 trades/year on 6f timeframe.
+12h_Camarilla_R1S1_DailyTrend_VolumeSpike
+Hypothesis: Uses Camarilla pivot levels (R1/S1) on 12h timeframe with daily trend filter and volume spike confirmation.
+Designed to capture mean-reversion bounces at key pivot levels while respecting daily trend direction.
+Works in both bull and bear markets by only taking reversals against the pivot but aligned with daily trend.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,75 +25,63 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get weekly data for ATR and volume filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA50 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Keltner Channel (20-period EMA, 2*ATR)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    kc_upper = ema_20 + 2 * atr_14
-    kc_lower = ema_20 - 2 * atr_14
+    # Calculate 12h Camarilla pivot levels (based on previous day's OHLC)
+    # For 12h chart, we use daily OHLC to calculate pivots
+    prev_day_high = df_1d['high'].shift(1).values  # Previous day high
+    prev_day_low = df_1d['low'].shift(1).values    # Previous day low
+    prev_day_close = df_1d['close'].shift(1).values # Previous day close
     
-    # Calculate weekly ATR for volume filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr1w = high_1w - low_1w
-    tr2w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3w = np.abs(low_1w - np.roll(close_1w, 1))
-    trw = np.maximum(tr1w, np.maximum(tr2w, tr3w))
-    trw[0] = tr1w[0]
-    atr_1w = pd.Series(trw).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Calculate pivots aligned to 12h timeframe
+    high_pivot = align_htf_to_ltf(prices, df_1d, prev_day_high)
+    low_pivot = align_htf_to_ltf(prices, df_1d, prev_day_low)
+    close_pivot = align_htf_to_ltf(prices, df_1d, prev_day_close)
     
-    # Volume filter: volume > 1.5x 20-period MA * (current weekly ATR / average weekly ATR)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    avg_atr_1w = np.nanmean(atr_1w_aligned[~np.isnan(atr_1w_aligned)])
-    vol_threshold = 1.5 * vol_ma_20 * (atr_1w_aligned / avg_atr_1w)
-    vol_filter = volume > vol_threshold
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    r1 = close_pivot + (high_pivot - low_pivot) * 1.1 / 12
+    s1 = close_pivot - (high_pivot - low_pivot) * 1.1 / 12
+    
+    # Calculate volume spike (>1.8x 30-period MA)
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_spike = volume > (1.8 * vol_ma_30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1w_aligned[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction from 1d EMA50
+        # Trend direction from daily EMA50
         trend_up = close[i] > ema_50_1d_aligned[i]
         trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Keltner Channel breakout conditions
-        breakout_up = high[i] > kc_upper[i-1]  # Break above upper KC
-        breakout_down = low[i] < kc_lower[i-1]  # Break below lower KC
+        # Price proximity to Camarilla levels (within 0.1%)
+        proximity_to_r1 = abs(high[i] - r1[i]) / r1[i] < 0.001
+        proximity_to_s1 = abs(low[i] - s1[i]) / s1[i] < 0.001
         
         # Volume confirmation
-        vol_confirm = vol_filter[i]
+        vol_confirm = vol_spike[i]
         
-        # Entry logic: Only take breakouts in direction of 1d trend
-        long_entry = breakout_up and trend_up and vol_confirm
-        short_entry = breakout_down and trend_down and vol_confirm
+        # Entry logic: 
+        # Long when price touches S1 in uptrend with volume
+        # Short when price touches R1 in downtrend with volume
+        long_entry = proximity_to_s1 and trend_up and vol_confirm
+        short_entry = proximity_to_r1 and trend_down and vol_confirm
         
-        # Exit logic: Opposite Keltner breakout or trend reversal
-        long_exit = breakout_down or not trend_up
-        short_exit = breakout_up or not trend_down
+        # Exit logic: Return to midpoint or opposite touch
+        midpoint = (r1[i] + s1[i]) / 2
+        long_exit = low[i] > midpoint  # Price back above midpoint
+        short_exit = high[i] < midpoint  # Price back below midpoint
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -118,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Keltner_Breakout_1dTrend_WeeklyATR_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_DailyTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
