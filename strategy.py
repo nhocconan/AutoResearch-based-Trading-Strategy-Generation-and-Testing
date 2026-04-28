@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d data once for HTF context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d indicators
@@ -23,39 +23,39 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d Donchian channel (15) - tighter for fewer signals
-    donchian_high = pd.Series(high_1d).rolling(window=15, min_periods=15).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=15, min_periods=15).min().values
+    # 1d Donchian channel (20) - standard breakout
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA20 - trend confirmation
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 1d EMA50 - trend confirmation
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1d ATR10 - volatility filter
+    # 1d ATR14 - volatility filter
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to daily timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    atr_10_aligned = align_htf_to_ltf(prices, df_1d, atr_10)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Volume surge: current volume > 1.8x 15-period average (12h)
-    vol_ma_15 = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
-    volume_surge = volume > (vol_ma_15 * 1.8)
+    # Volume surge: current volume > 2.0x 20-period average (daily)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(atr_10_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
             np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
@@ -64,14 +64,14 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_high_aligned[i]
         breakout_down = close[i] < donchian_low_aligned[i]
         
-        # Trend filter: price above/below 1d EMA20
-        trend_up = close[i] > ema_20_1d_aligned[i]
-        trend_down = close[i] < ema_20_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_10_aligned[i] > 0.006 * close[i]  # ATR > 0.6% of price
+        vol_filter = atr_14_aligned[i] > 0.008 * close[i]  # ATR > 0.8% of price
         
-        # Entry conditions - stricter criteria to reduce trade frequency
+        # Entry conditions - strict criteria to reduce trade frequency
         # Long: upward breakout + uptrend + volume surge + vol filter
         long_entry = breakout_up and trend_up and volume_surge[i] and vol_filter
         # Short: downward breakout + downtrend + volume surge + vol filter
@@ -82,28 +82,28 @@ def generate_signals(prices):
         short_exit = breakout_up or not trend_down
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
+            signals[i] = -0.30  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
+            signals[i] = 0.30   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian15_Breakout_1dEMA20_Volume_Surge18"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1dEMA50_Volume_Surge20"
+timeframe = "1d"
 leverage = 1.0
