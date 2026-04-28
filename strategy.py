@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_Volume_And_1wTrend_Filter
-Hypothesis: Combines KAMA trend direction with 1w EMA trend filter and volume confirmation.
-Designed for low trade frequency (<10/year) to minimize fee burn while capturing
-strong directional moves by requiring alignment across multiple timeframes and volume.
-Should work in both bull and bear markets by filtering trades with higher timeframe trend.
+6h_OrderBlock_OrderFlow_Imbalance
+Hypothesis: Combines order block detection (bullish/bearish OB from swing highs/lows) 
+with volume imbalance (delta volume) to identify high-probability reversal zones. 
+Works in both bull and bear markets by trading mean reversion from institutional 
+order blocks when retail momentum exhausts. Uses 12h trend filter to avoid 
+counter-trend trades in strong trends. Targets 15-30 trades/year for low fee drag.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,66 +22,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Get weekly data for EMA20 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate KAMA on daily close
-    # KAMA parameters: ER period=10, fast=2, slow=30
-    change = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
-    volatility = np.abs(np.diff(df_1d['close'])).rolling(window=10, min_periods=1).sum()
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(df_1d['close'])
-    kama[0] = df_1d['close'].iloc[0]
-    for i in range(1, len(df_1d)):
-        kama[i] = kama[i-1] + sc[i] * (df_1d['close'].iloc[i] - kama[i-1])
+    # Calculate swing points (using 5-bar window)
+    # Bullish swing low: low[i] is lowest in window
+    # Bearish swing high: high[i] is highest in window
+    window = 5
+    bullish_swing = np.zeros(n, dtype=bool)
+    bearish_swing = np.zeros(n, dtype=bool)
     
-    # Calculate 1w EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    for i in range(window, n - window):
+        if low[i] == np.min(low[i-window:i+window+1]):
+            bullish_swing[i] = True
+        if high[i] == np.max(high[i-window:i+window+1]):
+            bearish_swing[i] = True
     
-    # Align KAMA and weekly EMA to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Identify order blocks: last opposite candle before swing
+    # Bullish OB: last bearish candle before bullish swing low
+    # Bearish OB: last bullish candle before bearish swing high
+    bullish_ob = np.zeros(n, dtype=bool)
+    bearish_ob = np.zeros(n, dtype=bool)
     
-    # Volume confirmation: current volume > 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
+    for i in range(window, n):
+        if bullish_swing[i]:
+            # Look back for bearish candle
+            for j in range(i-1, max(i-10, window-1), -1):
+                if close[j] < open_[j]:  # bearish candle
+                    bullish_ob[j] = True
+                    break
+        if bearish_swing[i]:
+            # Look back for bullish candle
+            for j in range(i-1, max(i-10, window-1), -1):
+                if close[j] > open_[j]:  # bullish candle
+                    bearish_ob[j] = True
+                    break
+    
+    # Need open prices
+    open_ = prices['open'].values
+    
+    # Volume imbalance: delta volume (buy vol - sell vol) approximated by 
+    # volume * sign(close - open)
+    delta_volume = volume * np.where(close >= open_, 1, -1)
+    # Volume imbalance signal: look for divergence (price makes new low/high but 
+    # delta volume doesn't confirm)
+    vol_ma = pd.Series(delta_volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Bullish imbalance: price makes new low but delta volume > ma (hidden bullish)
+    # Bearish imbalance: price makes new high but delta volume < ma (hidden bearish)
+    lowest_low = pd.Series(low).rolling(window=50, min_periods=50).min().values
+    highest_high = pd.Series(high).rolling(window=50, min_periods=50).max().values
+    
+    bullish_imbalance = (low <= lowest_low) & (delta_volume > vol_ma)
+    bearish_imbalance = (high >= highest_high) & (delta_volume < vol_ma)
+    
+    # Align order blocks and imbalances
+    bullish_ob_aligned = align_htf_to_ltf(prices, pd.DataFrame({'dummy': bullish_ob}), bullish_ob.astype(float)) > 0.5
+    bearish_ob_aligned = align_htf_to_ltf(prices, pd.DataFrame({'dummy': bearish_ob}), bearish_ob.astype(float)) > 0.5
+    bullish_imb_aligned = align_htf_to_ltf(prices, pd.DataFrame({'dummy': bullish_imbalance}), bullish_imbalance.astype(float)) > 0.5
+    bearish_imb_aligned = align_htf_to_ltf(prices, pd.DataFrame({'dummy': bearish_imbalance}), bearish_imbalance.astype(float)) > 0.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for indicators to stabilize
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i])):
+        if np.isnan(ema_50_12h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filters
-        kama_bullish = close[i] > kama_aligned[i]
-        kama_bearish = close[i] < kama_aligned[i]
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend filter
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume_filter[i]
+        # Entry conditions: mean reversion from order blocks with volume imbalance
+        long_entry = bullish_ob_aligned[i] and bullish_imb_aligned[i] and downtrend
+        short_entry = bearish_ob_aligned[i] and bearish_imb_aligned[i] and uptrend
         
-        # Entry conditions: KAMA crossover with weekly trend and volume
-        long_entry = kama_bullish and weekly_uptrend and vol_confirm
-        short_entry = kama_bearish and weekly_downtrend and vol_confirm
-        
-        # Exit conditions: opposite KAMA crossover
-        long_exit = kama_bearish
-        short_exit = kama_bullish
+        # Exit conditions: price reaches opposite order block or trend strengthens
+        long_exit = bearish_ob_aligned[i] or (close[i] > ema_50_12h_aligned[i] * 1.02)
+        short_exit = bullish_ob_aligned[i] or (close[i] < ema_50_12h_aligned[i] * 0.98)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -105,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_With_Volume_And_1wTrend_Filter"
-timeframe = "1d"
+name = "6h_OrderBlock_OrderFlow_Imbalance"
+timeframe = "6h"
 leverage = 1.0
