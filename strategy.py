@@ -49,7 +49,7 @@ def generate_signals(prices):
     high_10 = pd.Series(df_1d['high'].values).rolling(window=10, min_periods=10).max().values
     low_10 = pd.Series(df_1d['low'].values).rolling(window=10, min_periods=10).min().values
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     high_10_aligned = align_htf_to_ltf(prices, df_1d, high_10)
     low_10_aligned = align_htf_to_ltf(prices, df_1d, low_10)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian10_1wEMA20_VolatilityFilter"
-timeframe = "6h"
+name = "12h_Donchian10_1wEMA20_VolatilityFilter"
+timeframe = "12h"
 leverage = 1.0
