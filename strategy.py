@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_WeeklyPivot_R4_S4_Breakout_1dTrend_Volume
-Hypothesis: 4-hour chart breakouts at weekly-derived R4/S4 pivot levels with 1-day trend filter and volume confirmation. 
-Weekly pivots capture major support/resistance levels that work in both bull and bear markets. 
-1-day trend filter ensures trades align with intermediate-term direction. 
-Volume confirmation filters false breakouts. Targets 20-50 trades/year by requiring confluence of weekly level break, daily trend, and volume surge.
+6h_Donchian20_WeeklyPivotTrend_Volume
+Hypothesis: 6-hour Donchian(20) breakouts aligned with weekly pivot trend and volume confirmation. Targets 15-35 trades/year by requiring breakout in direction of weekly trend with volume surge. Works in bull (breakouts continue) and bear (breakouts reverse) markets.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,75 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for price action
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Get weekly data for pivot calculation
+    # Get weekly data for pivot trend
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using previous week's data)
+    # Calculate weekly pivot points (using prior week)
     prev_week_high = df_1w['high'].shift(1).values
     prev_week_low = df_1w['low'].shift(1).values
     prev_week_close = df_1w['close'].shift(1).values
     
-    # Weekly pivot point
-    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    # Weekly R4 and S4 levels (more extreme levels for significant breaks)
-    weekly_range = prev_week_high - prev_week_low
-    R4 = weekly_pivot + weekly_range * 1.1
-    S4 = weekly_pivot - weekly_range * 1.1
+    pivot_point = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    r1 = 2 * pivot_point - prev_week_low
+    s1 = 2 * pivot_point - prev_week_high
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Weekly trend: price above/below pivot
+    weekly_trend_up = prev_week_close > pivot_point
+    weekly_trend_down = prev_week_close < pivot_point
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align weekly data to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
+    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down.astype(float))
     
-    # Align all higher timeframe data to 4h
-    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Donchian(20) on 6h data
+    lookback = 20
+    dc_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    dc_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-    trend_up = close > ema_50_1d_aligned
-    trend_down = close < ema_50_1d_aligned
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = max(50, lookback)  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(weekly_trend_up_aligned[i]) or 
+            np.isnan(weekly_trend_down_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R4 + 1d uptrend + volume surge
-        long_entry = (close[i] > R4_aligned[i] and 
-                     trend_up[i] and 
+        # Entry conditions
+        # Long: price breaks above Donchian high + weekly uptrend + volume surge
+        long_entry = (high[i] > dc_high[i] and 
+                     weekly_trend_up_aligned[i] > 0.5 and 
                      volume_surge[i])
         
-        # Short: price breaks below S4 + 1d downtrend + volume surge
-        short_entry = (close[i] < S4_aligned[i] and 
-                      trend_down[i] and 
+        # Short: price breaks below Donchian low + weekly downtrend + volume surge
+        short_entry = (low[i] < dc_low[i] and 
+                      weekly_trend_down_aligned[i] > 0.5 and 
                       volume_surge[i])
         
-        # Exit on opposite level break with volume surge
-        long_exit = close[i] < S4_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R4_aligned[i] and volume_surge[i]
+        # Exit on opposite Donchian break with volume surge
+        long_exit = low[i] < dc_low[i] and volume_surge[i]
+        short_exit = high[i] > dc_high[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -114,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyPivot_R4_S4_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPivotTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
