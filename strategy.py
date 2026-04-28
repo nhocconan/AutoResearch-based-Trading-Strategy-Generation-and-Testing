@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot and EMA200
+    # Get daily data for pivot levels and EMA200
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -82,8 +82,9 @@ def generate_signals(prices):
         short_entry = short_breakout and downtrend and vol_filter
         
         # Exit conditions: price returns to weekly pivot level or trend reverses
-        pivot_weekly = pd.Series(pivot_weekly).rolling(window=5, min_periods=5).last().values
-        pivot_weekly_aligned = align_htf_to_ltf(prices, df_1d, pivot_weekly)
+        pivot_weekly_series = pd.Series(pivot_weekly).rolling(window=5, min_periods=5).last()
+        pivot_weekly_values = pivot_weekly_series.values
+        pivot_weekly_aligned = align_htf_to_ltf(prices, df_1d, pivot_weekly_values)
         long_exit = close[i] < pivot_weekly_aligned[i] or not uptrend
         short_exit = close[i] > pivot_weekly_aligned[i] or not downtrend
         
@@ -110,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume_v2"
+name = "12h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume"
 timeframe = "12h"
 leverage = 1.0
