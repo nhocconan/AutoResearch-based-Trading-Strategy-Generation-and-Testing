@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_Reversal_Bounce_1dTrend_Volume
-Hypothesis: In 12h timeframe, price often reverses near Camarilla S3/R3 levels during pullbacks in strong 1d trends. This strategy captures bounces from extreme daily pivot levels with trend alignment and volume confirmation. Designed for lower frequency (~20-40 trades/year) to minimize fee drag while capturing meaningful moves in both bull and bear markets.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Trading 12-hour timeframe with Camarilla pivot R1/S1 breakouts filtered by 1-day EMA34 trend and volume spikes captures institutional order flow while minimizing trade frequency. The 12h timeframe reduces noise and fee drag compared to lower timeframes, while the 1d trend filter ensures alignment with higher timeframe momentum. Targets 12-37 trades per year.
 """
 
 import numpy as np
@@ -31,16 +31,15 @@ def generate_signals(prices):
     # Calculate Camarilla pivot levels from previous day
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     range_ = df_1d['high'] - df_1d['low']
-    # Focus on S3 and R3 for reversal bounces
-    R3 = typical_price + (range_ * 1.1 / 4)
-    S3 = typical_price - (range_ * 1.1 / 4)
+    R1 = typical_price + (range_ * 1.1 / 12)
+    S1 = typical_price - (range_ * 1.1 / 12)
     
     # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
     
-    # Volume confirmation: >1.5x 30-period MA (less frequent for 12h)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: >2.0x 20-period MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,9 +49,9 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or
-            np.isnan(S3_aligned[i]) or
-            np.isnan(vol_ma_30[i])):
+            np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -61,23 +60,21 @@ def generate_signals(prices):
         downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_30[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Reversal bounce conditions: price touches S3/R3 and shows rejection
-        # Long: price touches S3 and closes back above it (bounce)
-        long_bounce = (low[i] <= S3_aligned[i]) and (close[i] > S3_aligned[i]) and vol_confirm and uptrend
-        # Short: price touches R3 and closes back below it (rejection)
-        short_bounce = (high[i] >= R3_aligned[i]) and (close[i] < R3_aligned[i]) and vol_confirm and downtrend
+        # Breakout conditions
+        long_breakout = close[i] > R1_aligned[i] and vol_confirm and uptrend
+        short_breakout = close[i] < S1_aligned[i] and vol_confirm and downtrend
         
-        # Exit conditions: return to midpoint or opposite extreme
-        midpoint = (R3_aligned[i] + S3_aligned[i]) / 2
+        # Exit conditions: return to midpoint or opposite breakout
+        midpoint = (R1_aligned[i] + S1_aligned[i]) / 2
         long_exit = close[i] < midpoint
         short_exit = close[i] > midpoint
         
-        if long_bounce and position <= 0:
+        if long_breakout and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_bounce and position >= 0:
+        elif short_breakout and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -97,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_Reversal_Bounce_1dTrend_Volume"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
