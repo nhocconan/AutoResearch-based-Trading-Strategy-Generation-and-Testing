@@ -3,12 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with daily pivot point breakouts (S3/R3) filtered by weekly trend and volume.
-# Uses pivot levels as dynamic support/resistance, weekly EMA for trend filter, and volume confirmation.
-# Designed for fewer trades (target: 20-50/year) to avoid fee drag, works in both bull/bear markets via trend filter.
-# Entry: Break of S3 (long) or R3 (short) with volume > 20-bar MA and price vs weekly EMA alignment.
-# Exit: Opposite S1/R1 touch. Position size: 0.25 to limit drawdown.
-
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
@@ -37,7 +31,7 @@ def generate_signals(prices):
     r3_d = high_d + 2 * (pivot_d - low_d)
     s3_d = low_d - 2 * (high_d - pivot_d)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
     s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
     r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
@@ -58,6 +52,9 @@ def generate_signals(prices):
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Hour filter: 8-20 UTC (most active trading hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -68,6 +65,19 @@ def generate_signals(prices):
         if (np.isnan(r3_d_aligned[i]) or np.isnan(s3_d_aligned[i]) or 
             np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            # Outside session: flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
         
         # Volume filter: above average volume
@@ -113,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyPivot_S3_R3_Breakout_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "4h_DailyPivot_S3_R3_Breakout_WeeklyTrend_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
