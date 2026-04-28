@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Uses 4h primary timeframe targeting 19-50 trades/year (75-200 total over 4 years).
 # 1d EMA34 provides primary trend filter: bull when price > EMA34, bear when price < EMA34.
 # Camarilla H3/L3 from 1d provide institutional pivot points with proven edge.
 # Volume spike (>2.0x 24-bar average) confirms breakout strength.
 # Position size 0.25 for balance between return and drawdown control.
 # Discrete levels (0.0, ±0.25) minimize fee churn.
-# Works in both bull and bear: trend filter adapts to market regime, volume confirms genuine breakouts.
 
 name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
@@ -32,7 +31,7 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla pivots (H3, L3) and EMA34 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -42,8 +41,8 @@ def generate_signals(prices):
     # Calculate 1d Camarilla pivot levels (H3, L3)
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
-    h3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0  # H3 = Close + 1.1*(Range)/4
-    l3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0  # L3 = Close - 1.1*(Range)/4
+    h3_1d = close_1d + range_1d * 1.1 / 4.0  # H3 = Close + 1.1*(Range)/4
+    l3_1d = close_1d - range_1d * 1.1 / 4.0  # L3 = Close - 1.1*(Range)/4
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
