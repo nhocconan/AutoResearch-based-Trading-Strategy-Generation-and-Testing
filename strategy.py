@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channel (1-day)
+    # Get daily data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -22,22 +22,16 @@ def generate_signals(prices):
     high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Align to daily timeframe (no shift needed as we are on daily timeframe)
-    high_20_aligned = high_20  # Already aligned to daily bars
-    low_20_aligned = low_20    # Already aligned to daily bars
+    # Daily EMA200 for trend filter
+    close_1d_series = pd.Series(df_1d['close'].values)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Get weekly data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Align to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Weekly EMA50 for trend filter
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align weekly EMA to daily timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume filter: above average volume (20-period)
+    # Volume filter: above 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 8-20 UTC (most active trading hours)
@@ -51,7 +45,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -71,9 +65,9 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below weekly EMA50
-        trend_up = close[i] > ema50_1w_aligned[i]
-        trend_down = close[i] < ema50_1w_aligned[i]
+        # Trend filter: price above/below daily EMA200
+        trend_up = close[i] > ema200_1d_aligned[i]
+        trend_down = close[i] < ema200_1d_aligned[i]
         
         # Entry conditions: 
         # Long: break above daily Donchian high with upward trend and volume
@@ -111,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_Trend_Volume_Session"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA200_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
