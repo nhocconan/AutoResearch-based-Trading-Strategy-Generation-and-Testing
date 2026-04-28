@@ -11,11 +11,10 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Get 1d data for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -34,7 +33,7 @@ def generate_signals(prices):
     H3 = close_1d + (range_hl * 1.1 / 4)
     L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 4h
+    # Align pivot levels to 12h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
@@ -42,7 +41,7 @@ def generate_signals(prices):
     
     # Get 4h data for volume and volatility
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 10:
         return np.zeros(n)
     
     volume_4h = df_4h['volume'].values
@@ -82,11 +81,11 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 4h volume above average (1.2x threshold)
-        volume_filter = volume_4h[i] > vol_ma_20_aligned[i] * 1.2
+        # Volume filter: current 4h volume above average
+        volume_filter = volume_4h[i] > vol_ma_20_aligned[i]
         
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_4h_aligned[i] > 0.002 * close[i]  # At least 0.2% ATR
+        vol_filter = atr_4h_aligned[i] > 0.001 * close[i]  # At least 0.1% ATR
         
         # Entry conditions: Camarilla H4/L4 breakout with volume and trend
         long_breakout = close[i] > H4_aligned[i]
@@ -120,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_v2"
-timeframe = "4h"
+name = "12h_Camarilla_H4L4_Breakout_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
