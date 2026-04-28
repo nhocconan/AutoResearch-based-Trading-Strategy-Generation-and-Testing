@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: 4-hour breakouts at daily-derived Camarilla R3/S3 levels with daily trend filter and volume confirmation. 
-Focuses on strong momentum moves with institutional-grade levels (R3/S3) to reduce false signals.
-Targets 25-50 trades/year by requiring breakout, daily trend alignment, and volume surge.
-Works in bull/bear via trend filter and avoids range-bound whipsaws.
+4h_TRIX_VolumeSpike_RegimeFilter
+Hypothesis: TRIX momentum combined with volume spikes and Choppiness regime filter works in both bull and bear markets.
+Uses 4h TRIX(12) crossing zero with volume > 2x 20-period average and Choppiness > 61.8 (ranging) for mean reversion or < 38.2 (trending) for trend following.
+Targets 20-40 trades/year by requiring multiple confirmations to avoid overtrading.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,86 +20,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate TRIX on close prices
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) then percent change
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = pd.Series(ema3).pct_change() * 100  # Convert to percentage
+    trix_values = trix.values
     
-    # Calculate Camarilla levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Zero line crossover signals
+    trix_above_zero = trix_values > 0
+    trix_below_zero = trix_values < 0
     
-    # Camarilla R3 and S3 levels (stronger reversal points)
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align all higher timeframe data to 4h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Trend filter: price > EMA34 = bullish, < EMA34 = bearish
-    d_uptrend = close > ema_34_1d_aligned
-    d_downtrend = close < ema_34_1d_aligned
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.8)
+    volume_spike = volume > (vol_ma_20 * 2.0)
+    
+    # Choppiness Index for regime detection
+    # CHOP = 100 * log10(sum(ATR, 14) / (max(high, 14) - min(low, 14))) / log10(14)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First TR is just high-low
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    
+    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range_14 = max_high_14 - min_low_14
+    
+    # Avoid division by zero
+    chop_raw = np.where(range_14 > 0, sum_atr_14 / range_14, 1.0)
+    chop = 100 * np.log10(chop_raw) / np.log10(14)
+    
+    # Regime thresholds
+    chop_ranging = chop > 61.8   # Market is ranging (mean revert)
+    chop_trending = chop < 38.2  # Market is trending (follow momentum)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 30  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(chop_ranging[i]) or np.isnan(chop_trending[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R3 + daily uptrend + volume surge
-        long_entry = (close[i] > R3_aligned[i] and 
-                     d_uptrend[i] and 
-                     volume_surge[i])
+        # Long conditions
+        # In trending market: TRIX crosses above zero with volume spike
+        # In ranging market: TRIX crosses above zero from negative with volume spike (mean reversion)
+        long_signal = False
+        if chop_trending[i]:
+            # Trending market: follow TRIX momentum
+            long_signal = (trix_values[i] > 0 and trix_values[i-1] <= 0 and volume_spike[i])
+        elif chop_ranging[i]:
+            # Ranging market: mean reversion from oversold
+            long_signal = (trix_values[i] > 0 and trix_values[i-1] <= 0 and 
+                          trix_values[i-1] < -0.5 and volume_spike[i])  # Oversold threshold
         
-        # Short: price breaks below S3 + daily downtrend + volume surge
-        short_entry = (close[i] < S3_aligned[i] and 
-                      d_downtrend[i] and 
-                      volume_surge[i])
+        # Short conditions
+        # In trending market: TRIX crosses below zero with volume spike
+        # In ranging market: TRIX crosses below zero from positive with volume spike (mean reversion)
+        short_signal = False
+        if chop_trending[i]:
+            # Trending market: follow TRIX momentum
+            short_signal = (trix_values[i] < 0 and trix_values[i-1] >= 0 and volume_spike[i])
+        elif chop_ranging[i]:
+            # Ranging market: mean reversion from overbought
+            short_signal = (trix_values[i] < 0 and trix_values[i-1] >= 0 and 
+                           trix_values[i-1] > 0.5 and volume_spike[i])  # Overbought threshold
         
-        # Exit on opposite level break with volume surge
-        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
-        
-        if long_entry and position <= 0:
+        if long_signal:
             signals[i] = 0.25
-            position = 1
-        elif short_entry and position >= 0:
+        elif short_signal:
             signals[i] = -0.25
-            position = -1
-        elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
-        elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
         else:
-            # Hold current position
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+            signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+name = "4h_TRIX_VolumeSpike_RegimeFilter"
 timeframe = "4h"
 leverage = 1.0
