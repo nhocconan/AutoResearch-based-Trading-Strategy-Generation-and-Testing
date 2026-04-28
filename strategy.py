@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1wTrend_Filter
-Hypothesis: Elder Ray (Bull/Bear Power) signals combined with 1-week EMA trend filter to capture momentum in both bull and bear markets. 
-Weekly trend filter reduces whipsaws during reversals. Targets 20-40 trades/year by requiring Elder Ray divergence and weekly trend alignment.
-Works in bull markets via Bull Power strength and in bear markets via Bear Power divergence with trend filter.
+12h_KAMA_Direction_RSI_Chop_Filter
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) for trend direction on 12h timeframe, filtered by RSI momentum and Choppiness Index regime filter to avoid whipsaws in sideways markets. Designed for 12h timeframe to achieve 12-37 trades/year with strong trend capture in both bull and bear markets while minimizing false signals.
 """
 
 import numpy as np
@@ -18,82 +16,134 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for Choppiness Index calculation
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1-week EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 14-period Choppiness Index on daily data
+    # CHOP = 100 * log10(sum(ATR(14)) / (max(high,14) - min(low,14))) / log10(14)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr14 = tr.rolling(window=14, min_periods=14).mean()
     
-    # Elder Ray calculations (13-period EMA as base)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    sum_atr14 = atr14.rolling(window=14, min_periods=14).sum()
+    max_high14 = df_1d['high'].rolling(window=14, min_periods=14).max()
+    min_low14 = df_1d['low'].rolling(window=14, min_periods=14).min()
+    range14 = max_high14 - min_low14
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema_13
+    # Avoid division by zero
+    chop_raw = 100 * (np.log10(sum_atr14) - np.log10(range14)) / np.log10(14)
+    chop = chop_raw.fillna(50).values  # Fill NaN with neutral value
+    
+    # Get 12h data for KAMA and RSI
+    df_12h = get_htf_data(prices, '12h')
+    
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate Kaufman Adaptive Moving Average (KAMA) with ER=10
+    # Efficiency Ratio = |close - close[10]| / sum(|close - close[-1]| for 10 periods)
+    close_12h = df_12h['close']
+    change = abs(close_12h - close_12h.shift(10))
+    volatility = abs(close_12h - close_12h.shift(1)).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0).values
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close_12h.values, np.nan)
+    kama[0] = close_12h.iloc[0]
+    for i in range(1, len(kama)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_12h.iloc[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Calculate 14-period RSI on 12h data
+    delta = close_12h.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # Fill NaN with neutral value
+    
+    # Align all higher timeframe data to 12h (which is our primary timeframe)
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA stabilization
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_13[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1-week EMA34 slope
-        # Only consider uptrend if current EMA > EMA 5 periods ago
-        uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[max(i-5, start_idx)]
-        downtrend = ema_34_1w_aligned[i] < ema_34_1w_aligned[max(i-5, start_idx)]
+        # Determine trend direction from KAMA
+        kama_bullish = close[i] > kama_aligned[i]
+        kama_bearish = close[i] < kama_aligned[i]
         
-        # Elder Ray signals with divergence
-        # Long: Bull Power rising AND above zero (bullish momentum) + weekly uptrend
-        long_signal = (bull_power[i] > 0 and 
-                      bull_power[i] > bull_power[i-1] and  # Rising bull power
-                      uptrend)
+        # RSI conditions: avoid extreme overbought/oversold
+        rsi_not_overbought = rsi_aligned[i] < 70
+        rsi_not_oversold = rsi_aligned[i] > 30
         
-        # Short: Bear Power falling AND below zero (bearish momentum) + weekly downtrend
-        short_signal = (bear_power[i] < 0 and 
-                       bear_power[i] < bear_power[i-1] and  # Falling bear power (more negative)
-                       downtrend)
+        # Choppiness Index filter: only trade in trending markets (CHOP < 38.2) or strong mean reversion (CHOP > 61.8)
+        chop_trending = chop_aligned[i] < 38.2
+        chop_ranging = chop_aligned[i] > 61.8
         
-        # Exit when power signals reverse against position
-        long_exit = (position == 1 and 
-                    (bull_power[i] <= 0 or bull_power[i] < bull_power[i-1]))
-        short_exit = (position == -1 and 
-                     (bear_power[i] >= 0 or bear_power[i] > bear_power[i-1]))
+        # Entry conditions
+        # Long: KAMA bullish + RSI not overbought + (trending OR strong ranging for mean reversion)
+        long_entry = (kama_bullish and 
+                     rsi_not_overbought and 
+                     (chop_trending or chop_ranging))
         
-        if long_signal and position <= 0:
-            signals[i] = 0.25
+        # Short: KAMA bearish + RSI not oversold + (trending OR strong ranging for mean reversion)
+        short_entry = (kama_bearish and 
+                      rsi_not_oversold and 
+                      (chop_trending or chop_ranging))
+        
+        # Exit conditions: reverse when opposite signal occurs
+        long_exit = kama_bearish  # Exit long when KAMA turns bearish
+        short_exit = kama_bullish  # Exit short when KAMA turns bullish
+        
+        if long_entry and position <= 0:
+            signals[i] = 0.30
             position = 1
-        elif short_signal and position >= 0:
-            signals[i] = -0.25
+        elif short_entry and position >= 0:
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
-            signals[i] = 0.0
-            position = 0
+            signals[i] = -0.30  # Reverse to short
+            position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.0
-            position = 0
+            signals[i] = 0.30   # Reverse to long
+            position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1wTrend_Filter"
-timeframe = "6h"
+name = "12h_KAMA_Direction_RSI_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
