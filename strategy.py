@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian channel breakout with volume confirmation and chop regime filter.
-# Weekly Donchian(20) provides strong structural support/resistance based on weekly price action.
-# Breakout above weekly Donchian high (long) or below weekly Donchian low (short) with volume spike (>2.0x 20-bar average) for confirmation.
-# Chop regime filter: only trade when market is trending (CHOP < 38.2) to avoid false breakouts in ranging markets.
+# Hypothesis: 6h strategy using 12h Supertrend for trend direction and 1d Williams %R extremes for mean reversion entries.
+# Supertrend (12h, ATR=10, mult=3) identifies the primary trend on 12h timeframe.
+# Williams %R (1d, period=14) identifies overbought/oversold conditions: long when %R < -80, short when %R > -20.
+# Volume confirmation (>1.5x 20-bar average) reduces false signals.
+# This combines trend following with mean reversion in pullbacks, working in both bull and bear markets.
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h (within proven winning range).
 # Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
-# Target: 30-100 total trades over 4 years = 7-25/year for 1d (within proven winning range).
 
-name = "1d_Donchian20_1w_VolumeSpike_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_Supertrend_12h_WilliamsR_1d_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,64 +25,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channel
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for Supertrend calculation
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 20:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channel (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 12h Supertrend (ATR=10, mult=3)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Weekly Donchian high: max(high_1w, window=20)
-    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Weekly Donchian low: min(low_1w, window=20)
-    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Align weekly Donchian levels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
+    # ATR(10)
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Get daily data for chop regime filter
+    # Supertrend calculation
+    hl2 = (high_12h + low_12h) / 2
+    upper_band = hl2 + 3 * atr_10
+    lower_band = hl2 - 3 * atr_10
+    
+    supertrend = np.zeros(len(close_12h))
+    direction = np.ones(len(close_12h))  # 1 for uptrend, -1 for downtrend
+    
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close_12h)):
+        if close_12h[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close_12h[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1 and direction[i-1] == -1:
+            supertrend[i] = lower_band[i]
+        elif direction[i] == -1 and direction[i-1] == 1:
+            supertrend[i] = upper_band[i]
+        elif direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    # Align Supertrend and direction to 6h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+    
+    # Get daily data for Williams %R
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate chop regime filter (CHOP < 38.2 = trending market)
+    # Calculate 1d Williams %R (period=14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Chop calculation: CHOP = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    atr_sum_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
     # Avoid division by zero
-    range_14 = highest_high_14 - lowest_low_14
-    range_14 = np.where(range_14 == 0, 1e-10, range_14)
+    denominator = highest_high - lowest_low
+    williams_r = np.where(denominator != 0, -100 * (highest_high - close_1d) / denominator, -50)
     
-    chop = 100 * np.log10(atr_sum_14 / range_14) / np.log10(14)
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Chop regime: trending when CHOP < 38.2
-    chop_trending = chop < 38.2
-    
-    # Calculate daily volume spike: >2.0x 20-bar average volume (stricter to reduce trade frequency)
+    # Calculate 6h volume spike: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -90,26 +111,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(chop_trending[i]) or 
+        if (np.isnan(supertrend_aligned[i]) or 
+            np.isnan(direction_aligned[i]) or 
+            np.isnan(williams_r_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions with volume confirmation and chop regime filter
-        long_breakout = close[i] > donchian_high_aligned[i] and volume_spike[i] and chop_trending[i]
-        short_breakout = close[i] < donchian_low_aligned[i] and volume_spike[i] and chop_trending[i]
+        # Trend direction from 12h Supertrend
+        uptrend = direction_aligned[i] == 1
+        downtrend = direction_aligned[i] == -1
         
-        # Exit conditions: opposite Donchian level
-        long_exit = close[i] < donchian_low_aligned[i]
-        short_exit = close[i] > donchian_high_aligned[i]
+        # Williams %R extremes for mean reversion entries
+        oversold = williams_r_aligned[i] < -80  # Long signal
+        overbought = williams_r_aligned[i] > -20  # Short signal
+        
+        # Entry conditions with volume confirmation
+        long_entry = uptrend and oversold and volume_spike[i]
+        short_entry = downtrend and overbought and volume_spike[i]
+        
+        # Exit conditions: trend reversal or opposite Williams %R extreme
+        long_exit = not uptrend or williams_r_aligned[i] > -50
+        short_exit = not downtrend or williams_r_aligned[i] < -50
         
         # Handle entries and exits
-        if long_breakout and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
