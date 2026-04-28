@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h EMA(50) trend + volume confirmation + ATR stoploss
-# Donchian breakouts capture strong momentum moves. 12h EMA filter ensures alignment with medium-term trend.
-# Volume confirmation adds conviction. ATR-based stoploss manages risk. Designed for 4h timeframe
-# to target 20-50 trades/year, balancing signal quality and fee drag.
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA(34) trend + volume confirmation
+# Donchian breakouts capture strong momentum moves. 1w EMA filter ensures alignment with long-term trend.
+# Volume confirmation adds conviction. Designed for 1d timeframe to target 7-25 trades/year,
+# balancing signal quality and fee drag. Works in both bull and bear markets by following the
+# primary trend on weekly timeframe while using daily breakouts for entry timing.
 
-name = "4h_Donchian20_Breakout_12hEMA50_Trend_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA34_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,25 +23,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate 1w EMA(34) for trend
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align 12h EMA to 4h (changes only when 12h bar closes)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Calculate ATR(14) for stoploss and volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align 1w EMA to 1d (changes only when 1w bar closes)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -55,12 +49,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 20, 50, 14)  # Donchian(20), volume MA(20), 12h EMA(50), ATR(14)
+    start_idx = max(20, 20, 34)  # Donchian(20), volume MA(20), 1w EMA(34)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -71,30 +65,26 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price > Donchian High, above 12h EMA50, volume confirm
-            if price > donchian_high[i] and price > ema_50_12h_aligned[i] and vol_confirm:
+            # Long entry: Price > Donchian High, above 1w EMA34, volume confirm
+            if price > donchian_high[i] and price > ema_34_1w_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: Price < Donchian Low, below 12h EMA50, volume confirm
-            elif price < donchian_low[i] and price < ema_50_12h_aligned[i] and vol_confirm:
+            # Short entry: Price < Donchian Low, below 1w EMA34, volume confirm
+            elif price < donchian_low[i] and price < ema_34_1w_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or retracement to 12h EMA50
-            # ATR-based stoploss: 2.0 * ATR below entry
-            stop_loss = entry_price - 2.0 * atr[i]
-            if price < stop_loss or price < ema_50_12h_aligned[i]:
+        elif position == 1:  # Long - exit on retracement to 1w EMA34
+            if price < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or retracement to 12h EMA50
-            # ATR-based stoploss: 2.0 * ATR above entry
-            stop_loss = entry_price + 2.0 * atr[i]
-            if price > stop_loss or price > ema_50_12h_aligned[i]:
+        elif position == -1:  # Short - exit on retracement to 1w EMA34
+            if price > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
