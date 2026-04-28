@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Alligator_AllLines_Cross_1dTrend_VolumeConfirm
-Hypothesis: Williams Alligator (13,8,5 SMAs) with all lines aligned in same direction,
-filtered by 1d EMA50 trend and volume spike confirmation. Works in bull/bear markets
-by using 1d EMA50 as trend filter. Targets 20-30 trades/year to minimize fee drag.
+1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend
+Hypothesis: Weekly R3/S1 breakout with weekly trend filter (EMA50) and volume confirmation.
+Targets 10-20 trades/year on daily timeframe to minimize fee drift and capture major trends.
+Works in bull/bear via trend filter and volatility-based breakout conditions.
 """
 
 import numpy as np
@@ -20,22 +20,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate Alligator components on 4h data
-    # Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-    # Using SMA as approximation for SMMA (Williams uses SMMA but SMA is acceptable)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate 20-period volume MA for volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,37 +36,54 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(vol_ma_20[i])):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment: all lines in same order
-        # Bullish: Lips > Teeth > Jaw
-        # Bearish: Lips < Teeth < Jaw
-        bullish_align = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        bearish_align = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
+        # Calculate weekly pivot levels for current week
+        # Need previous week's OHLC (weekly data)
+        week_idx = i // (7 * 24 * 4)  # Approximate: 7 days * 24h * 4 (4h bars per day)
+        if week_idx < 1:
+            signals[i] = 0.0
+            continue
+            
+        prev_week_idx = week_idx - 1
+        if prev_week_idx >= len(df_1w):
+            signals[i] = 0.0
+            continue
+            
+        # Get previous week's OHLC from weekly data
+        ph = df_1w['high'].iloc[prev_week_idx]
+        pl = df_1w['low'].iloc[prev_week_idx]
+        pc = df_1w['close'].iloc[prev_week_idx]
         
-        # Trend direction from 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Weekly pivot levels (R3 and S3)
+        range_val = ph - pl
+        r3 = pc + (range_val * 1.1 * 2)  # R3 = C + 2*(H-L)*1.1
+        s3 = pc - (range_val * 1.1 * 2)  # S3 = C - 2*(H-L)*1.1
+        
+        # Trend direction from weekly EMA50
+        trend_up = close[i] > ema_50_1w_aligned[i]
+        trend_down = close[i] < ema_50_1w_aligned[i]
         
         # Volume confirmation: >2.0x 20-period MA
         vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Entry conditions
-        long_entry = bullish_align and trend_up and vol_confirm
-        short_entry = bearish_align and trend_down and vol_confirm
+        # Breakout conditions (R3 for long, S3 for short)
+        long_breakout = close[i] > r3
+        short_breakout = close[i] < s3
         
-        # Exit conditions: Alligator lines cross or trend reversal
-        # Exit long when lines cross bearish OR trend turns down
-        long_exit = ((lips[i] < teeth[i]) or (teeth[i] < jaw[i])) or (not trend_up)
-        # Exit short when lines cross bullish OR trend turns up
-        short_exit = ((lips[i] > teeth[i]) or (teeth[i] > jaw[i])) or (not trend_down)
+        # Entry logic
+        long_entry = vol_confirm and trend_up and long_breakout
+        short_entry = vol_confirm and trend_down and short_breakout
+        
+        # Exit logic: opposite breakout or trend reversal
+        long_exit = (close[i] < s3) or (not trend_up)
+        short_exit = (close[i] > r3) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -98,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Alligator_AllLines_Cross_1dTrend_VolumeConfirm"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
