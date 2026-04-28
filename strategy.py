@@ -18,7 +18,11 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily ATR(20) for volatility regime
+    # Daily Donchian(20) breakout levels
+    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    
+    # Daily ATR(14) for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -29,16 +33,22 @@ def generate_signals(prices):
     tr2[0] = np.inf
     tr3[0] = np.inf
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily Donchian(20) breakout levels
-    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    # Get weekly data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align to 12h timeframe
+    # Weekly EMA50 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align to 4h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Session filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -46,12 +56,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(atr_20_aligned[i])):
+            np.isnan(atr_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -68,21 +78,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above its 40-period median (avoid chop)
-        if i >= 40:
-            atr_median = np.median(atr_20_aligned[i-39:i+1])
-            vol_filter = atr_20_aligned[i] > atr_median
+        # Volatility filter: only trade when ATR is above its 50-period median (avoid chop)
+        if i >= 50:
+            atr_ma = np.median(atr_1d_aligned[i-49:i+1])
+            vol_filter = atr_1d_aligned[i] > atr_ma
         else:
-            vol_filter = True  # Not enough data for median, allow trade
+            vol_buffer = True  # Not enough data for median, allow trade
+        
+        # Trend filter: price above/below weekly EMA50
+        trend_up = close[i] > ema50_1w_aligned[i]
+        trend_down = close[i] < ema50_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: break above daily Donchian high with volatility
-        # Short: break below daily Donchian low with volatility
+        # Long: break above daily Donchian high with upward trend and volatility
+        # Short: break below daily Donchian low with downward trend and volatility
         long_breakout = close[i] > high_20_aligned[i]
         short_breakout = close[i] < low_20_aligned[i]
         
-        long_entry = long_breakout and vol_filter
-        short_entry = short_breakout and vol_filter
+        long_entry = long_breakout and vol_filter and trend_up
+        short_entry = short_breakout and vol_filter and trend_down
         
         # Exit conditions: opposite Donchian level touch
         long_exit = (close[i] < low_20_aligned[i]) and position == 1
@@ -111,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolMedianFilter_Session"
-timeframe = "12h"
+name = "4h_Donchian20_1wEMA50_VolatilityFilter_Session"
+timeframe = "4h"
 leverage = 1.0
