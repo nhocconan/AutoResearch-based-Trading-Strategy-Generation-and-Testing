@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Supertrend (ATR=10, mult=3.0) for trend direction and
-# 1d Camarilla R3/S3 levels for breakout entries with volume confirmation (>2.0x 20-bar avg volume).
-# Long when: price breaks above 1d Camarilla R3, volume > 2.0x avg, and 12h Supertrend is bullish.
-# Short when: price breaks below 1d Camarilla S3, volume > 2.0x avg, and 12h Supertrend is bearish.
-# Exit when: price returns to 1d Camarilla midpoint (P) or touches opposite level (S3 for long exit, R3 for short exit).
-# Uses discrete position sizing (0.25) to control risk. Target: 50-150 total trades over 4 years.
-# Works in bull markets (breakouts continue with trend) and bear markets (breakdowns continue with trend).
+# Hypothesis: 12h strategy using 1d Camarilla R3/S3 levels with 1w EMA50 trend filter and volume confirmation.
+# Enter long when price breaks above 1d Camarilla R3 level with volume > 2.0x average and close > 1w EMA50 (bullish bias).
+# Enter short when price breaks below 1d Camarilla S3 level with volume > 2.0x average and close < 1w EMA50 (bearish bias).
+# Exit when price returns to the 1d Camarilla midpoint (P).
+# Uses Camarilla structure for pivot points, weekly EMA for trend filter, and volume for confirmation.
+# Designed to work in both bull and bear markets by following the higher timeframe trend.
+# Uses discrete position sizing (0.25) to control risk and minimize fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_Camarilla_R3S3_Breakout_12hSupertrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,60 +51,23 @@ def generate_signals(prices):
     r3 = camarilla_pivot + camarilla_range * 1.1 / 4
     s3 = camarilla_pivot - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Get 12h data for Supertrend (ATR=10, mult=3.0) trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1w data for EMA50 trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 10:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Supertrend
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1w EMA50
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # ATR calculation
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1[0] = high_12h[0] - low_12h[0]  # First bar: no previous close
-    tr2[0] = np.abs(high_12h[0] - close_12h[0])  # First bar: use current close
-    tr3[0] = np.abs(low_12h[0] - close_12h[0])   # First bar: use current close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Supertrend calculation
-    hl2 = (high_12h + low_12h) / 2
-    upperband = hl2 + (3.0 * atr)
-    lowerband = hl2 - (3.0 * atr)
-    
-    supertrend = np.zeros_like(close_12h)
-    direction = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upperband[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_12h)):
-        if close_12h[i] > upperband[i-1]:
-            direction[i] = 1
-        elif close_12h[i] < lowerband[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = max(lowerband[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upperband[i], supertrend[i-1])
-    
-    # Align Supertrend direction to 6h timeframe (1 for bullish, -1 for bearish)
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
-    
-    # Calculate 6h volume confirmation: >2.0x 20-bar average volume
+    # Calculate 12h volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 2.0 * volume_ma_20
@@ -116,22 +80,22 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or
-            np.isnan(supertrend_direction_aligned[i]) or np.isnan(volume_ma_20[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 12h Supertrend direction
-        bullish_bias = supertrend_direction_aligned[i] == 1
-        bearish_bias = supertrend_direction_aligned[i] == -1
+        # Trend filter: 1w EMA50 bias
+        bullish_bias = close[i] > ema_50_1w_aligned[i]
+        bearish_bias = close[i] < ema_50_1w_aligned[i]
         
         # Camarilla breakout conditions
         long_breakout = close[i] > r3_aligned[i]
         short_breakout = close[i] < s3_aligned[i]
         
-        # Exit conditions: return to pivot or opposite level touched
+        # Exit condition: return to pivot
         long_exit = close[i] < pivot_aligned[i]
         short_exit = close[i] > pivot_aligned[i]
         
