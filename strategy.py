@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses actual Camarilla pivot levels from daily timeframe for institutional reference points.
-# 1d EMA34 ensures higher-timeframe trend alignment. Volume spike (>2.0x 20-bar average) confirms momentum.
-# Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years) minimizing fee drag.
-# Works in bull/bear markets by trading breakouts from key levels with volume confirmation and trend filter.
+# Hypothesis: 4h Bollinger Band Squeeze Breakout with 12h EMA50 trend filter and volume confirmation
+# Bollinger Band squeeze identifies low volatility periods preceding breakouts. 12h EMA50 ensures higher-timeframe trend alignment.
+# Volume spike (>2.0x 20-bar average) confirms breakout validity. Target 19-50 trades/year to minimize fee drag.
+# Works in bull/bear markets by capturing explosive moves after consolidation, with volume confirmation filtering false breakouts.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_BollingerSqueeze_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,35 +22,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 34:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
-    # Camarilla levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
-    # We focus on R3 and S3 for breakout entries
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate pivot point (PP) = (High + Low + Close) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate range = High - Low
-    range_1d = high_1d - low_1d
-    # Camarilla R3 = PP + (Range * 1.1 / 4)
-    r3 = pp + (range_1d * 1.1 / 4.0)
-    # Camarilla S3 = PP - (Range * 1.1 / 4)
-    s3 = pp - (range_1d * 1.1 / 4.0)
+    # Bollinger Bands (4h)
+    bb_period = 20
+    bb_std = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + bb_std * std_dev
+    lower_band = sma - bb_std * std_dev
+    bb_width = (upper_band - lower_band) / sma  # Normalized bandwidth
     
-    # Align Camarilla levels to 12h timeframe (wait for daily close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Bollinger Band Squeeze: bandwidth below 20-period average bandwidth
+    bb_width_series = pd.Series(bb_width)
+    bb_width_ma = bb_width_series.rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma  # True when in squeeze (low volatility)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -62,59 +56,59 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(34, 20)  # EMA34, volume MA20
+    start_idx = max(bb_period, 20, 50)  # BB period, volume MA, EMA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(sma[i]) or np.isnan(std_dev[i]) or 
+            np.isnan(bb_width_ma[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
         price = close[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        ema_34_val = ema_34_1d_aligned[i]
+        is_squeeze = squeeze[i]
+        upper = upper_band[i]
+        lower = lower_band[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above R3 with volume confirmation and above 1d EMA34
-            if price > r3_val and vol_confirm and price > ema_34_val:
+            # Long entry: breakout above upper band after squeeze, price above 12h EMA50, volume spike
+            if price > upper and is_squeeze and price > ema_50_12h_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: Price breaks below S3 with volume confirmation and below 1d EMA34
-            elif price < s3_val and vol_confirm and price < ema_34_val:
+            # Short entry: breakout below lower band after squeeze, price below 12h EMA50, volume spike
+            elif price < lower and is_squeeze and price < ema_50_12h_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or re-entry below R3
-            # ATR-based stoploss: 2.5 * ATR below entry (using 12h ATR)
+        elif position == 1:  # Long - exit on stoploss or mean reversion to middle band
+            # ATR-based stoploss: 2.0 * ATR below entry (using 4h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.5 * atr_val
-            # Exit on stoploss or price re-enters below R3 (breakout failed)
-            if price < stop_loss or price < r3_val:
+            stop_loss = entry_price - 2.0 * atr_val
+            # Exit on stoploss or when price reverts to middle band (mean reversion)
+            if price < stop_loss or price <= sma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or re-entry above S3
-            # ATR-based stoploss: 2.5 * ATR above entry
+        elif position == -1:  # Short - exit on stoploss or mean reversion to middle band
+            # ATR-based stoploss: 2.0 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.5 * atr_val
-            # Exit on stoploss or price re-enters above S3 (breakout failed)
-            if price > stop_loss or price > s3_val:
+            stop_loss = entry_price + 2.0 * atr_val
+            # Exit on stoploss or when price reverts to middle band (mean reversion)
+            if price > stop_loss or price >= sma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
