@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike.
-# Enter long when price breaks above Camarilla R3 with volume > 2.0x 20-bar average and price > 12h EMA50 (uptrend).
-# Enter short when price breaks below Camarilla S3 with volume > 2.0x 20-bar average and price < 12h EMA50 (downtrend).
-# Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Camarilla levels provide institutional support/resistance, volume confirms breakout strength, 12h EMA50 filters counter-trend noise.
-# Designed for 4h timeframe to target 75-200 trades over 4 years (19-50/year) with Sharpe > 0 on BTC/ETH/SOL.
+# Hypothesis: 1d strategy using 1w HMA21 trend filter with Donchian(20) breakout and volume confirmation.
+# Enter long when price breaks above Donchian(20) high with volume > 1.8x 20-bar average and price > 1w HMA21 (uptrend).
+# Enter short when price breaks below Donchian(20) low with volume > 1.8x 20-bar average and price < 1w HMA21 (downtrend).
+# Uses discrete position sizing (0.25) to limit drawdown. Target: 30-100 trades over 4 years.
+# Donchian provides objective breakout levels, volume confirms momentum, 1w HMA21 filters counter-trend noise.
+# Works in bull (breakouts with trend) and bear (failed breaks via exits) markets.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wHMA21_Volume_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,42 +24,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1w data for HMA21 trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 60:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w HMA21
+    close_1w = df_1w['close'].values
+    half_length = 21 // 2
+    sqrt_length = int(np.sqrt(21))
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # WMA function
+    def wma(values, window):
+        if len(values) < window:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, window + 1)
+        wma_vals = np.convolve(values, weights, mode='valid') / weights.sum()
+        result = np.full_like(values, np.nan)
+        result[window-1:] = wma_vals
+        return result
     
-    # Calculate 4h Camarilla levels from previous day (using daily data)
-    df_1d = get_htf_data(prices, '1d')
+    wma_half = wma(close_1w, half_length)
+    wma_full = wma(close_1w, 21)
+    hma_21_1w = wma(2 * wma_half - wma_full, sqrt_length)
     
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Align 1w HMA21 to 1d timeframe
+    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
     
-    # Camarilla levels: based on previous day's high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d Donchian channels (20)
+    def donchian_channels(high, low, length=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(length-1, len(high)):
+            upper[i] = np.max(high[i-length+1:i+1])
+            lower[i] = np.min(low[i-length+1:i+1])
+        return upper, lower
     
-    # Calculate Camarilla R3 and S3 levels
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    donchian_upper, donchian_lower = donchian_channels(high, low, 20)
     
-    # Align Camarilla levels to 4h timeframe (previous day's levels available at 4h open)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 4h volume confirmation: >2.0x 20-bar average volume
+    # Calculate 1d volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,18 +75,18 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(hma_21_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions with volume confirmation and trend filter
-        long_breakout = close[i] > camarilla_r3_aligned[i] and volume_confirm[i] and close[i] > ema_50_12h_aligned[i]
-        short_breakout = close[i] < camarilla_s3_aligned[i] and volume_confirm[i] and close[i] < ema_50_12h_aligned[i]
+        # Donchian breakout conditions with volume confirmation and trend filter
+        long_breakout = close[i] > donchian_upper[i] and volume_confirm[i] and close[i] > hma_21_1w_aligned[i]
+        short_breakout = close[i] < donchian_lower[i] and volume_confirm[i] and close[i] < hma_21_1w_aligned[i]
         
-        # Exit conditions: opposite Camarilla level
-        long_exit = close[i] < camarilla_s3_aligned[i]
-        short_exit = close[i] > camarilla_r3_aligned[i]
+        # Exit conditions: opposite Donchian level
+        long_exit = close[i] < donchian_lower[i]
+        short_exit = close[i] > donchian_upper[i]
         
         # Handle entries and exits
         if long_breakout and position <= 0:
