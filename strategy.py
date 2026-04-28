@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian channel breakout with volume confirmation and chop regime filter.
-# Enter long when price breaks above 1w Donchian upper (20) with volume spike and chop < 61.8 (trending regime).
-# Enter short when price breaks below 1w Donchian lower (20) with volume spike and chop < 61.8.
-# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 7-25 trades/year.
-# Higher timeframe structure (1w) reduces noise, volume confirms breakout strength, chop filter avoids ranging markets.
-# Works in bull (breakouts with trend) and bear (failed breaks reverse via exits) markets.
+# Hypothesis: 12h strategy using 1d Williams %R extreme levels with volume confirmation and chop regime filter.
+# Enter long when Williams %R crosses above -80 from below with volume spike and chop < 61.8 (trending).
+# Enter short when Williams %R crosses below -20 from above with volume spike and chop < 61.8.
+# Uses discrete position sizing (0.25) to limit drawdown. Target: 12-37 trades/year.
+# Williams %R identifies overextended conditions, volume confirms momentum, chop filter avoids ranging markets.
+# Works in bull (breakouts from oversold/overbought) and bear (mean reversion from extremes) markets.
 
-name = "1d_Donchian20_1w_Breakout_Volume_ChopFilter_v1"
-timeframe = "1d"
+name = "12h_WilliamsR_Volume_ChopFilter_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +24,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian channel (HTF)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Williams %R (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1w Donchian channel (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d Williams %R (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    n_1w = len(high_1w)
-    donchian_high = np.full(n_1w, np.nan)
-    donchian_low = np.full(n_1w, np.nan)
+    n_1d = len(high_1d)
+    williams_r = np.full(n_1d, np.nan)
     
-    for i in range(20, n_1w):
-        # Use rolling window of previous 20 bars (excluding current) to avoid look-ahead
-        donchian_high[i] = np.max(high_1w[i-20:i])
-        donchian_low[i] = np.min(low_1w[i-20:i])
+    for i in range(14, n_1d):
+        highest_high = np.max(high_1d[i-14:i+1])
+        lowest_low = np.min(low_1d[i-14:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
+        else:
+            williams_r[i] = -50.0
     
-    # Forward fill Donchian levels
-    donchian_high = pd.Series(donchian_high).ffill().values
-    donchian_low = pd.Series(donchian_low).ffill().values
+    # Align 1d Williams %R to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Align 1w indicators to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    
-    # Calculate 1d chop regime: EHLERS CHOPPINESS INDEX (14)
+    # Calculate 12h chop regime: EHLERS CHOPPINESS INDEX (14)
     def choppiness_index(high, low, close, length=14):
         atr_sum = np.zeros_like(close)
         true_range = np.zeros_like(close)
@@ -84,7 +81,7 @@ def generate_signals(prices):
     chop = choppiness_index(high, low, close, 14)
     chop_trending = chop < 61.8  # Trending regime when chop < 61.8
     
-    # Calculate 1d volume spike: >2.0x 20-bar average volume
+    # Calculate 12h volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
@@ -96,24 +93,30 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_20[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions with volume confirmation and chop filter
-        long_breakout = close[i] > donchian_high_aligned[i] and volume_spike[i] and chop_trending[i]
-        short_breakout = close[i] < donchian_low_aligned[i] and volume_spike[i] and chop_trending[i]
+        # Williams %R extreme conditions with volume confirmation and chop filter
+        # Long: crosses above -80 from below (oversold recovery)
+        long_signal = (williams_r_aligned[i] > -80 and 
+                      williams_r_aligned[i-1] <= -80 and 
+                      volume_spike[i] and chop_trending[i])
+        # Short: crosses below -20 from above (overbought rejection)
+        short_signal = (williams_r_aligned[i] < -20 and 
+                       williams_r_aligned[i-1] >= -20 and 
+                       volume_spike[i] and chop_trending[i])
         
-        # Exit conditions: opposite Donchian level
-        long_exit = close[i] < donchian_low_aligned[i]
-        short_exit = close[i] > donchian_high_aligned[i]
+        # Exit conditions: opposite extreme level
+        long_exit = williams_r_aligned[i] < -50  # Exit long when back below midpoint
+        short_exit = williams_r_aligned[i] > -50  # Exit short when back above midpoint
         
         # Handle entries and exits
-        if long_breakout and position <= 0:
+        if long_signal and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
+        elif short_signal and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
