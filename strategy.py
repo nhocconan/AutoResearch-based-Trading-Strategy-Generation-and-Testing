@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSlope
-Hypothesis: Combines 12h EMA50 trend filter with daily Camarilla R3/S3 breakout. 
-Uses volume slope (rising volume) as confirmation to avoid fakeouts. 
-Designed for low trade frequency (<25/year) to minimize fee burn while capturing 
-strong directional moves in both bull and bear markets by requiring alignment 
-across multiple timeframes and volume confirmation.
+1h_RSI_Extremes_4hTrend_1dVolFilter
+Hypothesis: 1h RSI extremes (overbought/oversold) with 4h trend filter and 1d volume filter.
+Works in bull/bear by fading extremes in trending markets. Low trade frequency via strict RSI thresholds.
 """
 
 import numpy as np
@@ -22,73 +19,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate 1d volume EMA20 for volume filter
+    vol_1d = df_1d['volume'].values
+    vol_ema_20_1d = pd.Series(vol_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20_1d)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla pivot levels from previous day
-    # Typical price = (H + L + C) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_hl = df_1d['high'] - df_1d['low']
-    
-    # Camarilla levels
-    R3 = typical_price + (range_hl * 1.1 / 2)
-    S3 = typical_price - (range_hl * 1.1 / 2)
-    
-    # Align to lower timeframe (4h) - values from previous day's close
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
-    typical_price_aligned = align_htf_to_ltf(prices, df_1d, typical_price.values)
-    
-    # Volume slope confirmation: current volume > previous volume (rising volume)
-    volume_slope = volume > np.roll(volume, 1)
-    volume_slope[0] = False  # First value has no previous
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 to stabilize
+    start_idx = 30  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or
-            np.isnan(S3_aligned[i]) or
-            np.isnan(typical_price_aligned[i])):
+        if (np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(vol_ema_20_1d_aligned[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Skip if outside trading session
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
         
-        # Volume slope confirmation: rising volume
-        vol_confirm = volume_slope[i]
+        # Trend filter: price relative to 4h EMA20
+        uptrend = close[i] > ema_20_4h_aligned[i]
+        downtrend = close[i] < ema_20_4h_aligned[i]
         
-        # Entry conditions: Camarilla breakout with volume slope and trend alignment
-        long_entry = (close[i] > R3_aligned[i]) and vol_confirm and uptrend
-        short_entry = (close[i] < S3_aligned[i]) and vol_confirm and downtrend
+        # Volume filter: current volume > 20-day average volume
+        vol_filter = volume[i] > vol_ema_20_1d_aligned[i]
         
-        # Exit conditions: price returns to typical price level or trend reverses
-        long_exit = close[i] < typical_price_aligned[i]
-        short_exit = close[i] > typical_price_aligned[i]
+        # RSI extremes: oversold (<30) or overbought (>70)
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        
+        # Entry conditions
+        long_entry = rsi_oversold and uptrend and vol_filter
+        short_entry = rsi_overbought and downtrend and vol_filter
+        
+        # Exit conditions: RSI returns to neutral zone (40-60)
+        long_exit = rsi[i] >= 40
+        short_exit = rsi[i] <= 60
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -99,14 +104,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSlope"
-timeframe = "4h"
+name = "1h_RSI_Extremes_4hTrend_1dVolFilter"
+timeframe = "1h"
 leverage = 1.0
