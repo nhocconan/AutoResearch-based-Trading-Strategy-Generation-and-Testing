@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels and trend
+    # Get daily data for pivot levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -37,13 +37,9 @@ def generate_signals(prices):
     prev_high_1d = np.concatenate([[high_1d[0]], high_1d[:-1]])
     prev_low_1d = np.concatenate([[low_1d[0]], low_1d[:-1]])
     
-    # Calculate Camarilla levels for each day
+    # Calculate Camarilla levels for each day (R4/S4 for breakout, R3/S3 for fade)
     R4 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 2
     R3 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 4
-    R2 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 6
-    R1 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 12
-    S1 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 12
-    S2 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 6
     S3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 4
     S4 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 2
     
@@ -53,6 +49,7 @@ def generate_signals(prices):
     R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
     # Calculate 6-period moving average of volume for volume filter
     vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
@@ -74,6 +71,7 @@ def generate_signals(prices):
             np.isnan(R4_aligned[i]) or 
             np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or
+            np.isnan(S4_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -97,7 +95,7 @@ def generate_signals(prices):
         
         # Breakout conditions: price breaks R4 (long) or S4 (short) with volume
         long_breakout = close[i] > R4_aligned[i] and vol_filter
-        short_breakout = close[i] < S3_aligned[i] and vol_filter  # Using S3 for stop and reverse
+        short_breakout = close[i] < S4_aligned[i] and vol_filter
         
         # Fade conditions: price touches R3/S3 and reverses
         long_fade = (close[i] <= R3_aligned[i] * 1.002) and (close[i] >= R3_aligned[i] * 0.998) and downtrend and vol_filter
