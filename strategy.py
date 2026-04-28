@@ -48,7 +48,7 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume_1d > (vol_ma_20 * 2.0)  # Volume spike: 2x average
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 6h timeframe
     bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
     bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BollingerSqueeze_Breakout_RSI_Volume"
-timeframe = "4h"
+name = "6h_BollingerSqueeze_Breakout_RSI_Volume"
+timeframe = "6h"
 leverage = 1.0
