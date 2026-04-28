@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation.
-# Uses weekly Donchian channels (20-period) to identify trend direction and strength.
-# Combines with 1d Donchian breakout (20-period) and volume spike (2x 20-period average) for entry.
-# Designed for 1d timeframe with ~30-100 total trades over 4 years to minimize fee drift.
-# Should work in both bull and bear markets by filtering for trend alignment.
+# Hypothesis: 4h Camarilla Pivot R4/S4 breakout with 1d volume spike and 1d EMA(34) trend filter.
+# Uses daily Camarilla levels for major support/resistance, requiring price to break through
+# R4 (strong resistance) or S4 (strong support) with volume confirmation (2x 20-day average).
+# Trend filter uses 1d EMA(34) to ensure alignment with daily trend.
+# Designed for low-frequency, high-conviction trades targeting 20-50 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
@@ -19,64 +19,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla levels, EMA, and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Weekly upper/lower bands
-    weekly_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    weekly_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_hl = df_1d['high'] - df_1d['low']
     
-    # Weekly trend: price above upper = uptrend, below lower = downtrend
-    weekly_upper_aligned = align_htf_to_ltf(prices, df_1w, weekly_upper)
-    weekly_lower_aligned = align_htf_to_ltf(prices, df_1w, weekly_lower)
+    # Camarilla levels: R4 = C + (H-L) * 1.1/2, S4 = C - (H-L) * 1.1/2
+    r4 = df_1d['close'] + (range_hl * 1.1 / 2)
+    s4 = df_1d['close'] - (range_hl * 1.1 / 2)
     
-    # 1d Donchian breakout (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
     
-    # Volume filter: volume > 2x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
+    # Volume filter: 1d volume > 2x 20-day average
+    volume_1d = df_1d['volume'].values
+    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (volume_ma_20 * 2.0)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for Donchian calculation
+    start_idx = max(34, 20)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_upper_aligned[i]) or np.isnan(weekly_lower_aligned[i]) or
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > weekly_upper_aligned[i]
-        weekly_downtrend = close[i] < weekly_lower_aligned[i]
+        # Trend filter: price above/below 1d EMA(34)
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # 1d Donchian breakout
-        breakout_up = close[i] > high_20[i-1]  # Break above previous 20-period high
-        breakout_down = close[i] < low_20[i-1]  # Break below previous 20-period low
+        # Breakout conditions: price breaks R4/S4 with volume spike
+        long_breakout = (close[i] > r4_aligned[i]) and volume_spike_aligned[i]
+        short_breakout = (close[i] < s4_aligned[i]) and volume_spike_aligned[i]
         
-        # Entry conditions
-        long_entry = weekly_uptrend and breakout_up and volume_spike[i]
-        short_entry = weekly_downtrend and breakout_down and volume_spike[i]
+        # Exit conditions: price returns inside Camarilla H-L range
+        typical_today = (high[i] + low[i] + close[i]) / 3
+        range_today = high[i] - low[i]
+        r4_today = close[i] + (range_today * 1.1 / 2)  # Approximate for exit
+        s4_today = close[i] - (range_today * 1.1 / 2)
         
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = breakout_down or not weekly_uptrend
-        short_exit = breakout_up or not weekly_downtrend
+        long_exit = close[i] < r4_today
+        short_exit = close[i] > s4_today
         
         # Handle entries and exits
-        if long_entry and position <= 0:
+        if long_breakout and uptrend and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+        elif short_breakout and downtrend and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -96,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DonchianBreakout_1wTrendFilter_VolumeSpike"
-timeframe = "1d"
+name = "4h_Camarilla_R4S4_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
