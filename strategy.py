@@ -3,18 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator + Elder Ray combination with 1w EMA34 trend filter.
-# Uses 1d primary timeframe targeting 7-25 trades/year (30-100 total over 4 years).
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend presence and direction.
-# Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures trend strength.
-# 1w EMA34 provides higher timeframe trend alignment: only take longs when price > 1w EMA34,
-# shorts when price < 1w EMA34 to avoid counter-trend trades.
-# Volume confirmation (>1.5x 20-bar average) ensures breakout validity.
-# Position size 0.25 balances return and drawdown control.
-# Works in both bull and bear markets via trend filter + Alligator/Elder Ray logic.
+# Hypothesis: 6h Williams %R extreme levels (80/20) with 1d ADX25 trend filter and volume spike confirmation.
+# Williams %R identifies overbought/oversold conditions; ADX filters for trending markets to avoid false signals.
+# Volume spike confirms momentum behind the reversal. Discrete position sizing (0.25) controls drawdown.
+# Targets 50-150 total trades over 4 years (12-37/year) with Sharpe > 0 on BTC/ETH in both bull/bear regimes.
 
-name = "1d_WilliamsAlligator_ElderRay_1wEMA34_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_1dADX25_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,105 +22,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Alligator and Elder Ray calculations
+    # Get 1d data for Williams %R and ADX
     df_1d = get_htf_data(prices, '1d')
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 13 or len(df_1w) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    close_1w = df_1w['close'].values
     
-    # Williams Alligator: Smoothed Moving Average (SMA with specific periods)
-    # Jaw: 13-period SMA, Teeth: 8-period SMA, Lips: 5-period SMA
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    # Calculate Williams %R (14-period) on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema_13
-    bear_power = low_1d - ema_13
+    # Calculate ADX (14-period) on 1d
+    # True Range
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d).shift(1) - close_1d)
+    tr3 = abs(pd.Series(low_1d).shift(1) - close_1d)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1w EMA34 for higher timeframe trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = -pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Align all HTF indicators to 1d timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Smoothed DM and TR
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    atr_smooth = pd.Series(atr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_smooth
+    minus_di = 100 * minus_dm_smooth / atr_smooth
+    
+    # ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align HTF indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 6h volume spike: >2.0x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure sufficient history for EMA34
+    start_idx = 50  # Ensure sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or
-            np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or
-            np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator conditions:
-        # Alligator sleeping (jaws, teeth, lips intertwined) = no trend
-        # Alligator awakening (lines separated) = trend present
-        # Direction: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        alligator_sleeping = (
-            (lips_aligned[i] >= teeth_aligned[i] * 0.999) and (lips_aligned[i] <= teeth_aligned[i] * 1.001) and
-            (teeth_aligned[i] >= jaw_aligned[i] * 0.999) and (teeth_aligned[i] <= jaw_aligned[i] * 1.001)
-        )
-        alligator_awake = not alligator_sleeping
-        alligator_uptrend = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        alligator_downtrend = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+        # Williams %R extreme levels
+        williams_r_val = williams_r_aligned[i]
+        oversold = williams_r_val < -80  # Oversold condition
+        overbought = williams_r_val > -20  # Overbought condition
         
-        # Elder Ray conditions: measure trend strength
-        strong_bull_power = bull_power_aligned[i] > 0
-        strong_bear_power = bear_power_aligned[i] < 0
-        
-        # Higher timeframe trend filter: 1w EMA34
-        price_above_1w_ema = close[i] > ema_34_1w_aligned[i]
-        price_below_1w_ema = close[i] < ema_34_1w_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Long entry: Alligator uptrend + strong bull power + price above 1w EMA + volume spike
-        long_entry = (
-            alligator_awake and
-            alligator_uptrend and
-            strong_bull_power and
-            price_above_1w_ema and
-            vol_confirm
-        )
+        # Entry conditions
+        long_entry = oversold and strong_trend and vol_confirm
+        short_entry = overbought and strong_trend and vol_confirm
         
-        # Short entry: Alligator downtrend + strong bear power + price below 1w EMA + volume spike
-        short_entry = (
-            alligator_awake and
-            alligator_downtrend and
-            strong_bear_power and
-            price_below_1w_ema and
-            vol_confirm
-        )
-        
-        # Exit conditions: Alligator sleeping or opposing Elder Ray signal
-        long_exit = alligator_sleeping or (bear_power_aligned[i] > 0)
-        short_exit = alligator_sleeping or (bull_power_aligned[i] < 0)
+        # Exit conditions: opposite extreme or loss of trend/volume
+        long_exit = (williams_r_val > -20) or not strong_trend or not vol_confirm
+        short_exit = (williams_r_val < -80) or not strong_trend or not vol_confirm
         
         # Handle entries and exits
         if long_entry and position <= 0:
