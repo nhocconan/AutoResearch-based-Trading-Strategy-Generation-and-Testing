@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Uses 1d EMA34 to capture intermediate trend direction. Breaks above R3 in uptrend or below S3 in downtrend
-# with volume confirmation provide high-probability entries. Target: 19-50 trades/year via tight R3/S3 breakout
+# with volume confirmation provide high-probability entries. Target: 12-37 trades/year via tight R3/S3 breakout
 # conditions + volume + trend filter. Works in both bull (breakouts with trend) and bear (mean reversion at extremes).
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,10 +37,10 @@ def generate_signals(prices):
     r3 = typical_price + hl_range * 1.1 / 4
     s3 = typical_price - hl_range * 1.1 / 4
     
-    # Align 1d EMA34 to 4h timeframe (completed 1d candles only)
+    # Align 1d EMA34 to 12h timeframe (completed 1d candles only)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align 1d Camarilla levels to 4h timeframe (completed 1d levels only)
+    # Align 1d Camarilla levels to 12h timeframe (completed 1d levels only)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
@@ -83,7 +83,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long - exit on stoploss or price falls below S3 (reversal)
-            # ATR-based stoploss: 2.0 * ATR below entry (using 4h ATR)
+            # ATR-based stoploss: 2.0 * ATR below entry (using 12h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
