@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Enter long when price breaks above Camarilla R3 level, 1d EMA34 trending up, and volume > 2.0x 20-bar average.
 # Enter short when price breaks below Camarilla S3 level, 1d EMA34 trending down, and volume > 2.0x 20-bar average.
 # Exit when price reaches opposite Camarilla level (R3/S3) or crosses the 1d EMA34.
-# Uses discrete position sizing (0.30) to balance return and fee drag.
-# Target: 100-180 total trades over 4 years (25-45/year) to avoid excessive fee churn.
+# Uses discrete position sizing (0.25) to balance return and fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid excessive fee churn.
 # Camarilla levels provide precise intraday support/resistance; EMA34 filters for 1d trend alignment;
 # Volume spike confirms institutional participation in breakouts.
+# Works in both bull and bear markets by following the 1d trend while using Camarilla for precise entries.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,10 +27,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34
@@ -38,24 +39,17 @@ def generate_signals(prices):
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate Camarilla levels from previous 1d OHLC
-    # Need to get 1d data for Camarilla calculation (different from EMA data)
-    df_1d_cam = get_htf_data(prices, '1d')
-    
-    if len(df_1d_cam) < 2:
-        return np.zeros(n)
-    
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d_cam['close'].shift(1).values
-    prev_high = df_1d_cam['high'].shift(1).values
-    prev_low = df_1d_cam['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
     # Camarilla levels: R3/S3 = C ± (H-L)*1.1/2
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d_cam, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d_cam, camarilla_s3)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -96,10 +90,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if breakout_up and ema_trend_up and vol_confirm and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif breakout_down and ema_trend_down and vol_confirm and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif position == 1 and exit_long:
             signals[i] = 0.0
@@ -110,9 +104,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
