@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_20_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12-hour Donchian channel (20-period) breakouts with volume confirmation and daily trend alignment provide high-probability trades with low frequency (12-37/year). The daily trend filter prevents counter-trend trading, reducing whipsaw in both bull and bear markets. Volume spike confirms institutional participation. Target: 12-37 trades/year per symbol.
+4h_RSI_40_60_1dTrend_Strategy
+Hypothesis: RSI 40-60 range (neutral zone) with daily EMA50 trend filter provides mean-reversion opportunities in both bull and bear markets. Enter long when RSI crosses above 40 in uptrend, short when RSI crosses below 60 in downtrend. Exit on opposite RSI cross or trend reversal. Low-frequency signals reduce fee drag while capturing market swings.
 """
 
 import numpy as np
@@ -28,43 +28,53 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12-hour Donchian channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate RSI(14) on 4h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 2.0)
+    # Wilder's smoothing (alpha = 1/period)
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    
+    for i in range(1, len(gain)):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for Donchian and daily EMA to stabilize
+    start_idx = 30  # Wait for RSI and daily EMA to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
-        
-        # Breakout conditions
-        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous period's upper band
-        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous period's lower band
         
         # Trend filter from daily EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions with volume confirmation
-        long_entry = breakout_long and volume_spike[i] and uptrend
-        short_entry = breakout_short and volume_spike[i] and downtrend
+        # RSI conditions
+        rsi_above_40 = rsi[i] > 40
+        rsi_below_60 = rsi[i] < 60
+        rsi_cross_above_40 = rsi[i] > 40 and rsi[i-1] <= 40
+        rsi_cross_below_60 = rsi[i] < 60 and rsi[i-1] >= 60
         
-        # Exit on opposite breakout
-        long_exit = breakout_short and volume_spike[i]
-        short_exit = breakout_long and volume_spike[i]
+        # Entry conditions
+        long_entry = rsi_cross_above_40 and uptrend
+        short_entry = rsi_cross_below_60 and downtrend
+        
+        # Exit conditions
+        long_exit = rsi_cross_below_60 or not uptrend  # Exit on RSI < 60 or trend change
+        short_exit = rsi_cross_above_40 or not downtrend  # Exit on RSI > 40 or trend change
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -89,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_20_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_RSI_40_60_1dTrend_Strategy"
+timeframe = "4h"
 leverage = 1.0
