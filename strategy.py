@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Width Regime + 1d Donchian Breakout + Volume Spike
-# Bollinger Band Width < 20th percentile = low volatility squeeze (range regime)
-# Donchian(20) breakout on 1d with volume > 2x 20-bar average = expansion signal
-# Long when 1d price breaks above Donchian upper band AND 6h BBW < 20th percentile AND volume spike
-# Short when 1d price breaks below Donchian lower band AND 6h BBW < 20th percentile AND volume spike
-# BBW regime filter ensures we only trade breakouts after low volatility periods, reducing false breakouts
-# Works in both bull and bear markets by capturing expansion after contraction
-# Target: 12-30 trades/year via tight regime + breakout + volume confluence
+# Hypothesis: 12h Williams %R reversal with 1d ADX25 regime filter and volume confirmation
+# Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Long when %R < -80 (oversold) AND ADX > 25 (trending) AND volume > 1.5x 20-bar avg
+# Short when %R > -20 (overbought) AND ADX > 25 (trending) AND volume > 1.5x 20-bar avg
+# Exits when %R crosses above -50 (for longs) or below -50 (for shorts)
+# Target: 12-37 trades/year via regime filter reducing whipsaw in ranging markets
+# Works in both bull and bear markets by only trading when ADX confirms trending conditions
 
-name = "6h_BBW_Regime_1dDonchian20_Breakout_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_1dADX25_Regime_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,90 +20,100 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculations
+    # Get 1d data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need sufficient data for Donchian(20)
+    if len(df_1d) < 30:  # Need sufficient data for ADX
         return np.zeros(n)
     
-    # Calculate Donchian(20) on 1d data
+    # Calculate ADX(14) on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Donchian upper and lower bands (20-period)
-    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Prepend zeros for alignment (since we lost first 19 bars in calculations)
-    donch_high_20 = np.concatenate([np.full(19, np.nan), donch_high_20])
-    donch_low_20 = np.concatenate([np.full(19, np.nan), donch_low_20])
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     
-    # Align 1d Donchian bands to 6h timeframe
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    # Smoothed DM
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Bollinger Band Width on 6h data (20, 2)
-    close_s = pd.Series(close)
-    sma_20 = close_s.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_s.rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20 * 100  # Percentage width
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
     
-    # Calculate 20th percentile of BBW for regime filter (using 100-bar lookback)
-    bbw_series = pd.Series(bb_width)
-    bbw_percentile_20 = bbw_series.rolling(window=100, min_periods=100).quantile(0.20).values
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: >2x 20-bar average volume
+    # Prepend zeros for alignment (since we lost first bar in calculations)
+    adx = np.concatenate([np.full(27, np.nan), adx])  # 14 (TR) + 14 (ADX smoothing) - 1
+    
+    # Align 1d ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Williams %R(14) on 12h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(120, 20)  # Need sufficient history for all indicators (100 for BBW percentile + 20 for others)
+    start_idx = max(40, 20)  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(bbw_percentile_20[i]) or np.isnan(sma_20[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        vol_spike = volume_spike[i]
-        bbw_regime = bb_width[i] < bbw_percentile_20[i]  # Low volatility squeeze regime
-        close_price = close[i]
-        donch_high = donch_high_20_aligned[i]
-        donch_low = donch_low_20_aligned[i]
+        vol_conf = volume_confirm[i]
+        adx_val = adx_aligned[i]
+        wr = williams_r[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price breaks above Donchian upper band AND BBW regime (low vol) AND volume spike
-            if close_price > donch_high and bbw_regime and vol_spike:
+            # Long when Williams %R < -80 (oversold) AND ADX > 25 (trending) AND volume confirmation
+            if wr < -80 and adx_val > 25 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Donchian lower band AND BBW regime (low vol) AND volume spike
-            elif close_price < donch_low and bbw_regime and vol_spike:
+            # Short when Williams %R > -20 (overbought) AND ADX > 25 (trending) AND volume confirmation
+            elif wr > -20 and adx_val > 25 and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price returns to middle of Donchian channel or volatility expands
-            donch_mid = (donch_high + donch_low) / 2
-            if close_price < donch_mid or not bbw_regime:  # Exit when price retracs to mid or volatility expands
+        elif position == 1:  # Long - exit when Williams %R crosses above -50
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when price returns to middle of Donchian channel or volatility expands
-            donch_mid = (donch_high + donch_low) / 2
-            if close_price > donch_mid or not bbw_regime:  # Exit when price retracs to mid or volatility expands
+        elif position == -1:  # Short - exit when Williams %R crosses below -50
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
