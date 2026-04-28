@@ -56,7 +56,7 @@ def generate_signals(prices):
     H4 = close_1d + range_1d * 1.1 / 2
     L4 = close_1d - range_1d * 1.1 / 2
     
-    # AlCamarilla levels to 12h timeframe
+    # Align Camarilla levels to 12h timeframe
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
