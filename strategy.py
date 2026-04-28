@@ -1,35 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d KAMA (Kaufman Adaptive Moving Average) direction + RSI(14) + weekly volatility regime filter.
-# KAMA adapts to market noise - follows price closely in trending markets, stays flat in ranging markets.
-# In trending markets (weekly ATR > 20-period average), we take KAMA direction signals.
-# In ranging markets (weekly ATR <= 20-period average), we mean-revert at RSI extremes.
-# This dual-regime approach works in both bull and bear markets by adapting to volatility conditions.
-# Weekly volatility filter prevents whipsaws in low-volatility environments.
+# Hypothesis: 6h Time-of-Day volatility breakout combined with 1-day ATR filter.
+# During high volatility periods (UTC 12:00-20:00), price breaks often have follow-through.
+# Uses ATR(14) from daily chart to set dynamic breakout thresholds, avoiding false breakouts in low volatility.
+# Volatility filter ensures trades occur only when market has sufficient movement potential.
+# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by focusing on volatility expansion rather than direction.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def _kama(close, er_length=10, fast_sc=2, slow_sc=30):
-    """Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.zeros_like(close)
-    for i in range(1, len(close)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    
-    er = np.zeros_like(close)
-    for i in range(len(close)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,99 +19,99 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get weekly data for volatility regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for ATR filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:  # Need enough for ATR calculation
         return np.zeros(n)
     
-    # Weekly ATR for volatility regime
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily ATR (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First period
     
-    atr_1w = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr_ma_1w = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
+    # Wilder's smoothing (equivalent to RMA)
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Align weekly volatility regime to daily
-    vol_regime = atr_1w > atr_ma_1w  # True = trending, False = ranging
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_regime.astype(float))
+    # Align ATR to 6h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Daily KAMA
-    kama = _kama(close, er_length=10, fast_sc=2, slow_sc=30)
-    kama_dir = np.where(close > kama, 1, -1)  # 1 = above KAMA (bullish), -1 = below KAMA (bearish)
+    # Pre-calculate hour of day for each bar (vectorized)
+    hours = pd.to_datetime(open_time).hour
     
-    # Daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Volatility breakout parameters
+    breakout_mult = 0.5  # ATR multiplier for breakout threshold
+    vol_threshold = 0.5  # Minimum ATR ratio to consider volatile enough
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate ATR ratio (current ATR / 20-period ATR average) for volatility regime
+    atr_ma = pd.Series(atr_aligned).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = np.where(atr_ma > 0, atr_aligned / atr_ma, 0)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(30, 20)  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_regime_aligned[i])):
+        # Skip if any required data is invalid
+        if (np.isnan(atr_aligned[i]) or np.isnan(atr_ma[i]) or 
+            np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
-        kama_direction = kama_dir[i]
-        rsi_value = rsi[i]
-        is_trending = vol_regime_aligned[i] > 0.5  # Weekly volatility regime
+        # Time filter: UTC 12:00-20:00 (high volatility period for crypto)
+        hour = hours[i]
+        in_volatile_hours = 12 <= hour <= 20
         
-        if is_trending:
-            # Trending regime: follow KAMA direction
-            long_entry = kama_direction == 1 and position <= 0
-            short_entry = kama_direction == -1 and position >= 0
-            # Exit when KAMA direction changes
-            long_exit = kama_direction == -1 and position == 1
-            short_exit = kama_direction == 1 and position == -1
-        else:
-            # Ranging regime: mean reversion at RSI extremes
-            long_entry = rsi_value < 30 and position <= 0  # Oversold
-            short_entry = rsi_value > 70 and position >= 0  # Overbought
-            # Exit when RSI returns to neutral zone
-            long_exit = rsi_value > 50 and position == 1
-            short_exit = rsi_value < 50 and position == -1
+        # Volatility filter: only trade when ATR is above average
+        volatile_enough = atr_ratio[i] > vol_threshold
         
-        # Handle entries and exits
-        if long_entry:
-            signals[i] = 0.25
-            position = 1
-        elif short_entry:
-            signals[i] = -0.25
-            position = -1
-        elif long_exit and position == 1:
+        # Skip if not in trading hours or not volatile enough
+        if not (in_volatile_hours and volatile_enough):
             signals[i] = 0.0
-            position = 0
-        elif short_exit and position == -1:
-            signals[i] = 0.0
-            position = 0
-        else:
-            # Hold current position
-            if position == 1:
+            continue
+        
+        # Calculate dynamic breakout levels based on previous bar
+        if i > 0:
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            
+            # Breakout thresholds
+            upper_break = prev_high + breakout_mult * atr_aligned[i-1]
+            lower_break = prev_low - breakout_mult * atr_aligned[i-1]
+            
+            # Breakout conditions
+            breakout_up = close[i] > upper_break
+            breakout_down = close[i] < lower_break
+            
+            # Additional confirmation: close must be beyond the midpoint of the range
+            range_mid = (prev_high + prev_low) / 2
+            confirmation_up = close[i] > range_mid
+            confirmation_down = close[i] < range_mid
+            
+            # Entry signals
+            if breakout_up and confirmation_up:
                 signals[i] = 0.25
-            elif position == -1:
+            elif breakout_down and confirmation_down:
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "1d_KAMA_RSI_VolatilityRegime"
-timeframe = "1d"
+name = "6h_TimeOfDay_VolatilityBreakout_1dATR_Filter"
+timeframe = "6h"
 leverage = 1.0
