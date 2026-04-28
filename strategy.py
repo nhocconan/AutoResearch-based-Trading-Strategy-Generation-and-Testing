@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R extremes (oversold/overbought) with volume confirmation and 4h EMA50 trend filter.
-# Enter long when Williams %R < -80 (oversold) with volume > 1.8x average and close > 4h EMA50.
-# Enter short when Williams %R > -20 (overbought) with volume > 1.8x average and close < 4h EMA50.
-# Exit when Williams %R returns to -50 (mean reversion) or opposite extreme is touched.
-# Uses Williams %R for mean reversion in ranging markets, filtered by 4h EMA50 to avoid counter-trend trades.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Hypothesis: 4h strategy using 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Enter long when price breaks above 1d Donchian upper channel with volume > 1.8x average and close > 1w EMA50 (bullish bias).
+# Enter short when price breaks below 1d Donchian lower channel with volume > 1.8x average and close < 1w EMA50 (bearish bias).
+# Exit when price returns to the 1d Donchian midpoint or opposite channel is touched.
+# Uses Donchian structure for breakouts, higher timeframe EMA for trend filter, and volume for confirmation.
+# Works in bull markets (breakouts continue up with trend) and bear markets (breakdowns continue down with trend).
 # Uses discrete position sizing (0.25) to control risk. Target: 75-200 total trades over 4 years.
 
-name = "4h_WilliamsR_1dExtreme_Volume1.8x_4hEMA50_v1"
+name = "4h_Donchian20_1wEMA50_VolumeBreakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,31 +25,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation (HTF)
+    # Get 1d data for Donchian channel calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Calculate 1d Donchian(20) channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Rolling window for Williams %R (14 periods)
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Donchian upper and lower channels (20-period)
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    midpoint_20 = (upper_20 + lower_20) / 2.0
     
-    # Align Williams %R to 4h timeframe (with 1-bar delay for completed 1d bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align Donchian levels to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_20)
     
-    # Get 4h data for EMA50 trend filter (primary timeframe, but calculate once before loop)
-    # Note: We're already in 4h timeframe, so we can calculate directly
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 1w data for EMA50 trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA50
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate 4h volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -63,31 +68,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(midpoint_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 4h EMA50 bias
-        bullish_bias = close[i] > ema_50[i]
-        bearish_bias = close[i] < ema_50[i]
+        # Trend filter: 1w EMA50 bias
+        bullish_bias = close[i] > ema_50_1w_aligned[i]
+        bearish_bias = close[i] < ema_50_1w_aligned[i]
         
-        # Williams %R conditions
-        williams_r_val = williams_r_aligned[i]
-        oversold = williams_r_val < -80
-        overbought = williams_r_val > -20
-        mean_reversion_exit = abs(williams_r_val + 50) < 5  # Near -50 (mean reversion)
-        opposite_extreme = (position == 1 and williams_r_val > -20) or (position == -1 and williams_r_val < -80)
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper_aligned[i]
+        short_breakout = close[i] < lower_aligned[i]
+        
+        # Exit conditions: return to midpoint or opposite channel touched
+        long_exit = close[i] < midpoint_aligned[i]
+        short_exit = close[i] > midpoint_aligned[i]
         
         # Entry conditions
-        long_entry = oversold and vol_confirm and bullish_bias
-        short_entry = overbought and vol_confirm and bearish_bias
-        
-        # Exit conditions
-        long_exit = mean_reversion_exit or opposite_extreme
-        short_exit = mean_reversion_exit or opposite_extreme
+        long_entry = long_breakout and vol_confirm and bullish_bias
+        short_entry = short_breakout and vol_confirm and bearish_bias
         
         # Handle entries and exits
         if long_entry and position <= 0:
