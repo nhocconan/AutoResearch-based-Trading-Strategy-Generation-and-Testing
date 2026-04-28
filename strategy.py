@@ -13,83 +13,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for weekly pivot calculation (using daily data)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly pivot points from daily data
+    # Use last 5 days to approximate weekly OHLC
+    weekly_high = np.zeros(len(close_1d))
+    weekly_low = np.zeros(len(close_1d))
+    weekly_close = np.zeros(len(close_1d))
     
-    # Get 4h data for ATR calculation (used for stop loss)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
+    for i in range(len(close_1d)):
+        if i >= 4:
+            weekly_high[i] = np.max(high_1d[i-4:i+1])
+            weekly_low[i] = np.min(low_1d[i-4:i+1])
+            weekly_close[i] = close_1d[i]
+        else:
+            weekly_high[i] = np.max(high_1d[:i+1])
+            weekly_low[i] = np.min(low_1d[:i+1])
+            weekly_close[i] = close_1d[i]
+    
+    # Weekly pivot calculation
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    
+    # Align weekly pivot levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
+    # 1w EMA(20) for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate ATR(14) on 4h
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Volume filter: current volume above 20-period average
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 14)
+    start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_4h_aligned[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from 1w EMA
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # Entry conditions: breakout of recent range with volume confirmation
-        lookback = 10
-        if i >= lookback:
-            recent_high = np.nanmax(high[i-lookback:i])
-            recent_low = np.nanmin(low[i-lookback:i])
-            
-            # Volume filter: current volume above recent average
-            vol_ma = np.nanmean(volume[max(0,i-5):i]) if i >= 5 else volume[i]
-            volume_filter = volume[i] > 1.3 * vol_ma
-            
-            long_breakout = close[i] > recent_high
-            short_breakout = close[i] < recent_low
-            
-            long_entry = uptrend and long_breakout and volume_filter
-            short_entry = downtrend and short_breakout and volume_filter
-        else:
-            long_entry = False
-            short_entry = False
+        # Volume filter
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
-        # Exit conditions: ATR-based trailing stop
+        # Fade at extreme weekly pivot levels (S3/R3)
+        fade_at_s3 = close[i] <= weekly_s3_aligned[i] and volume_filter
+        fade_at_r3 = close[i] >= weekly_r3_aligned[i] and volume_filter
+        
+        # Breakout continuation at stronger levels (S2/R2)
+        break_at_s2 = close[i] < weekly_s2_aligned[i] and uptrend and volume_filter
+        break_at_r2 = close[i] > weekly_r2_aligned[i] and downtrend and volume_filter
+        
+        long_entry = fade_at_s3 or break_at_s2
+        short_entry = fade_at_r3 or break_at_r2
+        
+        # Exit conditions: mean reversion to weekly pivot
         if position == 1:
-            # Trail stop: exit if price drops 2.5*ATR from highest high since entry
-            lookback_stop = min(20, i+1)
-            recent_high = np.nanmax(high[i-lookback_stop:i+1])
-            exit_condition = close[i] < recent_high - 2.5 * atr_4h_aligned[i]
+            exit_condition = close[i] >= weekly_pivot_aligned[i]
         elif position == -1:
-            # Trail stop: exit if price rises 2.5*ATR from lowest low since entry
-            lookback_stop = min(20, i+1)
-            recent_low = np.nanmin(low[i-lookback_stop:i+1])
-            exit_condition = close[i] > recent_low + 2.5 * atr_4h_aligned[i]
+            exit_condition = close[i] <= weekly_pivot_aligned[i]
         else:
             exit_condition = False
         
@@ -114,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Breakout_Volume_Trend_ATRStop_v3"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Fade_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
