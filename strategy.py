@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Ichimoku Cloud (Tenkan-sen/Kijun-sen cross + price vs cloud) with volume confirmation.
-# Enter long when price breaks above 1d Kumo (cloud) with Tenkan > Kijun (bullish TK cross) and volume spike.
-# Enter short when price breaks below 1d Kumo with Tenkan < Kijun (bearish TK cross) and volume spike.
-# Uses Ichimoku from 1d for higher timeframe structure, volume confirms breakout strength.
-# Discrete position sizing (0.25) to limit drawdown. Target: 12-37 trades/year on 6h.
-# Works in bull (cloud breakouts with trend) and bear (failed breaks reverse via exits) markets.
+# Hypothesis: 12h strategy using 1d Camarilla pivot R3/S3 breakout with volume confirmation and chop regime filter.
+# Enter long when price breaks above 1d Camarilla R3 with volume spike and chop < 61.8 (trending regime).
+# Enter short when price breaks below 1d Camarilla S3 with volume spike and chop < 61.8.
+# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 12-37 trades/year.
+# Camarilla levels provide structure from higher timeframe, volume confirms breakout strength, chop filter avoids ranging markets.
+# Works in bull (breakouts with trend) and bear (failed breaks reverse via exits) markets.
 
-name = "6h_Ichimoku_TK_Cross_Kumo_Breakout_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_Volume_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,53 +24,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku (HTF)
+    # Get 1d data for Camarilla pivots (HTF)
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Ichimoku components
+    # Calculate 1d Camarilla pivots (using previous bar's high, low, close)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     n_1d = len(high_1d)
+    camarilla_r3 = np.full(n_1d, np.nan)
+    camarilla_s3 = np.full(n_1d, np.nan)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    highest_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    lowest_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (highest_tenkan + lowest_tenkan) / 2.0
+    for i in range(1, n_1d):
+        # Use previous bar to avoid look-ahead
+        phigh = high_1d[i-1]
+        plow = low_1d[i-1]
+        pclose = close_1d[i-1]
+        pivot = (phigh + plow + pclose) / 3.0
+        rng = phigh - plow
+        camarilla_r3[i] = pivot + rng * 1.1 / 4.0
+        camarilla_s3[i] = pivot - rng * 1.1 / 4.0
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    highest_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    lowest_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (highest_kijun + lowest_kijun) / 2.0
+    # Forward fill Camarilla levels
+    camarilla_r3 = pd.Series(camarilla_r3).ffill().values
+    camarilla_s3 = pd.Series(camarilla_s3).ffill().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, plotted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2.0)
+    # Align 1d indicators to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, plotted 26 periods ahead
-    period_senkou_b = 52
-    highest_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    lowest_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((highest_senkou_b + lowest_senkou_b) / 2.0)
+    # Calculate 12h chop regime: EHLERS CHOPPINESS INDEX (14)
+    def choppiness_index(high, low, close, length=14):
+        atr_sum = np.zeros_like(close)
+        true_range = np.zeros_like(close)
+        for i in range(1, len(close)):
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            true_range[i] = tr
+            if i >= length:
+                atr_sum[i] = atr_sum[i-1] + tr - true_range[i-length+1]
+            else:
+                atr_sum[i] = atr_sum[i-1] + tr
+        atr = atr_sum / length
+        max_high = np.zeros_like(close)
+        min_low = np.zeros_like(close)
+        for i in range(len(close)):
+            if i < length:
+                max_high[i] = np.max(high[:i+1])
+                min_low[i] = np.min(low[:i+1])
+            else:
+                max_high[i] = np.max(high[i-length+1:i+1])
+                min_low[i] = np.min(low[i-length+1:i+1])
+        chop = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            if max_high[i] != min_low[i]:
+                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(length)
+            else:
+                chop[i] = 50.0
+        return chop
     
-    # Chikou Span (Lagging Span): Close plotted 26 periods behind (not needed for breakout logic)
+    chop = choppiness_index(high, low, close, 14)
+    chop_trending = chop < 61.8  # Trending regime when chop < 61.8
     
-    # Kumo (Cloud) top and bottom: Senkou Span A and B
-    kumo_top = np.maximum(senkou_a, senkou_b)
-    kumo_bottom = np.minimum(senkou_a, senkou_b)
-    
-    # Align 1d Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    kumo_top_aligned = align_htf_to_ltf(prices, df_1d, kumo_top)
-    kumo_bottom_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom)
-    
-    # Calculate 6h volume spike: >2.0x 20-bar average volume
+    # Calculate 12h volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
@@ -82,26 +101,18 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(kumo_top_aligned[i]) or np.isnan(kumo_bottom_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Ichimoku breakout conditions with volume confirmation
-        # Bullish: price above cloud, Tenkan > Kijun (bullish TK cross)
-        long_breakout = (close[i] > kumo_top_aligned[i] and 
-                        tenkan_aligned[i] > kijun_aligned[i] and 
-                        volume_spike[i])
+        # Camarilla breakout conditions with volume confirmation and chop filter
+        long_breakout = close[i] > camarilla_r3_aligned[i] and volume_spike[i] and chop_trending[i]
+        short_breakout = close[i] < camarilla_s3_aligned[i] and volume_spike[i] and chop_trending[i]
         
-        # Bearish: price below cloud, Tenkan < Kijun (bearish TK cross)
-        short_breakout = (close[i] < kumo_bottom_aligned[i] and 
-                         tenkan_aligned[i] < kijun_aligned[i] and 
-                         volume_spike[i])
-        
-        # Exit conditions: price re-enters the cloud
-        long_exit = close[i] < kumo_bottom_aligned[i]
-        short_exit = close[i] > kumo_top_aligned[i]
+        # Exit conditions: opposite Camarilla level
+        long_exit = close[i] < camarilla_s3_aligned[i]
+        short_exit = close[i] > camarilla_r3_aligned[i]
         
         # Handle entries and exits
         if long_breakout and position <= 0:
