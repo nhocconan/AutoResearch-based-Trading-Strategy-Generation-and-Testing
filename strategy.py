@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,29 +15,29 @@ def generate_signals(prices):
     
     # Get daily data for trend and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate daily ATR(10) for volatility filter
     tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
     # Calculate daily EMA(50) for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily indicators to 1h
+    # Align daily indicators to 4h
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 20-period moving average of volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 10-period moving average of volume
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -47,7 +47,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -66,8 +66,8 @@ def generate_signals(prices):
         uptrend = close[i] > ema50_aligned[i]
         downtrend = close[i] < ema50_aligned[i]
         
-        # Volatility filter: only trade when ATR is above its 10-period average
-        atr_ma = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean()
+        # Volatility filter: only trade when ATR is above its 5-period average
+        atr_ma = pd.Series(atr_1d).rolling(window=5, min_periods=5).mean()
         atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma.values)
         vol_filter = atr_aligned[i] > atr_ma_aligned[i] if not np.isnan(atr_ma_aligned[i]) else False
         
@@ -83,10 +83,10 @@ def generate_signals(prices):
         short_exit = not downtrend or not vol_filter
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -97,14 +97,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA50_ATR14_Volume_Trend_Session"
-timeframe = "1h"
+name = "4h_EMA50_ATR10_Volume_Trend_Session"
+timeframe = "4h"
 leverage = 1.0
