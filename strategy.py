@@ -13,12 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
+    # Get daily data once for HTF context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for HTF context
+    # Get weekly data for additional context
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
@@ -37,24 +37,24 @@ def generate_signals(prices):
     daily_range = high_1d - low_1d
     
     # Daily Camarilla pivot levels (based on previous day)
-    camarilla_r1 = close_1d + daily_range * 1.1 / 12
-    camarilla_s1 = close_1d - daily_range * 1.1 / 12
     camarilla_r3 = close_1d + daily_range * 1.1 / 4
     camarilla_s3 = close_1d - daily_range * 1.1 / 4
+    camarilla_r4 = close_1d + daily_range * 1.1 / 2
+    camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align Daily Camarilla levels to 1d timeframe (no shift needed as we use previous day's data)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Daily Camarilla levels to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Weekly trend filter: EMA34
     close_1w_series = pd.Series(close_1w)
     ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Volume filter: above average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: above average volume (50-period)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -66,8 +66,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -93,14 +93,14 @@ def generate_signals(prices):
         trend_down = close[i] < ema34_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: price breaks above daily R3 with volume and trend up
-        # Short: price breaks below daily S3 with volume and trend down
+        # Long: price breaks above daily R3 with volume and weekly trend up
+        # Short: price breaks below daily S3 with volume and weekly trend down
         long_entry = (close[i] > r3_aligned[i]) and vol_filter and trend_up
         short_entry = (close[i] < s3_aligned[i]) and vol_filter and trend_down
         
-        # Exit conditions: price returns to opposite daily S1/R1 levels
-        long_exit = (close[i] < s1_aligned[i])
-        short_exit = (close[i] > r1_aligned[i])
+        # Exit conditions: price returns to opposite daily S3/R3 levels
+        long_exit = (close[i] < s3_aligned[i])
+        short_exit = (close[i] > r3_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -125,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DailyCamarilla_R3S1_WeeklyTrend_Volume_Session"
-timeframe = "1d"
+name = "6h_DailyCamarilla_R3S3_WeeklyTrend_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
