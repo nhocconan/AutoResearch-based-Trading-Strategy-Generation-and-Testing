@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS_V2
-Hypothesis: Improved version with stricter entry conditions (3x volume spike, higher volume MA period) to reduce trade frequency and avoid overtrading. Targets 15-25 trades/year.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla pivot (R1/S1) breakout on 12h with 1d EMA34 trend filter and volume spike confirmation.
+Targets 15-30 trades/year to minimize fee drift. Works in bull/bear via trend filter.
 """
 
 import numpy as np
@@ -10,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,38 +19,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot calculation
+    # Get 1-day data for trend filter and Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Calculate 50-period volume MA for volume spike confirmation (higher period = fewer signals)
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Calculate 20-period volume MA for volume spike confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for indicators to stabilize
+    start_idx = 34  # Wait for EMA to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_50[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         # Calculate Camarilla pivot levels for current day
         # Need previous day's OHLC (1d data)
-        day_idx = i // 96  # 96 = 24*4 (4h bars per day)
+        day_idx = i // 2  # 2 = 24/12 (12h bars per day)
         if day_idx < 1:
             signals[i] = 0.0
             continue
@@ -66,19 +62,15 @@ def generate_signals(prices):
         
         # Camarilla levels
         range_val = ph - pl
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
         r1 = pc + (range_val * 1.1 / 12)
         s1 = pc - (range_val * 1.1 / 12)
         
-        # Trend direction from 12h EMA50
-        trend_up = close[i] > ema_50_12h_aligned[i]
-        trend_down = close[i] < ema_50_12h_aligned[i]
+        # Trend direction from 1d EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation: >3.0x 50-period MA (stricter = fewer trades)
-        vol_confirm = volume[i] > (3.0 * vol_ma_50[i])
+        # Volume confirmation: >2.0x 20-period MA
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
         # Breakout conditions
         long_breakout = close[i] > r1
@@ -115,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS_V2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
