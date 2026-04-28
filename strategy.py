@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: 12-hour chart breakouts at daily-derived Camarilla R1/S1 levels with daily trend filter and volume confirmation.
-Targets 12-37 trades/year by requiring breakout, daily trend alignment, and volume surge to reduce false signals and work in both bull and bear markets.
+4h_WeeklyPivot_R4_S4_Breakout_1dTrend_Volume
+Hypothesis: 4-hour chart breakouts at weekly-derived R4/S4 pivot levels with 1-day trend filter and volume confirmation. 
+Weekly pivots capture major support/resistance levels that work in both bull and bear markets. 
+1-day trend filter ensures trades align with intermediate-term direction. 
+Volume confirmation filters false breakouts. Targets 20-50 trades/year by requiring confluence of weekly level break, daily trend, and volume surge.
 """
 
 import numpy as np
@@ -19,27 +21,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels (calculated from previous day)
+    # Get 4h data for price action
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points (using previous week's data)
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
+    
+    # Weekly pivot point
+    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    # Weekly R4 and S4 levels (more extreme levels for significant breaks)
+    weekly_range = prev_week_high - prev_week_low
+    R4 = weekly_pivot + weekly_range * 1.1
+    S4 = weekly_pivot - weekly_range * 1.1
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous daily bar
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla R1 and S1 levels
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Get 1d data for trend filter
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all higher timeframe data to 12h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align all higher timeframe data to 4h
+    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
@@ -57,25 +71,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R1 + 1d uptrend + volume surge
-        long_entry = (close[i] > R1_aligned[i] and 
+        # Long: price breaks above R4 + 1d uptrend + volume surge
+        long_entry = (close[i] > R4_aligned[i] and 
                      trend_up[i] and 
                      volume_surge[i])
         
-        # Short: price breaks below S1 + 1d downtrend + volume surge
-        short_entry = (close[i] < S1_aligned[i] and 
+        # Short: price breaks below S4 + 1d downtrend + volume surge
+        short_entry = (close[i] < S4_aligned[i] and 
                       trend_down[i] and 
                       volume_surge[i])
         
         # Exit on opposite level break with volume surge
-        long_exit = close[i] < S1_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R1_aligned[i] and volume_surge[i]
+        long_exit = close[i] < S4_aligned[i] and volume_surge[i]
+        short_exit = close[i] > R4_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -100,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_WeeklyPivot_R4_S4_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
