@@ -12,94 +12,89 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours (08-20 UTC) - open_time is already datetime64[ms]
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter and pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 4h EMA(20) for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Weekly EMA(21) for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Weekly pivot points (standard calculation)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    R1 = pivot_1w + (range_1w * 1.0)
+    S1 = pivot_1w - (range_1w * 1.0)
+    R2 = pivot_1w + (range_1w * 2.0)
+    S2 = pivot_1w - (range_1w * 2.0)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d Camarilla pivot levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    H4 = close_1d + (range_hl * 1.1 / 2)
-    L4 = close_1d - (range_hl * 1.1 / 2)
-    H3 = close_1d + (range_hl * 1.1 / 4)
-    L3 = close_1d - (range_hl * 1.1 / 4)
-    
-    # Align pivot levels to 1h
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align weekly levels to 6h
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
     
     # Volume confirmation: current volume > 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # ATR filter to avoid extreme volatility
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_pct = atr / close
+    atr_ma = pd.Series(atr_pct).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr_pct < (atr_ma * 1.5)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(21, 20, 50)
     
     for i in range(start_idx, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or 
-            np.isnan(L4_aligned[i]) or
+        if (np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or
+            np.isnan(R2_aligned[i]) or
+            np.isnan(S2_aligned[i]) or
             np.isnan(vol_ma_20[i]) or
-            np.isnan(H3_aligned[i]) or
-            np.isnan(L3_aligned[i])):
+            np.isnan(volatility_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 4h EMA(20)
-        uptrend = close[i] > ema_20_4h_aligned[i]
-        downtrend = close[i] < ema_20_4h_aligned[i]
+        # Trend filter from weekly EMA(21)
+        uptrend = close[i] > ema_21_1w_aligned[i]
+        downtrend = close[i] < ema_21_1w_aligned[i]
         
-        # Volume filter: current volume above average
+        # Volume filter
         volume_filter = volume[i] > vol_ma_20[i]
         
-        # Entry conditions: Camarilla H4/L4 breakout with volume, trend filter
-        long_breakout = close[i] > H4_aligned[i]
-        short_breakout = close[i] < L4_aligned[i]
+        # Entry conditions: Weekly S1/R1 breakout with volume, trend, and volatility filter
+        long_breakout = close[i] > R1_aligned[i]
+        short_breakout = close[i] < S1_aligned[i]
         
-        long_entry = uptrend and long_breakout and volume_filter
-        short_entry = downtrend and short_breakout and volume_filter
+        long_entry = uptrend and long_breakout and volume_filter and volatility_filter[i]
+        short_entry = downtrend and short_breakout and volume_filter and volatility_filter[i]
         
-        # Exit conditions: Close below/above opposite Camarilla level (H3/L3 for exits)
-        long_exit = close[i] < L3_aligned[i]
-        short_exit = close[i] > H3_aligned[i]
+        # Exit conditions: Close below/above opposite weekly level (S2/R2 for exits)
+        long_exit = close[i] < S2_aligned[i]
+        short_exit = close[i] > R2_aligned[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -107,14 +102,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Camarilla_H4L4_Breakout_VolumeTrend_Session_v1"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_R1S1_Breakout_VolumeTrend_ATRFilter_v1"
+timeframe = "6h"
 leverage = 1.0
