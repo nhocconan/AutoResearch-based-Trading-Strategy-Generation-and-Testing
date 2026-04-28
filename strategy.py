@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Aroon_Breakaway_Trend_Strength
-Hypothesis: Aroon(25) detects strong trending moves when Aroon-Up > 80 or Aroon-Down > 80, combined with volume confirmation and 1-week trend filter to avoid false breakouts in ranging markets. Designed for 6h timeframe to capture multi-day trends in BTC/ETH with controlled trade frequency (~15-25 trades/year).
+1d_1w_PriceChannel_Volume_Confluence
+Hypothesis: Price breaking weekly Donchian channel with volume confirmation and daily trend filter captures strong momentum moves. Weekly timeframe reduces noise and trade frequency, while volume confirmation ensures institutional participation. Works in both bull (breakouts) and bear (breakdowns) markets by targeting expansion phases. Targets 10-20 trades/year on daily timeframe.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,67 +18,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
+    # Get weekly data for Donchian channel
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate weekly Donchian channel (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Aroon(25) calculation
-    aroon_period = 25
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
+    # Align to daily timeframe (waits for weekly close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    for i in range(aroon_period, n):
-        # Periods since highest high
-        highest_high_idx = np.argmax(high[i-aroon_period:i+1])
-        periods_since_high = aroon_period - highest_high_idx
-        aroon_up[i] = ((aroon_period - periods_since_high) / aroon_period) * 100
-        
-        # Periods since lowest low
-        lowest_low_idx = np.argmin(low[i-aroon_period:i+1])
-        periods_since_low = aroon_period - lowest_low_idx
-        aroon_down[i] = ((aroon_period - periods_since_low) / aroon_period) * 100
+    # Daily EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: >1.6x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: >2.0x 50-period MA
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, aroon_period)  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(aroon_up[i]) or
-            np.isnan(aroon_down[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_50[i]) or
+            np.isnan(vol_ma_50[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1w EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: price above/below daily EMA50
+        uptrend = close[i] > ema_50[i]
+        downtrend = close[i] < ema_50[i]
         
-        # Aroon breakout conditions
-        aroon_bullish = aroon_up[i] > 80 and aroon_down[i] < 30  # Strong uptrend
-        aroon_bearish = aroon_down[i] > 80 and aroon_up[i] < 30  # Strong downtrend
+        # Breakout conditions
+        bullish_breakout = close[i] > donchian_high_aligned[i]
+        bearish_breakout = close[i] < donchian_low_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.6 * vol_ma_20[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_50[i])
         
-        # Entry logic: Aroon breakout in direction of weekly trend with volume
-        long_entry = vol_confirm and uptrend and aroon_bullish
-        short_entry = vol_confirm and downtrend and aroon_bearish
+        # Entry logic: breakout in direction of trend with volume
+        long_entry = vol_confirm and uptrend and bullish_breakout
+        short_entry = vol_confirm and downtrend and bearish_breakout
         
-        # Exit logic: Aroon weakening or trend change
-        long_exit = aroon_up[i] < 50 or (not uptrend)
-        short_exit = aroon_down[i] < 50 or (not downtrend)
+        # Exit logic: opposite breakout or trend change
+        long_exit = bearish_breakout or (not uptrend)
+        short_exit = bullish_breakout or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -103,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Aroon_Breakaway_Trend_Strength"
-timeframe = "6h"
+name = "1d_1w_PriceChannel_Volume_Confluence"
+timeframe = "1d"
 leverage = 1.0
