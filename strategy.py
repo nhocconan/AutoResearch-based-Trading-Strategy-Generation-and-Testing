@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_RSI_Filter_Volume
-Hypothesis: KAMA trend direction + RSI momentum filter + volume spike on 4h.
-KAMA adapts to market noise, reducing false signals in chop. RSI filters momentum extremes.
-Volume spike confirms institutional interest. Works in bull/bear via adaptive trend.
-Target: 25-40 trades/year to minimize fee drag.
+1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend_Volume
+Hypothesis: Weekly Camarilla pivot (R3/S3) breakout on daily timeframe with weekly EMA20 trend filter and volume spike confirmation.
+Targets 10-25 trades/year to minimize fee drift while capturing strong trend moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,72 +19,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for KAMA calculation (using same timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for Camarilla pivot calculation and trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate KAMA (adaptive moving average)
-    close_4h = df_4h['close'].values
-    # Efficiency Ratio: price change / volatility
-    change = np.abs(np.diff(close_4h, k=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_4h, k=1)), axis=0)  # 10-period volatility
-    # Avoid division by zero
-    volatility = np.where(volatility == 0, 1, volatility)
-    er = np.concatenate([np.full(10, np.nan), change / volatility])
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.full_like(close_4h, np.nan)
-    kama[29] = close_4h[29]  # seed
-    for i in range(30, len(close_4h)):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate weekly EMA20 for trend filter
+    close_weekly = df_weekly['close'].values
+    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
     
-    # Align KAMA to lower timeframe (though same here, for consistency)
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
-    
-    # RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume spike confirmation (2x 20-period MA)
+    # Calculate 20-period volume MA for volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 20  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_20_weekly_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Trend direction from KAMA
-        trend_up = close[i] > kama_aligned[i]
-        trend_down = close[i] < kama_aligned[i]
+        # Calculate weekly Camarilla pivot levels
+        # Need previous week's OHLC (weekly data)
+        week_idx = i // 480  # 480 = 20*24 (20 days per month approximation for weekly)
+        if week_idx < 1:
+            signals[i] = 0.0
+            continue
+            
+        prev_week_idx = week_idx - 1
+        if prev_week_idx >= len(df_weekly):
+            signals[i] = 0.0
+            continue
+            
+        # Get previous week's OHLC from weekly data
+        ph = df_weekly['high'].iloc[prev_week_idx]
+        pl = df_weekly['low'].iloc[prev_week_idx]
+        pc = df_weekly['close'].iloc[prev_week_idx]
         
-        # RSI filters: avoid overbought/oversold extremes
-        rsi_ok_long = rsi[i] < 70  # not overbought
-        rsi_ok_short = rsi[i] > 30  # not oversold
+        # Camarilla levels (R3 and S3)
+        range_val = ph - pl
+        r3 = pc + (range_val * 1.1 / 4)  # R3 level
+        s3 = pc - (range_val * 1.1 / 4)  # S3 level
+        
+        # Trend direction from weekly EMA20
+        trend_up = close[i] > ema_20_weekly_aligned[i]
+        trend_down = close[i] < ema_20_weekly_aligned[i]
+        
+        # Volume confirmation: >2.0x 20-period MA
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        
+        # Breakout conditions
+        long_breakout = close[i] > r3
+        short_breakout = close[i] < s3
         
         # Entry logic
-        long_entry = trend_up and rsi_ok_long and vol_confirm[i]
-        short_entry = trend_down and rsi_ok_short and vol_confirm[i]
+        long_entry = vol_confirm and trend_up and long_breakout
+        short_entry = vol_confirm and trend_down and short_breakout
         
-        # Exit logic: trend reversal or RSI extreme
-        long_exit = not trend_up or rsi[i] >= 70
-        short_exit = not trend_down or rsi[i] <= 30
+        # Exit logic: opposite breakout or trend reversal
+        long_exit = (close[i] < s3) or (not trend_up)
+        short_exit = (close[i] > r3) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -111,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_RSI_Filter_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
