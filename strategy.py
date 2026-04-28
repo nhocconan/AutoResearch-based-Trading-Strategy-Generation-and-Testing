@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power (Bull/Bear) with 1d ADX25 regime filter and volume confirmation
-# Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-# Long when Bull Power > 0 AND ADX > 25 (trending) AND volume > 1.5x 20-bar avg
-# Short when Bear Power > 0 AND ADX > 25 AND volume > 1.5x 20-bar avg
-# Exits when power reverses sign or volume drops
-# Target: 12-37 trades/year via regime filter reducing whipsaw in ranging markets
-# Works in both bull and bear markets by only trading when ADX confirms trending conditions
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 12h Trend Filter and Volume Confirmation
+# Long when price breaks above upper BB(20,2) AND 12h EMA50 uptrend AND volume > 2x 20-bar avg
+# Short when price breaks below lower BB(20,2) AND 12h EMA50 downtrend AND volume > 2x 20-bar avg
+# Exit when price returns to middle BB(20) or volume drops
+# Bollinger Squeeze (BBWidth < 20th percentile) precedes high-probability breakouts in both bull/bear markets
+# Target: 12-37 trades/year via volatility contraction expansion pattern
+# Works in ranging markets by capturing explosive moves after low volatility periods
 
-name = "6h_ElderRay_Power_1dADX25_Regime_VolumeFilter_v1"
+name = "6h_BollingerSqueeze_Breakout_12hEMA50_Trend_VolumeSpike_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -20,109 +20,79 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA13 and ADX calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need sufficient data for EMA13 and ADX
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
-    # Calculate EMA(13) on 1d close
-    close_1d = df_1d['close'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate EMA(50) on 12h close
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate ADX(14) on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align 12h EMA50 to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    
-    # Smoothed DM
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr14
-    di_minus = 100 * dm_minus_14 / tr14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Prepend zeros for alignment (since we lost first bar in calculations)
-    ema_13_1d = np.concatenate([np.full(13, np.nan), ema_13_1d])
-    adx = np.concatenate([np.full(27, np.nan), adx])  # 13 (EMA) + 14 (TR) + 14 (ADX smoothing) - 1
-    
-    # Align 1d indicators to 6h timeframe
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Elder Ray Power on 6h data
-    # Bull Power = High - EMA13(close)
-    # Bear Power = EMA13(close) - Low
+    # Calculate Bollinger Bands on 6h data (20, 2)
     close_s = pd.Series(close)
-    ema_13_6h = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13_6h
-    bear_power = ema_13_6h - low
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Calculate Bollinger Band Width percentile (20-period lookback)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
+    
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)  # Need sufficient history for all indicators
+    start_idx = 100  # Need sufficient history for BBWidth percentile
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_13_6h[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(bb_middle[i]) or 
+            np.isnan(bb_width_percentile[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        adx_val = adx_aligned[i]
-        bp = bull_power[i]
-        br = bear_power[i]
+        bb_squeeze = bb_width_percentile[i] < 0.20  # BBWidth in lowest 20%
+        ema_12h = ema_50_12h_aligned[i]
+        price = close[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when Bull Power > 0 AND ADX > 25 (trending) AND volume confirmation
-            if bp > 0 and adx_val > 25 and vol_conf:
+            # Long when BB squeeze breakout up AND 12h EMA50 uptrend AND volume confirmation
+            if bb_squeeze and price > bb_upper[i] and price > ema_12h and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when Bear Power > 0 AND ADX > 25 (trending) AND volume confirmation
-            elif br > 0 and adx_val > 25 and vol_conf:
+            # Short when BB squeeze breakout down AND 12h EMA50 downtrend AND volume confirmation
+            elif bb_squeeze and price < bb_lower[i] and price < ema_12h and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when Bull Power <= 0 or ADX < 20 (range) or no volume
-            if bp <= 0 or adx_val < 20 or not vol_conf:
+        elif position == 1:  # Long - exit when price returns to middle BB or volume drops
+            if price < bb_middle[i] or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when Bear Power <= 0 or ADX < 20 (range) or no volume
-            if br <= 0 or adx_val < 20 or not vol_conf:
+        elif position == -1:  # Short - exit when price returns to middle BB or volume drops
+            if price > bb_middle[i] or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
