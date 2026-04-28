@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_VWAP_Trend_Breakout
-Hypothesis: VWAP breakout with daily trend filter (weekly EMA) and volume confirmation.
-Works in bull markets (breakout above VWAP in uptrend) and bear markets (breakdown below VWAP in downtrend).
-Targets 10-20 trades/year to minimize fee drag while capturing significant moves.
+6h_RSI_Extreme_12hTrend_VolumeSpike
+Hypothesis: Extreme RSI (14) values on 6h (RSI<20 or >80) with 12h trend filter (price>SMA50 for long, <SMA50 for short) and volume spike confirmation. Works in both bull/bear by fading extremes in trend direction. Targets 15-25 trades/year.
 """
 
 import numpy as np
@@ -12,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,56 +18,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 12h SMA50 for trend
+    sma_50_12h = pd.Series(df_12h['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_50_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_50_12h)
     
-    # Calculate VWAP (typical price * volume cumulative / volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(volume)
-    # Avoid division by zero
-    vwap = np.where(cum_vol > 0, cum_pv / cum_vol, typical_price)
+    # Calculate 6h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Volume confirmation: >1.5x 20-period MA
+    # Volume confirmation: >2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 60  # Wait for RSI and SMA to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(vwap[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(rsi[i]) or np.isnan(sma_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend: price above/below EMA20
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+        # 12h trend filter
+        trend_up = close[i] > sma_50_12h_aligned[i]
+        trend_down = close[i] < sma_50_12h_aligned[i]
         
-        # Price relative to VWAP
-        above_vwap = close[i] > vwap[i]
-        below_vwap = close[i] < vwap[i]
+        # RSI extremes
+        rsi_oversold = rsi[i] < 20
+        rsi_overbought = rsi[i] > 80
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Entry logic: VWAP breakout in direction of weekly trend
-        long_entry = vol_confirm and weekly_uptrend and above_vwap
-        short_entry = vol_confirm and weekly_downtrend and below_vwap
+        # Entry logic: fade RSI extremes in direction of 12h trend
+        long_entry = vol_confirm and trend_up and rsi_oversold
+        short_entry = vol_confirm and trend_down and rsi_overbought
         
-        # Exit logic: opposite VWAP cross or trend change
-        long_exit = (below_vwap) or (not weekly_uptrend)
-        short_exit = (above_vwap) or (not weekly_downtrend)
+        # Exit logic: RSI returns to neutral zone or trend reversal
+        long_exit = (rsi[i] > 50) or (not trend_up)
+        short_exit = (rsi[i] < 50) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_VWAP_Trend_Breakout"
-timeframe = "1d"
+name = "6h_RSI_Extreme_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
