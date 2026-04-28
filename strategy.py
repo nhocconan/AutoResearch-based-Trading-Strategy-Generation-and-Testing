@@ -23,24 +23,26 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR(14)
+    # Calculate daily 50-period EMA for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate daily ATR(14) for volatility filter
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily Bollinger Bands (20, 2)
-    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + (2 * std20)
-    lower_bb = sma20 - (2 * std20)
+    # Calculate daily Donchian channels (20-period)
+    high20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    high20_aligned = align_htf_to_ltf(prices, df_1d, high20)
+    low20_aligned = align_htf_to_ltf(prices, df_1d, low20)
     
     # Calculate volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,9 +60,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr14_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or
-            np.isnan(lower_bb_aligned[i]) or
+        if (np.isnan(ema50_aligned[i]) or 
+            np.isnan(atr14_aligned[i]) or
+            np.isnan(high20_aligned[i]) or
+            np.isnan(low20_aligned[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
@@ -70,26 +73,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR above 1.5x average (avoid choppy markets)
-        vol_filter = atr14_aligned[i] > (np.nanmean(atr14_aligned[max(0, i-50):i+1]) * 1.5)
+        # Trend filter: price above/below daily EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
-        # Bollinger Band squeeze detection: narrow bands indicate low volatility
-        bb_width = (upper_bb_aligned[i] - lower_bb_aligned[i]) / sma20[np.searchsorted(df_1d.index, prices.index[i]) if i < len(prices) else -1] if np.searchsorted(df_1d.index, prices.index[i]) < len(df_1d) else 20
-        bb_squeeze = bb_width < 0.02  # Less than 2% width indicates squeeze
+        # Volatility filter: current ATR above average (avoid extremely choppy markets)
+        vol_filter = atr14_aligned[i] > np.nanmean(atr14_aligned[max(0, i-50):i+1])
         
-        # Entry conditions: breakout from Bollinger Bands with volume and volatility
-        long_breakout = close[i] > upper_bb_aligned[i]
-        short_breakout = close[i] < lower_bb_aligned[i]
+        # Entry conditions: breakout from daily Donchian channels with volume and trend
+        long_breakout = close[i] > high20_aligned[i]
+        short_breakout = close[i] < low20_aligned[i]
         
-        long_entry = long_breakout and vol_filter and bb_squeeze
-        short_entry = short_breakout and vol_filter and bb_squeeze
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: return to middle of Bollinger Bands
-        middle_bb = sma20[np.searchsorted(df_1d.index, prices.index[i]) if i < len(prices) else -1] if np.searchsorted(df_1d.index, prices.index[i]) < len(df_1d) else sma20[-1]
-        middle_bb_aligned = align_htf_to_ltf(prices, df_1d, pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values)
-        
-        long_exit = close[i] < middle_bb_aligned[i]
-        short_exit = close[i] > middle_bb_aligned[i]
+        # Exit conditions: return to opposite Donchian level or trend reversal
+        long_exit = close[i] < low20_aligned[i] or not uptrend
+        short_exit = close[i] > high20_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_BollingerSqueeze_Breakout_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_DailyEMA50_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
