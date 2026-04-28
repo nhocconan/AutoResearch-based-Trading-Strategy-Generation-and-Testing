@@ -13,36 +13,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for HTF context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data once for HTF context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w indicators
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Calculate 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w Donchian channel (20) - major trend structure
-    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # 1d Bollinger Bands (20, 2.0)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # 1w EMA20 - trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 1d RSI (14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14 = rsi_14.fillna(50).values
     
-    # 1w ATR14 - volatility filter
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # 1d ADX (14)
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm = np.concatenate([[np.nan], np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)])
+    minus_dm = np.concatenate([[np.nan], np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    # Align HTF indicators to 6h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,31 +66,27 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_14_1w_aligned[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        # Mean reversion conditions
+        near_lower_bb = close[i] <= lower_bb_aligned[i] * 1.005  # Within 0.5% of lower BB
+        near_upper_bb = close[i] >= upper_bb_aligned[i] * 0.995  # Within 0.5% of upper BB
+        oversold = rsi_14_aligned[i] < 30
+        overbought = rsi_14_aligned[i] > 70
+        strong_trend = adx_aligned[i] > 25
         
-        # Trend filter: price above/below 1w EMA20
-        trend_up = close[i] > ema_20_1w_aligned[i]
-        trend_down = close[i] < ema_20_1w_aligned[i]
+        # Entry conditions - mean reversion in ranging markets, trend following in trending
+        # Long: near lower BB + oversold + not strong trend (range) OR oversold + strong trend (trend pullback)
+        long_entry = (near_lower_bb and oversold and not strong_trend) or (oversold and strong_trend)
+        # Short: near upper BB + overbought + not strong trend (range) OR overbought + strong trend (trend pullback)
+        short_entry = (near_upper_bb and overbought and not strong_trend) or (overbought and strong_trend)
         
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_14_1w_aligned[i] > 0.008 * close[i]  # ATR > 0.8% of price
-        
-        # Entry conditions - balanced for daily timeframe
-        # Long: upward breakout + uptrend + vol filter
-        long_entry = breakout_up and trend_up and vol_filter
-        # Short: downward breakout + downtrend + vol filter
-        short_entry = breakout_down and trend_down and vol_filter
-        
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = breakout_down or not trend_up
-        short_exit = breakout_up or not trend_down
+        # Exit conditions
+        long_exit = (close[i] >= sma_20[-1] if not np.isnan(sma_20[-1]) else False) or rsi_14_aligned[i] > 50
+        short_exit = (close[i] <= sma_20[-1] if not np.isnan(sma_20[-1]) else False) or rsi_14_aligned[i] < 50
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -100,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA20_Volume_Filter"
-timeframe = "1d"
+name = "6h_BollingerRSI_ADX_MeanReversion_Trend"
+timeframe = "6h"
 leverage = 1.0
