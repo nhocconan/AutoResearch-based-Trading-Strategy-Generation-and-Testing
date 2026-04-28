@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extremes with 1d EMA34 trend filter and volume confirmation.
-# Enter long when Williams %R < -80 (oversold), 1d EMA34 trending up, and volume > 1.8x 20-bar average.
-# Enter short when Williams %R > -20 (overbought), 1d EMA34 trending down, and volume > 1.8x 20-bar average.
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
-# Uses discrete position sizing (0.30) to balance return and fee drag.
-# Target: 80-160 total trades over 4 years (20-40/year) to avoid excessive fee churn.
-# Williams %R identifies momentum extremes; 1d EMA34 filters for higher timeframe trend alignment;
-# Volume spike confirms institutional participation in reversals.
+# Hypothesis: 12h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Enter long when price breaks above Camarilla R4 level, 1d EMA34 trending up, and volume > 1.8x 24-bar average.
+# Enter short when price breaks below Camarilla S4 level, 1d EMA34 trending down, and volume > 1.8x 24-bar average.
+# Exit when price reaches opposite Camarilla level (R4/S4) or crosses the 1d EMA34.
+# Uses discrete position sizing (0.25) to minimize fee drag while maintaining profitability.
+# Target: 50-120 total trades over 4 years (12-30/year) to stay within optimal trade frequency.
+# Camarilla R4/S4 levels provide stronger support/resistance than R3/S3, reducing false breakouts.
+# 1d EMA34 filters for daily trend alignment, improving performance in both bull and bear markets.
+# Volume spike confirms institutional participation, increasing breakout reliability.
 
-name = "4h_WilliamsR_Extremes_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R4S4_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +27,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 34:
@@ -37,28 +38,34 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate Williams %R (14-period)
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Camarilla levels from previous 1d OHLC
+    # Need previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Volume confirmation: >1.8x 20-bar average volume
+    # Camarilla levels: R4/S4 = C ± (H-L)*1.1/4
+    camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Volume confirmation: >1.8x 24-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.8 * volume_ma_20
+    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > 1.8 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, lookback)  # Ensure sufficient history for indicators
+    start_idx = max(34, 24)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
@@ -74,31 +81,33 @@ def generate_signals(prices):
             ema_trend_up = False
             ema_trend_down = False
         
-        # Williams %R conditions
-        wr_oversold = williams_r[i] < -80
-        wr_overbought = williams_r[i] > -20
-        wr_exit_long = williams_r[i] > -50  # Exit long when crosses above -50
-        wr_exit_short = williams_r[i] < -50  # Exit short when crosses below -50
+        # Camarilla breakout conditions
+        breakout_up = close[i] > camarilla_r4_aligned[i]
+        breakout_down = close[i] < camarilla_s4_aligned[i]
+        
+        # Exit conditions: price reaches opposite Camarilla level or crosses 1d EMA34
+        exit_long = close[i] < camarilla_s4_aligned[i] or close[i] < ema_34_aligned[i]
+        exit_short = close[i] > camarilla_r4_aligned[i] or close[i] > ema_34_aligned[i]
         
         # Handle entries and exits
-        if wr_oversold and ema_trend_up and vol_confirm and position <= 0:
-            signals[i] = 0.30
+        if breakout_up and ema_trend_up and vol_confirm and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif wr_overbought and ema_trend_down and vol_confirm and position >= 0:
-            signals[i] = -0.30
+        elif breakout_down and ema_trend_down and vol_confirm and position >= 0:
+            signals[i] = -0.25
             position = -1
-        elif position == 1 and wr_exit_long:
+        elif position == 1 and exit_long:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and wr_exit_short:
+        elif position == -1 and exit_short:
             signals[i] = 0.0
             position = 0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
