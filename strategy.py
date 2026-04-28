@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d Elder Ray trend filter and volume spike confirmation.
-# Enter long when Alligator jaws (13-period SMMA) cross above teeth (8-period SMMA) with 1d Elder Bull Power > 0 and volume > 1.5x 20-bar average.
-# Enter short when Alligator jaws cross below teeth with 1d Elder Bear Power < 0 and volume > 1.5x 20-bar average.
-# Exit when Alligator jaws cross back over teeth in opposite direction.
+# Hypothesis: 4h Donchian(20) breakout with 1d HMA21 trend filter and volume confirmation.
+# Enter long when price breaks above Donchian upper band with 1d HMA21 uptrend and volume > 1.5x 20-bar average.
+# Enter short when price breaks below Donchian lower band with 1d HMA21 downtrend and volume > 1.5x 20-bar average.
+# Exit when price retraces to the Donchian midline (average of upper and lower bands).
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year).
-# Williams Alligator identifies trend initiation; 1d Elder Ray ensures higher timeframe alignment; volume spike filters weak signals.
-# Works in both bull (strong breakouts) and bear (strong breakdowns).
+# Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian provides clear structure; 1d HMA21 ensures higher timeframe alignment; volume spike filters weak breakouts.
+# Works in both bull (strong breakouts) and bear (strong breakdowns) due to symmetric long/short logic.
 
-name = "12h_Williams_Alligator_1dElderRay_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dHMA21_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,40 +26,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray
+    # Get 1d data for HMA21 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Calculate 1d EMA13 for Elder Ray
+    # Calculate 1d HMA21
     close_1d = df_1d['close'].values
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    half_length = 21 // 2
+    sqrt_length = int(np.sqrt(21))
     
-    # Align EMA13 to 12h
-    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
+    # WMA function
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    # Calculate Elder Bull Power and Bear Power
-    bull_power = high - ema_13_aligned  # using 12h high for consistency
-    bear_power = low - ema_13_aligned   # using 12h low for consistency
+    # HMA calculation
+    wma_half = np.array([np.nan] * len(close_1d))
+    wma_full = np.array([np.nan] * len(close_1d))
     
-    # Williams Alligator on 12h: SMMA (Smoothed Moving Average)
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    def smma(values, period):
-        """Smoothed Moving Average"""
-        if len(values) < period:
-            return np.full_like(values, np.nan)
-        result = np.full_like(values, np.nan)
-        # First value is SMA
-        result[period-1] = np.mean(values[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CURRENT_VALUE) / PERIOD
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    for i in range(half_length - 1, len(close_1d)):
+        wma_half[i] = wma(close_1d[i - half_length + 1:i + 1], half_length)
     
-    jaw = smma(close, 13)  # Jaw
-    teeth = smma(close, 8)  # Teeth
-    lips = smma(close, 5)   # Lips (not used in signals but calculated for completeness)
+    for i in range(21 - 1, len(close_1d)):
+        wma_full[i] = wma(close_1d[i - 21 + 1:i + 1], 21)
+    
+    hma_raw = 2 * wma_half - wma_full
+    hma_21 = np.array([np.nan] * len(close_1d))
+    
+    for i in range(sqrt_length - 1, len(hma_raw)):
+        if not np.isnan(hma_half[i - sqrt_length + 1:i + 1]).any():
+            hma_21[i] = wma(hma_half[i - sqrt_length + 1:i + 1], sqrt_length)
+    
+    # Align HMA21 to 4h
+    hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
+    
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian(20) on 4h
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Align Donchian to 4h (no additional delay needed as we use completed 4h bars)
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_4h, donch_mid)
     
     # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -69,57 +89,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # Ensure sufficient history for volume MA and Alligator
+    start_idx = 20  # Ensure sufficient history for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(volume_ma_20[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(hma_21_aligned[i]) or np.isnan(volume_ma_20[i]) or 
+            np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Alligator signals: Jaw crossing Teeth
-        jaw_above_teeth = jaw[i] > teeth[i]
-        jaw_below_teeth = jaw[i] < teeth[i]
-        
-        # Previous bar crossover detection
-        if i > start_idx:
-            prev_jaw_above_teeth = jaw[i-1] > teeth[i-1]
-            prev_jaw_below_teeth = jaw[i-1] < teeth[i-1]
-            
-            # Bullish crossover: Jaw crosses above Teeth
-            bullish_cross = jaw_above_teeth and not prev_jaw_above_teeth
-            # Bearish crossover: Jaw crosses below Teeth
-            bearish_cross = jaw_below_teeth and not prev_jaw_below_teeth
+        # 1d HMA21 trend: slope over 3 periods
+        if i >= 3:
+            hma_slope = (hma_21_aligned[i] - hma_21_aligned[i-3]) / 3
+            hma_trend_up = hma_slope > 0
+            hma_trend_down = hma_slope < 0
         else:
-            bullish_cross = False
-            bearish_cross = False
+            hma_trend_up = False
+            hma_trend_down = False
         
         price = close[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: bullish crossover, Elder Bull Power > 0, volume confirm
-            if bullish_cross and bull_power[i] > 0 and vol_confirm:
+            # Long entry: price > Donchian high, HMA21 up, volume confirm
+            if price > donch_high_aligned[i] and hma_trend_up and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish crossover, Elder Bear Power < 0, volume confirm
-            elif bearish_cross and bear_power[i] < 0 and vol_confirm:
+            # Short entry: price < Donchian low, HMA21 down, volume confirm
+            elif price < donch_low_aligned[i] and hma_trend_down and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - hold or exit on bearish crossover
-            if bearish_cross:
+        elif position == 1:  # Long - hold or exit at Donchian mid
+            if price <= donch_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - hold or exit on bullish crossover
-            if bullish_cross:
+        elif position == -1:  # Short - hold or exit at Donchian mid
+            if price >= donch_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
