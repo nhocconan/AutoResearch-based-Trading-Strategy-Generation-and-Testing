@@ -13,28 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for ATR and SMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly ATR(14)
-    tr1 = np.maximum(high_1w[1:], low_1w[:-1]) - np.minimum(high_1w[1:], low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # Calculate daily ATR(14)
+    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly SMA(50)
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    # Calculate daily SMA(50)
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
-    # Align weekly indicators to daily
-    atr_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    sma50_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    # Align daily indicators to 6h
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
     # Calculate average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,8 +67,8 @@ def generate_signals(prices):
         downtrend = close[i] < sma50_aligned[i]
         
         # Volatility filter: only trade when ATR is above its 10-period average
-        atr_ma_1w = pd.Series(atr_1w).rolling(window=10, min_periods=10).mean().values
-        atr_ma_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
+        atr_ma_1d = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
+        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
         vol_filter = atr_aligned[i] > atr_ma_aligned[i] if not np.isnan(atr_ma_aligned[i]) else False
         
         # Volume filter: current volume above average
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_SMA50_ATR14_Volume_Trend_Session"
-timeframe = "1d"
+name = "6h_SMA50_ATR14_Volume_Trend_Session"
+timeframe = "6h"
 leverage = 1.0
