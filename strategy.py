@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 4h primary timeframe to reduce trade frequency and fee drag.
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses 12h primary timeframe for lower trade frequency, 1d for trend direction.
 # Camarilla H3/L3 levels provide structured breakouts with good risk/reward.
-# 1d EMA34 filters for trend alignment on higher timeframe.
-# Volume spike (>2.0x 20-bar average) confirms breakout strength.
-# Position size 0.25 for balance between return and drawdown control.
-# Target: 80-180 total trades over 4 years = 20-45/year for 4h.
+# 1d EMA34 filters for trend alignment, volume spike confirms breakout strength.
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h.
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,10 +37,10 @@ def generate_signals(prices):
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
+    # Align 1d EMA34 to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 4h Camarilla pivots (based on previous day's OHLC)
+    # Calculate 12h Camarilla pivots (based on previous day's OHLC)
     # Group by date to get daily OHLC
     prices_df = prices.copy()
     prices_df['date'] = prices_df['open_time'].dt.date
@@ -58,11 +56,11 @@ def generate_signals(prices):
     low_prev = daily_ohlc['low'].shift(1).values
     close_prev = daily_ohlc['close'].shift(1).values
     
-    # Camarilla H3, L3 levels (standard levels)
+    # Camarilla H3, L3 levels
     H3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     L3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Map daily levels to 4h bars
+    # Map daily levels to 12h bars
     date_map = prices_df.set_index('open_time')['date']
     camarilla_H3 = np.full(n, np.nan)
     camarilla_L3 = np.full(n, np.nan)
@@ -76,9 +74,9 @@ def generate_signals(prices):
             camarilla_H3[idx] = H3[prev_idx]
             camarilla_L3[idx] = L3[prev_idx]
     
-    # 4h volume spike: >2.0x 20-bar average volume
+    # 12h volume spike: >1.5x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
