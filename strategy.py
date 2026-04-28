@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA20 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels calculated from 1d data (R1/S1 for mean reversion fade, R2/S2 for breakout confirmation)
-# Only takes breakout trades in direction of 4h EMA20 trend with volume confirmation (>1.5x average)
-# Session filter: 08-20 UTC to avoid low-volume periods
-# Designed to work in both bull and bear markets by combining pivot structure with trend filter
-# Target: 15-37 trades/year via tight Camarilla breakout conditions + volume + trend filter + session
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1w trend filter and volume confirmation
+# Uses Bollinger Bands calculated from 6h data to detect low volatility squeeze (BB width < 20th percentile)
+# Breakout occurs when price closes outside BB AND 1w EMA50 trend aligned AND volume > 2.0x average
+# Designed to work in both bull and bear markets by combining volatility contraction with trend following
+# Target: 12-37 trades/year via tight Bollinger squeeze breakout conditions + volume + trend filter
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA20_Trend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Bollinger_Squeeze_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,122 +23,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Bollinger Bands (20, 2) on 6h data
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_width = bb_upper - bb_lower
+    
+    # Bollinger Band squeeze: width < 20th percentile (low volatility)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=100).quantile(0.20).values
+    bb_squeeze = bb_width < bb_width_percentile
+    
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from 1d OHLC (previous day's data)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA50 on 1w close for trend filter
+    close_1w = pd.Series(df_1w['close'])
+    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    # First value will be invalid (rolled from last), but min_periods will handle alignment
+    # Align 1w EMA50 to 6h timeframe (completed 1w candles only)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Camarilla levels
-    camarilla_r1 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 12)
-    camarilla_s1 = close_1d_prev - ((high_1d_prev - low_1d_prev) * 1.1 / 12)
-    camarilla_r2 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 6)
-    camarilla_s2 = close_1d_prev - ((high_1d_prev - low_1d_prev) * 1.1 / 6)
-    
-    # Align 1d Camarilla levels to 1h timeframe (completed 1d candles only)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    
-    # Get 4h data for EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    # Calculate EMA20 on 4h close for trend filter
-    close_4h = pd.Series(df_4h['close'])
-    ema20_4h = close_4h.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align 4h EMA20 to 1h timeframe (completed 4h candles only)
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * volume_ma_20
-    
-    # Session filter: 08-20 UTC (avoid low-volume periods)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 20)  # Need sufficient history for volume MA and EMA20
+    start_idx = max(100, 50)  # Need sufficient history for BB percentile and EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema20_4h_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_squeeze[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Check session filter
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-            
         vol_confirm = volume_spike[i]
         price = close[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        r2 = camarilla_r2_aligned[i]
-        s2 = camarilla_s2_aligned[i]
-        ema20_val = ema20_4h_aligned[i]
+        bb_up = bb_upper[i]
+        bb_low = bb_lower[i]
+        ema50_val = ema50_1w_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long breakout: price breaks above R2 AND 4h EMA20 uptrend AND volume spike
-            if price > r2 and price > ema20_val and vol_confirm:
-                signals[i] = 0.20
+            # Long breakout: price closes above upper BB AND in squeeze AND 1w EMA50 uptrend AND volume spike
+            if price > bb_up and bb_squeeze[i] and price > ema50_val and vol_confirm:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short breakout: price breaks below S2 AND 4h EMA20 downtrend AND volume spike
-            elif price < s2 and price < ema20_val and vol_confirm:
-                signals[i] = -0.20
+            # Short breakout: price closes below lower BB AND in squeeze AND 1w EMA50 downtrend AND volume spike
+            elif price < bb_low and bb_squeeze[i] and price < ema50_val and vol_confirm:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or price falls below R1 (mean reversion)
-            # ATR-based stoploss: 2.0 * ATR below entry (using 1h ATR)
+        elif position == 1:  # Long - exit on stoploss or price falls below middle BB (mean reversion)
+            # ATR-based stoploss: 2.5 * ATR below entry (using 6h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.0 * atr_val
-            # Exit on stoploss or price < R1 (mean reversion back to pivot)
-            if price < stop_loss or price < r1:
+            stop_loss = entry_price - 2.5 * atr_val
+            # Exit on stoploss or price < middle BB (mean reversion)
+            if price < stop_loss or price < bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-        elif position == -1:  # Short - exit on stoploss or price rises above S1 (mean reversion)
-            # ATR-based stoploss: 2.0 * ATR above entry
+                signals[i] = 0.25
+        elif position == -1:  # Short - exit on stoploss or price rises above middle BB (mean reversion)
+            # ATR-based stoploss: 2.5 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.0 * atr_val
-            # Exit on stoploss or price > S1 (mean reversion back to pivot)
-            if price > stop_loss or price > s1:
+            stop_loss = entry_price + 2.5 * atr_val
+            # Exit on stoploss or price > middle BB (mean reversion)
+            if price > stop_loss or price > bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
