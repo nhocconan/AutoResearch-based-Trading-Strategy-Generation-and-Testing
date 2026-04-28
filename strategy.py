@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 4h EMA50 trend filter and 2x volume spike confirmation.
-# Enter long when price breaks above Camarilla R3 level with 4h EMA50 upward slope and volume > 2x 20-bar average.
-# Enter short when price breaks below Camarilla S3 level with 4h EMA50 downward slope and volume confirmation.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and 2x volume spike confirmation.
+# Enter long when price breaks above Camarilla R3 level with 1w EMA50 upward slope and volume > 2x 20-bar average.
+# Enter short when price breaks below Camarilla S3 level with 1w EMA50 downward slope and volume confirmation.
 # Exit when price retraces to the Camarilla H3/L3 levels respectively.
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Target: 30-100 total trades over 4 years (7-25/year).
 # Camarilla R3/S3 levels provide good breakout points with sufficient filtering.
-# 4h EMA50 slope ensures we trade with the intermediate-term trend.
+# 1w EMA50 slope ensures we trade with the long-term trend.
 # Volume spike (2x) filters weak breakouts, reducing false signals.
+# Works in both bull and bear markets by following the 1w trend.
 
-name = "4h_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeSpike_v2"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,22 +28,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA50
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate EMA50 slope (1-bar change)
-    ema_slope = np.diff(ema_4h, prepend=np.nan)
+    ema_slope = np.diff(ema_1w, prepend=np.nan)
     
-    # Align EMA50 and slope to 4h
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    ema_slope_aligned = align_htf_to_ltf(prices, df_4h, ema_slope)
+    # Align EMA50 and slope to 1d
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    ema_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_slope)
     
     # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
@@ -55,7 +56,7 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Align to 4h
+    # Align to 1d
     prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
     prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
@@ -78,7 +79,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_slope_aligned[i]) or 
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(ema_slope_aligned[i]) or 
             np.isnan(volume_ma_20[i]) or 
             np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or 
             np.isnan(prev_close_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or
@@ -89,7 +90,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 4h EMA50 trend: positive slope = uptrend, negative slope = downtrend
+        # 1w EMA50 trend: positive slope = uptrend, negative slope = downtrend
         ema_up = ema_slope_aligned[i] > 0
         ema_down = ema_slope_aligned[i] < 0
         
@@ -97,11 +98,11 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: price > R3, EMA50 trending up, volume confirm
+            # Long entry: price > R3, 1w EMA50 trending up, volume confirm
             if price > R3[i] and ema_up and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price < S3, EMA50 trending down, volume confirm
+            # Short entry: price < S3, 1w EMA50 trending down, volume confirm
             elif price < S3[i] and ema_down and vol_confirm:
                 signals[i] = -0.25
                 position = -1
