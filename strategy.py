@@ -13,30 +13,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once for HTF context
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data once for HTF context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 12h high/low/close for calculations
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Weekly high/low/close for calculations
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h range for pivot calculations
-    daily_range_12h = high_12h - low_12h
+    # Calculate weekly range for pivot calculations
+    weekly_range = high_1w - low_1w
     
-    # Camarilla pivot levels (based on previous 12h bar)
-    camarilla_r3 = close_12h + daily_range_12h * 1.1 / 4
-    camarilla_s3 = close_12h - daily_range_12h * 1.1 / 4
+    # Weekly Pivot Points (based on previous week)
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3
+    weekly_r1 = (2 * weekly_pivot) - low_1w
+    weekly_s1 = (2 * weekly_pivot) - high_1w
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    # Align Weekly Pivot levels to daily timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # 12h trend filter: EMA20
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # Weekly trend filter: EMA21
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,8 +53,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema_21_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -72,19 +75,19 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below 12h EMA20
-        price_above_ema = close[i] > ema_20_aligned[i]
-        price_below_ema = close[i] < ema_20_aligned[i]
+        # Trend filter: price above/below weekly EMA21
+        price_above_ema = close[i] > ema_21_aligned[i]
+        price_below_ema = close[i] < ema_21_aligned[i]
         
         # Entry conditions: 
-        # Long: price breaks above R3 with volume and uptrend
-        # Short: price breaks below S3 with volume and downtrend
-        long_entry = (close[i] > r3_aligned[i]) and price_above_ema and vol_filter
-        short_entry = (close[i] < s3_aligned[i]) and price_below_ema and vol_filter
+        # Long: price crosses above weekly R1 with volume and uptrend
+        # Short: price crosses below weekly S1 with volume and downtrend
+        long_entry = (close[i] > r1_aligned[i]) and price_above_ema and vol_filter
+        short_entry = (close[i] < s1_aligned[i]) and price_below_ema and vol_filter
         
-        # Exit conditions: price returns to opposite S3/R3 levels or trend reversal
-        long_exit = (close[i] < s3_aligned[i]) or (not price_above_ema)
-        short_exit = (close[i] > r3_aligned[i]) or (not price_below_ema)
+        # Exit conditions: price returns to opposite S1/R1 levels or trend reversal
+        long_exit = (close[i] < s1_aligned[i]) or (not price_above_ema)
+        short_exit = (close[i] > r1_aligned[i]) or (not price_below_ema)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -109,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA20_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1S1_EMA21"
+timeframe = "1d"
 leverage = 1.0
