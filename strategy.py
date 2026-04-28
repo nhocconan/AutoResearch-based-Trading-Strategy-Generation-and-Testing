@@ -43,15 +43,15 @@ def generate_signals(prices):
     rsi_1d = 100 - (100 / (1 + rs))
     rsi_1d = np.where(avg_loss == 0, 100, rsi_1d)
     
-    # Align daily indicators to 4h timeframe
+    # Align daily indicators to 12h timeframe
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h SMA(20) for trend filter
+    # Calculate 12h SMA(20) for trend filter
     sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_SMA20_RSI_Filter"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_SMA20_RSI_Filter"
+timeframe = "12h"
 leverage = 1.0
