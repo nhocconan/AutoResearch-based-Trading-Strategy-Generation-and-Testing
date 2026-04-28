@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,76 +13,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # 1w EMA(21) for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Get 1d data for ATR calculation (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Get 12h data for ATR calculation (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate ATR(14) on 12h
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_12h = np.concatenate([[np.nan], tr_12h])  # Align with original index
-    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    
-    # Bollinger Bands on 12h (20, 2)
-    sma_20_12h = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
-    std_20_12h = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
-    upper_bb_12h = sma_20_12h + 2 * std_20_12h
-    lower_bb_12h = sma_20_12h - 2 * std_20_12h
-    upper_bb_aligned = align_htf_to_ltf(prices, df_12h, upper_bb_12h)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_12h, lower_bb_12h)
+    # Calculate ATR(14) on 1d
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d = np.concatenate([[np.nan], tr_1d])  # Align with original index
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 50, 14)
+    start_idx = max(100, 21, 14)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr_12h_aligned[i]) or
-            np.isnan(upper_bb_aligned[i]) or
-            np.isnan(lower_bb_aligned[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter from 1w EMA
+        uptrend = close[i] > ema_21_1w_aligned[i]
+        downtrend = close[i] < ema_21_1w_aligned[i]
         
-        # Entry conditions: Bollinger Band breakout with volume confirmation
-        long_entry = uptrend and close[i] > upper_bb_aligned[i] and volume[i] > 1.5 * np.nanmedian(volume[max(0,i-10):i])
-        short_entry = downtrend and close[i] < lower_bb_aligned[i] and volume[i] > 1.5 * np.nanmedian(volume[max(0,i-10):i])
+        # Entry conditions: trend following with volume filter
+        vol_ma = np.nanmean(volume[max(0,i-5):i]) if i >= 5 else 0
+        long_entry = uptrend and close[i] > high[i-1] and volume[i] > 1.5 * vol_ma
+        short_entry = downtrend and close[i] < low[i-1] and volume[i] > 1.5 * vol_ma
         
         # Exit conditions: ATR-based stop loss
         if position == 1:
             # Trail stop: exit if price drops 2.5*ATR from highest high since entry
-            recent_high = np.nanmax(high[max(0,i-20):i+1]) if i >= 20 else high[i]
-            exit_condition = close[i] < recent_high - 2.5 * atr_12h_aligned[i]
+            recent_high = np.nanmax(high[max(0,i-10):i+1]) if i >= 10 else high[i]
+            exit_condition = close[i] < recent_high - 2.5 * atr_1d_aligned[i]
         elif position == -1:
             # Trail stop: exit if price rises 2.5*ATR from lowest low since entry
-            recent_low = np.nanmin(low[max(0,i-20):i+1]) if i >= 20 else low[i]
-            exit_condition = close[i] > recent_low + 2.5 * atr_12h_aligned[i]
+            recent_low = np.nanmin(low[max(0,i-10):i+1]) if i >= 10 else low[i]
+            exit_condition = close[i] > recent_low + 2.5 * atr_1d_aligned[i]
         else:
             exit_condition = False
         
@@ -107,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_BB_Breakout_Trend_ATR_1dEMA50"
-timeframe = "12h"
+name = "1d_1wEMA21_TrendBreakout_ATRStop"
+timeframe = "1d"
 leverage = 1.0
