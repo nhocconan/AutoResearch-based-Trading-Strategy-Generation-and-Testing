@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 35:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,82 +13,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
+        return np.zeros(n)
+    
+    # 12h EMA34 for trend filter
+    close_12h_series = pd.Series(df_12h['close'].values)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # Get daily data for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Choppiness Index (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get weekly data for ATR-based volatility filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    # Weekly ATR(14) for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
+    tr = np.concatenate([[np.nan], tr])  # align with indices
     
-    # Get 4h data for Donchian channel breakout
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # ATR (14-period smoothed TR)
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # 4h Donchian channel (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Sum of ATR over 14 periods
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
     
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Max(high) and min(low) over 14 periods
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Choppiness Index
+    chop = 100 * np.log10(sum_atr_14 / (max_high_14 - min_low_14)) / np.log10(14)
+    chop = np.where((max_high_14 - min_low_14) == 0, 50, chop)  # avoid division by zero
+    chop = np.where(np.isnan(chop), 50, chop)
+    
+    # Align chop to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (volume_ma * 1.5)
+    
+    # Calculate daily range for Donchian channels
+    range_1d = high_1d - low_1d
+    
+    # Donchian channels (20-period high/low)
+    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian channels to 12h
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Wait for sufficient warmup
+    start_idx = 34  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr14_1w_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        trend_up = close[i] > ema34_1d_aligned[i]
-        trend_down = close[i] < ema34_1d_aligned[i]
+        # Regime filter: Chop > 61.8 = ranging market (mean revert)
+        # Chop < 38.2 = trending market (trend follow)
+        chop_value = chop_aligned[i]
+        is_ranging = chop_value > 61.8
+        is_trending = chop_value < 38.2
         
-        # Volatility filter: only trade when volatility is above average
-        vol_filter = atr14_1w_aligned[i] > 0  # Always true after warmup, but keeps structure
+        # Trend filter
+        trend_up = close[i] > ema34_12h_aligned[i]
+        trend_down = close[i] < ema34_12h_aligned[i]
         
         # Entry conditions
-        # Long: break above 4h Donchian high with upward trend
-        long_breakout = close[i] > donchian_high_aligned[i]
-        long_entry = long_breakout and trend_up and vol_filter
+        # Long: buy at Donchian low in ranging market with upward bias
+        long_entry = is_ranging and close[i] <= donch_low_aligned[i] and trend_up and volume_filter[i]
         
-        # Short: break below 4h Donchian low with downward trend
-        short_breakout = close[i] < donchian_low_aligned[i]
-        short_entry = short_breakout and trend_down and vol_filter
+        # Short: sell at Donchian high in ranging market with downward bias
+        short_entry = is_ranging and close[i] >= donch_high_aligned[i] and trend_down and volume_filter[i]
         
         # Exit conditions: opposite Donchian level
-        long_exit = close[i] < donchian_low_aligned[i] and position == 1
-        short_exit = close[i] > donchian_high_aligned[i] and position == -1
+        long_exit = close[i] >= donch_high_aligned[i] and position == 1
+        short_exit = close[i] <= donch_low_aligned[i] and position == -1
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -114,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_4hBreakout_1dEMA34_1wATRFilter"
-timeframe = "1d"
+name = "12h_Donchian20_Chop618_Range_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
