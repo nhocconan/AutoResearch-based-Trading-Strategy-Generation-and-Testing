@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R Extreme Reversal with 1d trend filter and volume confirmation
+# Hypothesis: 4h Williams %R Extreme Reversal with 1d trend filter and volume confirmation
 # Williams %R measures overbought/oversold: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Long when %R < -80 (oversold) and price above 1d EMA(34), volume > 2x 20-bar average
-# Short when %R > -20 (overbought) and price below 1d EMA(34), volume > 2x 20-bar average
-# Uses 12h timeframe targeting 12-37 trades/year (~50-150 total over 4 years) to minimize fee drag.
-# Works in bull markets via oversold bounces and in bear markets via overbought reversals.
+# Long when %R crosses above -80 from below (oversold reversal), price > 1d EMA(34), volume > 2x 20-bar average
+# Short when %R crosses below -20 from above (overbought reversal), price < 1d EMA(34), volume > 2x 20-bar average
+# Uses 4h timeframe targeting 20-50 trades/year (~80-200 total over 4 years) to minimize fee drag.
+# Works in bull markets via buying oversold dips and in bear markets via selling overbought rallies.
 
-name = "12h_WilliamsR14_ExtremeReversal_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_ExtremeReversal_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,10 +35,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams %R(14) on 12h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Calculate Williams %R(14) on 4h data
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
     williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: >2.0x 20-bar average volume (strict filter to reduce trades)
     volume_series = pd.Series(volume)
@@ -54,42 +57,43 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_ma_20[i])):
+            np.isnan(volume_ma_20[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
         price = close[i]
         curr_wr = williams_r[i]
+        prev_wr = williams_r[i-1]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R < -80 (oversold), price above 1d EMA34, volume spike
-            if curr_wr < -80 and price > ema_34_1d_aligned[i] and vol_confirm:
+            # Long entry: Williams %R crosses above -80 from below, price above 1d EMA34, volume spike
+            if curr_wr > -80 and prev_wr <= -80 and price > ema_34_1d_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: Williams %R > -20 (overbought), price below 1d EMA34, volume spike
-            elif curr_wr > -20 and price < ema_34_1d_aligned[i] and vol_confirm:
+            # Short entry: Williams %R crosses below -20 from above, price below 1d EMA34, volume spike
+            elif curr_wr < -20 and prev_wr >= -20 and price < ema_34_1d_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or Williams %R > -50 (exiting oversold)
-            # ATR-based stoploss: 2.5 * ATR below entry (using 12h ATR)
+        elif position == 1:  # Long - exit on stoploss or Williams %R crossing below -50
+            # ATR-based stoploss: 2.5 * ATR below entry (using 4h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
             stop_loss = entry_price - 2.5 * atr_val
-            if price < stop_loss or curr_wr > -50:
+            if price < stop_loss or curr_wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or Williams %R < -50 (exiting overbought)
+        elif position == -1:  # Short - exit on stoploss or Williams %R crossing above -50
             # ATR-based stoploss: 2.5 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
@@ -97,7 +101,7 @@ def generate_signals(prices):
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
             stop_loss = entry_price + 2.5 * atr_val
-            if price > stop_loss or curr_wr < -50:
+            if price > stop_loss or curr_wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
