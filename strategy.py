@@ -46,13 +46,13 @@ def generate_signals(prices):
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 12-hour Donchian channels (15-period)
-    high_15 = pd.Series(high).rolling(window=15, min_periods=15).max().values
-    low_15 = pd.Series(low).rolling(window=15, min_periods=15).min().values
+    # Calculate 4-hour Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -68,8 +68,8 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(atr_aligned[i]) or 
             np.isnan(adx_aligned[i]) or 
-            np.isnan(high_15[i]) or 
-            np.isnan(low_15[i])):
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i])):
             signals[i] = 0.0
             continue
         
@@ -90,8 +90,8 @@ def generate_signals(prices):
         strong_trend = adx_aligned[i] > 25
         
         # Donchian breakout conditions
-        breakout_up = close[i] > high_15[i-1]  # Break above previous high
-        breakout_down = close[i] < low_15[i-1]  # Break below previous low
+        breakout_up = close[i] > high_20[i-1]  # Break above previous high
+        breakout_down = close[i] < low_20[i-1]  # Break below previous low
         
         # Volatility filter: ensure sufficient ATR
         atr_ma = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
@@ -114,10 +114,10 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         # Exit conditions: opposite Donchian breakout
-        elif position == 1 and close[i] < low_15[i-1]:
+        elif position == 1 and close[i] < low_20[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > high_15[i-1]:
+        elif position == -1 and close[i] > high_20[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -131,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian15_Breakout_ADX25_SMA50_Trend"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_ADX25_SMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
