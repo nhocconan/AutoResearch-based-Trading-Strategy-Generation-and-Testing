@@ -1,3 +1,9 @@
+# 12h_Camarilla_R4S4_Breakout_WeeklyEMA21
+# Hypothesis: Use 12h timeframe with Camarilla R4/S4 levels from daily pivots and weekly EMA21 trend filter.
+# Targets 12-37 trades/year (50-150 total) by combining daily pivot breakouts with weekly trend alignment.
+# Works in bull/bear: Weekly EMA21 filters trend direction, reducing false breakouts in ranging markets.
+# Volume confirmation ensures breakout validity. Designed for low frequency to minimize fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,46 +19,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for HTF context
+    # Get daily data once for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily ATR for volatility measurement
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Daily OHLC for pivot calculation (previous day's values)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily range
+    daily_range = high_1d - low_1d
     
-    # Calculate ATR ratio: current ATR vs 50-period average ATR (volatility regime filter)
-    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_1d / atr_ma_50
+    # Camarilla R4 and S4 levels (based on previous day)
+    camarilla_r4 = close_1d + daily_range * 1.1 / 2
+    camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align daily ATR ratio to 4h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Weekly EMA21 for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 4-period RSI for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align HTF indicators to 12h timeframe (only use completed bars)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Volume filter: above average volume (20-period)
+    # Volume filter: 20-period moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Hour filter: 8-20 UTC (most active trading hours)
+    # Session filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -62,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -83,21 +84,19 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Volatility regime filter: trade when volatility is elevated (ATR ratio > 0.8)
-        vol_regime = atr_ratio_aligned[i] > 0.8
+        # Weekly trend filter: price above/below weekly EMA21
+        price_above_weekly_ema = close[i] > ema_21_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_21_1w_aligned[i]
         
-        # RSI momentum filter: avoid extreme overbought/oversold
-        rsi_not_extreme = (rsi[i] > 20) and (rsi[i] < 80)
+        # Entry conditions: 
+        # Long: price breaks above R4 with volume and weekly uptrend
+        # Short: price breaks below S4 with volume and weekly downtrend
+        long_entry = (close[i] > r4_aligned[i]) and price_above_weekly_ema and vol_filter
+        short_entry = (close[i] < s4_aligned[i]) and price_below_weekly_ema and vol_filter
         
-        # Entry conditions:
-        # Long: volatility elevated + RSI not extreme + volume
-        # Short: volatility elevated + RSI not extreme + volume
-        long_entry = vol_regime and rsi_not_extreme and vol_filter and (rsi[i] > 50)
-        short_entry = vol_regime and rsi_not_extreme and vol_filter and (rsi[i] < 50)
-        
-        # Exit conditions: volatility drops or RSI reverses
-        long_exit = (not vol_regime) or (rsi[i] < 40)
-        short_exit = (not vol_regime) or (rsi[i] > 60)
+        # Exit conditions: price returns to opposite S4/R4 levels or weekly trend reversal
+        long_exit = (close[i] < s4_aligned[i]) or (not price_above_weekly_ema)
+        short_exit = (close[i] > r4_aligned[i]) or (not price_below_weekly_ema)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -122,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATR_VolRegime_RSI_Momentum"
-timeframe = "4h"
+name = "12h_Camarilla_R4S4_Breakout_WeeklyEMA21"
+timeframe = "12h"
 leverage = 1.0
