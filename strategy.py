@@ -1,8 +1,3 @@
-# 1d_Camarilla_R1_S1_Breakout_1wEMA34_Volume_Filter
-# Hypothesis: 1d Camarilla pivot breakouts with weekly EMA trend filter and volume confirmation
-# Work in bull markets via breakout momentum and in bear via mean reversion at pivot levels
-# Target: 10-25 trades/year to avoid fee drag, focus on high-probability setups
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -10,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,88 +13,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for primary analysis
+    # Get 1d data once for HTF context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for trend context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # 1d OHLC for Camarilla calculation
+    # Calculate 1d indicators
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate previous day's Camarilla levels (using prior day's range)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # 1d Donchian channel (15) - shorter window for more frequent but still controlled breakouts
+    donchian_high = pd.Series(high_1d).rolling(window=15, min_periods=15).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=15, min_periods=15).min().values
     
-    # Camarilla levels: R1, S1 based on previous day
-    range_prev = prev_high - prev_low
-    R1 = prev_close + (range_prev * 1.0 / 12)
-    S1 = prev_close - (range_prev * 1.0 / 12)
+    # 1d EMA21 - trend confirmation (shorter period for faster adaptation)
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d ATR10 - volatility filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Weekly EMA34 for higher timeframe trend
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align HTF indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    atr_10_aligned = align_htf_to_ltf(prices, df_1d, atr_10)
     
-    # Align 1d indicators to lower timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Align weekly EMA to lower timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume confirmation (1d volume > 20-day average)
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = df_1d['volume'].values / vol_ma_1d
+    # Calculate volume ratio for confirmation (10-period MA)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    vol_ratio = volume_1d / vol_ma_1d
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for all indicators
+    start_idx = 60  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_10_aligned[i]) or
             np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Price relative to Camarilla levels
-        price_above_R1 = close[i] > R1_aligned[i]
-        price_below_S1 = close[i] < S1_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > donchian_high_aligned[i]
+        breakout_down = close[i] < donchian_low_aligned[i]
         
-        # Trend filters: daily and weekly alignment
-        daily_uptrend = close[i] > ema_34_1d_aligned[i]
-        weekly_uptrend = close[i] > ema_34_1w_aligned[i]
-        daily_downtrend = close[i] < ema_34_1d_aligned[i]
-        weekly_downtrend = close[i] < ema_34_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA21
+        trend_up = close[i] > ema_21_1d_aligned[i]
+        trend_down = close[i] < ema_21_1d_aligned[i]
         
-        # Volume confirmation: require significantly above-average volume
-        vol_confirm = vol_ratio_aligned[i] > 1.5
+        # Volatility filter: avoid extremely low volatility periods
+        vol_filter = atr_10_aligned[i] > 0.005 * close[i]  # ATR > 0.5% of price
         
-        # Entry conditions - selective for quality
-        # Long: price breaks above R1 with daily/weekly uptrend and volume
-        long_entry = price_above_R1 and daily_uptrend and weekly_uptrend and vol_confirm
-        # Short: price breaks below S1 with daily/weekly downtrend and volume
-        short_entry = price_below_S1 and daily_downtrend and weekly_downtrend and vol_confirm
+        # Volume confirmation: require above-average volume
+        vol_confirm = vol_ratio_aligned[i] > 1.1
         
-        # Exit conditions: return to mean (opposite pivot level) or trend breakdown
-        long_exit = close[i] < S1_aligned[i] or not (daily_uptrend and weekly_uptrend)
-        short_exit = close[i] > R1_aligned[i] or not (daily_downtrend and weekly_downtrend)
+        # Entry conditions - optimized for 12h timeframe
+        # Long: upward breakout + uptrend + vol filter + volume confirmation
+        long_entry = breakout_up and trend_up and vol_filter and vol_confirm
+        # Short: downward breakout + downtrend + vol filter + volume confirmation
+        short_entry = breakout_down and trend_down and vol_filter and vol_confirm
+        
+        # Exit conditions: opposite breakout or trend reversal
+        long_exit = breakout_down or not trend_up
+        short_exit = breakout_up or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -124,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA34_Volume_Filter"
-timeframe = "1d"
+name = "12h_Donchian15_Breakout_1dEMA21_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
