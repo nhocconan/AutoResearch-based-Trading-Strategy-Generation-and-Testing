@@ -25,7 +25,7 @@ def generate_signals(prices):
     # Calculate daily EMA(34) for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily EMA to 6h timeframe
+    # Align daily EMA to 12h timeframe
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Calculate daily volume
@@ -34,7 +34,7 @@ def generate_signals(prices):
     # Calculate daily volume moving average (20-period)
     vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily volume MA to 6h timeframe
+    # Align daily volume MA to 12h timeframe
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     # Calculate daily volume spike (current volume > 2x 20-period MA)
@@ -51,10 +51,6 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     
     # Calculate weekly pivot points (standard floor trader method)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
     pivot_1w = (high_1w + low_1w + close_1w) / 3.0
     r1_1w = 2.0 * pivot_1w - low_1w
     s1_1w = 2.0 * pivot_1w - high_1w
@@ -63,11 +59,11 @@ def generate_signals(prices):
     r3_1w = high_1w + 2.0 * (pivot_1w - low_1w)
     s3_1w = low_1w - 2.0 * (high_1w - pivot_1w)
     
-    # Align weekly pivot levels to 6h timeframe
+    # Align weekly pivot levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
     s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    # Calculate 6m Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -117,7 +113,8 @@ def generate_signals(prices):
         # Exit conditions: 
         # Long exit: price returns below weekly pivot or trend reversal
         # Short exit: price returns above weekly pivot or trend reversal
-        pivot_aligned = align_htf_to_ltf(prices, df_1w, (high_1w + low_1w + close_1w) / 3.0)
+        pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
         pivot_val = pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else (r3 + s3) / 2.0
         
         long_exit = (close[i] < pivot_val) or (not uptrend)
@@ -146,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_Breakout_DailyEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R3S3_Breakout_DailyEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
