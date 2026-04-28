@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In ranging markets, mean reversion
-# from extreme levels works well. The 1d EMA34 filter ensures we only take mean reversion
-# trades in the direction of the daily trend, avoiding counter-trend trades in strong trends.
-# Volume confirmation filters out low-momentum false signals. Designed for 6h timeframe
-# to balance trade frequency and capture meaningful moves in both bull and bear markets.
-# Target: 80-120 total trades over 4 years = 20-30/year. Size: 0.25.
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses 12h primary timeframe for lower trade frequency (target 50-150 total over 4 years).
+# Camarilla H3/L3 levels provide strong intraday support/resistance, filtered by 1d EMA34
+# trend direction and volume spikes to avoid false breakouts. Works in both bull and bear
+# markets by following the 1d trend while using Camarilla levels as structure.
+# Target: 80-120 total trades over 4 years = 20-30/year for 12h. Size: 0.25.
 
-name = "6h_WilliamsR_1dEMA34_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,18 +38,44 @@ def generate_signals(prices):
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe
+    # Align 1d EMA34 to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams %R (14-period) on 6h data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Avoid division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 12h Camarilla pivots (based on previous day's OHLC)
+    # Group by date to get daily OHLC
+    prices_df = prices.copy()
+    prices_df['date'] = prices_df['open_time'].dt.date
+    daily_ohlc = prices_df.groupby('date').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).reset_index()
     
-    # 6h volume spike: >1.5x 20-bar average volume
+    # Calculate Camarilla levels for each day
+    high_prev = daily_ohlc['high'].shift(1).values
+    low_prev = daily_ohlc['low'].shift(1).values
+    close_prev = daily_ohlc['close'].shift(1).values
+    
+    # Camarilla H3, L3 levels
+    H3 = close_prev + 1.1 * (high_prev - low_prev) / 4
+    L3 = close_prev - 1.1 * (high_prev - low_prev) / 4
+    
+    # Map daily levels to 12h bars
+    date_map = prices_df.set_index('open_time')['date']
+    camarilla_H3 = np.full(n, np.nan)
+    camarilla_L3 = np.full(n, np.nan)
+    
+    for idx, date_val in enumerate(date_map):
+        if pd.isna(date_val):
+            continue
+        date_idx = daily_ohlc[daily_ohlc['date'] == date_val].index
+        if len(date_idx) > 0 and date_idx[0] > 0:  # Ensure we have previous day
+            prev_idx = date_idx[0] - 1
+            camarilla_H3[idx] = H3[prev_idx]
+            camarilla_L3[idx] = L3[prev_idx]
+    
+    # 12h volume spike: >1.5x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 1.5 * volume_ma_20
     
@@ -62,7 +87,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(williams_r[i]) or
+            np.isnan(camarilla_H3[i]) or
+            np.isnan(camarilla_L3[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -76,21 +102,19 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Williams %R mean reversion conditions
-        # Long when oversold (%R < -80) and trending up (price > EMA)
-        # Short when overbought (%R > -20) and trending down (price < EMA)
-        williams_oversold = williams_r[i] < -80
-        williams_overbought = williams_r[i] > -20
+        # Camarilla breakout conditions
+        long_breakout = close[i] > camarilla_H3[i]
+        short_breakout = close[i] < camarilla_L3[i]
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        long_entry = williams_oversold and price_above_ema and vol_confirm
-        short_entry = williams_overbought and price_below_ema and vol_confirm
+        long_entry = price_above_ema and long_breakout and vol_confirm
+        short_entry = price_below_ema and short_breakout and vol_confirm
         
-        # Exit conditions: Williams %R returns to neutral territory
-        long_exit = williams_r[i] > -50  # Exit when %R crosses above -50
-        short_exit = williams_r[i] < -50  # Exit when %R crosses below -50
+        # Exit conditions: opposite Camarilla level
+        long_exit = close[i] < camarilla_L3[i]
+        short_exit = close[i] > camarilla_H3[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
