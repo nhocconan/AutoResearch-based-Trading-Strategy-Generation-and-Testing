@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_Bounce_Strategy
-Hypothesis: On daily timeframe, use weekly pivot points (calculated from prior week's high/low/close) as dynamic support/resistance. Price bounces off these levels with volume confirmation provide high-probability entries. Weekly trend filter (via weekly EMA21) ensures alignment with higher timeframe momentum. Designed for low trade frequency (<15/year) to minimize fee dust and work in both bull/bear via mean-reversion at key levels.
+6h_Donchian20_WeeklyTrend_Breakout
+Hypothesis: On 6-hour timeframe, use Donchian(20) breakouts in the direction of weekly trend (via 8/21 EMA crossover) with volume confirmation. Weekly trend filter avoids counter-trend trades during extended trends, while Donchian breakouts capture momentum bursts. Volume surge confirms institutional participation. Designed for moderate trade frequency (~30-60/year) to balance opportunity and fee decay in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,65 +18,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points and trend filter
+    # Get weekly data for trend filter
     df_weekly = get_htf_data(prices, '1w')
     if len(df_weekly) < 21:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    # Calculate weekly 8 and 21 EMA for trend filter
     close_weekly = df_weekly['close'].values
-    
-    pp_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    r1_weekly = 2 * pp_weekly - low_weekly
-    s1_weekly = 2 * pp_weekly - high_weekly
-    
-    # Align weekly pivot levels to daily timeframe
-    pp_weekly_aligned = align_htf_to_ltf(prices, df_weekly, pp_weekly)
-    r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1_weekly)
-    s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1_weekly)
-    
-    # Weekly trend filter: EMA21 on weekly close
+    ema8_weekly = pd.Series(close_weekly).ewm(span=8, adjust=False, min_periods=8).mean().values
     ema21_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema21_weekly)
-    weekly_uptrend = close_weekly[-1] > ema21_weekly[-1] if len(close_weekly) > 0 else False  # Will be updated in loop
     
-    # Daily volume confirmation: volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    # Align weekly EMAs to 6h timeframe
+    ema8_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema8_weekly)
+    ema21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema21_weekly)
+    
+    # Weekly trend: bullish when EMA8 > EMA21
+    weekly_uptrend = ema8_weekly_aligned > ema21_weekly_aligned
+    weekly_downtrend = ema8_weekly_aligned < ema21_weekly_aligned
+    
+    # Donchian channels (20-period) - using prior bars only
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Donchian breakouts
+    breakout_long = close > highest_high
+    breakout_short = close < lowest_low
+    
+    # Volume confirmation: current volume > 1.8x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_surge = volume > (vol_ma_50 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 21  # Wait for indicators to stabilize
+    start_idx = 70  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_weekly_aligned[i]) or np.isnan(r1_weekly_aligned[i]) or
-            np.isnan(s1_weekly_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(ema8_weekly_aligned[i]) or np.isnan(ema21_weekly_aligned[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Update weekly trend based on current weekly bar
-        # Find corresponding weekly index for current daily bar
-        # We approximate: weekly trend is bullish if price > weekly EMA21
-        weekly_uptrend_current = close[i] > ema21_weekly_aligned[i]
+        # Entry conditions with weekly trend alignment and volume surge
+        long_entry = breakout_long[i] and weekly_uptrend[i] and volume_surge[i]
+        short_entry = breakout_short[i] and weekly_downtrend[i] and volume_surge[i]
         
-        # Distance to pivot levels (as fraction of price)
-        dist_to_s1 = (close[i] - s1_weekly_aligned[i]) / close[i]
-        dist_to_r1 = (r1_weekly_aligned[i] - close[i]) / close[i]
-        
-        # Entry conditions: price near pivot level with volume surge and trend alignment
-        near_support = abs(dist_to_s1) < 0.005  # Within 0.5% of S1
-        near_resistance = abs(dist_to_r1) < 0.005  # Within 0.5% of R1
-        
-        long_entry = near_support and volume_surge[i] and weekly_uptrend_current
-        short_entry = near_resistance and volume_surge[i] and not weekly_uptrend_current
-        
-        # Exit when price moves to opposite pivot level
-        long_exit = near_resistance and volume_surge[i]
-        short_exit = near_support and volume_surge[i]
+        # Exit on opposite breakout with volume surge
+        long_exit = breakout_short[i] and volume_surge[i]
+        short_exit = breakout_long[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -101,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Pivot_Bounce_Strategy"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyTrend_Breakout"
+timeframe = "6h"
 leverage = 1.0
