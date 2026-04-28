@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR(14) stoploss.
-# Enter long when price breaks above Donchian upper band (20-bar high) and 1d EMA50 is rising.
-# Enter short when price breaks below Donchian lower band (20-bar low) and 1d EMA50 is falling.
-# Exit when price touches Donchian middle band (20-bar average of high/low) or ATR-based stoploss.
-# Uses discrete position sizing (0.30) to balance return and drawdown.
-# Target: 100-200 total trades over 4 years (25-50/year).
-# Donchian channels provide clear breakout levels; 1d EMA50 ensures higher timeframe alignment;
-# ATR stoploss manages risk in volatile markets. Works in bull (breakouts up) and bear (breakouts down).
+# Hypothesis: 1d Williams Alligator (Jaw/Teeth/Lips) with 1w EMA50 trend filter and volume confirmation.
+# Alligator: Jaw=SMA(13,8), Teeth=SMA(8,5), Lips=SMA(5,3). 
+# Enter long when Lips > Teeth > Jaw (bullish alignment) and 1w EMA50 trending up and volume > 2x 20-bar average.
+# Enter short when Lips < Teeth < Jaw (bearish alignment) and 1w EMA50 trending down and volume > 2x 20-bar average.
+# Exit when Alligator lines converge (|Lips - Jaw| < 0.1 * ATR(14)) or reverse alignment.
+# Uses discrete position sizing (0.25) to limit drawdown. Target: 30-100 total trades over 4 years (7-25/year).
+# Williams Alligator identifies trending vs ranging markets; 1w EMA50 ensures higher timeframe alignment;
+# volume confirmation filters weak signals. Works in both bull (strong uptrends) and bear (strong downtrends).
 
-name = "4h_Donchian20_1dEMA50_Trend_ATRStop_v1"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wEMA50_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,8 +24,9 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(14) for exit condition
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -35,81 +36,87 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Donchian(20) channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA50
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align EMA50 to 4h
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align EMA50 to 1d
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # EMA50 trend: slope over 3 periods
-    ema_50_slope = np.zeros_like(ema_50_aligned)
-    ema_50_slope[3:] = (ema_50_aligned[3:] - ema_50_aligned[:-3]) / 3
-    ema_trend_up = ema_50_slope > 0
-    ema_trend_down = ema_50_slope < 0
+    # Williams Alligator: Jaw=SMA(13,8), Teeth=SMA(8,5), Lips=SMA(5,3)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Volume confirmation: >2x 20-bar average volume
+    volume_series = pd.Series(volume)
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(20, 14)  # Ensure sufficient history for indicators
+    start_idx = max(21, 20)  # Ensure sufficient history for indicators (13+8=21)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # ATR-based stoploss levels
-        if position == 1:  # Long position
-            stop_loss = entry_price - 2.0 * atr[i]
-        elif position == -1:  # Short position
-            stop_loss = entry_price + 2.0 * atr[i]
-        else:
-            stop_loss = 0.0
+        # Volume confirmation
+        vol_confirm = volume_confirm[i]
         
+        # 1w EMA50 trend: slope over 3 periods
+        if i >= 3:
+            ema_slope = (ema_50_aligned[i] - ema_50_aligned[i-3]) / 3
+            ema_trend_up = ema_slope > 0
+            ema_trend_down = ema_slope < 0
+        else:
+            ema_trend_up = False
+            ema_trend_down = False
+        
+        # Alligator alignment
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        
+        # Convergence exit: |Lips - Jaw| < 0.1 * ATR(14)
+        lips_jaw_diff = np.abs(lips[i] - jaw[i])
+        convergence_exit = lips_jaw_diff < 0.1 * atr[i]
+        
+        # Price action
         price = close[i]
         
-        # Handle exits
-        if position == 1:  # Long - exit on middle band touch or stoploss
-            if price <= donchian_middle[i] or price <= stop_loss:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.30
-        elif position == -1:  # Short - exit on middle band touch or stoploss
-            if price >= donchian_middle[i] or price >= stop_loss:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.30
-        else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper band and EMA50 trending up
-            if price > donchian_upper[i] and ema_trend_up[i]:
-                signals[i] = 0.30
+        # Handle entries and exits
+        if position == 0:  # Flat - look for new entries
+            # Long entry: Bullish alignment, EMA50 up, volume confirm
+            if bullish_alignment and ema_trend_up and vol_confirm:
+                signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short entry: price breaks below Donchian lower band and EMA50 trending down
-            elif price < donchian_lower[i] and ema_trend_down[i]:
-                signals[i] = -0.30
+            # Short entry: Bearish alignment, EMA50 down, volume confirm
+            elif bearish_alignment and ema_trend_down and vol_confirm:
+                signals[i] = -0.25
                 position = -1
-                entry_price = price
             else:
                 signals[i] = 0.0
+        elif position == 1:  # Long - hold or exit on convergence or reverse
+            if convergence_exit or not bullish_alignment:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # Short - hold or exit on convergence or reverse
+            if convergence_exit or not bearish_alignment:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
