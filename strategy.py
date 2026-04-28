@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R3/S3 breakout with daily trend filter and volume confirmation.
-Breakouts at R3 (resistance) for long, S3 (support) for short in direction of daily EMA34 trend.
-Volume > 1.5x 20-period MA confirms breakout strength. Designed for low trade frequency (~25/year)
-to minimize fee drag while capturing institutional breakout moves in both bull and bear markets.
+4h_RSI_Divergence_Volume_Filter
+Hypothesis: RSI divergence (hidden divergence) on 4h with volume confirmation and 1d trend filter.
+Hidden bullish: price makes higher low, RSI makes lower low → long in uptrend.
+Hidden bearish: price makes lower high, RSI makes higher high → short in downtrend.
+Targets 20-30 trades/year to minimize fee drag while capturing trend continuations.
+Works in both bull and bear markets by following higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mts_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,36 +22,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
+    # Calculate 1d EMA for trend
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla uses previous day's range to calculate support/resistance
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
-    
-    # Camarilla levels: H4/L4 = close ± 1.1*range/2, H3/L3 = close ± 1.1*range/4, 
-    # H2/L2 = close ± 1.1*range/6, H1/L1 = close ± 1.1*range/12
-    # We use H3/L3 and H4/L4 (R3/S3 and R4/S4) for breakouts
-    r3 = prev_close + 1.1 * prev_range / 4
-    s3 = prev_close - 1.1 * prev_range / 4
-    r4 = prev_close + 1.1 * prev_range / 2
-    s4 = prev_close - 1.1 * prev_range / 2
-    
-    # Align Camarilla levels to 4h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Calculate RSI(14) on 4h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     # Volume confirmation: >1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,30 +52,45 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(rsi_values[i-1]) or np.isnan(vol_ma_20[i]) or
+            i < 2):  # Need at least 2 bars for divergence check
             signals[i] = 0.0
             continue
         
-        # Daily trend: price above/below EMA34
-        daily_uptrend = close[i] > ema_34_1d_aligned[i]
-        daily_downtrend = close[i] < ema_34_1d_aligned[i]
+        # Determine 1d trend
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_r3 = close[i] > r3_aligned[i]  # Break above R3
-        breakdown_s3 = close[i] < s3_aligned[i]  # Break below S3
+        # Check for hidden bullish divergence: price higher low, RSI lower low
+        # Need to look back for swing lows
+        hidden_bull = False
+        hidden_bear = False
+        
+        # Simple swing detection: look for local lows/highs over 3 bars
+        if i >= 3:
+            # Price low at i-1
+            if low[i-1] <= low[i-2] and low[i-1] <= low[i]:
+                # RSI lower low at i-1
+                if rsi_values[i-1] <= rsi_values[i-2] and rsi_values[i-1] <= rsi_values[i]:
+                    hidden_bull = True
+            
+            # Price high at i-1
+            if high[i-1] >= high[i-2] and high[i-1] >= high[i]:
+                # RSI higher high at i-1
+                if rsi_values[i-1] >= rsi_values[i-2] and rsi_values[i-1] >= rsi_values[i]:
+                    hidden_bear = True
         
         # Volume confirmation
         vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Entry logic: breakout in direction of daily trend
-        long_entry = vol_confirm and daily_uptrend and breakout_r3
-        short_entry = vol_confirm and daily_downtrend and breakdown_s3
+        # Entry logic: hidden divergence in direction of 1d trend
+        long_entry = vol_confirm and trend_up and hidden_bull
+        short_entry = vol_confirm and trend_down and hidden_bear
         
-        # Exit logic: opposite breakdown/breakout or trend change
-        long_exit = (close[i] < s3_aligned[i]) or (not daily_uptrend)
-        short_exit = (close[i] > r3_aligned[i]) or (not daily_downtrend)
+        # Exit logic: opposite divergence or trend change
+        long_exit = hidden_bear or not trend_up
+        short_exit = hidden_bull or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -110,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+name = "4h_RSI_Divergence_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
