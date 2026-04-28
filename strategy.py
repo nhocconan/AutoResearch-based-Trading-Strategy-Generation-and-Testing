@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_RSI_Momentum
-Hypothesis: Combines KAMA trend direction with RSI momentum and volume confirmation. 
-KAMA adapts to market conditions, providing reliable trend signals in both trending and ranging markets. 
-RSI filters for momentum strength, while volume confirms institutional participation. 
-Designed for low trade frequency (<30/year) to minimize fee burn while capturing strong moves.
+6h_OrderFlow_Imbalance_Momentum
+Hypothesis: Combines volume-weighted price action with momentum to detect institutional order flow.
+Uses 1-day VWAP deviation and 6-hour momentum for confluence. Designed for low trade frequency
+(15-25 trades/year) to minimize fee burn while capturing sustained moves in both bull and bear
+markets by requiring alignment between short-term momentum and institutional volume bias.
 """
 
 import numpy as np
@@ -21,115 +21,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get 4h data for KAMA calculation (using same timeframe as primary)
-    # We'll calculate KAMA on 4h closes directly
+    # Calculate daily VWAP
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d = vwap_1d.values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    def calculate_kama(close_prices, length=10, fast=2, slow=30):
-        # Calculate efficiency ratio
-        change = np.abs(np.diff(close_prices, prepend=close_prices[0]))
-        volatility = np.abs(np.diff(close_prices))
-        
-        # Avoid division by zero
-        er = np.zeros_like(close_prices)
-        for i in range(1, len(close_prices)):
-            if volatility[i] != 0:
-                er[i] = change[i] / volatility[i]
-            else:
-                er[i] = 0
-        
-        # Smooth ER
-        er_smoothed = np.zeros_like(close_prices)
-        er_smoothed[0] = er[0]
-        for i in range(1, len(close_prices)):
-            er_smoothed[i] = 0.1 * er[i] + 0.9 * er_smoothed[i-1]
-        
-        # Calculate smoothing constant
-        sc = (er_smoothed * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        
-        # Calculate KAMA
-        kama = np.zeros_like(close_prices)
-        kama[0] = close_prices[0]
-        for i in range(1, len(close_prices)):
-            kama[i] = kama[i-1] + sc[i] * (close_prices[i] - kama[i-1])
-        
-        return kama
+    # Align VWAP to 6h timeframe (using previous day's VWAP)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Calculate KAMA on 4h closes
-    kama = calculate_kama(close, length=10, fast=2, slow=30)
+    # Calculate 6-hour momentum (rate of change over 4 periods = 24h)
+    momentum = np.zeros(n)
+    momentum[4:] = (close[4:] - close[:-4]) / close[:-4]
     
-    # Calculate RSI
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        # Calculate average gain and loss
-        avg_gain = np.zeros_like(close_prices)
-        avg_loss = np.zeros_like(close_prices)
-        
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period+1, len(close_prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        # Calculate RS and RSI
-        rs = np.zeros_like(close_prices)
-        rsi = np.zeros_like(close_prices)
-        for i in range(period, len(close_prices)):
-            if avg_loss[i] != 0:
-                rs[i] = avg_gain[i] / avg_loss[i]
-                rsi[i] = 100 - (100 / (1 + rs[i]))
-            else:
-                rsi[i] = 100
-        
-        return rsi
+    # Calculate volume imbalance ratio (buying vs selling pressure)
+    # Using close location within the bar's range
+    close_location = np.zeros(n)
+    ranges = high - low
+    mask = ranges > 0
+    close_location[mask] = (close[mask] - low[mask]) / ranges[mask]
+    close_location[~mask] = 0.5  # When range is zero, assume middle
     
-    rsi = calculate_rsi(close, period=14)
+    # Volume-weighted close location (positive = buying pressure, negative = selling)
+    vol_weighted_cl = close_location * (2 * volume - np.roll(volume, 1))  # Approximate delta volume
+    vol_weighted_cl[0] = 0
     
-    # Volume confirmation: volume above 20-period average
-    volume_ma = np.zeros_like(volume)
-    for i in range(20, len(volume)):
-        volume_ma[i] = np.mean(volume[i-20:i])
-    volume_ma[:20] = volume_ma[20]  # Fill initial values
-    volume_confirm = volume > volume_ma
+    # Smooth the volume pressure signal
+    vol_pressure = pd.Series(vol_weighted_cl).ewm(span=8, adjust=False, min_periods=8).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicators to stabilize
+    start_idx = 20  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(momentum[i]) or
+            np.isnan(vol_pressure[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to KAMA
-        uptrend = close[i] > kama[i]
-        downtrend = close[i] < kama[i]
+        # Determine volume pressure bias
+        buying_pressure = vol_pressure[i] > 0.1
+        selling_pressure = vol_pressure[i] < -0.1
         
-        # Momentum filter: RSI in productive range (not overbought/oversold extremes)
-        rsi_momentum = (rsi[i] > 40) & (rsi[i] < 80)  # Avoid extremes
+        # Momentum conditions
+        mom_bullish = momentum[i] > 0.015  # >1.5% momentum
+        mom_bearish = momentum[i] < -0.015  # <-1.5% momentum
         
-        # Volume confirmation
-        vol_confirm = volume_confirm[i]
+        # VWAP deviation
+        above_vwap = close[i] > vwap_1d_aligned[i]
+        below_vwap = close[i] < vwap_1d_aligned[i]
         
-        # Entry conditions: KAMA direction with momentum and volume
-        long_entry = uptrend & rsi_momentum & vol_confirm
-        short_entry = downtrend & rsi_momentum & vol_confirm
+        # Entry conditions: momentum + volume pressure + VWAP alignment
+        long_entry = mom_bullish and buying_pressure and above_vwap
+        short_entry = mom_bearish and selling_pressure and below_vwap
         
-        # Exit conditions: trend reversal or momentum exhaustion
-        long_exit = (~uptrend) | (rsi[i] > 75)  # Exit on trend change or overbought
-        short_exit = (~downtrend) | (rsi[i] < 25)  # Exit on trend change or oversold
+        # Exit conditions: momentum divergence or VWAP reversion
+        long_exit = (momentum[i] < -0.005) or (close[i] < vwap_1d_aligned[i] * 0.998)
+        short_exit = (momentum[i] > 0.005) or (close[i] > vwap_1d_aligned[i] * 1.002)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -154,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Direction_RSI_Momentum"
-timeframe = "4h"
+name = "6h_OrderFlow_Imbalance_Momentum"
+timeframe = "6h"
 leverage = 1.0
