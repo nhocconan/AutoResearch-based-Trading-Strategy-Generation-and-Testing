@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,26 +23,26 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
     # Calculate daily ATR(14) for volatility filter
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily 50-period EMA for trend filter
+    # Calculate daily EMA(50) for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate daily Donchian channels (20-period)
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align daily indicators to 12h timeframe
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
     # Calculate volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,14 +56,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 200
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
+        if (np.isnan(atr14_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or
             np.isnan(donchian_low_aligned[i]) or
-            np.isnan(atr14_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
@@ -74,12 +74,11 @@ def generate_signals(prices):
             continue
         
         # Trend filter: price above/below daily EMA50
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
-        # Volatility filter: current ATR above 1.2x average (avoid choppy markets)
-        atr_avg = np.nanmean(atr14_aligned[max(0, i-50):i+1]) if i > 0 else atr14_aligned[i]
-        vol_filter = atr14_aligned[i] > (atr_avg * 1.2)
+        # Volatility filter: current ATR above average (avoid choppy markets)
+        vol_filter = atr14_aligned[i] > np.nanmean(atr14_aligned[max(0, i-20):i+1])
         
         # Entry conditions: Donchian breakout with volume and trend
         long_breakout = close[i] > donchian_high_aligned[i]
@@ -88,7 +87,7 @@ def generate_signals(prices):
         long_entry = long_breakout and uptrend and vol_filter
         short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: opposite Donchian breach or trend reversal
+        # Exit conditions: return to opposite Donchian band or trend reversal
         long_exit = close[i] < donchian_low_aligned[i] or not uptrend
         short_exit = close[i] > donchian_high_aligned[i] or not downtrend
         
@@ -115,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_DailyEMA50_VolumeFilter_v1"
-timeframe = "4h"
+name = "12h_Donchian20_DailyEMA50_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
