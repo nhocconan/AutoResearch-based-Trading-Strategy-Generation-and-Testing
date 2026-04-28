@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_PriceAction_SwingRejection_Momentum
-Hypothesis: Capture momentum bursts after price rejection at 12h swing points in trending markets.
-Works in bull/bear by trading with 12h trend and entering only after rejection candles show
-institutional interest. Low frequency via strict swing confirmation and momentum filters.
+4h_RSI_Divergence_Trend_Filter_v1
+Hypothesis: Use RSI divergence on 1h timeframe with 4h EMA trend filter and volume confirmation to capture reversals in both bull and bear markets.
+Targets 20-40 trades/year by requiring multiple confirmations, reducing false signals and fee drag.
 """
 
 import numpy as np
@@ -20,57 +19,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for swing points and trend
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 30:
+    # Get 1h data for RSI calculation
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 50:
         return np.zeros(n)
     
-    # 12h EMA50 for trend
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # 12h swing highs/lows (fractal-like: need confirmation)
-    highs_12h = df_12h['high'].values
-    lows_12h = df_12h['low'].values
-    swing_high = np.zeros_like(highs_12h, dtype=bool)
-    swing_low = np.zeros_like(lows_12h, dtype=bool)
-    # Swing high: high > left and right, confirmed by next candle close
-    for i in range(2, len(highs_12h)-2):
-        if (highs_12h[i] > highs_12h[i-1] and highs_12h[i] > highs_12h[i-2] and
-            highs_12h[i] > highs_12h[i+1] and highs_12h[i] > highs_12h[i+2]):
-            swing_high[i] = True
-    # Swing low: low < left and right, confirmed by next candle close
-    for i in range(2, len(lows_12h)-2):
-        if (lows_12h[i] < lows_12h[i-1] and lows_12h[i] < lows_12h[i-2] and
-            lows_12h[i] < lows_12h[i+1] and lows_12h[i] < lows_12h[i+2]):
-            swing_low[i] = True
-    # Need 2-bar confirmation for swing points (price must close beyond swing level)
-    swing_high_confirmed = np.zeros_like(swing_high, dtype=bool)
-    swing_low_confirmed = np.zeros_like(swing_low, dtype=bool)
-    for i in range(2, len(highs_12h)-2):
-        if swing_high[i] and i+2 < len(highs_12h):
-            # Confirm if price closes below swing high within 2 bars
-            if np.any(highs_12h[i+1:i+3] < highs_12h[i]):
-                swing_high_confirmed[i] = True
-    for i in range(2, len(lows_12h)-2):
-        if swing_low[i] and i+2 < len(lows_12h):
-            # Confirm if price closes above swing low within 2 bars
-            if np.any(lows_12h[i+1:i+3] > lows_12h[i]):
-                swing_low_confirmed[i] = True
-    # Align 12h data to 6h
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    swing_high_aligned = align_htf_to_ltf(prices, df_12h, swing_high_confirmed.astype(float), additional_delay_bars=2)
-    swing_low_aligned = align_htf_to_ltf(prices, df_12h, swing_low_confirmed.astype(float), additional_delay_bars=2)
+    # Calculate RSI(14) on 1h
+    delta = pd.Series(df_1h['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # 60-period volume average for surge detection
-    vol_ma_60 = pd.Series(volume).rolling(window=60, min_periods=60).mean().values
-    volume_surge = volume > (vol_ma_60 * 2.0)
+    # Get 4h data for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
     
-    # Momentum: 5-period ROC > 0
-    roc_5 = np.zeros(n)
-    for i in range(5, n):
-        if close[i-5] != 0:
-            roc_5[i] = (close[i] - close[i-5]) / close[i-5]
-    momentum = roc_5 > 0
+    # Calculate EMA(50) on 4h
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Align 1h RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1h, rsi_values)
+    
+    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
+    h4_uptrend = close > ema_50_4h_aligned
+    h4_downtrend = close < ema_50_4h_aligned
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,35 +61,48 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(swing_high_aligned[i]) or 
-            np.isnan(swing_low_aligned[i]) or np.isnan(volume_surge[i]) or np.isnan(momentum[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 12h trend
-        trend_up = ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1] if i > 0 else False
-        trend_down = ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1] if i > 0 else False
+        # Bullish RSI divergence: price makes lower low, RSI makes higher low
+        bullish_div = False
+        if i >= 5:
+            # Look for recent swing low in price
+            if low[i] < low[i-1] and low[i] < low[i-2] and low[i] < low[i-3] and low[i] < low[i-4]:
+                # Check if this is a lower low compared to 5 periods ago
+                if low[i] < low[i-5]:
+                    # Check if RSI is making a higher low
+                    if rsi_aligned[i] > rsi_aligned[i-5] and rsi_aligned[i] < 40:
+                        bullish_div = True
         
-        # Long setup: price rejects swing high in uptrend, then breaks above with momentum
-        long_setup = swing_high_aligned[i] > 0 and trend_up
-        long_trigger = (close[i] > high[i-1] and  # Break above prior bar high
-                       volume_surge[i] and 
-                       momentum[i])
+        # Bearish RSI divergence: price makes higher high, RSI makes lower high
+        bearish_div = False
+        if i >= 5:
+            # Look for recent swing high in price
+            if high[i] > high[i-1] and high[i] > high[i-2] and high[i] > high[i-3] and high[i] > high[i-4]:
+                # Check if this is a higher high compared to 5 periods ago
+                if high[i] > high[i-5]:
+                    # Check if RSI is making a lower high
+                    if rsi_aligned[i] < rsi_aligned[i-5] and rsi_aligned[i] > 60:
+                        bearish_div = True
         
-        # Short setup: price rejects swing low in downtrend, then breaks below with momentum
-        short_setup = swing_low_aligned[i] > 0 and trend_down
-        short_trigger = (close[i] < low[i-1] and  # Break below prior bar low
-                        volume_surge[i] and 
-                        momentum[i])
+        # Entry conditions
+        # Long: bullish RSI divergence + 4h uptrend + volume surge
+        long_entry = bullish_div and h4_uptrend[i] and volume_surge[i]
         
-        # Exit on opposite swing rejection
-        long_exit = swing_low_aligned[i] > 0 and trend_down
-        short_exit = swing_high_aligned[i] > 0 and trend_up
+        # Short: bearish RSI divergence + 4h downtrend + volume surge
+        short_entry = bearish_div and h4_downtrend[i] and volume_surge[i]
         
-        if long_setup and long_trigger and position <= 0:
+        # Exit on opposite signal
+        long_exit = bearish_div and volume_surge[i]
+        short_exit = bullish_div and volume_surge[i]
+        
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_setup and short_trigger and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -127,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_PriceAction_SwingRejection_Momentum"
-timeframe = "6h"
+name = "4h_RSI_Divergence_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
