@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA200 trend filter and volume confirmation.
-# Targets 12h timeframe for lower trade frequency and better test generalization.
-# Long when price breaks above R3 with volume and price > 1w EMA200 (uptrend).
-# Short when price breaks below S3 with volume and price < 1w EMA200 (downtrend).
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA200 trend filter and volume confirmation.
+# Uses proven Camarilla structure from DB top performers. Tight entries target 20-50 trades/year.
+# Long when price breaks above R3 with volume and price > 1d EMA200 (uptrend).
+# Short when price breaks below S3 with volume and price < 1d EMA200 (downtrend).
 # Volume spike (>2.0x 20-bar average) confirms breakout strength.
 # Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
-# Uses 1w EMA200 for robust trend filter that works in both bull and bear markets.
+# Works in both bull and bear via 1d EMA200 trend filter.
 
-name = "12h_Camarilla_R3_S3_Breakout_1wEMA200_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA200_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,18 +25,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get 1d data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA200 for trend filter
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate 1d EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate 12h Camarilla levels (based on previous bar's range)
+    # Calculate 4h Camarilla levels (based on previous bar's range)
     # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
     camarilla_r3 = close + (high - low) * 1.1 / 2
     camarilla_s3 = close - (high - low) * 1.1 / 2
@@ -46,7 +46,7 @@ def generate_signals(prices):
     camarilla_r3[0] = np.nan
     camarilla_s3[0] = np.nan
     
-    # Calculate 12h volume spike: >2.0x 20-bar average volume
+    # Calculate 4h volume spike: >2.0x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
     
@@ -57,24 +57,24 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_1w_aligned[i]) or 
+        if (np.isnan(ema_200_1d_aligned[i]) or 
             np.isnan(camarilla_r3[i]) or 
             np.isnan(camarilla_s3[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1w EMA200 direction (price above/below EMA200)
-        price_above_ema = close[i] > ema_200_1w_aligned[i]
-        price_below_ema = close[i] < ema_200_1w_aligned[i]
+        # Trend filter: 1d EMA200 direction (price above/below EMA200)
+        price_above_ema = close[i] > ema_200_1d_aligned[i]
+        price_below_ema = close[i] < ema_200_1d_aligned[i]
         
         # Camarilla breakout conditions with volume confirmation
         long_breakout = close[i] > camarilla_r3[i] and volume_spike[i]
         short_breakout = close[i] < camarilla_s3[i] and volume_spike[i]
         
         # Exit conditions: opposite Camarilla level or trend reversal
-        long_exit = close[i] < camarilla_s3[i] or close[i] < ema_200_1w_aligned[i]
-        short_exit = close[i] > camarilla_r3[i] or close[i] > ema_200_1w_aligned[i]
+        long_exit = close[i] < camarilla_s3[i] or close[i] < ema_200_1d_aligned[i]
+        short_exit = close[i] > camarilla_r3[i] or close[i] > ema_200_1d_aligned[i]
         
         # Handle entries and exits
         if long_breakout and price_above_ema and position <= 0:
