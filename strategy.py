@@ -13,45 +13,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter and pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
-    
-    # 12h EMA34 for trend filter
-    close_12h_series = pd.Series(df_12h['close'].values)
-    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    
-    # Get daily data for Camarilla pivots
+    # Get daily data for trend and volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla pivots from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily EMA34 for trend filter
+    close_1d_series = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Daily ATR for volatility filter
+    tr1 = np.abs(df_1d['high'].values - df_1d['low'].values)
+    tr2 = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
+    tr3 = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
     
-    # Camarilla levels: R4, R3, S3, S4
-    r4 = close_1d + range_1d * 1.1 / 2
-    r3 = close_1d + range_1d * 1.1 / 4
-    s3 = close_1d - range_1d * 1.1 / 4
-    s4 = close_1d - range_1d * 1.1 / 2
-    
-    # Align to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume filter: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    # 4h Bollinger Bands for mean reversion signals
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,28 +45,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema34_12h_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr14_aligned[i]) or 
+            np.isnan(sma20[i]) or np.isnan(std20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        trend_up = close[i] > ema34_12h_aligned[i]
-        trend_down = close[i] < ema34_12h_aligned[i]
+        # Trend filter: only trade with daily trend
+        trend_up = ema34_1d_aligned[i] > ema34_1d_aligned[i-1] if i > 0 else False
+        trend_down = ema34_1d_aligned[i] < ema34_1d_aligned[i-1] if i > 0 else False
+        
+        # Volatility filter: only trade when volatility is elevated
+        vol_filter = atr14_aligned[i] > np.mean(atr14_aligned[max(0, i-50):i+1]) if i >= 50 else False
+        
+        # Mean reversion signals from 4h Bollinger Bands
+        bb_lower_touch = close[i] <= lower_bb[i]
+        bb_upper_touch = close[i] >= upper_bb[i]
         
         # Entry conditions
-        # Long: break above R3 with upward trend and volume
-        long_breakout = close[i] > r3_aligned[i]
-        long_entry = long_breakout and trend_up and volume_filter[i]
+        # Long: touch lower BB in uptrend with elevated volatility
+        long_entry = bb_lower_touch and trend_up and vol_filter
+        # Short: touch upper BB in downtrend with elevated volatility
+        short_entry = bb_upper_touch and trend_down and vol_filter
         
-        # Short: break below S3 with downward trend and volume
-        short_breakout = close[i] < s3_aligned[i]
-        short_entry = short_breakout and trend_down and volume_filter[i]
-        
-        # Exit conditions: opposite S4/R4 levels
-        long_exit = close[i] < s4_aligned[i] and position == 1
-        short_exit = close[i] > r4_aligned[i] and position == -1
+        # Exit conditions: return to middle Bollinger Band
+        long_exit = close[i] >= sma20[i] and position == 1
+        short_exit = close[i] <= sma20[i] and position == -1
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -107,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_12hEMA34_VolumeFilter"
-timeframe = "6h"
+name = "4h_BollingerMeanReversion_1dTrendVolFilter"
+timeframe = "4h"
 leverage = 1.0
