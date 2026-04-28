@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_PivotReversal_1wTrend_VolumeFilter
-Hypothesis: Daily pivot reversals with weekly trend filter and volume spike capture turning points in both bull and bear markets. Pivots provide objective support/resistance, weekly trend filters counter-trend noise, and volume confirms momentum. Targets 12-30 trades/year.
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
+Hypothesis: Camarilla pivot levels (R1/S1) from 1-day act as intraday support/resistance. Breakouts of these levels with 12-hour EMA50 trend filter and volume spike capture explosive moves. Works in bull/bear by following the 12h trend. Targets 20-40 trades/year.
 """
 
 import numpy as np
@@ -18,66 +18,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get 1-day data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate daily pivot points: (H + L + C) / 3
+    # Calculate Camarilla pivot levels for each 1-day bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3.0
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Get 12-hour data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align pivot and weekly EMA to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume confirmation: >2.0x 30-period MA
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: >1.5x 20-period MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Pivot reversal conditions
-        # Long: price crosses above pivot from below in downtrend
-        # Short: price crosses below pivot from above in uptrend
-        long_signal = (close[i] > pivot_aligned[i]) and (close[i-1] <= pivot_aligned[i-1]) and downtrend
-        short_signal = (close[i] < pivot_aligned[i]) and (close[i-1] >= pivot_aligned[i-1]) and uptrend
+        # Breakout conditions: break of Camarilla R1/S1
+        breakout_r1 = close[i] > camarilla_r1_aligned[i]
+        breakdown_s1 = close[i] < camarilla_s1_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (2.0 * vol_ma_30[i])
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Entry logic: pivot reversal with volume and counter-trend
-        long_entry = long_signal and vol_confirm
-        short_entry = short_signal and vol_confirm
+        # Entry logic: breakout in direction of trend with volume
+        long_entry = vol_confirm and uptrend and breakout_r1
+        short_entry = vol_confirm and downtrend and breakdown_s1
         
-        # Exit logic: opposite pivot cross or trend alignment
-        long_exit = (close[i] < pivot_aligned[i]) and (close[i-1] >= pivot_aligned[i-1])
-        short_exit = (close[i] > pivot_aligned[i]) and (close[i-1] <= pivot_aligned[i-1])
+        # Exit logic: opposite breakout or trend change
+        long_exit = breakdown_s1 or (not uptrend)
+        short_exit = breakout_r1 or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -102,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_PivotReversal_1wTrend_VolumeFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
