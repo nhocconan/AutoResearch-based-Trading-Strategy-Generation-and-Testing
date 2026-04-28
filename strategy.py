@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_RegimeFilter
-Hypothesis: TRIX momentum combined with volume spikes and Choppiness regime filter works in both bull and bear markets.
-Uses 4h TRIX(12) crossing zero with volume > 2x 20-period average and Choppiness > 61.8 (ranging) for mean reversion or < 38.2 (trending) for trend following.
-Targets 20-40 trades/year by requiring multiple confirmations to avoid overtrading.
+1d_KAMA_RSI_ChopFilter
+Hypothesis: Daily KAMA direction with RSI overbought/oversold and Choppiness Index regime filter.
+KAMA adapts to market noise, reducing whipsaw in chop. RSI extremes provide mean-reversion entries.
+Chop filter (>61.8) ensures we only mean-revert in ranging markets, avoiding trending whipsaw.
+Targets 15-25 trades/year by requiring KAMA trend, RSI extreme, and chop regime alignment.
+Works in bull/bear: mean reversion in ranges, trend following via KAMA in strong trends.
 """
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,91 +22,163 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX on close prices
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) then percent change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = pd.Series(ema3).pct_change() * 100  # Convert to percentage
-    trix_values = trix.values
+    # Get 1d data for calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Zero line crossover signals
-    trix_above_zero = trix_values > 0
-    trix_below_zero = trix_values < 0
+    # KAMA (Kaufman Adaptive Moving Average) parameters
+    er_len = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 2.0)
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close, k=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Handle first er_len values
+    er = np.full_like(close, np.nan, dtype=np.float64)
+    for i in range(er_len, len(close)):
+        if volatility[i] != 0:
+            er[i] = change[i-er_len] / volatility[i]
+        else:
+            er[i] = 0
     
-    # Choppiness Index for regime detection
-    # CHOP = 100 * log10(sum(ATR, 14) / (max(high, 14) - min(low, 14))) / log10(14)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First TR is just high-low
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[er_len] = close[er_len]  # Seed
+    for i in range(er_len + 1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Avoid division by zero
-    chop_raw = np.where(range_14 > 0, sum_atr_14 / range_14, 1.0)
-    chop = 100 * np.log10(chop_raw) / np.log10(14)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
     
-    # Regime thresholds
-    chop_ranging = chop > 61.8   # Market is ranging (mean revert)
-    chop_trending = chop < 38.2  # Market is trending (follow momentum)
+    # First average
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    
+    # Wilder smoothing
+    for i in range(15, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Choppiness Index (14-period)
+    def true_range(h, l, c_prev):
+        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    
+    tr = np.full_like(close, np.nan)
+    for i in range(1, len(close)):
+        tr[i] = true_range(high[i], low[i], close[i-1])
+    
+    atr14 = np.full_like(close, np.nan)
+    for i in range(14, len(close)):
+        atr14[i] = np.mean(tr[i-13:i+1])
+    
+    # Highest high and lowest low over 14 periods
+    hh = np.full_like(close, np.nan)
+    ll = np.full_like(close, np.nan)
+    for i in range(13, len(close)):
+        hh[i] = np.max(high[i-13:i+1])
+        ll[i] = np.min(low[i-13:i+1])
+    
+    chop = np.full_like(close, np.nan)
+    for i in range(13, len(close)):
+        if atr14[i] > 0 and hh[i] > ll[i]:
+            chop[i] = 100 * np.log10(sum(tr[i-13:i+1]) / (hh[i] - ll[i])) / np.log10(14)
+        else:
+            chop[i] = 50
+    
+    # Align KAMA, RSI, Chop to 1d (already 1d but ensure alignment)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix_values[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(chop_ranging[i]) or np.isnan(chop_trending[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions
-        # In trending market: TRIX crosses above zero with volume spike
-        # In ranging market: TRIX crosses above zero from negative with volume spike (mean reversion)
-        long_signal = False
-        if chop_trending[i]:
-            # Trending market: follow TRIX momentum
-            long_signal = (trix_values[i] > 0 and trix_values[i-1] <= 0 and volume_spike[i])
-        elif chop_ranging[i]:
-            # Ranging market: mean reversion from oversold
-            long_signal = (trix_values[i] > 0 and trix_values[i-1] <= 0 and 
-                          trix_values[i-1] < -0.5 and volume_spike[i])  # Oversold threshold
+        # Regime filter: Chop > 61.8 = ranging market (mean revert)
+        ranging = chop_aligned[i] > 61.8
         
-        # Short conditions
-        # In trending market: TRIX crosses below zero with volume spike
-        # In ranging market: TRIX crosses below zero from positive with volume spike (mean reversion)
-        short_signal = False
-        if chop_trending[i]:
-            # Trending market: follow TRIX momentum
-            short_signal = (trix_values[i] < 0 and trix_values[i-1] >= 0 and volume_spike[i])
-        elif chop_ranging[i]:
-            # Ranging market: mean reversion from overbought
-            short_signal = (trix_values[i] < 0 and trix_values[i-1] >= 0 and 
-                           trix_values[i-1] > 0.5 and volume_spike[i])  # Overbought threshold
+        # KAMA trend: price above KAMA = bullish bias, below = bearish bias
+        price_above_kama = close[i] > kama_aligned[i]
+        price_below_kama = close[i] < kama_aligned[i]
         
-        if long_signal:
-            signals[i] = 0.25
-        elif short_signal:
-            signals[i] = -0.25
+        # RSI extremes for mean reversion
+        rsi_oversold = rsi_aligned[i] < 30
+        rsi_overbought = rsi_aligned[i] > 70
+        
+        # Entry logic: only in ranging markets
+        if ranging:
+            # Long: RSI oversold + price above KAMA (bullish bias in range)
+            if rsi_oversold and price_above_kama and position <= 0:
+                signals[i] = 0.25
+                position = 1
+            # Short: RSI overbought + price below KAMA (bearish bias in range)
+            elif rsi_overbought and price_below_kama and position >= 0:
+                signals[i] = -0.25
+                position = -1
+            # Exit when RSI returns to neutral (40-60) or opposite extreme
+            elif position == 1 and (rsi_aligned[i] > 50 or rsi_overbought):
+                signals[i] = -0.25  # Close long
+                position = 0
+            elif position == -1 and (rsi_aligned[i] < 50 or rsi_oversold):
+                signals[i] = 0.25   # Close short
+                position = 0
+            else:
+                # Hold current position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
         else:
-            signals[i] = 0.0
+            # In trending markets, follow KAMA direction
+            if price_above_kama and position <= 0:
+                signals[i] = 0.25
+                position = 1
+            elif price_below_kama and position >= 0:
+                signals[i] = -0.25
+                position = -1
+            elif position == 1 and price_below_kama:
+                signals[i] = 0.0  # Exit long
+                position = 0
+            elif position == -1 and price_above_kama:
+                signals[i] = 0.0  # Exit short
+                position = 0
+            else:
+                # Hold current position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_RegimeFilter"
-timeframe = "4h"
+name = "1d_KAMA_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
