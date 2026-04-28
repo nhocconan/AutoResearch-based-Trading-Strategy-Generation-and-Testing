@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation.
-# Uses Williams Alligator (Jaw/Teeth/Lips) to identify trend direction and strength.
-# Combines with 1d EMA(50) trend filter and volume spike (2x 20-period average) for confirmation.
-# Aims to capture strong trends while avoiding choppy markets. Designed for 4h timeframe
-# with ~50-150 total trades over 4 years to minimize fee drag.
+# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation.
+# Uses weekly Donchian channels (20-period) to identify trend direction and strength.
+# Combines with 1d Donchian breakout (20-period) and volume spike (2x 20-period average) for entry.
+# Designed for 1d timeframe with ~30-100 total trades over 4 years to minimize fee drift.
+# Should work in both bull and bear markets by filtering for trend alignment.
 
 import numpy as np
 import pandas as pd
@@ -19,45 +19,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Williams Alligator: SMAs with specific offsets
-    # Jaw: 13-period SMMA shifted 8 bars
-    # Teeth: 8-period SMMA shifted 5 bars  
-    # Lips: 5-period SMMA shifted 3 bars
-    def smma(data, period):
-        """Smoothed Moving Average"""
-        sma = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            sma[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
-        return sma
+    # Weekly upper/lower bands
+    weekly_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    weekly_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Weekly trend: price above upper = uptrend, below lower = downtrend
+    weekly_upper_aligned = align_htf_to_ltf(prices, df_1w, weekly_upper)
+    weekly_lower_aligned = align_htf_to_ltf(prices, df_1w, weekly_lower)
     
-    # Apply shifts (Jaw: +8, Teeth: +5, Lips: +3)
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # Volatility filter: ATR(20) for dynamic thresholds
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # 1d Donchian breakout (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: volume > 2x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,34 +47,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 13)  # Wait for EMA, ATR, and Alligator
+    start_idx = 20  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
-            np.isnan(atr[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(weekly_upper_aligned[i]) or np.isnan(weekly_lower_aligned[i]) or
+            np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA(50)
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > weekly_upper_aligned[i]
+        weekly_downtrend = close[i] < weekly_lower_aligned[i]
         
-        # Alligator alignment: Lips > Teeth > Jaw = uptrend, reverse = downtrend
-        alligator_long = lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i]
-        alligator_short = lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i]
-        
-        # Volatility-based entry filter: only trade when volatility is elevated
-        vol_filter = atr[i] > np.mean(atr[max(0, i-50):i+1])  # Above average volatility
+        # 1d Donchian breakout
+        breakout_up = close[i] > high_20[i-1]  # Break above previous 20-period high
+        breakout_down = close[i] < low_20[i-1]  # Break below previous 20-period low
         
         # Entry conditions
-        long_entry = uptrend and alligator_long and volume_spike[i] and vol_filter
-        short_entry = downtrend and alligator_short and volume_spike[i] and vol_filter
+        long_entry = weekly_uptrend and breakout_up and volume_spike[i]
+        short_entry = weekly_downtrend and breakout_down and volume_spike[i]
         
-        # Exit conditions: trend reversal or Alligator reversal
-        long_exit = (not uptrend) or (not alligator_long)
-        short_exit = (not downtrend) or (not alligator_short)
+        # Exit conditions: opposite breakout or trend reversal
+        long_exit = breakout_down or not weekly_uptrend
+        short_exit = breakout_up or not weekly_downtrend
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -119,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1d_DonchianBreakout_1wTrendFilter_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
