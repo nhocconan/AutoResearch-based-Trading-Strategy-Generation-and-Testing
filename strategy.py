@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakout on 12h with 1d trend filter (price > 1d EMA34) and volume spikes.
-Works in bull (breakouts above R3) and bear (breakdowns below S3) by capturing institutional interest.
-Targets 15-30 trades/year to minimize fee drag. Uses 1d EMA34 trend filter for multi-timeframe alignment.
+4h_Keltner_Channel_MeanReversion
+Hypothesis: Price tends to revert to the mean after touching Keltner Channel bands during low volatility periods.
+Long when price touches lower band with bullish divergence on RSI and low volatility (ATR ratio < 0.8).
+Short when price touches upper band with bearish divergence on RSI and low volatility.
+Uses 1-day EMA200 trend filter to avoid counter-trend trades in strong trends.
+Designed for 20-30 trades/year to minimize fee drag while capturing mean reversion in ranging markets.
+Works in both bull and bear by adapting to volatility regimes and using trend filter for direction bias.
 """
 
 import numpy as np
@@ -12,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 34:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,65 +23,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA200 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    close_1d_prev = np.roll(close_1d, 1)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev[0] = np.nan
-    high_1d_prev[0] = np.nan
-    low_1d_prev[0] = np.nan
+    # Calculate ATR(14) for Keltner Channel
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    camarilla_range = (high_1d_prev - low_1d_prev) * 1.1
-    r3 = close_1d_prev + camarilla_range / 4
-    s3 = close_1d_prev - camarilla_range / 4
+    # Calculate EMA20 for Keltner Channel middle line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Keltner Channel bands (typically 1.5x ATR)
+    kc_upper = ema20 + (1.5 * atr)
+    kc_lower = ema20 - (1.5 * atr)
     
-    # Volume spike: current volume > 2x 24-period average (24*12h = 12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (vol_ma_24 * 2.0)
+    # Calculate RSI(14) for divergence
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate ATR ratio for volatility filter (current ATR / 50-period average ATR)
+    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / (atr_ma_50 + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Wait for volume MA and Camarilla to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(kc_upper[i]) or 
+            np.isnan(kc_lower[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(rsi[i-1]) or
+            np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions
-        breakout_long = close[i] > r3_aligned[i]  # Price breaks above R3
-        breakout_short = close[i] < s3_aligned[i]  # Price breaks below S3
+        # Price touching Keltner bands
+        touch_lower = low[i] <= kc_lower[i]
+        touch_upper = high[i] >= kc_upper[i]
         
-        # Trend filter from 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # RSI divergence signals
+        # Bullish RSI divergence: price makes lower low, RSI makes higher low
+        bullish_div = (low[i] < low[i-1]) and (rsi[i] > rsi[i-1])
+        # Bearish RSI divergence: price makes higher high, RSI makes lower high
+        bearish_div = (high[i] > high[i-1]) and (rsi[i] < rsi[i-1])
         
-        # Entry conditions with volume confirmation
-        long_entry = breakout_long and volume_spike[i] and uptrend
-        short_entry = breakout_short and volume_spike[i] and downtrend
+        # Volatility filter: low volatility environment (ATR ratio < 0.8)
+        low_vol = atr_ratio[i] < 0.8
         
-        # Exit on opposite breakout
-        long_exit = breakout_short and volume_spike[i]
-        short_exit = breakout_long and volume_spike[i]
+        # Trend filter from 1d EMA200
+        uptrend = close[i] > ema_200_1d_aligned[i]
+        downtrend = close[i] < ema_200_1d_aligned[i]
+        
+        # Entry conditions
+        long_entry = touch_lower and bullish_div and low_vol and uptrend
+        short_entry = touch_upper and bearish_div and low_vol and downtrend
+        
+        # Exit when price returns to middle line (EMA20)
+        long_exit = close[i] >= ema20[i]
+        short_exit = close[i] <= ema20[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -87,11 +110,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
+            signals[i] = 0.0
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+            signals[i] = 0.0
+            position = 0
         else:
             # Hold current position
             if position == 1:
@@ -103,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Keltner_Channel_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
