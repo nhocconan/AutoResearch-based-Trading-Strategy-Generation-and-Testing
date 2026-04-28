@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_CloudFilter_1dTrend_Volume
-Hypothesis: Ichimoku Tenkan/Kijun cross with cloud filter on 6h, combined with 1d EMA50 trend filter and volume spike confirmation. Works in bull markets (long when price above cloud in uptrend) and bear markets (short when price below cloud in downtrend). Target: 50-150 total trades over 4 years to minimize fee drag while capturing high-probability momentum shifts.
+1d_Adaptive_Kelly_RSI_Extreme_Volatility
+Hypothesis: Daily RSI extremes (oversold/overbought) combined with volatility expansion signals and adaptive position sizing based on Kelly criterion.
+Works in bull markets by buying oversold dips in uptrends, and in bear markets by selling overbought rallies in downtrends.
+Volatility filter ensures trades occur during significant market moves, reducing whipsaw.
+Adaptive scaling reduces position size during low volatility periods to minimize drawdown.
+Target: 15-25 trades/year to minimize fee drag while capturing high-probability mean reversions.
 """
 
 import numpy as np
@@ -18,81 +22,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Calculate daily RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Calculate daily ATR(14) for volatility measurement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = high[0] - close[0]
+    tr3[0] = low[0] - close[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
+    # Calculate ATR ratio: current ATR / 50-period average ATR
+    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / (atr_ma_50 + 1e-10)
     
-    # Kumo (cloud) top and bottom
-    kumo_top = np.maximum(senkou_a, senkou_b)
-    kumo_bottom = np.minimum(senkou_a, senkou_b)
+    # Volatility expansion signal: ATR ratio > 1.2
+    vol_expansion = atr_ratio > 1.2
+    
+    # RSI extreme conditions
+    rsi_oversold = rsi < 30
+    rsi_overbought = rsi > 70
+    
+    # Trend filter from weekly EMA50
+    uptrend = close > ema_50_1w_aligned
+    downtrend = close < ema_50_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for Ichimoku to stabilize (max 52 periods)
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Ichimoku signals
-        tk_cross_above = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        tk_cross_below = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
+        # Entry logic: RSI extreme in direction of trend with volatility expansion
+        long_entry = rsi_oversold[i] and uptrend[i] and vol_expansion[i]
+        short_entry = rsi_overbought[i] and downtrend[i] and vol_expansion[i]
         
-        # Price relative to cloud
-        price_above_kumo = close[i] > kumo_top[i]
-        price_below_kumo = close[i] < kumo_bottom[i]
-        
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
-        
-        # Volume confirmation: >1.8x 20-period MA
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
-        
-        # Entry conditions
-        long_entry = vol_confirm and tk_cross_above and price_above_kumo and uptrend
-        short_entry = vol_confirm and tk_cross_below and price_below_kumo and downtrend
-        
-        # Exit conditions: opposite TK cross or trend change
-        long_exit = tk_cross_below or (not uptrend)
-        short_exit = tk_cross_above or (not downtrend)
+        # Exit logic: RSI returns to neutral zone or trend changes
+        long_exit = rsi[i] > 50 or not uptrend[i]
+        short_exit = rsi[i] < 50 or not downtrend[i]
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            # Adaptive sizing: base size 0.25, scaled by volatility (capped)
+            vol_scale = min(atr_ratio[i] / 1.5, 1.5)  # Scale with vol, max 1.5x
+            size = 0.25 * vol_scale
+            size = min(max(size, 0.10), 0.35)  # Clamp between 0.10 and 0.35
+            signals[i] = size
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            vol_scale = min(atr_ratio[i] / 1.5, 1.5)
+            size = 0.25 * vol_scale
+            size = min(max(size, 0.10), 0.35)
+            signals[i] = -size
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -103,7 +110,7 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Base size when holding
             elif position == -1:
                 signals[i] = -0.25
             else:
@@ -111,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend_Volume"
-timeframe = "6h"
+name = "1d_Adaptive_Kelly_RSI_Extreme_Volatility"
+timeframe = "1d"
 leverage = 1.0
