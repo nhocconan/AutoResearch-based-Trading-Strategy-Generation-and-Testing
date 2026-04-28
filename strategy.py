@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams Alligator (jaw/teeth/lips) with 6h Donchian(20) breakout and volume confirmation.
-# Williams Alligator defines market regime: when lines are intertwined (chop) vs aligned (trend).
-# In choppy regimes (Alligator sleeping): fade Donchian breakouts at 20-period levels.
-# In trending regimes (Alligator awake): continue Donchian breakouts in direction of trend.
-# Uses 1d Alligator for higher-timeframe regime filter to reduce false breakouts on 6h.
-# Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
-# Target: 50-150 total trades over 4 years = 12-37/year for 6h (within proven winning range).
+# Hypothesis: 12h strategy using 1d Williams %R extremes with 1d EMA50 trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions. Long when %R crosses above -80 from below (oversold bounce),
+# short when %R crosses below -20 from above (overbought rejection). 1d EMA50 filters counter-trend trades.
+# Volume spike (>1.8x 20-bar average) confirms breakout strength. Position size 0.25 balances return and drawdown.
+# Designed to work in both bull (catching bounces in uptrend) and bear (fading rallies in downtrend) markets.
 
-name = "6h_WilliamsAlligator_Donchian20_Regime_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,77 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator regime filter
+    # Get 1d data for Williams %R and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 13:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Williams Alligator: SMA(close, 13), SMA(close, 8), SMA(close, 5) with offsets
+    # Calculate 1d Williams %R (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values  # Blue line
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values   # Red line
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values    # Green line
     
-    # Align Alligator lines to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Alligator regime: TRUE when intertwined (chop/sleeping), FALSE when aligned (trend/awake)
-    # Chop condition: max - min of the three lines < 0.5% of price (tightly coiled)
-    max_line = np.maximum(np.maximum(jaw_aligned, teeth_aligned), lips_aligned)
-    min_line = np.minimum(np.minimum(jaw_aligned, teeth_aligned), lips_aligned)
-    alligator_range = max_line - min_line
-    price_level = (jaw_aligned + teeth_aligned + lips_aligned) / 3
-    chop_threshold = 0.005 * price_level  # 0.5% of price
-    is_chop = alligator_range < chop_threshold  # TRUE = chop/sleeping, FALSE = trend/awake
+    # Align Williams %R to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Calculate 6h Donchian(20) channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 6h volume confirmation: >1.8x 30-bar average volume
+    # Align EMA to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate 12h volume spike: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_30 = volume_series.rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > 1.8 * volume_ma_30
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure sufficient history for all indicators
+    start_idx = 100  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma_30[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > donchian_high[i] and volume_spike[i]
-        short_breakout = close[i] < donchian_low[i] and volume_spike[i]
+        # Trend filter: price relative to 1d EMA50
+        above_ema = close[i] > ema_50_1d_aligned[i]
+        below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Regime-based logic
-        if is_chop[i]:  # Alligator sleeping -> chop regime -> fade breakouts
-            # In chop: fade Donchian breakouts (expect reversion to mean)
-            long_entry = short_breakout  # Short on upside breakout
-            short_entry = long_breakout  # Long on downside breakout
-            # Exit when price returns to Alligator midline (teeth)
-            long_exit = close[i] > teeth_aligned[i]
-            short_exit = close[i] < teeth_aligned[i]
-        else:  # Alligator awake -> trend regime -> continue breakouts
-            # In trend: continue Donchian breakouts in direction of Alligator alignment
-            # Determine trend direction from Alligator alignment (lips > teeth > jaw = uptrend)
-            is_uptrend = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-            is_downtrend = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
-            long_entry = long_breakout and is_uptrend
-            short_entry = short_breakout and is_downtrend
-            # Exit when trend weakens (Alligator lines start to intertwine) or opposite Donchian breakout
-            long_exit = is_chop[i] or short_breakout
-            short_exit = is_chop[i] or long_breakout
+        # Williams %R extreme conditions with volume confirmation
+        # Long: %R crosses above -80 from below (exiting oversold)
+        williams_r_long_signal = williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80
+        # Short: %R crosses below -20 from above (exiting overbought)
+        williams_r_short_signal = williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20
+        
+        long_entry = williams_r_long_signal and volume_spike[i] and above_ema
+        short_entry = williams_r_short_signal and volume_spike[i] and below_ema
+        
+        # Exit conditions: opposite Williams %R extreme or trend reversal
+        long_exit = williams_r_aligned[i] < -20 or below_ema  # Exit when overbought or trend turns down
+        short_exit = williams_r_aligned[i] > -80 or above_ema  # Exit when oversold or trend turns up
         
         # Handle entries and exits
         if long_entry and position <= 0:
