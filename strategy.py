@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,29 +15,31 @@ def generate_signals(prices):
     
     # Get 1d data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 1d indicators
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Donchian channel (20) on 1d for stability
+    # Donchian channel (20) on 1d
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # EMA50 on 1d for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 4h
+    # Volume spike on 1d: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (vol_ma_20 * 2.0)
+    
+    # Align to 12h
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,7 +49,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -59,15 +61,13 @@ def generate_signals(prices):
         trend_up = close[i] > ema_50_1d_aligned[i]
         trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions
-        # Long: upward breakout + uptrend + volume surge
-        long_entry = breakout_up and trend_up and volume_surge[i]
-        # Short: downward breakout + downtrend + volume surge
-        short_entry = breakout_down and trend_down and volume_surge[i]
+        # Entry conditions: breakout + trend + volume spike
+        long_entry = breakout_up and trend_up and volume_spike_aligned[i]
+        short_entry = breakout_down and trend_down and volume_spike_aligned[i]
         
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = breakout_down or not trend_up
-        short_exit = breakout_up or not trend_down
+        # Exit conditions: opposite breakout
+        long_exit = breakout_down
+        short_exit = breakout_up
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -92,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA50_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
