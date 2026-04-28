@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation.
-# Williams %R(14) identifies overbought/oversold conditions. In strong trends (price > EMA34),
-# we take mean reversion shorts when %R > -20 (overbought) and longs when %R < -80 (oversold).
-# Volume confirmation (>1.5x 20-bar average) ensures momentum behind the move.
-# Target: 12-30 trades/year (50-120 total over 4 years) with discrete position sizing 0.25.
-# Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses 12h primary timeframe targeting 12-37 trades/year (50-150 total over 4 years).
+# 1d EMA34 provides primary trend filter: bull when price > EMA34, bear when price < EMA34.
+# Camarilla R3/S3 from 1d provide institutional pivot points with proven edge.
+# Volume spike (>2.0x 24-bar average) confirms breakout strength.
+# Position size 0.25 for balance between return and drawdown control.
+# Discrete levels (0.0, ±0.25) minimize fee churn.
 
-name = "6h_WilliamsR_MeanReversion_1dEMA34_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,39 +25,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) to reduce low-liquidity noise
+    # Pre-compute session hours (08-20 UTC) to reduce noise
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for Camarilla pivots (R3, S3) and EMA34 trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0  # R3 = Close + 1.1*(Range)/4
+    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0  # S3 = Close - 1.1*(Range)/4
+    
+    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align HTF indicators to 12h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams %R(14) on 6h data
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high_14 - close) / (highest_high_14 - lowest_low_14) * -100
-    
-    # Volume confirmation: >1.5x 20-bar average
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    # Calculate 12h volume spike: >2.0x 24-bar average volume (accounting for session gaps)
+    volume_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need EMA34 and Williams %R warmup
+    start_idx = 34  # Ensure sufficient history for EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(williams_r[i]) or
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
@@ -65,24 +75,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1d EMA34 direction
+        # Trend filter: 1d EMA34 direction (price above/below EMA34)
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Williams %R mean reversion signals
-        oversold = williams_r[i] < -80  # Oversold condition
-        overbought = williams_r[i] > -20  # Overbought condition
+        # Camarilla breakout conditions
+        long_breakout = close[i] > r3_1d_aligned[i]
+        short_breakout = close[i] < s3_1d_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume_confirm[i]
+        vol_confirm = volume_spike[i]
         
-        # Entry logic: mean reversion in direction of trend
-        long_entry = price_above_ema and oversold and vol_confirm
-        short_entry = price_below_ema and overbought and vol_confirm
+        long_entry = price_above_ema and long_breakout and vol_confirm
+        short_entry = price_below_ema and short_breakout and vol_confirm
         
-        # Exit logic: opposite Williams %R level or trend change
-        long_exit = williams_r[i] > -20 or not price_above_ema  # Exit long when overbought or trend turns bearish
-        short_exit = williams_r[i] < -80 or not price_below_ema  # Exit short when oversold or trend turns bullish
+        # Exit conditions: opposite Camarilla level (R4/S4 for tighter stop)
+        # Calculate R4/S4 for exit
+        r4_1d = close_1d + (high_1d - low_1d) * 1.1 / 2.0  # R4 = Close + 1.1*(Range)/2
+        s4_1d = close_1d - (high_1d - low_1d) * 1.1 / 2.0  # S4 = Close - 1.1*(Range)/2
+        r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+        s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+        
+        long_exit = close[i] < s4_1d_aligned[i]  # Exit long at S4
+        short_exit = close[i] > r4_1d_aligned[i]  # Exit short at R4
         
         # Handle entries and exits
         if long_entry and position <= 0:
