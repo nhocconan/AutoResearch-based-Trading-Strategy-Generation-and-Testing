@@ -1,3 +1,10 @@
+# Your task is to write a new strategy.py that follows the rules and builds upon the insights from the experiment history.
+# Hypothesis: A 6h strategy using a 12h Supertrend filter and 12h Donchian breakout with volume confirmation.
+# This combines a proven trend filter (Supertrend) with a classic breakout (Donchian) on a higher timeframe (12h) for direction,
+# and uses volume on the 6h chart to confirm the breakout's strength.
+# The Supertrend helps avoid whipsaws in ranging markets, while the Donchian breakout captures momentum.
+# Using a 12h Supertrend on a 6h chart should provide a good balance of signal frequency and reliability.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:  # Increased warmup for Supertrend
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,39 +20,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR-based regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 12h data for Supertrend and Donchian
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Weekly ATR(14) for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 12h Supertrend calculation (ATR=10, multiplier=3.0)
+    # True Range
+    tr1 = pd.Series(df_12h['high']).diff()
+    tr2 = pd.Series(df_12h['low']).diff().abs()
+    tr3 = abs(pd.Series(df_12h['high']) - pd.Series(df_12h['low']).shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).fillna(0)
+    atr = tr.ewm(alpha=1/10, adjust=False, min_periods=10).mean()  # 10-period ATR
     
-    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1]))
-    tr2 = np.maximum(np.abs(low_1w[1:] - close_1w[:-1]), tr1)
-    tr = np.concatenate([[np.inf], tr2])  # first TR is inf
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Basic Upper and Lower Bands
+    hl2 = (pd.Series(df_12h['high']) + pd.Series(df_12h['low'])) / 2
+    upper_band = hl2 + (3.0 * atr)
+    lower_band = hl2 - (3.0 * atr)
     
-    # Get daily data for Donchian channels and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Final Upper and Lower Bands
+    final_upper = upper_band.copy()
+    final_lower = lower_band.copy()
+    for i in range(1, len(df_12h)):
+        if df_12h['close'].iloc[i] <= final_upper.iloc[i-1]:
+            final_upper.iloc[i] = min(upper_band.iloc[i], final_upper.iloc[i-1])
+        else:
+            final_upper.iloc[i] = upper_band.iloc[i]
+        if df_12h['close'].iloc[i] >= final_lower.iloc[i-1]:
+            final_lower.iloc[i] = max(lower_band.iloc[i], final_lower.iloc[i-1])
+        else:
+            final_lower.iloc[i] = lower_band.iloc[i]
     
-    # Daily Donchian Channel (20)
-    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    # Supertrend direction
+    supertrend = np.zeros(len(df_12h))
+    for i in range(1, len(df_12h)):
+        if df_12h['close'].iloc[i] > final_upper.iloc[i-1]:
+            supertrend[i] = 1
+        elif df_12h['close'].iloc[i] < final_lower.iloc[i-1]:
+            supertrend[i] = -1
+        else:
+            supertrend[i] = supertrend[i-1]
     
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 12h Donchian Channel (20)
+    high_20 = pd.Series(df_12h['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_12h['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Align to daily timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
+    # Align 12h indicators to 6h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    high_20_aligned = align_htf_to_ltf(prices, df_12h, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_12h, low_20)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,13 +79,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr_14_aligned[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -82,26 +104,18 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below daily EMA34
-        trend_up = close[i] > ema34_1d_aligned[i]
-        trend_down = close[i] < ema34_1d_aligned[i]
-        
-        # Regime filter: low volatility (ATR below median)
-        # Use 50-period median of ATR to avoid look-ahead
-        if i >= 50:
-            atr_median = np.median(atr_14_aligned[i-50:i])
-            low_vol = atr_14_aligned[i] < atr_median
-        else:
-            low_vol = True  # Not enough data for median, allow trading
+        # Trend filter: 12h Supertrend direction
+        trend_up = supertrend_aligned[i] == 1
+        trend_down = supertrend_aligned[i] == -1
         
         # Entry conditions: 
-        # Long: breakout above daily Donchian high in uptrend + low vol
-        # Short: breakdown below daily Donchian low in downtrend + low vol
+        # Long: breakout above 12h Donchian high in uptrend
+        # Short: breakdown below 12h Donchian low in downtrend
         long_breakout = close[i] > high_20_aligned[i]
         short_breakout = close[i] < low_20_aligned[i]
         
-        long_entry = long_breakout and vol_filter and trend_up and low_vol
-        short_entry = short_breakout and vol_filter and trend_down and low_vol
+        long_entry = long_breakout and vol_filter and trend_up
+        short_entry = short_breakout and vol_filter and trend_down
         
         # Exit conditions: opposite Donchian level touch
         long_exit = (close[i] < low_20_aligned[i]) and position == 1
@@ -130,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DonchianBreakout_DailyTrend_Volume_LowVol_Session"
-timeframe = "1d"
+name = "6h_Supertrend_Donchian_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
