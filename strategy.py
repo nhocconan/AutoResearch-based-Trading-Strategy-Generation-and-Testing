@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla pivot levels (R3/S3) from daily timeframe act as key support/resistance. 
-Breakouts of these levels with 1-day trend filter (price > EMA34) and volume spikes 
-capture strong momentum moves. Works in bull markets (breakouts continue up) and bear 
-markets (breakdowns continue down) by following institutional levels. Targets 15-30 trades/year.
+12h_PivotReversal_1wTrend_VolumeFilter
+Hypothesis: Daily pivot reversals with weekly trend filter and volume spike capture turning points in both bull and bear markets. Pivots provide objective support/resistance, weekly trend filters counter-trend noise, and volume confirms momentum. Targets 12-30 trades/year.
 """
 
 import numpy as np
@@ -21,80 +18,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each day
-    # Using previous day's OHLC to calculate today's levels
+    # Calculate daily pivot points: (H + L + C) / 3
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
     
-    # Previous day's values for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Camarilla formula: range = prev_high - prev_low
-    # R3 = prev_close + (range * 1.1/2)
-    # S3 = prev_close - (range * 1.1/2)
-    # R4 = prev_close + (range * 1.1)
-    # S4 = prev_close - (range * 1.1)
-    prev_range = prev_high - prev_low
-    camarilla_r3 = prev_close + (prev_range * 1.1 / 2)
-    camarilla_s3 = prev_close - (prev_range * 1.1 / 2)
-    camarilla_r4 = prev_close + (prev_range * 1.1)
-    camarilla_s4 = prev_close - (prev_range * 1.1)
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align pivot and weekly EMA to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 1-day EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: >2x 20-period MA (higher threshold for fewer trades)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: >2.0x 30-period MA
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 40  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # Breakout conditions
-        breakout_r3 = close[i] > r3_aligned[i]
-        breakdown_s3 = close[i] < s3_aligned[i]
-        breakout_r4 = close[i] > r4_aligned[i]
-        breakdown_s4 = close[i] < s4_aligned[i]
+        # Pivot reversal conditions
+        # Long: price crosses above pivot from below in downtrend
+        # Short: price crosses below pivot from above in uptrend
+        long_signal = (close[i] > pivot_aligned[i]) and (close[i-1] <= pivot_aligned[i-1]) and downtrend
+        short_signal = (close[i] < pivot_aligned[i]) and (close[i-1] >= pivot_aligned[i-1]) and uptrend
         
-        # Volume confirmation (strong spike)
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        # Volume confirmation
+        vol_confirm = volume[i] > (2.0 * vol_ma_30[i])
         
-        # Entry logic: breakout of R3/S3 with trend and volume
-        # In strong trends, also allow R4/S4 breakouts
-        long_entry = vol_confirm and ((uptrend and breakout_r3) or breakout_r4)
-        short_entry = vol_confirm and ((downtrend and breakdown_s3) or breakdown_s4)
+        # Entry logic: pivot reversal with volume and counter-trend
+        long_entry = long_signal and vol_confirm
+        short_entry = short_signal and vol_confirm
         
-        # Exit logic: opposite breakdown or trend failure
-        long_exit = breakdown_s3 or (not uptrend and breakdown_s4)
-        short_exit = breakout_r3 or (not downtrend and breakout_r4)
+        # Exit logic: opposite pivot cross or trend alignment
+        long_exit = (close[i] < pivot_aligned[i]) and (close[i-1] >= pivot_aligned[i-1])
+        short_exit = (close[i] > pivot_aligned[i]) and (close[i-1] <= pivot_aligned[i-1])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -119,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_PivotReversal_1wTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
