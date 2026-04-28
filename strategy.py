@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_RCI_Momentum_52WeekLow_Trend
-Hypothesis: The Rate of Change Index (RCI) identifies momentum extremes, while proximity to 52-week lows indicates mean-reversion opportunities in oversold conditions. Combined with a weekly trend filter (price above/below weekly SMA50) and volume confirmation, this strategy captures mean-reversion bounces in bear markets and momentum continuations in bull markets. The 1d timeframe ensures low trade frequency (<25/year) to minimize fee drag, while the weekly trend filter prevents counter-trend entries. Target: 15-20 trades/year per symbol.
+4h_Donchian20_Breakout_VolumeTrend
+Hypothesis: Donchian channel breakouts on 4h with volume confirmation and trend filter capture strong trends in both bull and bear markets while minimizing whipsaw. The 4h timeframe balances trade frequency (~20-50/year) and signal quality. Volume surge confirms institutional participation, and ADX trend filter ensures trades align with market direction. This approach has shown strong performance in SOL and aims to extend to BTC/ETH with proper filtering.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:  # Need ~1 year for 52-week low calculation
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,92 +18,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get 4h data for Donchian channels and trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly SMA50 for trend filter
-    close_weekly = df_weekly['close'].values
-    sma_50_weekly = pd.Series(close_weekly).rolling(window=50, min_periods=50).mean().values
-    sma_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma_50_weekly)
+    # Calculate Donchian channels (20-period high/low) on 4h
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 52-week low (260 trading days)
-    # Use expanding minimum to track 52-week low
-    min_52w = np.full(n, np.nan)
-    for i in range(260, n):
-        min_52w[i] = np.min(low[i-260:i])
+    # Donchian upper/lower bands (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate RCI (Rank Correlation Index) over 9 periods
-    # RCI measures the correlation between price ranks and time ranks
-    rci = np.full(n, np.nan)
-    for i in range(9, n):
-        # Get prices for the last 9 periods
-        prices_window = close[i-8:i+1]
-        # Rank the prices (1 = lowest, 9 = highest)
-        price_ranks = pd.Series(prices_window).rank(method='average').values
-        # Time ranks are always 1,2,3,...,9
-        time_ranks = np.arange(1, 10)
-        # Calculate Spearman correlation
-        if np.std(price_ranks) > 0 and np.std(time_ranks) > 0:
-            rci[i] = np.corrcoef(price_ranks, time_ranks)[0, 1]
+    # Align Donchian bands to 4h timeframe (already aligned by get_htf_data, but we need to align the rolling values)
+    # Since we're using 4h data, we need to align the rolling calculations to the 4h bars
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Calculate ADX for trend filtering on 1d (stronger trend filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth TR and DM (14-period)
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus14 / tr14
+    di_minus = 100 * dm_minus14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume spike: current volume > 1.5x 20-period average on 4h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(260, 9)  # Wait for 52-week low and RCI to stabilize
+    start_idx = 50  # Wait for all indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma_50_weekly_aligned[i]) or np.isnan(min_52w[i]) or 
-            np.isnan(rci[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Conditions
-        price_above_weekly_trend = close[i] > sma_50_weekly_aligned[i]
-        price_below_weekly_trend = close[i] < sma_50_weekly_aligned[i]
-        near_52w_low = close[i] <= (min_52w[i] * 1.05)  # Within 5% of 52-week low
-        rci_oversold = rci[i] < -0.8  # Strong negative momentum
-        rci_overbought = rci[i] > 0.8  # Strong positive momentum
+        # Donchian breakout conditions
+        breakout_long = close[i] > donchian_high_aligned[i-1]  # Break above upper band
+        breakout_short = close[i] < donchian_low_aligned[i-1]  # Break below lower band
         
-        # Entry logic:
-        # Long when: near 52-week low, RCI oversold, and weekly uptrend (or no strong downtrend)
-        # Short when: near 52-week high (implied by strong uptrend), RCI overbought, and weekly downtrend
-        long_entry = near_52w_low and rci_oversold and price_above_weekly_trend
-        short_entry = (close[i] >= (min_52w[i] * 3.0)) and rci_overbought and price_below_weekly_trend  # Simplified 52w high proxy
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
-        # Exit when RCI reverts to neutral
-        long_exit = rci[i] > -0.3
-        short_exit = rci[i] < 0.3
+        # Entry conditions with volume confirmation and trend filter
+        long_entry = breakout_long and volume_spike[i] and strong_trend
+        short_entry = breakout_short and volume_spike[i] and strong_trend
+        
+        # Exit when opposite breakout occurs (trend reversal signal)
+        long_exit = breakout_short and volume_spike[i]
+        short_exit = breakout_long and volume_spike[i]
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
-            signals[i] = 0.0
-            position = 0
+            signals[i] = -0.30  # Reverse to short
+            position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.0
-            position = 0
+            signals[i] = 0.30   # Reverse to long
+            position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_RCI_Momentum_52WeekLow_Trend"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
