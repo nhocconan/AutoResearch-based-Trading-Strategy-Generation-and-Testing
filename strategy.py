@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,22 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once for HTF context
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data once for HTF context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h indicators
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Calculate 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 12h EMA(50) for trend
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA(34) for trend
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 12h RSI(14)
-    delta = pd.Series(close_12h).diff()
+    # 1d RSI(14)
+    delta = pd.Series(close_1d).diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
     avg_gain = gain.rolling(window=14, min_periods=14).mean().values
@@ -36,30 +36,30 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
     
-    # 12h ATR(14) for volatility
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # 1d ATR(14) for volatility
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
-    atr_14_aligned = align_htf_to_ltf(prices, df_12h, atr_14)
+    # Align HTF indicators to 1h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Hour filter: 8-20 UTC (most active hours)
+    # Hour filter: 8-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(rsi_aligned[i]) or 
             np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
@@ -77,32 +77,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        trend_up = close[i] > ema_50_aligned[i]
-        trend_down = close[i] < ema_50_aligned[i]
+        # Trend filter: price above/below EMA34
+        trend_up = close[i] > ema_34_aligned[i]
+        trend_down = close[i] < ema_34_aligned[i]
         
         # Momentum filter: RSI in favorable range (not extreme)
-        rsi_bullish = rsi_aligned[i] > 40 and rsi_aligned[i] < 70
-        rsi_bearish = rsi_aligned[i] < 60 and rsi_aligned[i] > 30
+        rsi_bullish = rsi_aligned[i] > 50 and rsi_aligned[i] < 70
+        rsi_bearish = rsi_aligned[i] < 50 and rsi_aligned[i] > 30
         
         # Volume filter: above average volume
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         vol_filter = volume[i] > vol_ma[i]
         
-        # Entry conditions
+        # Entry conditions - more selective
         long_entry = trend_up and rsi_bullish and vol_filter
         short_entry = trend_down and rsi_bearish and vol_filter
         
         # Exit conditions: opposite conditions or volatility spike
         atr_ma = pd.Series(atr_14_aligned).rolling(window=10, min_periods=10).mean().values
-        long_exit = not trend_up or not rsi_bullish or (atr_14_aligned[i] > 2.5 * atr_ma[i])
-        short_exit = not trend_down or not rsi_bearish or (atr_14_aligned[i] > 2.5 * atr_ma[i])
+        long_exit = not trend_up or not rsi_bullish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
+        short_exit = not trend_down or not rsi_bearish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -113,14 +113,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_EMA50_RSI_Volume_Session_12h"
-timeframe = "4h"
+name = "1h_EMA34_RSI_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
