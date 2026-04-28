@@ -12,29 +12,33 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Pre-compute hour for session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # Get daily data for trend filter and volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h ATR(14) for volatility filter
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    # Daily ATR(14) for volatility filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # 4h Donchian channels (20-period)
+    # Get 4h data for entry timing (Donchian breakout)
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 20:
         return np.zeros(n)
@@ -42,12 +46,13 @@ def generate_signals(prices):
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     
+    # 4h Donchian channels (20-period)
     highest_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     lowest_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
     lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
     
-    # Volume confirmation: current volume > 1.5x average volume (4h average)
+    # Volume confirmation: current volume > 1.5x 4h average volume
     vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > vol_ma_4h * 1.5
     
@@ -57,20 +62,25 @@ def generate_signals(prices):
     start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
+        # Session filter: only trade 08-20 UTC
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            continue
+        
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(atr_14_12h_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or
             np.isnan(highest_high_4h_aligned[i]) or
             np.isnan(lowest_low_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 12h EMA
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter from daily EMA
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volatility filter: avoid low volatility periods
-        vol_filter = atr_14_12h_aligned[i] > 0
+        vol_filter = atr_14_1d_aligned[i] > 0
         
         # Breakout conditions
         breakout_up = close[i] > highest_high_4h_aligned[i]
@@ -90,10 +100,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.20
             position = -1
         elif exit_condition and position != 0:
             signals[i] = 0.0
@@ -101,14 +111,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_VolumeVolFilter"
-timeframe = "4h"
+name = "1h_DailyEMA34_4hDonchian20_VolumeSession"
+timeframe = "1h"
 leverage = 1.0
