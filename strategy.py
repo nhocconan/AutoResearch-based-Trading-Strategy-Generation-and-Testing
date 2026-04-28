@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla R3/S3 breakouts with volume confirmation and 1w EMA34 trend filter.
-# Enter long when price breaks above 1d Camarilla R3 level with volume > 2.0x 50-bar average and close > 1w EMA34.
-# Enter short when price breaks below 1d Camarilla S3 level with volume > 2.0x average and close < 1w EMA34.
-# Exit when price returns to the 1d Camarilla midpoint (P).
+# Hypothesis: 12h strategy using 1d Donchian(20) breakout with volume confirmation and 1w ADX trend filter.
+# Enter long when price breaks above 1d Donchian upper band with volume > 1.8x 30-bar average and 1w ADX > 25.
+# Enter short when price breaks below 1d Donchian lower band with volume > 1.8x average and 1w ADX > 25.
+# Exit when price returns to the 1d Donchian midpoint.
 # Uses discrete position sizing (0.25) to control risk and minimize fee churn.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 # Works in bull markets (breakouts continue up with trend) and bear markets (breakdowns continue down with trend).
-# Uses 1d Camarilla for structure (more stable than lower TF) and 1w EMA34 for trend filter (reduces whipsaws).
+# Uses 1d Donchian for structure (more stable than lower TF) and 1w ADX for trend filter (reduces whipsaws).
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA34_VolumeConfirm_v1"
+name = "12h_Donchian_20_1wADX25_VolumeConfirm_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -26,51 +26,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (MTF structure)
+    # Get 1d data for Donchian calculation (MTF structure)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 1:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (using previous bar's OHLC)
+    # Calculate 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True range for Camarilla calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - close_1d)
-    tr3 = np.abs(low_1d - close_1d)
-    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Donchian upper and lower bands (using previous bar's high/low)
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
+    middle_20 = (upper_20 + lower_20) / 2.0
     
-    # Camarilla levels (based on previous bar's close and range)
-    camarilla_pivot = close_1d  # Pivot is previous close
-    camarilla_range = high_1d - low_1d
+    # Align Donchian levels to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    middle_aligned = align_htf_to_ltf(prices, df_1d, middle_20)
     
-    # R3 and S3 levels (standard breakout levels)
-    r3 = camarilla_pivot + camarilla_range * 1.1 / 4
-    s3 = camarilla_pivot - camarilla_range * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # Get 1w data for EMA34 trend filter (MTF trend)
+    # Get 1w data for ADX trend filter (MTF trend)
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1w) < 34:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA34
+    # Calculate 1w ADX (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate volume confirmation: >2.0x 50-bar average volume
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - close_1w)
+    tr3 = np.abs(low_1w - close_1w)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = -np.diff(low_1w, prepend=low_1w[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1w
+    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1w
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx_14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_14_aligned = align_htf_to_ltf(prices, df_1w, adx_14)
+    
+    # Volume confirmation: >1.8x 30-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_50 = volume_series.rolling(window=50, min_periods=50).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_50
+    volume_ma_30 = volume_series.rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > 1.8 * volume_ma_30
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,29 +91,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma_50[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or
+            np.isnan(adx_14_aligned[i]) or np.isnan(volume_ma_30[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1w EMA34 bias
-        bullish_bias = close[i] > ema_34_1w_aligned[i]
-        bearish_bias = close[i] < ema_34_1w_aligned[i]
+        # Trend filter: 1w ADX > 25 indicates trending market
+        trending = adx_14_aligned[i] > 25
         
-        # Camarilla breakout conditions
-        long_breakout = close[i] > r3_aligned[i]
-        short_breakout = close[i] < s3_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper_aligned[i]
+        short_breakout = close[i] < lower_aligned[i]
         
-        # Exit condition: return to pivot
-        long_exit = close[i] < pivot_aligned[i]
-        short_exit = close[i] > pivot_aligned[i]
+        # Exit condition: return to middle band
+        long_exit = close[i] < middle_aligned[i]
+        short_exit = close[i] > middle_aligned[i]
         
-        # Entry conditions
-        long_entry = long_breakout and vol_confirm and bullish_bias
-        short_entry = short_breakout and vol_confirm and bearish_bias
+        # Entry conditions (require both volume confirmation and trending market)
+        long_entry = long_breakout and vol_confirm and trending
+        short_entry = short_breakout and vol_confirm and trending
         
         # Handle entries and exits
         if long_entry and position <= 0:
