@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R2_S2_Breakout_1dTrend_Volume
-Hypothesis: Weekly R2/S2 pivot levels act as stronger weekly support/resistance than daily levels. 
-Breakouts above R2 or below S2 with volume confirmation and daily trend alignment 
-provide high-probability trades on 6h timeframe. Daily trend filter prevents trading 
-against major trend, reducing whipsaw in both bull and bear markets. 
-Target: 15-25 trades/year.
+12h_KAMA_Trend_With_Daily_Trend_And_Volume_Filter
+Hypothesis: KAMA adapts to market conditions, capturing trends while reducing whipsaw in ranging markets.
+Combining with daily trend filter (price > daily EMA34) and volume confirmation creates robust trend-following
+that works in both bull and bear markets. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -22,69 +20,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volume average
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate KAMA (12h timeframe)
+    # Efficiency Ratio = |change| / volatility
+    change = np.abs(np.diff(close, k=10))  # 10-period change
+    vol = np.sum(np.abs(np.diff(close)), axis=0)  # 10-period volatility
+    er = np.zeros_like(change)
+    mask = vol != 0
+    er[mask] = change[mask] / vol[mask]
     
-    # Calculate weekly R2 and S2 pivot levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R2 = Pivot + Range * 1.1 / 2
-    # S2 = Pivot - Range * 1.1 / 2
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_range = weekly_high - weekly_low
-    r2 = weekly_pivot + (weekly_range * 1.1 / 2.0)
-    s2 = weekly_pivot - (weekly_range * 1.1 / 2.0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Align weekly pivots to 6h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start after 10 periods
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i-10] * (close[i] - kama[i-1])
     
-    # Volume spike: current volume > 2.0x 20-day average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 2.0)
+    volume_filter = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_long = close[i] > r2_aligned[i-1]  # Break above previous week's R2
-        breakout_short = close[i] < s2_aligned[i-1]  # Break below previous week's S2
+        # Trend conditions
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        price_above_daily_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_daily_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Trend filter from daily EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Entry conditions
+        long_entry = price_above_kama and price_above_daily_ema and volume_filter[i]
+        short_entry = price_below_kama and price_below_daily_ema and volume_filter[i]
         
-        # Entry conditions with volume confirmation
-        long_entry = breakout_long and volume_spike[i] and uptrend
-        short_entry = breakout_short and volume_spike[i] and downtrend
-        
-        # Exit on opposite breakout
-        long_exit = breakout_short and volume_spike[i]
-        short_exit = breakout_long and volume_spike[i]
+        # Exit conditions (opposite signal)
+        long_exit = price_below_kama and price_below_daily_ema
+        short_exit = price_above_kama and price_above_daily_ema
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -93,11 +85,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
+            signals[i] = 0.0
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+            signals[i] = 0.0
+            position = 0
         else:
             # Hold current position
             if position == 1:
@@ -109,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R2_S2_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_KAMA_Trend_With_Daily_Trend_And_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
