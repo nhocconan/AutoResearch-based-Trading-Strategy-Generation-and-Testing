@@ -13,31 +13,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channel on 6h data
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Calculate 20-period Donchian channel on 12h data (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d EMA200 for trend filter
+    # Get 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align higher timeframe data to 6h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align higher timeframe data to 4h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,7 +47,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(volume_surge[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
@@ -55,9 +55,9 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_high_aligned[i]
         breakout_down = close[i] < donchian_low_aligned[i]
         
-        # Trend filter: price above/below 1d EMA200
-        trend_up = close[i] > ema_200_1d_aligned[i]
-        trend_down = close[i] < ema_200_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
         # Long: upward breakout + uptrend + volume surge
@@ -70,28 +70,28 @@ def generate_signals(prices):
         short_exit = breakout_up or not trend_down
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
+            signals[i] = -0.30  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
+            signals[i] = 0.30   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian20_Breakout_1dEMA200_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_12hChannel_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
