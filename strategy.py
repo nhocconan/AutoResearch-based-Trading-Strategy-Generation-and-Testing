@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 12h primary timeframe targeting 12-37 trades/year (50-150 total over 4 years).
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses 4h primary timeframe targeting 19-50 trades/year (75-200 total over 4 years).
 # 1d EMA34 provides primary trend filter: bull when price > EMA34, bear when price < EMA34.
 # Camarilla H3/L3 from 1d provide institutional pivot points with proven edge.
-# Volume spike (>1.8x 20-bar average) confirms breakout strength.
+# Volume spike (>2.0x 24-bar average) confirms breakout strength.
 # Position size 0.25 for balance between return and drawdown control.
 # Discrete levels (0.0, ±0.25) minimize fee churn.
+# Works in both bull and bear: trend filter ensures we only trade with higher timeframe momentum,
+# while Camarilla levels provide mean-reversion exits at institutional pivot points.
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +33,7 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla pivots (H3, L3) and EMA34 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -47,14 +49,14 @@ def generate_signals(prices):
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h volume spike: >1.8x 20-bar average volume (accounting for session gaps)
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.8 * volume_ma_20
+    # Calculate 4h volume spike: >2.0x 24-bar average volume (accounting for session gaps)
+    volume_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,7 +68,7 @@ def generate_signals(prices):
         if (np.isnan(h3_1d_aligned[i]) or
             np.isnan(l3_1d_aligned[i]) or
             np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(volume_ma_20[i])):
+            np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
