@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and 1.5x volume spike confirmation.
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and 1.5x volume spike confirmation.
 # Enter long when price breaks above 20-period Donchian high with 1d ADX > 25 and volume > 1.5x 20-bar average.
 # Enter short when price breaks below 20-period Donchian low with 1d ADX > 25 and volume confirmation.
 # Exit when price retraces to the midpoint of the Donchian channel.
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Target: 50-150 total trades over 4 years (12-37/year).
 # Donchian breakouts capture strong momentum moves. ADX filter ensures we only trade in trending markets,
 # avoiding whipsaws in ranging conditions. Volume confirmation filters weak breakouts.
-# This combination has proven effective on SOLUSDT and should work on BTC/ETH.
+# This combination should work on BTC/ETH in both bull and bear markets by capturing strong trends.
 
-name = "4h_Donchian20_Breakout_1dADX_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dADX_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,27 +27,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channel calculation
-    df_4h = get_htf_data(prices, '4h')
+    # Get 12h data for Donchian channel calculation
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_4h) < 20:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channel (20-period high/low)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 12h Donchian channel (20-period high/low)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
     # Donchian high: rolling max of high over 20 periods
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
     # Donchian low: rolling min of low over 20 periods
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     # Donchian midpoint: average of high and low
     donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Align Donchian levels to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
+    # Align Donchian levels to 12h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
     
     # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -94,7 +94,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilders_smoothing(dx, 14)
     
-    # Align ADX to 4h
+    # Align ADX to 12h
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: >1.5x 20-bar average volume
