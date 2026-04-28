@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w Camarilla pivot R4/S4 breakout with volume confirmation and chop regime filter.
-# Enter long when price breaks above 1w Camarilla R4 with volume spike and chop < 61.8 (trending regime).
-# Enter short when price breaks below 1w Camarilla S4 with volume spike and chop < 61.8.
-# Uses discrete position sizing (0.30) to balance return and drawdown. Target: 12-37 trades/year.
-# Weekly Camarilla levels provide strong structure from higher timeframe, volume confirms breakout strength,
-# chop filter avoids ranging markets. Works in bull (breakouts with trend) and bear (failed breaks reverse via exits).
+# Hypothesis: 4h strategy using 1d Williams %R extreme reversal with volume confirmation and chop regime filter.
+# Enter long when 1d Williams %R < -80 (oversold) and price closes above 4h EMA20 with volume spike and chop < 61.8.
+# Enter short when 1d Williams %R > -20 (overbought) and price closes below 4h EMA20 with volume spike and chop < 61.8.
+# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 20-50 trades/year.
+# Williams %R provides mean-reversion edge from higher timeframe, volume confirms momentum, chop filter avoids ranging markets.
+# Works in bull (oversold bounces) and bear (overbought reversals) markets.
 
-name = "12h_Camarilla_R4S4_Breakout_Volume_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_1d_OversoldOverbought_Volume_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,40 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla pivots (HTF)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Williams %R (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1w Camarilla pivots (using previous bar's high, low, close)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d Williams %R (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    n_1w = len(high_1w)
-    camarilla_r4 = np.full(n_1w, np.nan)
-    camarilla_s4 = np.full(n_1w, np.nan)
+    n_1d = len(high_1d)
+    williams_r = np.full(n_1d, np.nan)
     
-    for i in range(1, n_1w):
-        # Use previous bar to avoid look-ahead
-        phigh = high_1w[i-1]
-        plow = low_1w[i-1]
-        pclose = close_1w[i-1]
-        pivot = (phigh + plow + pclose) / 3.0
-        rng = phigh - plow
-        camarilla_r4[i] = pivot + rng * 1.1 / 2.0  # R4 level
-        camarilla_s4[i] = pivot - rng * 1.1 / 2.0  # S4 level
+    for i in range(14, n_1d):
+        highest_high = np.max(high_1d[i-14:i+1])
+        lowest_low = np.min(low_1d[i-14:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
+        else:
+            williams_r[i] = -50.0
     
-    # Forward fill Camarilla levels
-    camarilla_r4 = pd.Series(camarilla_r4).ffill().values
-    camarilla_s4 = pd.Series(camarilla_s4).ffill().values
+    # Align 1d Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Align 1w indicators to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # Calculate 4h EMA20 for trend filter
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Calculate 12h chop regime: EHLERS CHOPPINESS INDEX (14)
+    # Calculate 4h chop regime: EHLERS CHOPPINESS INDEX (14)
     def choppiness_index(high, low, close, length=14):
         atr_sum = np.zeros_like(close)
         true_range = np.zeros_like(close)
@@ -89,7 +85,7 @@ def generate_signals(prices):
     chop = choppiness_index(high, low, close, 14)
     chop_trending = chop < 61.8  # Trending regime when chop < 61.8
     
-    # Calculate 12h volume spike: >2.0x 20-bar average volume
+    # Calculate 4h volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
@@ -101,25 +97,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_20[i]) or 
             np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions with volume confirmation and chop filter
-        long_breakout = close[i] > camarilla_r4_aligned[i] and volume_spike[i] and chop_trending[i]
-        short_breakout = close[i] < camarilla_s4_aligned[i] and volume_spike[i] and chop_trending[i]
+        # Williams %R extreme conditions with volume confirmation and chop filter
+        long_condition = williams_r_aligned[i] < -80 and close[i] > ema_20[i] and volume_spike[i] and chop_trending[i]
+        short_condition = williams_r_aligned[i] > -20 and close[i] < ema_20[i] and volume_spike[i] and chop_trending[i]
         
-        # Exit conditions: opposite Camarilla level
-        long_exit = close[i] < camarilla_s4_aligned[i]
-        short_exit = close[i] > camarilla_r4_aligned[i]
+        # Exit conditions: opposite extreme or EMA cross
+        long_exit = williams_r_aligned[i] > -20 or close[i] < ema_20[i]
+        short_exit = williams_r_aligned[i] < -80 or close[i] > ema_20[i]
         
         # Handle entries and exits
-        if long_breakout and position <= 0:
-            signals[i] = 0.30
+        if long_condition and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
-            signals[i] = -0.30
+        elif short_condition and position >= 0:
+            signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -127,9 +123,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
