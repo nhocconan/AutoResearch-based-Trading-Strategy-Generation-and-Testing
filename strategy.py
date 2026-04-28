@@ -1,3 +1,9 @@
+# 4h_Macd_Histogram_Zero_Cross_Trend_Filter
+# Hypothesis: MACD histogram crossing zero with trend filter (EMA50) and volume confirmation captures sustained momentum moves in both bull and bear markets.
+# The MACD histogram crossing zero indicates a change in short-term momentum relative to longer-term trend, which when aligned with the EMA50 trend and confirmed by volume, provides high-probability entries.
+# Target: 20-40 trades/year on 4h timeframe to minimize fee drag while capturing significant moves.
+# Uses EMA50 for trend filter and volume > 20-period average for confirmation.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,44 +19,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA and RSI
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # ER (Efficiency Ratio)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate daily EMA(50) for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate MACD (12,26,9) on close prices
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    # Calculate 12h momentum filter (price vs 12-period ago)
-    mom_12 = np.zeros_like(close)
-    mom_12[:12] = 0
-    mom_12[12:] = close[12:] - close[:-12]
-    
-    # Align daily indicators to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align daily EMA50 to 4h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Calculate average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,9 +54,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(mom_12[i]) or
+        if (np.isnan(ema50_aligned[i]) or 
+            np.isnan(macd_hist[i]) or
+            np.isnan(macd_hist[i-1]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -79,27 +66,26 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below KAMA
-        uptrend = close[i] > kama_aligned[i]
-        downtrend = close[i] < kama_aligned[i]
-        
-        # Momentum filter: positive/negative 12-period momentum
-        mom_pos = mom_12[i] > 0
-        mom_neg = mom_12[i] < 0
-        
-        # RSI filter: avoid extremes
-        rsi_ok = (rsi_aligned[i] > 30) & (rsi_aligned[i] < 70)
+        # Trend filter: price above/below EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
         # Volume filter: current volume above average
         vol_filter = volume[i] > vol_ma[i]
         
-        # Entry conditions
-        long_entry = uptrend and mom_pos and rsi_ok and vol_filter
-        short_entry = downtrend and mom_neg and rsi_ok and vol_filter
+        # MACD histogram zero cross signals
+        macd_bullish_cross = macd_hist[i] > 0 and macd_hist[i-1] <= 0
+        macd_bearish_cross = macd_hist[i] < 0 and macd_hist[i-1] >= 0
         
-        # Exit conditions: trend reversal or RSI extreme
-        long_exit = not uptrend or rsi_aligned[i] >= 70
-        short_exit = not downtrend or rsi_aligned[i] <= 30
+        long_entry = macd_bullish_cross and uptrend and vol_filter
+        short_entry = macd_bearish_cross and downtrend and vol_filter
+        
+        # Exit when MACD histogram crosses back in opposite direction or trend fails
+        macd_bearish_exit = macd_hist[i] < 0 and macd_hist[i-1] >= 0
+        macd_bullish_exit = macd_hist[i] > 0 and macd_hist[i-1] <= 0
+        
+        long_exit = macd_bearish_exit or not uptrend
+        short_exit = macd_bullish_exit or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -124,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_Momentum"
-timeframe = "12h"
+name = "4h_Macd_Histogram_Zero_Cross_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
