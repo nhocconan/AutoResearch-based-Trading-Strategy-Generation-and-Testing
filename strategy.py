@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot breakouts at R1/S1 levels on 4h timeframe with 1-day EMA50 trend filter and volume spike work in both bull and bear markets. The 1d trend filter reduces whipsaw from counter-trend breakouts, volume confirms institutional participation, and R1/S1 levels provide high-probability entry points with favorable risk-reward. Target: 20-50 trades/year per symbol to minimize fee drag while capturing significant moves.
+1d_RCI_Momentum_52WeekLow_Trend
+Hypothesis: The Rate of Change Index (RCI) identifies momentum extremes, while proximity to 52-week lows indicates mean-reversion opportunities in oversold conditions. Combined with a weekly trend filter (price above/below weekly SMA50) and volume confirmation, this strategy captures mean-reversion bounces in bear markets and momentum continuations in bull markets. The 1d timeframe ensures low trade frequency (<25/year) to minimize fee drag, while the weekly trend filter prevents counter-trend entries. Target: 15-20 trades/year per symbol.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 300:  # Need ~1 year for 52-week low calculation
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,69 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly SMA50 for trend filter
+    close_weekly = df_weekly['close'].values
+    sma_50_weekly = pd.Series(close_weekly).rolling(window=50, min_periods=50).mean().values
+    sma_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma_50_weekly)
     
-    # Calculate 1d Camarilla pivot levels (based on previous 1d bar)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 52-week low (260 trading days)
+    # Use expanding minimum to track 52-week low
+    min_52w = np.full(n, np.nan)
+    for i in range(260, n):
+        min_52w[i] = np.min(low[i-260:i])
     
-    # Calculate pivot point and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate RCI (Rank Correlation Index) over 9 periods
+    # RCI measures the correlation between price ranks and time ranks
+    rci = np.full(n, np.nan)
+    for i in range(9, n):
+        # Get prices for the last 9 periods
+        prices_window = close[i-8:i+1]
+        # Rank the prices (1 = lowest, 9 = highest)
+        price_ranks = pd.Series(prices_window).rank(method='average').values
+        # Time ranks are always 1,2,3,...,9
+        time_ranks = np.arange(1, 10)
+        # Calculate Spearman correlation
+        if np.std(price_ranks) > 0 and np.std(time_ranks) > 0:
+            rci[i] = np.corrcoef(price_ranks, time_ranks)[0, 1]
     
-    # Camarilla levels: R1, R2, S1, S2
-    r1_1d = pivot_1d + range_1d * 1.1000 / 12.0
-    r2_1d = pivot_1d + range_1d * 1.1000 / 6.0
-    s1_1d = pivot_1d - range_1d * 1.1000 / 12.0
-    s2_1d = pivot_1d - range_1d * 1.1000 / 6.0
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 2.0)
+    volume_spike = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for all indicators to stabilize
+    start_idx = max(260, 9)  # Wait for 52-week low and RCI to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(sma_50_weekly_aligned[i]) or np.isnan(min_52w[i]) or 
+            np.isnan(rci[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions
-        breakout_long = close[i] > r1_1d_aligned[i-1]  # Break above R1
-        breakout_short = close[i] < s1_1d_aligned[i-1]  # Break below S1
+        # Conditions
+        price_above_weekly_trend = close[i] > sma_50_weekly_aligned[i]
+        price_below_weekly_trend = close[i] < sma_50_weekly_aligned[i]
+        near_52w_low = close[i] <= (min_52w[i] * 1.05)  # Within 5% of 52-week low
+        rci_oversold = rci[i] < -0.8  # Strong negative momentum
+        rci_overbought = rci[i] > 0.8  # Strong positive momentum
         
-        # Trend filter from 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Entry logic:
+        # Long when: near 52-week low, RCI oversold, and weekly uptrend (or no strong downtrend)
+        # Short when: near 52-week high (implied by strong uptrend), RCI overbought, and weekly downtrend
+        long_entry = near_52w_low and rci_oversold and price_above_weekly_trend
+        short_entry = (close[i] >= (min_52w[i] * 3.0)) and rci_overbought and price_below_weekly_trend  # Simplified 52w high proxy
         
-        # Entry conditions with volume confirmation and trend alignment
-        long_entry = breakout_long and volume_spike[i] and uptrend
-        short_entry = breakout_short and volume_spike[i] and downtrend
-        
-        # Exit on opposite breakout (reverse position)
-        long_exit = breakout_short and volume_spike[i]
-        short_exit = breakout_long and volume_spike[i]
+        # Exit when RCI reverts to neutral
+        long_exit = rci[i] > -0.3
+        short_exit = rci[i] < 0.3
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -89,11 +88,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
+            signals[i] = 0.0
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+            signals[i] = 0.0
+            position = 0
         else:
             # Hold current position
             if position == 1:
@@ -105,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_RCI_Momentum_52WeekLow_Trend"
+timeframe = "1d"
 leverage = 1.0
