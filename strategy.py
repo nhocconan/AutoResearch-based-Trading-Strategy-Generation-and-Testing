@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -40,7 +40,7 @@ def generate_signals(prices):
     camarilla_r4 = close_1w + weekly_range * 1.1 / 2
     camarilla_s4 = close_1w - weekly_range * 1.1 / 2
     
-    # Align Weekly Camarilla levels to 1d timeframe
+    # Align Weekly Camarilla levels to 6h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
@@ -52,16 +52,32 @@ def generate_signals(prices):
     # Volume filter: above average volume (30-period)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
+    # Hour filter: 8-20 UTC (most active trading hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(ema21_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            # Outside session: flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
         
         # Volume filter: above average volume
@@ -104,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyCamarilla_R4S4_DailyTrend_Volume"
-timeframe = "1d"
+name = "6h_WeeklyCamarilla_R4S4_DailyTrend_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
