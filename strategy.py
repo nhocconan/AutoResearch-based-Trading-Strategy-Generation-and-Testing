@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
-# Camarilla R3/S3 levels represent stronger intraday support/resistance than R1/S1.
-# Breakout above R3 with 1d EMA34 uptrend and volume spike = long.
-# Breakdown below S3 with 1d EMA34 downtrend and volume spike = short.
-# Exit on retracement to Camarilla H3/L3 levels (mid-range) to avoid giving back too much profit.
-# Uses 12h timeframe to limit trades (target: 50-150 total over 4 years) and reduce fee drag.
-# Volume confirmation filters weak breakouts. Works in both bull/bear markets by requiring alignment with 1d trend.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend + volume spike
+# Donchian channels provide robust price structure with clear breakout levels.
+# Breakout above upper band with 1d EMA34 uptrend and volume confirmation = long.
+# Breakdown below lower band with 1d EMA34 downtrend and volume confirmation = short.
+# Exit on retracement to middle band (20-period average) or opposite band.
+# Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
+# Target: 75-200 total trades over 4 years (19-50/year).
+# Works in both bull/bear markets by requiring alignment with 1d trend.
+# Volume confirmation filters weak breakouts.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +27,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation (requires daily OHLC)
+    # Get 1d data for trend filter (requires daily OHLC)
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 2:
@@ -36,28 +38,21 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from prior 1d bar (prior day's OHLC)
-    # Camarilla uses prior period's OHLC: PP = (H+L+C)/3
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # H3 = C + (H-L)*1.1/6, L3 = C - (H-L)*1.1/6
+    # Calculate Donchian channels (20-period) from prior completed 1d bar
+    # Donchian uses prior period's OHLC: Upper = max(high), Lower = min(low)
     # We shift by 1 to use prior completed 1d bar's OHLC
     prior_high = df_1d['high'].shift(1).values
     prior_low = df_1d['low'].shift(1).values
-    prior_close = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla levels
-    pp = (prior_high + prior_low + prior_close) / 3.0
-    r3 = prior_close + (prior_high - prior_low) * 1.1 / 4.0
-    s3 = prior_close - (prior_high - prior_low) * 1.1 / 4.0
-    h3 = prior_close + (prior_high - prior_low) * 1.1 / 6.0
-    l3 = prior_close - (prior_high - prior_low) * 1.1 / 6.0
+    # Calculate Donchian levels
+    upper = pd.Series(prior_high).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(prior_low).rolling(window=20, min_periods=20).min().values
+    middle = (upper + lower) / 2.0
     
-    # Align Camarilla levels to 12h (they change only when 1d bar closes)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # Align Donchian levels to 4h (they change only when 1d bar closes)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    middle_aligned = align_htf_to_ltf(prices, df_1d, middle)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -67,13 +62,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure sufficient history for volume MA and EMA
+    start_idx = max(20, 34)  # Ensure sufficient history for Donchian and EMA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -88,24 +82,24 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price > R3, 1d EMA34 uptrend, volume confirm
-            if price > r3_aligned[i] and ema_trend_up and vol_confirm:
+            # Long entry: Price > upper, 1d EMA34 uptrend, volume confirm
+            if price > upper_aligned[i] and ema_trend_up and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price < S3, 1d EMA34 downtrend, volume confirm
-            elif price < s3_aligned[i] and ema_trend_down and vol_confirm:
+            # Short entry: Price < lower, 1d EMA34 downtrend, volume confirm
+            elif price < lower_aligned[i] and ema_trend_down and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on retracement to L3 or below S3
-            if price < l3_aligned[i] or price < s3_aligned[i]:
+        elif position == 1:  # Long - exit on retracement to middle or below lower
+            if price < middle_aligned[i] or price < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on retracement to H3 or above R3
-            if price > h3_aligned[i] or price > r3_aligned[i]:
+        elif position == -1:  # Short - exit on retracement to middle or above upper
+            if price > middle_aligned[i] or price > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
