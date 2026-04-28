@@ -24,8 +24,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d EMA(50) for trend
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA(34) for trend
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # 1d RSI(14)
     delta = pd.Series(close_1d).diff()
@@ -44,8 +44,8 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 12h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align HTF indicators to 4h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
@@ -59,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(rsi_aligned[i]) or 
             np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
@@ -77,9 +77,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        trend_up = close[i] > ema_50_aligned[i]
-        trend_down = close[i] < ema_50_aligned[i]
+        # Trend filter: price above/below EMA34
+        trend_up = close[i] > ema_34_aligned[i]
+        trend_down = close[i] < ema_34_aligned[i]
         
         # Momentum filter: RSI in favorable range (not extreme)
         rsi_bullish = rsi_aligned[i] > 50 and rsi_aligned[i] < 70
@@ -99,10 +99,10 @@ def generate_signals(prices):
         short_exit = not trend_down or not rsi_bearish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -113,14 +113,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_EMA50_RSI_Volume_Session"
-timeframe = "12h"
+name = "4h_EMA34_RSI_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
