@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_KC_Trend_Follow_Volume
-Hypothesis: 4h Keltner Channel breakout with 1d EMA trend filter and volume confirmation.
-Goes long when price breaks above upper KC in uptrend, short when breaks below lower KC in downtrend.
-Uses volume spike (>2x 20-bar MA) to confirm breakouts. Designed for low trade frequency
-(20-30 trades/year) to minimize fee drag while capturing strong directional moves.
-Works in both bull and bear markets by following 1d trend direction.
+4h_MultiTimeframe_Confluence_Bands
+Hypothesis: Combines 4h Bollinger Band breakout with 1d EMA trend filter and volume confirmation.
+Goes long when price breaks above upper Bollinger Band in uptrend with volume spike,
+short when breaks below lower band in downtrend with volume spike.
+Designed for low trade frequency (15-30 trades/year) to minimize fee drift while capturing
+strong directional moves in both bull and bear markets by following daily trend.
 """
 
 import numpy as np
@@ -22,33 +22,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Keltner Channel (20, 2)
-    # Middle = EMA20
-    # Upper = EMA20 + 2 * ATR(10)
-    # Lower = EMA20 - 2 * ATR(10)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 4h Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_middle + (bb_std_dev * bb_std)
+    bb_lower = bb_middle - (bb_std_dev * bb_std)
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    kc_upper = ema_20 + 2 * atr_10
-    kc_lower = ema_20 - 2 * atr_10
-    
-    # Volume confirmation: >2x 20-period MA
+    # Volume confirmation: >1.8x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,30 +52,30 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(kc_upper[i]) or 
-            np.isnan(kc_lower[i]) or
+            np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
+        # Trend filter: price above/below daily EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_upper = close[i] > kc_upper[i]
-        breakdown_lower = close[i] < kc_lower[i]
+        # Bollinger Band breakout conditions
+        bb_breakout_up = close[i] > bb_upper[i]
+        bb_breakout_down = close[i] < bb_lower[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
         
         # Entry logic: breakout in direction of trend with volume
-        long_entry = vol_confirm and uptrend and breakout_upper
-        short_entry = vol_confirm and downtrend and breakdown_lower
+        long_entry = vol_confirm and uptrend and bb_breakout_up
+        short_entry = vol_confirm and downtrend and bb_breakout_down
         
         # Exit logic: opposite breakout or trend change
-        long_exit = breakdown_lower or (not uptrend)
-        short_exit = breakout_upper or (not downtrend)
+        long_exit = bb_breakout_down or (not uptrend)
+        short_exit = bb_breakout_up or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -107,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KC_Trend_Follow_Volume"
+name = "4h_MultiTimeframe_Confluence_Bands"
 timeframe = "4h"
 leverage = 1.0
