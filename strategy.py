@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_RangeBreakout_1dTrend_Filter_v1
-Hypothesis: Use weekly pivot levels for major support/resistance, with 1d trend filter and volatility-based range breakout.
-In bull markets: buy pullbacks to weekly S1/S2 in uptrend. In bear markets: sell rallies to weekly R1/R2 in downtrend.
-Weekly pivots provide institutional levels; 1d trend filters for direction; range breakout avoids chop.
-Targets 15-30 trades/year to minimize fee drag while capturing meaningful moves.
+12h_1w1d_Camarilla_R3_S3_Breakout_Trend_Volume
+Hypothesis: Combine 12h price action with 1w/1d trend and volume confirmation. 
+Uses 1d EMA100 for trend filter and 1w EMA50 for higher timeframe bias. 
+Breaks above R3 or below S3 of daily Camarilla levels with volume surge (>2x 24-bar average) 
+and aligned weekly/daily trend. Designed for fewer, higher-quality trades (target: 15-30/year) 
+to reduce fee drag while capturing sustained moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,83 +14,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get 1d and 1w data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivots from previous week
-    prev_week_high = df_w['high'].shift(1).values
-    prev_week_low = df_w['low'].shift(1).values
-    prev_week_close = df_w['close'].shift(1).values
+    # Calculate Camarilla levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot - prev_week_low
-    s1 = 2 * pivot - prev_week_high
-    r2 = pivot + (prev_week_high - prev_week_low)
-    s2 = pivot - (prev_week_high - prev_week_low)
+    # Camarilla R3 and S3 levels
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # 1d EMA50 for trend filter
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA100 for trend filter
+    ema_100_1d = pd.Series(df_1d['close']).ewm(span=100, adjust=False, min_periods=100).mean().values
     
-    # Align weekly and daily data to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_w, s2)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # 1w EMA50 for higher timeframe bias
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Trend: bullish when price > EMA50, bearish when price < EMA50
-    d1_uptrend = close > ema_50_aligned
-    d1_downtrend = close < ema_50_aligned
+    # Align all higher timeframe data to 12h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volatility filter: avoid choppy markets (use 6h ATR)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Normalize ATR by price for volatility regime
-    atr_ratio = atr / np.maximum(close, 1e-10)
-    # Low volatility threshold: avoid extremely choppy periods
-    vol_ma_50 = pd.Series(atr_ratio).rolling(window=50, min_periods=50).mean().values
-    low_vol_filter = atr_ratio < (vol_ma_50 * 1.5)  # Avoid high volatility spikes
+    # Trend filters: 
+    # Daily trend: price > EMA100 = bullish, < EMA100 = bearish
+    d1_uptrend = close > ema_100_1d_aligned
+    d1_downtrend = close < ema_100_1d_aligned
+    
+    # Weekly trend bias: price > weekly EMA50 = bullish bias, < = bearish bias
+    w1_bullish_bias = close > ema_50_1w_aligned
+    w1_bearish_bias = close < ema_50_1w_aligned
+    
+    # Volume confirmation: current volume > 2.0x 24-period average
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_surge = volume > (vol_ma_24 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 200  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(low_vol_filter[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_100_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: pullback to pivot levels in trend direction with low volatility filter
-        long_entry = (close[i] >= s1_aligned[i] and close[i] <= pivot_aligned[i] and 
-                     d1_uptrend[i] and low_vol_filter[i])
-        short_entry = (close[i] <= r1_aligned[i] and close[i] >= pivot_aligned[i] and 
-                      d1_downtrend[i] and low_vol_filter[i])
+        # Entry conditions with trend alignment and volume surge
+        # Long: price breaks above R3 + daily uptrend + weekly bullish bias + volume surge
+        long_entry = (close[i] > R3_aligned[i] and 
+                     d1_uptrend[i] and 
+                     w1_bullish_bias[i] and 
+                     volume_surge[i])
         
-        # Exit when price reaches opposite pivot level or trend reverses
-        long_exit = (close[i] >= r1_aligned[i]) or (not d1_uptrend[i])
-        short_exit = (close[i] <= s1_aligned[i]) or (not d1_downtrend[i])
+        # Short: price breaks below S3 + daily downtrend + weekly bearish bias + volume surge
+        short_entry = (close[i] < S3_aligned[i] and 
+                      d1_downtrend[i] and 
+                      w1_bearish_bias[i] and 
+                      volume_surge[i])
+        
+        # Exit on opposite Camarilla level break with volume surge
+        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
+        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -114,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_RangeBreakout_1dTrend_Filter_v1"
-timeframe = "6h"
+name = "12h_1w1d_Camarilla_R3_S3_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
