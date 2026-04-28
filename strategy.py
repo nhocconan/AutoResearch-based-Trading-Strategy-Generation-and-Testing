@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Divergence_Volume_Trend
-Hypothesis: RSI divergence with volume confirmation and daily trend filter works in both bull and bear markets. RSI divergence captures momentum exhaustion, volume confirms institutional participation, and daily trend filter reduces whipsaw. Target: 20-40 trades/year per symbol.
+4h_Donchian_Breakout_20_Trend_1d_EMA50_Volume_Spike
+Hypothesis: 4-hour Donchian(20) breakouts with 1-day EMA50 trend filter and volume spike work in both bull and bear markets. The trend filter reduces whipsaw, volume confirms institutional participation, and tight entry conditions limit trades to avoid fee drag. Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,69 +28,41 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Donchian(20) on 4h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate RSI peaks and troughs for divergence
-    rsi_peak = np.zeros_like(rsi)
-    rsi_trough = np.zeros_like(rsi)
-    price_peak = np.zeros_like(close)
-    price_trough = np.zeros_like(close)
-    
-    # Find local peaks and troughs (3-bar window)
-    for i in range(2, n-2):
-        # RSI peak: higher than neighbors
-        if rsi[i] > rsi[i-1] and rsi[i] > rsi[i-2] and rsi[i] > rsi[i+1] and rsi[i] > rsi[i+2]:
-            rsi_peak[i] = rsi[i]
-            price_peak[i] = close[i]
-        # RSI trough: lower than neighbors
-        if rsi[i] < rsi[i-1] and rsi[i] < rsi[i-2] and rsi[i] < rsi[i+1] and rsi[i] < rsi[i+2]:
-            rsi_trough[i] = rsi[i]
-            price_trough[i] = close[i]
-    
-    # Forward fill peaks and troughs for comparison
-    rsi_peak_series = pd.Series(rsi_peak).replace(0, np.nan).ffill().fillna(0).values
-    rsi_trough_series = pd.Series(rsi_trough).replace(0, np.nan).ffill().fillna(0).values
-    price_peak_series = pd.Series(price_peak).replace(0, np.nan).ffill().fillna(0).values
-    price_trough_series = pd.Series(price_trough).replace(0, np.nan).ffill().fillna(0).values
-    
-    # Bullish divergence: price makes lower low, RSI makes higher low
-    bullish_div = (price_trough_series < np.roll(price_trough_series, 1)) & (rsi_trough_series > np.roll(rsi_trough_series, 1))
-    # Bearish divergence: price makes higher high, RSI makes lower high
-    bearish_div = (price_peak_series > np.roll(price_peak_series, 1)) & (rsi_peak_series < np.roll(rsi_peak_series, 1))
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma_20 * 1.5)
+    volume_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for all indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
+        
+        # Donchian breakout conditions
+        breakout_long = close[i] > high_20[i-1]  # Break above 20-period high
+        breakout_short = close[i] < low_20[i-1]  # Break below 20-period low
         
         # Trend filter from daily EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions with volume confirmation
-        long_entry = bullish_div[i] and volume_confirm[i] and uptrend
-        short_entry = bearish_div[i] and volume_confirm[i] and downtrend
+        long_entry = breakout_long and volume_spike[i] and uptrend
+        short_entry = breakout_short and volume_spike[i] and downtrend
         
-        # Exit on opposite signal
-        long_exit = bearish_div[i] and volume_confirm[i]
-        short_exit = bullish_div[i] and volume_confirm[i]
+        # Exit on opposite breakout (reverse position)
+        long_exit = breakout_short and volume_spike[i]
+        short_exit = breakout_long and volume_spike[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -115,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Divergence_Volume_Trend"
+name = "4h_Donchian_Breakout_20_Trend_1d_EMA50_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
