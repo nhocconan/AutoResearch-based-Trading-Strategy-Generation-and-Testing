@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Premium_Index_Divergence_12hTrend
-Hypothesis: Use futures premium index (basis) as a sentiment indicator. When basis diverges from price action (price makes new high but basis makes lower high), it signals weakening momentum and potential reversal. Combined with 12h trend filter to avoid counter-trend trades. Works in both bull and bear markets by capturing exhaustion moves. Targets low trade frequency (~15-30/year) to minimize fee drag.
+4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: On 4h timeframe, enter long when price breaks above R3 with volume surge and daily uptrend (EMA34 > EMA89), short when price breaks below S3 with volume surge and daily downtrend. Exit on opposite S1/R1 level. Uses Camarilla's most significant levels for institutional breakouts. Daily trend filter avoids counter-trend trades. Volume surge confirms institutional participation. Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -10,81 +10,95 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate rolling premium index approximation (close - 20-period EMA)
-    # This approximates basis deviation from fair value
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    premium_index = close - ema20  # Positive = premium, Negative = discount
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get daily data for trend filter and Camarilla calculation
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 89:
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Calculate daily 34 and 89 EMA for trend filter
+    close_daily = df_daily['close'].values
+    ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_daily = pd.Series(close_daily).ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # 12h trend: bullish when price > EMA34, bearish when price < EMA34
-    trend_bull = close > ema34_12h_aligned
-    trend_bear = close < ema34_12h_aligned
+    # Align daily EMAs to 4h timeframe
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    ema89_daily_aligned = align_htf_to_ltf(prices, df_daily, ema89_daily)
     
-    # Divergence detection: price makes new high/low but premium index doesn't confirm
-    # Bearish divergence: price makes higher high, premium index makes lower high
-    # Bullish divergence: price makes lower low, premium index makes higher low
+    # Daily trend: bullish when EMA34 > EMA89
+    daily_uptrend = ema34_daily_aligned > ema89_daily_aligned
+    daily_downtrend = ema34_daily_aligned < ema89_daily_aligned
     
-    # Calculate rolling max/min for divergence detection (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    premium_max = pd.Series(premium_index).rolling(window=20, min_periods=20).max().values
-    premium_min = pd.Series(premium_index).rolling(window=20, min_periods=20).min().values
+    # Previous day's data for Camarilla calculation
+    prev_close = np.roll(close_daily, 1)
+    prev_high = np.roll(df_daily['high'].values, 1)
+    prev_low = np.roll(df_daily['low'].values, 1)
+    prev_close[0] = close_daily[0]
+    prev_high[0] = df_daily['high'].values[0]
+    prev_low[0] = df_daily['low'].values[0]
     
-    # Bearish divergence: price at recent high but premium index below recent high
-    bear_div = (high == high_max) & (premium_index < premium_max)
-    # Bullish divergence: price at recent low but premium index above recent low
-    bull_div = (low == low_min) & (premium_index > premium_min)
+    # Calculate Camarilla pivot levels
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + camarilla_range * 1.1 / 4
+    s3 = prev_close - camarilla_range * 1.1 / 4
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
+    
+    # Volume confirmation: current volume > 2.0x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_surge = volume > (vol_ma_50 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(premium_index[i]) or
-            np.isnan(high_max[i]) or np.isnan(low_min[i]) or
-            np.isnan(premium_max[i]) or np.isnan(premium_min[i])):
+        if (np.isnan(ema34_daily_aligned[i]) or np.isnan(ema89_daily_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: divergence + trend alignment
-        bearish_entry = bear_div[i] and trend_bear[i]  # Price high but weak momentum in downtrend
-        bullish_entry = bull_div[i] and trend_bull[i]  # Price low but strong momentum in uptrend
+        # Entry conditions with daily trend alignment and volume surge
+        long_entry = close[i] > r3_aligned[i] and daily_uptrend[i] and volume_surge[i]
+        short_entry = close[i] < s3_aligned[i] and daily_downtrend[i] and volume_surge[i]
         
-        # Exit when divergence disappears or trend changes
-        bearish_exit = ~bear_div[i] or ~trend_bear[i]
-        bullish_exit = ~bull_div[i] or ~trend_bull[i]
+        # Exit on opposite Camarilla R1/S1 level (more conservative exit)
+        long_exit = close[i] < s1_aligned[i]
+        short_exit = close[i] > r1_aligned[i]
         
-        if bullish_entry and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif bearish_entry and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif bearish_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
-        elif bullish_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+        elif long_exit and position == 1:
+            signals[i] = 0.0
+            position = 0
+        elif short_exit and position == -1:
+            signals[i] = 0.0
+            position = 0
         else:
             # Hold current position
             if position == 1:
@@ -96,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Premium_Index_Divergence_12hTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
