@@ -1,7 +1,7 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R1/S1 breakouts on 12h timeframe with 1d trend filter and volume confirmation capture high-probability mean-reversion trades. Works in both bull and bear markets by using 1d trend to filter direction and volume to confirm breakout strength. Targets 15-25 trades/year on 12h timeframe.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot breakout at R1/S1 levels with 1d EMA50 trend filter and volume confirmation provides high-probability entries in trending markets while avoiding chop. Targets 20-30 trades/year on 4h timeframe. Works in both bull and bear markets by following the daily trend.
 """
 
 import numpy as np
@@ -20,32 +20,36 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h Camarilla levels using previous day's OHLC
-    # Camarilla levels require previous day's data
-    prev_day_high = df_1d['high'].shift(1).values  # Previous day's high
-    prev_day_low = df_1d['low'].shift(1).values    # Previous day's low
-    prev_day_close = df_1d['close'].shift(1).values # Previous day's close
+    # Calculate Camarilla pivot levels for each 4h bar using previous 1d OHLC
+    # We need to align the daily OHLC to each 4h bar
+    # First get daily OHLC arrays
+    open_1d = df_1d['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels
+    # Align daily OHLC to 4h timeframe (each 4h bar gets the previous day's OHLC)
+    open_1d_aligned = align_htf_to_ltf(prices, df_1d, open_1d)
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    
+    # Calculate Camarilla levels for each bar
     # R1 = C + (H-L)*1.1/12
     # S1 = C - (H-L)*1.1/12
-    camarilla_range = prev_day_high - prev_day_low
-    r1 = prev_day_close + camarilla_range * 1.1 / 12
-    s1 = prev_day_close - camarilla_range * 1.1 / 12
+    rang = high_1d_aligned - low_1d_aligned
+    r1 = close_1d_aligned + rang * 1.1 / 12
+    s1 = close_1d_aligned - rang * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: >1.5x 20-period MA (approx 10 days on 12h)
+    # Volume confirmation: >1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,31 +59,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(r1[i]) or
+            np.isnan(s1[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Camarilla breakout conditions
-        breakout_above_r1 = close[i] > r1_aligned[i]
-        breakout_below_s1 = close[i] < s1_aligned[i]
+        # Breakout conditions
+        breakout_long = close[i] > r1[i]  # Break above R1
+        breakout_short = close[i] < s1[i]  # Break below S1
         
         # Volume confirmation
         vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Entry logic: Camarilla breakout in direction of trend with volume
-        long_entry = vol_confirm and uptrend and breakout_above_r1
-        short_entry = vol_confirm and downtrend and breakout_below_s1
+        # Entry logic: breakout in direction of trend with volume
+        long_entry = vol_confirm and uptrend and breakout_long
+        short_entry = vol_confirm and downtrend and breakout_short
         
-        # Exit logic: opposite Camarilla level touch or trend change
-        long_exit = close[i] < s1_aligned[i] or (not uptrend)
-        short_exit = close[i] > r1_aligned[i] or (not downtrend)
+        # Exit logic: opposite breakout or trend change
+        long_exit = breakout_short or (not uptrend)
+        short_exit = breakout_long or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -104,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
