@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation.
-# Enter long when price breaks above Donchian(20) upper band, 1d ADX > 25 (trending regime), and volume > 1.5x 20-bar average.
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
+# Enter long when price breaks above Donchian(20) upper band, weekly EMA50 is rising, and volume > 1.5x 20-bar average.
 # Enter short when price breaks below Donchian(20) lower band under same conditions.
-# Exit when price crosses Donchian midpoint or ADX < 20 (trend weakening).
+# Exit when price crosses Donchian midpoint.
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 80-150 total trades over 4 years (20-38/year) to avoid fee drag.
-# ADX filter ensures we only trade in trending markets, avoiding choppy false breakouts.
+# Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
+# Weekly trend filter ensures we trade with the higher timeframe momentum, reducing whipsaws.
+# Volume confirmation adds conviction to breakouts.
 
-name = "4h_DonchianBreakout_1dADX25_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_DonchianBreakout_1wEMA50Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,50 +26,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA(50) for trend direction
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_prev = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().shift(1).values
+    ema_50_1w_rising = ema_50_1w > ema_50_1w_prev
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Align weekly EMA trend to daily timeframe
+    ema_50_1w_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w_rising)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+, DM-
-    tr_period = 14
-    atr = pd.Series(tr).rolling(window=tr_period, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=tr_period, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=tr_period, min_periods=tr_period).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / np.where(atr != 0, atr, 1e-10)
-    di_minus = 100 * dm_minus_smooth / np.where(atr != 0, atr, 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) != 0, (di_plus + di_minus), 1e-10)
-    adx = pd.Series(dx).rolling(window=tr_period, min_periods=tr_period).mean().values
-    
-    # Align 1d ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian channels (20-period) on 4h
+    # Donchian channels (20-period) on 1d
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -86,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
+        if (np.isnan(ema_50_1w_rising_aligned[i]) or np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -94,24 +67,23 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend regime: ADX > 25 = strong trend (favorable for breakouts)
-        strong_trend = adx_aligned[i] > 25
-        # Trend weakening: ADX < 20 = exit condition
-        trend_weakening = adx_aligned[i] < 20
+        # Weekly trend filter: EMA50 rising = bullish trend
+        weekly_bullish = ema_50_1w_rising_aligned[i]
+        weekly_bearish = ~weekly_bullish
         
         # Donchian breakout conditions
         breakout_up = close[i] > highest_high[i-1]  # Break above previous period's high
         breakout_down = close[i] < lowest_low[i-1]  # Break below previous period's low
         
         # Exit conditions
-        exit_long = close[i] < donchian_mid[i] or trend_weakening
-        exit_short = close[i] > donchian_mid[i] or trend_weakening
+        exit_long = close[i] < donchian_mid[i]
+        exit_short = close[i] > donchian_mid[i]
         
         # Handle entries and exits
-        if breakout_up and strong_trend and vol_confirm and position <= 0:
+        if breakout_up and weekly_bullish and vol_confirm and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif breakout_down and strong_trend and vol_confirm and position >= 0:
+        elif breakout_down and weekly_bearish and vol_confirm and position >= 0:
             signals[i] = -0.25
             position = -1
         elif position == 1 and exit_long:
