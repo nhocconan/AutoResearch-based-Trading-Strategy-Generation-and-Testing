@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Supertrend with 1d ADX regime filter and volume confirmation
-# Supertrend captures trend direction with built-in ATR stop mechanism
-# 1d ADX > 25 filters for trending markets (avoids choppy ranging periods)
-# Volume confirmation > 2.0x 20-bar average ensures institutional participation
-# Long when Supertrend = uptrend, 1d ADX > 25, volume spike
-# Short when Supertrend = downtrend, 1d ADX > 25, volume spike
-# Uses discrete position sizing (0.0, ±0.25) to minimize fee churn
-# Targets 20-50 trades/year to avoid fee drag while capturing major trends
+# Hypothesis: 6h Weekly Pivot Reversal with 1d Volume Spike and 1w EMA34 Trend Filter
+# Weekly Pivots: Calculate R1,S1,R2,S2 from prior weekly OHLC
+# Long when price crosses above S1 with volume spike and 1w EMA34 uptrend
+# Short when price crosses below R1 with volume spike and 1w EMA34 downtrend
+# Uses 6h timeframe targeting 12-37 trades/year (~50-150 total over 4 years)
+# Weekly pivot provides strong institutional levels; volume confirms breakout validity;
+# Weekly EMA filter ensures alignment with larger trend, reducing counter-trend trades
 
-name = "4h_Supertrend_1dADX_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Reversal_1dVolumeSpike_1wEMA34_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,157 +25,103 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX regime filter
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1w data for weekly pivot and EMA trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with original index
+    # Calculate 1d volume spike confirmation (>1.5x 20-bar average)
+    volume_1d = df_1d['volume'].values
+    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > 1.5 * volume_ma_20
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Calculate 1w EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Smoothed TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder smoothing
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Calculate weekly pivots from prior week OHLC
+    # Weekly pivot: P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    atr_1d = wilder_smooth(tr, 14)
-    plus_dm_smooth = wilder_smooth(plus_dm, 14)
-    minus_dm_smooth = wilder_smooth(minus_dm, 14)
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
     
-    # +DI and -DI
-    plus_di_1d = np.where(atr_1d != 0, (plus_dm_smooth / atr_1d) * 100, 0)
-    minus_di_1d = np.where(atr_1d != 0, (minus_dm_smooth / atr_1d) * 100, 0)
-    
-    # DX and ADX
-    dx_1d = np.where((plus_di_1d + minus_di_1d) != 0, 
-                     np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d) * 100, 0)
-    adx_1d = wilder_smooth(dx_1d, 14)
-    
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 4h Supertrend
-    atr_period = 10
-    multiplier = 3.0
-    
-    # True Range for 4h
-    tr1_4h = high[1:] - low[1:]
-    tr2_4h = np.abs(high[1:] - close[:-1])
-    tr3_4h = np.abs(low[1:] - close[:-1])
-    tr_4h = np.maximum(np.maximum(tr1_4h, tr2_4h), tr3_4h)
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    
-    # ATR using Wilder's smoothing
-    atr_4h = wilder_smooth(tr_4h, atr_period)
-    
-    # Basic Upper and Lower Bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + (multiplier * atr_4h)
-    lower_band = hl2 - (multiplier * atr_4h)
-    
-    # Initialize Supertrend
-    supertrend = np.full(n, np.nan)
-    trend = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
-    
-    # First valid value
-    start_atr = atr_period
-    if start_atr < n:
-        supertrend[start_atr] = upper_band[start_atr]
-        trend[start_atr] = 1
-    
-    # Calculate Supertrend iteratively
-    for i in range(start_atr + 1, n):
-        if np.isnan(atr_4h[i]) or np.isnan(close[i-1]):
-            supertrend[i] = supertrend[i-1]
-            trend[i] = trend[i-1]
-            continue
-            
-        if supertrend[i-1] == upper_band[i-1]:
-            if close[i] <= upper_band[i]:
-                supertrend[i] = upper_band[i]
-                trend[i] = -1
-            else:
-                supertrend[i] = lower_band[i]
-                trend[i] = 1
-        else:
-            if close[i] >= lower_band[i]:
-                supertrend[i] = lower_band[i]
-                trend[i] = 1
-            else:
-                supertrend[i] = upper_band[i]
-                trend[i] = -1
-    
-    # Volume confirmation: >2.0x 20-bar average volume
-    volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    # Align weekly pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(34, 20)  # ADX and volume MA
+    start_idx = 34  # Need enough bars for 1w EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(supertrend[i]) or 
-            np.isnan(trend[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_confirm = volume_spike[i]
         price = close[i]
-        adx_val = adx_1d_aligned[i]
-        st_value = supertrend[i]
-        st_trend = trend[i]
+        vol_confirm = volume_spike_1d_aligned[i]
+        ema_uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] if i > 0 else False
+        ema_downtrend = ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] if i > 0 else False
         
-        # Regime filter: only trade when 1d ADX > 25 (trending market)
-        is_trending = adx_val > 25
-        
+        # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: Supertrend uptrend, trending market, volume spike
-            if st_trend == 1 and is_trending and vol_confirm:
+            # Long entry: price crosses above S1 with volume spike and 1w EMA uptrend
+            if i > 0 and close[i-1] <= s1_aligned[i-1] and price > s1_aligned[i] and vol_confirm and ema_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Supertrend downtrend, trending market, volume spike
-            elif st_trend == -1 and is_trending and vol_confirm:
+                entry_price = price
+            # Short entry: price crosses below R1 with volume spike and 1w EMA downtrend
+            elif i > 0 and close[i-1] >= r1_aligned[i-1] and price < r1_aligned[i] and vol_confirm and ema_downtrend:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on trend change
-            # Exit when Supertrend turns downtrend
-            if st_trend == -1:
+        elif position == 1:  # Long - exit on stoploss or pivot breakdown
+            # ATR-based stoploss: 2.0 * ATR below entry (using 6h ATR)
+            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
+            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr = np.maximum(np.maximum(tr1, tr2), tr3)
+            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
+            stop_loss = entry_price - 2.0 * atr_val
+            # Exit on stoploss or when price breaks below S2 (strong bearish signal)
+            if price < stop_loss or price < s2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on trend change
-            # Exit when Supertrend turns uptrend
-            if st_trend == 1:
+        elif position == -1:  # Short - exit on stoploss or pivot breakout
+            # ATR-based stoploss: 2.0 * ATR above entry
+            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
+            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr = np.maximum(np.maximum(tr1, tr2), tr3)
+            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
+            stop_loss = entry_price + 2.0 * atr_val
+            # Exit on stoploss or when price breaks above R2 (strong bullish signal)
+            if price > stop_loss or price > r2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
