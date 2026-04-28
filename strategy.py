@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for higher timeframe context
+    # Get daily data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for volatility filter
+    # Calculate daily ATR(14) for volatility filter
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -30,14 +30,14 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First value
     atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d ATR(14) moving average for volatility regime detection
+    # Calculate daily ATR(14) moving average for volatility regime detection
     atr_ma_1d = pd.Series(atr14_1d).rolling(window=50, min_periods=50).mean().values
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -49,7 +49,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -60,7 +60,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during active hours
+        # Skip if outside trading session
         if not session_mask[i]:
             signals[i] = 0.0
             continue
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyATR_VolRegime_Donchian20_Breakout_v1"
-timeframe = "12h"
+name = "4h_DailyATR_VolRegime_Donchian20_Breakout_v2"
+timeframe = "4h"
 leverage = 1.0
