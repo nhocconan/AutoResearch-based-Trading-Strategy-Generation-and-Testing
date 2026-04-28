@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_ChaikinOscillator_Reversal_1dTrend_Filter
-Hypothesis: Chaikin Oscillator identifies accumulation/distribution shifts. Reversal signals when oscillator crosses zero with volume confirmation, filtered by 1d EMA trend. Works in bull/bear by trading reversals against trend exhaustion.
+4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: 4-hour breakouts at daily-derived Camarilla R3/S3 levels with daily trend filter and volume confirmation. 
+Focuses on strong momentum moves with institutional-grade levels (R3/S3) to reduce false signals.
+Targets 25-50 trades/year by requiring breakout, daily trend alignment, and volume surge.
+Works in bull/bear via trend filter and avoids range-bound whipsaws.
 """
 
 import numpy as np
@@ -18,60 +21,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Money Flow Multiplier and Volume
-    mfm = ((close - low) - (high - close)) / (high - low)
-    mfm = np.where((high - low) == 0, 0, mfm)
-    mfv = mfm * volume
-    
-    # Chaikin Oscillator: (3-day EMA of MFV) - (10-day EMA of MFV)
-    mfv_series = pd.Series(mfv)
-    ema3 = mfv_series.ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10 = mfv_series.ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin = ema3 - ema10
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-    d_uptrend = close > ema_50_1d_aligned
-    d_downtrend = close < ema_50_1d_aligned
+    # Camarilla R3 and S3 levels (stronger reversal points)
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all higher timeframe data to 4h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Trend filter: price > EMA34 = bullish, < EMA34 = bearish
+    d_uptrend = close > ema_34_1d_aligned
+    d_downtrend = close < ema_34_1d_aligned
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for sufficient warmup (max of 10, 50)
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(chaikin[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(d_uptrend[i]) or np.isnan(d_downtrend[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Chaikin zero cross with momentum
-        chaikin_cross_up = (chaikin[i] > 0) and (chaikin[i-1] <= 0)
-        chaikin_cross_down = (chaikin[i] < 0) and (chaikin[i-1] >= 0)
+        # Entry conditions with trend alignment and volume surge
+        # Long: price breaks above R3 + daily uptrend + volume surge
+        long_entry = (close[i] > R3_aligned[i] and 
+                     d_uptrend[i] and 
+                     volume_surge[i])
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_surge = volume[i] > (vol_ma_20[i] * 1.5) if not np.isnan(vol_ma_20[i]) else False
+        # Short: price breaks below S3 + daily downtrend + volume surge
+        short_entry = (close[i] < S3_aligned[i] and 
+                      d_downtrend[i] and 
+                      volume_surge[i])
         
-        # Entry conditions
-        # Long: Chaikin crosses up from negative + volume surge + not in strong uptrend (fade strength)
-        long_entry = chaikin_cross_up and volume_surge and not d_uptrend[i]
-        
-        # Short: Chaikin crosses down from positive + volume surge + not in strong downtrend (fade weakness)
-        short_entry = chaikin_cross_down and volume_surge and not d_downtrend[i]
-        
-        # Exit when Chaikin crosses zero in opposite direction
-        long_exit = chaikin_cross_down
-        short_exit = chaikin_cross_up
+        # Exit on opposite level break with volume surge
+        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
+        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -96,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ChaikinOscillator_Reversal_1dTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
