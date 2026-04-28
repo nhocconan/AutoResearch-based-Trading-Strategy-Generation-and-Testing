@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_InsideBar_Breakout_1dTrend_VolumeFilter
-Hypothesis: Inside bars on 4h indicate consolidation. Breakouts of inside bar high/low with 1-day EMA trend filter and volume spike capture explosive moves in both bull and bear markets. Inside bar reduces false breakouts, and volume filter ensures momentum. Targets 20-40 trades/year.
+6h_Camarilla_R3_S3_Fade_1wTrend_VolumeFilter
+Hypothesis: On 6-hour chart, price often reverts to the mean after reaching extreme Camarilla levels (R3/S3) during weekly trends. 
+Fading R3/S3 with weekly trend filter and volume exhaustion filter captures mean reversion in both bull and bear markets.
+Weekly trend ensures we fade in direction of higher timeframe momentum, reducing counter-trend risk.
+Volume exhaustion (low volume) confirms lack of follow-through, increasing fade probability.
+Target: 15-25 trades/year (60-100 total over 4 years).
 """
 
 import numpy as np
@@ -18,29 +22,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Camarilla levels from previous day's range
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.1 * (high - low)
+    # S3 = close - 1.1 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Inside bar detection: current high < previous high AND current low > previous low
-    inside_bar = (high < np.roll(high, 1)) & (low > np.roll(low, 1))
+    r3 = prev_close + 1.1 * (prev_high - prev_low)
+    s3 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # Inside bar high and low (use previous bar's high/low as the inside bar boundaries)
-    inside_high = np.roll(high, 1)
-    inside_low = np.roll(low, 1)
+    # Align Camarilla levels to 6h timeframe (use previous day's levels)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Align inside bar levels to current timeframe (they are already 4h, no need to align from HTF)
-    # But we need to ensure we use the inside bar from the bar that just closed
-    inside_high_aligned = inside_high  # already at 4h resolution
-    inside_low_aligned = inside_low
-    
-    # Volume confirmation: >1.5x 20-period MA
+    # Volume exhaustion: volume < 0.7 * 20-period MA (low volume = lack of follow-through)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -50,31 +63,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(inside_high_aligned[i]) or
-            np.isnan(inside_low_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Breakout conditions: break of inside bar high/low
-        breakout_high = close[i] > inside_high_aligned[i]
-        breakdown_low = close[i] < inside_low_aligned[i]
+        # Fade conditions: price at extreme levels with volume exhaustion
+        at_r3 = high[i] >= r3_aligned[i]  # touched or exceeded R3
+        at_s3 = low[i] <= s3_aligned[i]   # touched or exceeded S3
+        vol_exhausted = volume[i] < (0.7 * vol_ma_20[i])
         
-        # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        # Entry logic: fade extreme levels in direction of weekly trend with volume exhaustion
+        long_entry = vol_exhausted and uptrend and at_s3   # fade S3 in uptrend
+        short_entry = vol_exhausted and downtrend and at_r3 # fade R3 in downtrend
         
-        # Entry logic: breakout in direction of trend with volume
-        long_entry = vol_confirm and uptrend and breakout_high
-        short_entry = vol_confirm and downtrend and breakdown_low
+        # Exit logic: price moves back toward mean (daily VWAP approximation) or trend fails
+        # Use mid-point of Camarilla width as exit target
+        camarilla_width = r3_aligned[i] - s3_aligned[i]
+        exit_level_long = s3_aligned[i] + 0.5 * camarilla_width  # 50% retracement
+        exit_level_short = r3_aligned[i] - 0.5 * camarilla_width
         
-        # Exit logic: opposite breakout or trend change
-        long_exit = breakdown_low or (not uptrend)
-        short_exit = breakout_high or (not downtrend)
+        long_exit = low[i] <= exit_level_long or (not uptrend)
+        short_exit = high[i] >= exit_level_short or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -99,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_InsideBar_Breakout_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Fade_1wTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
