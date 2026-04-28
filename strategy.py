@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Divergence_Volume_Filter
-Hypothesis: RSI divergence (hidden divergence) on 4h with volume confirmation and 1d trend filter.
-Hidden bullish: price makes higher low, RSI makes lower low → long in uptrend.
-Hidden bearish: price makes lower high, RSI makes higher high → short in downtrend.
-Targets 20-30 trades/year to minimize fee drag while capturing trend continuations.
-Works in both bull and bear markets by following higher timeframe trend.
+1d_WeeklyTrixTrend_WithVolumeSpike
+Hypothesis: TRIX momentum on weekly timeframe captures trend changes with low lag.
+Combined with daily volume spike and price above/below weekly EMA34 for filtering.
+Trades only in direction of weekly trend to avoid counter-trend whipsaws.
+Targets 15-25 trades/year to minimize fee drag while capturing major moves.
 """
 
 import numpy as np
 import pandas as pd
-from mts_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,75 +21,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for TRIX and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA for trend
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate TRIX (15-period EMA of EMA of EMA of log returns)
+    close_1w = df_1w['close'].values
+    log_returns = np.log(close_1w[1:] / close_1w[:-1])
+    log_returns = np.concatenate([[0], log_returns])  # align length
     
-    # Calculate RSI(14) on 4h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    ema1 = pd.Series(log_returns).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3 - pd.Series(ema3).shift(1))  # percentage change
+    trix = trix.fillna(0).values
     
-    # Volume confirmation: >1.5x 20-period MA
+    # Weekly EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align weekly indicators to daily
+    trix_aligned = align_htf_to_ltf(prices, df_1w, trix)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Daily volume confirmation: >2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 40  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(rsi_values[i-1]) or np.isnan(vol_ma_20[i]) or
-            i < 2):  # Need at least 2 bars for divergence check
+        if (np.isnan(trix_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 1d trend
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Weekly trend: price above/below EMA34
+        weekly_bullish = close[i] > ema34_1w_aligned[i]
+        weekly_bearish = close[i] < ema34_1w_aligned[i]
         
-        # Check for hidden bullish divergence: price higher low, RSI lower low
-        # Need to look back for swing lows
-        hidden_bull = False
-        hidden_bear = False
-        
-        # Simple swing detection: look for local lows/highs over 3 bars
-        if i >= 3:
-            # Price low at i-1
-            if low[i-1] <= low[i-2] and low[i-1] <= low[i]:
-                # RSI lower low at i-1
-                if rsi_values[i-1] <= rsi_values[i-2] and rsi_values[i-1] <= rsi_values[i]:
-                    hidden_bull = True
-            
-            # Price high at i-1
-            if high[i-1] >= high[i-2] and high[i-1] >= high[i]:
-                # RSI higher high at i-1
-                if rsi_values[i-1] >= rsi_values[i-2] and rsi_values[i-1] >= rsi_values[i]:
-                    hidden_bear = True
+        # TRIX signal: zero cross with momentum
+        trix_cross_up = trix_aligned[i-1] <= 0 and trix_aligned[i] > 0
+        trix_cross_down = trix_aligned[i-1] >= 0 and trix_aligned[i] < 0
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Entry logic: hidden divergence in direction of 1d trend
-        long_entry = vol_confirm and trend_up and hidden_bull
-        short_entry = vol_confirm and trend_down and hidden_bear
+        # Entry logic: TRIX cross in direction of weekly trend with volume
+        long_entry = vol_confirm and weekly_bullish and trix_cross_up
+        short_entry = vol_confirm and weekly_bearish and trix_cross_down
         
-        # Exit logic: opposite divergence or trend change
-        long_exit = hidden_bear or not trend_up
-        short_exit = hidden_bull or not trend_down
+        # Exit logic: opposite TRIX cross or trend change
+        long_exit = trix_cross_down or (not weekly_bullish)
+        short_exit = trix_cross_up or (not weekly_bearish)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -115,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Divergence_Volume_Filter"
-timeframe = "4h"
+name = "1d_WeeklyTrixTrend_WithVolumeSpike"
+timeframe = "1d"
 leverage = 1.0
