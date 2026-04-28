@@ -13,23 +13,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and volatility regime
+    # Get daily data for Donchian channel
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Daily ATR(14) for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.inf
-    tr2[0] = np.inf
-    tr3[0] = np.inf
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily Donchian(10) breakout levels
+    high_10 = pd.Series(df_1d['high'].values).rolling(window=10, min_periods=10).max().values
+    low_10 = pd.Series(df_1d['low'].values).rolling(window=10, min_periods=10).min().values
+    
+    # Align to 12h timeframe
+    high_10_aligned = align_htf_to_ltf(prices, df_1d, high_10)
+    low_10_aligned = align_htf_to_ltf(prices, df_1d, low_10)
     
     # Get weekly data for trend filter (EMA20)
     df_1w = get_htf_data(prices, '1w')
@@ -41,17 +36,18 @@ def generate_signals(prices):
     ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Get daily data for Donchian channel (10-period for more sensitivity)
-    if len(df_1d) < 10:
-        return np.zeros(n)
-    
-    # Daily Donchian(10) breakout levels
-    high_10 = pd.Series(df_1d['high'].values).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(df_1d['low'].values).rolling(window=10, min_periods=10).min().values
-    
-    # Align to 12h timeframe
-    high_10_aligned = align_htf_to_ltf(prices, df_1d, high_10)
-    low_10_aligned = align_htf_to_ltf(prices, df_1d, low_10)
+    # Get daily data for ATR (volatility filter)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = np.inf
+    tr2[0] = np.inf
+    tr3[0] = np.inf
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Session filter: 8-20 UTC (most active trading hours)
