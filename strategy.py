@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R (14) with volume confirmation and chop regime filter.
-# Enter long when Williams %R crosses above -20 (oversold bounce) with volume spike and chop < 61.8.
-# Enter short when Williams %R crosses below -80 (overbought rejection) with volume spike and chop < 61.8.
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 30-60 trades/year.
-# Williams %R provides mean-reversion signals in ranging markets, volume confirms momentum, chop filter avoids false signals in strong trends.
-# Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets by fading extremes.
+# Hypothesis: 1d strategy using 1w Camarilla pivot R3/S3 breakout with volume confirmation and ADX trend filter.
+# Enter long when price breaks above 1w Camarilla R3 with volume spike and ADX > 25 (trending regime).
+# Enter short when price breaks below 1w Camarilla S3 with volume spike and ADX > 25.
+# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 15-30 trades/year.
+# Camarilla levels from weekly timeframe provide strong structure, volume confirms breakout strength, ADX filter avoids ranging markets.
+# Works in bull (breakouts with trend) and bear (failed breaks reverse via exits) markets.
 
-name = "4h_WilliamsR_Volume_ChopFilter_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_Volume_ADX_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,67 +24,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R (HTF)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for Camarilla pivots (HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R (14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w Camarilla pivots (using previous bar's high, low, close)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    n_1d = len(high_1d)
-    williams_r = np.full(n_1d, np.nan)
+    n_1w = len(high_1w)
+    camarilla_r3 = np.full(n_1w, np.nan)
+    camarilla_s3 = np.full(n_1w, np.nan)
     
-    for i in range(14, n_1d):
-        highest_high = np.max(high_1d[i-13:i+1])
-        lowest_low = np.min(low_1d[i-13:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50.0
+    for i in range(1, n_1w):
+        # Use previous bar to avoid look-ahead
+        phigh = high_1w[i-1]
+        plow = low_1w[i-1]
+        pclose = close_1w[i-1]
+        pivot = (phigh + plow + pclose) / 3.0
+        rng = phigh - plow
+        camarilla_r3[i] = pivot + rng * 1.1 / 4.0
+        camarilla_s3[i] = pivot - rng * 1.1 / 4.0
     
-    # Align 1d Williams %R to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Forward fill Camarilla levels
+    camarilla_r3 = pd.Series(camarilla_r3).ffill().values
+    camarilla_s3 = pd.Series(camarilla_s3).ffill().values
     
-    # Calculate 4h chop regime: EHLERS CHOPPINESS INDEX (14)
-    def choppiness_index(high, low, close, length=14):
-        atr_sum = np.zeros_like(close)
-        true_range = np.zeros_like(close)
-        for i in range(1, len(close)):
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-            true_range[i] = tr
-            if i >= length:
-                atr_sum[i] = atr_sum[i-1] + tr - true_range[i-length+1]
-            else:
-                atr_sum[i] = atr_sum[i-1] + tr
-        atr = atr_sum / length
-        max_high = np.zeros_like(close)
-        min_low = np.zeros_like(close)
-        for i in range(len(close)):
-            if i < length:
-                max_high[i] = np.max(high[:i+1])
-                min_low[i] = np.min(low[:i+1])
-            else:
-                max_high[i] = np.max(high[i-length+1:i+1])
-                min_low[i] = np.min(low[i-length+1:i+1])
-        chop = np.zeros_like(close)
-        for i in range(length-1, len(close)):
-            if max_high[i] != min_low[i]:
-                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(length)
-            else:
-                chop[i] = 50.0
-        return chop
+    # Align 1w indicators to 1d timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    chop = choppiness_index(high, low, close, 14)
-    chop_trending = chop < 61.8  # Trending regime when chop < 61.8
+    # Calculate 1d ADX (14) for trend regime
+    def calculate_adx(high, low, close, length=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = 0  # First value has no previous close
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed TR, DM+, DM-
+        tr_smooth = np.zeros_like(tr)
+        dm_plus_smooth = np.zeros_like(dm_plus)
+        dm_minus_smooth = np.zeros_like(dm_minus)
+        
+        # Initial smoothed values (first length periods)
+        tr_smooth[length-1] = np.sum(tr[0:length])
+        dm_plus_smooth[length-1] = np.sum(dm_plus[0:length])
+        dm_minus_smooth[length-1] = np.sum(dm_minus[0:length])
+        
+        # Subsequent smoothed values (Wilder's smoothing)
+        for i in range(length, len(tr)):
+            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / length) + tr[i]
+            dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1] / length) + dm_plus[i]
+            dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1] / length) + dm_minus[i]
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smooth / tr_smooth
+        di_minus = 100 * dm_minus_smooth / tr_smooth
+        
+        # DX and ADX
+        dx = np.zeros_like(close)
+        dx[length-1:] = 100 * np.abs(di_plus[length-1:] - di_minus[length-1:]) / (di_plus[length-1:] + di_minus[length-1:])
+        
+        adx = np.zeros_like(close)
+        adx[2*length-1:] = np.nan
+        if len(dx) >= 2*length:
+            adx[2*length-1] = np.mean(dx[length:2*length])
+            for i in range(2*length, len(dx)):
+                adx[i] = (adx[i-1] * (length-1) + dx[i]) / length
+        
+        return adx
     
-    # Calculate 4h volume spike: >1.8x 20-bar average volume
+    adx = calculate_adx(high, low, close, 14)
+    adx_trending = adx > 25  # Trending regime when ADX > 25
+    
+    # Calculate 1d volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.8 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -93,24 +122,24 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_20[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(volume_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R conditions with volume confirmation and chop filter
-        long_signal = williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20 and volume_spike[i] and chop_trending[i]
-        short_signal = williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80 and volume_spike[i] and chop_trending[i]
+        # Camarilla breakout conditions with volume confirmation and ADX filter
+        long_breakout = close[i] > camarilla_r3_aligned[i] and volume_spike[i] and adx_trending[i]
+        short_breakout = close[i] < camarilla_s3_aligned[i] and volume_spike[i] and adx_trending[i]
         
-        # Exit conditions: opposite extreme
-        long_exit = williams_r_aligned[i] < -80
-        short_exit = williams_r_aligned[i] > -20
+        # Exit conditions: opposite Camarilla level
+        long_exit = close[i] < camarilla_s3_aligned[i]
+        short_exit = close[i] > camarilla_r3_aligned[i]
         
         # Handle entries and exits
-        if long_signal and position <= 0:
+        if long_breakout and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_signal and position >= 0:
+        elif short_breakout and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
