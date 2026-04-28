@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation
-# Long when Bull Power > 0 AND close > 1d EMA50 AND volume > 1.8x 20-bar avg
-# Short when Bear Power < 0 AND close < 1d EMA50 AND volume > 1.8x 20-bar avg
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 6h.
-# Works in bull markets by trading with trend, works in bear by requiring volume spikes
-# which often accompany climactic moves that precede reversals.
+# Hypothesis: 12h Camarilla R4/S4 breakout with 1w EMA50 trend filter and volume confirmation
+# Long when price breaks above R4 AND close > 1w EMA50 AND volume > 1.8x 20-bar avg
+# Short when price breaks below S4 AND close < 1w EMA50 AND volume > 1.8x 20-bar avg
+# Exits when price retouches the opposite Camarilla level (S4 for longs, R4 for shorts)
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-30 trades/year on 12h.
+# Works in bull markets by trading breakouts with trend, works in bear by requiring volume spikes
+# which often accompany panic selling/buying climaxes that precede reversals.
 
-name = "6h_ElderRay_1dEMA50_Trend_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R4S4_Breakout_1wEMA50_Trend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,26 +25,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need sufficient data for EMA50
+    # Get 1w data for EMA50 and Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1d close
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(50) on 1w close
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate EMA(13) on 6h close for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla levels from previous 1w OHLC
+    # We need the OHLC of the completed 1w bar to calculate levels for current period
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # High - EMA(13)
-    bear_power = low - ema_13   # Low - EMA(13)
+    # Calculate Camarilla levels: R4, S4
+    # R4 = close + ((high - low) * 1.1/2)
+    # S4 = close - ((high - low) * 1.1/2)
+    camarilla_r4 = close_1w + ((high_1w - low_1w) * 1.1 / 2)
+    camarilla_s4 = close_1w - ((high_1w - low_1w) * 1.1 / 2)
     
-    # Align 1d EMA50 to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1w EMA50 to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: >1.8x 20-bar average volume (strict filter to reduce trades)
+    # Align 1w Camarilla levels to 12h timeframe (use completed 1w bar's levels)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    
+    # Volume confirmation: >1.8x 20-bar average volume (moderate filter to balance trades)
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 1.8 * volume_ma_20
@@ -52,41 +61,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 13, 20)  # Need sufficient history for all indicators
+    start_idx = max(50, 20)  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        ema_trend = ema_50_1d_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        ema_trend = ema_50_1w_aligned[i]
+        r4_level = camarilla_r4_aligned[i]
+        s4_level = camarilla_s4_aligned[i]
         curr_close = close[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when Bull Power > 0 AND close > 1d EMA50 AND volume confirmation
-            if bull > 0 and curr_close > ema_trend and vol_conf:
+            # Long when price breaks above R4 AND close > 1w EMA50 AND volume confirmation
+            if curr_close > r4_level and curr_close > ema_trend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when Bear Power < 0 AND close < 1d EMA50 AND volume confirmation
-            elif bear < 0 and curr_close < ema_trend and vol_conf:
+            # Short when price breaks below S4 AND close < 1w EMA50 AND volume confirmation
+            elif curr_close < s4_level and curr_close < ema_trend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when Bull Power <= 0 (momentum fades)
-            if bull <= 0:
+        elif position == 1:  # Long - exit when price retouches S4 (opposite level)
+            if curr_close <= s4_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when Bear Power >= 0 (momentum fades)
-            if bear >= 0:
+        elif position == -1:  # Short - exit when price retouches R4 (opposite level)
+            if curr_close >= r4_level:
                 signals[i] = 0.0
                 position = 0
             else:
