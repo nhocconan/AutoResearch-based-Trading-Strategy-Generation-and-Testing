@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams %R extremes with volume confirmation and chop regime filter.
-# Enter long when 1d Williams %R < -80 (oversold) with volume spike and chop < 61.8 (trending regime).
-# Enter short when 1d Williams %R > -20 (overbought) with volume spike and chop < 61.8.
-# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 12-37 trades/year.
-# Williams %R provides mean-reversion edge from higher timeframe, volume confirms momentum exhaustion,
-# chop filter avoids ranging markets. Works in bull (oversold bounces) and bear (overbought failures) markets.
+# Hypothesis: 4h strategy using 1d Williams Alligator (Jaw/Teeth/Lips) with volume confirmation and chop regime filter.
+# Enter long when Alligator lines are bullish (Lips > Teeth > Jaw) with volume spike and chop < 61.8 (trending).
+# Enter short when Alligator lines are bearish (Lips < Teeth < Jaw) with volume spike and chop < 61.8.
+# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 20-50 trades/year.
+# Alligator provides trend direction from higher timeframe, volume confirms strength, chop filter avoids ranging markets.
+# Works in bull (trend continuation) and bear (trend reversal) markets by following the Alligator's alignment.
 
-name = "12h_WilliamsR_Volume_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Alligator_Trend_Volume_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,32 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R (HTF)
+    # Get 1d data for Williams Alligator (HTF)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d Williams Alligator: SMAs of median price
+    # Jaw: 13-period SMA, shifted 8 bars ahead
+    # Teeth: 8-period SMA, shifted 5 bars ahead
+    # Lips: 5-period SMA, shifted 3 bars ahead
+    median_price = (df_1d['high'] + df_1d['low']) / 2.0
     close_1d = df_1d['close'].values
     
-    n_1d = len(high_1d)
-    williams_r = np.full(n_1d, np.nan)
+    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    for i in range(14, n_1d):
-        highest_high = np.max(high_1d[i-14:i+1])
-        lowest_low = np.min(low_1d[i-14:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50.0
+    # Align 1d indicators to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_raw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_raw)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_raw)
     
-    # Align 1d indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Calculate 12h chop regime: EHLERS CHOPPINESS INDEX (14)
+    # Calculate 4h chop regime: EHLERS CHOPPINESS INDEX (14)
     def choppiness_index(high, low, close, length=14):
         atr_sum = np.zeros_like(close)
         true_range = np.zeros_like(close)
@@ -81,7 +78,7 @@ def generate_signals(prices):
     chop = choppiness_index(high, low, close, 14)
     chop_trending = chop < 61.8  # Trending regime when chop < 61.8
     
-    # Calculate 12h volume spike: >2.0x 20-bar average volume
+    # Calculate 4h volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
@@ -93,24 +90,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_20[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R extreme conditions with volume confirmation and chop filter
-        long_signal = williams_r_aligned[i] < -80 and volume_spike[i] and chop_trending[i]
-        short_signal = williams_r_aligned[i] > -20 and volume_spike[i] and chop_trending[i]
+        # Alligator trend conditions with volume confirmation and chop filter
+        # Bullish: Lips > Teeth > Jaw
+        bullish = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        # Bearish: Lips < Teeth < Jaw
+        bearish = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
         
-        # Exit conditions: Williams %R returns to neutral territory
-        long_exit = williams_r_aligned[i] > -50
-        short_exit = williams_r_aligned[i] < -50
+        long_entry = bullish and volume_spike[i] and chop_trending[i]
+        short_entry = bearish and volume_spike[i] and chop_trending[i]
+        
+        # Exit conditions: opposite Alligator alignment
+        long_exit = bearish  # Exit long when Alligator turns bearish
+        short_exit = bullish  # Exit short when Alligator turns bullish
         
         # Handle entries and exits
-        if long_signal and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_signal and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
