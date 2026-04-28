@@ -13,61 +13,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once for HTF context
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
     # Get daily data once for HTF context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h high/low/close
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 4h data for additional trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
     
-    # Calculate 12h range for pivot calculations
-    daily_range_12h = high_12h - low_12h
-    
-    # Calculate 1d high/low/close
+    # Daily high/low/close for calculations
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d range for pivot calculations
-    daily_range_1d = high_1d - low_1d
+    # Calculate daily range for pivot calculations
+    daily_range = high_1d - low_1d
     
-    # Calculate ATR (14) for volatility filter
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h close for EMA calculation
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h ATR for volatility filter
-    tr_12h = np.maximum(high_12h - low_12h, np.maximum(np.abs(high_12h - np.roll(close_12h, 1)), np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    # Camarilla pivot levels (based on previous day)
+    camarilla_r3 = close_1d + daily_range * 1.1 / 4
+    camarilla_s3 = close_1d - daily_range * 1.1 / 4
     
-    # 12h ATR-based volatility filter: current 12h ATR > 1.5 * average 12h ATR
-    atr_ma_12h = pd.Series(atr_12h).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr_12h > (atr_ma_12h * 1.5)
+    # 4h EMA34 for trend
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 12h EMA21 for trend
-    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Align Camarilla levels and 4h EMA to 1h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Calculate 1d EMA50 for trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume filter: above average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 4h timeframe
-    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_filter_aligned = align_htf_to_ltf(prices, df_12h, vol_filter)
-    
-    # Calculate 12h ATR-based volatility
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    
-    # Session filter: 8-20 UTC (most active trading hours)
+    # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -77,8 +59,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_filter_aligned[i]) or np.isnan(atr_12h_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -95,28 +77,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: 12h ATR > 1.5 * average 12h ATR
-        vol_condition = vol_filter_aligned[i]
+        # Volume filter: above average volume
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: 12h EMA21 > 1d EMA50 (bullish alignment)
-        bullish_alignment = ema_21_12h_aligned[i] > ema_50_1d_aligned[i]
-        bearish_alignment = ema_21_12h_aligned[i] < ema_50_1d_aligned[i]
+        # 4h trend filter: price above/below 4h EMA34
+        price_above_4h_ema = close[i] > ema_34_4h_aligned[i]
+        price_below_4h_ema = close[i] < ema_34_4h_aligned[i]
         
-        # Entry conditions:
-        # Long: bullish alignment + volatility expansion
-        # Short: bearish alignment + volatility expansion
-        long_entry = bullish_alignment and vol_condition
-        short_entry = bearish_alignment and vol_condition
+        # Entry conditions: 
+        # Long: price breaks above daily R3 with volume and 4h uptrend
+        # Short: price breaks below daily S3 with volume and 4h downtrend
+        long_entry = (close[i] > r3_aligned[i]) and price_above_4h_ema and vol_filter
+        short_entry = (close[i] < s3_aligned[i]) and price_below_4h_ema and vol_filter
         
-        # Exit conditions: trend reversal or volatility contraction
-        long_exit = (not bullish_alignment) or (not vol_condition)
-        short_exit = (not bearish_alignment) or (not vol_condition)
+        # Exit conditions: price returns to opposite daily S3/R3 levels
+        long_exit = close[i] < s3_aligned[i]
+        short_exit = close[i] > r3_aligned[i]
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -127,14 +109,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Volatility_Trend_Alignment_12h1d"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_4hEMA34_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
