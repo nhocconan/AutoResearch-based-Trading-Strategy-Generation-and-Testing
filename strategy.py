@@ -44,13 +44,10 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 1d timeframe (since we are on 1d)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Hour filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,19 +59,6 @@ def generate_signals(prices):
         if (np.isnan(ema_34_aligned[i]) or np.isnan(rsi_aligned[i]) or 
             np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade 8-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            # Outside session: flatten position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
             continue
         
         # Trend filter: price above/below EMA34
@@ -121,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_RSI_Volume_Session"
-timeframe = "4h"
+name = "1d_EMA34_RSI_Volume"
+timeframe = "1d"
 leverage = 1.0
