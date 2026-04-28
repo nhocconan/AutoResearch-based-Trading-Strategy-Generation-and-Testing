@@ -1,5 +1,8 @@
-# 12h_CamarillaPivot_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Use 12-hour Camarilla R1/S1 breakouts aligned with daily trend (via 21 EMA) and volume confirmation. The daily trend filter avoids counter-trend trades, while Camarilla pivot levels provide high-probability breakout zones. Volume surge confirms institutional participation. Designed for low trade frequency (~12-37/year) to minimize fee drag and maximize robustness in both bull and bear markets.
+#!/usr/bin/env python3
+"""
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: On 4-hour timeframe, use Camarilla pivot R1/S1 breakouts in the direction of 1-day trend (via EMA34) with volume confirmation. Daily trend filter avoids counter-trend trades, while Camarilla levels provide precise entry/exit points. Volume surge confirms institutional participation. Designed for moderate trade frequency (~20-50/year) to balance opportunity and fee decay in both bull and bear markets.
+"""
 
 import numpy as np
 import pandas as pd
@@ -15,89 +18,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and pivot calculation
+    # Get daily data for trend filter and Camarilla pivots
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 21:
+    if len(df_daily) < 34:
         return np.zeros(n)
     
-    # Calculate daily 21 EMA for trend filter
+    # Calculate daily EMA34 for trend filter
     close_daily = df_daily['close'].values
-    ema21_daily = pd.Series(close_daily).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
     
-    # Align daily EMA to 12h timeframe
-    ema21_daily_aligned = align_htf_to_ltf(prices, df_daily, ema21_daily)
+    # Daily trend: bullish when price > EMA34
+    daily_uptrend = close > ema34_daily_aligned
+    daily_downtrend = close < ema34_daily_aligned
     
-    # Daily trend: bullish when close > EMA21
-    daily_uptrend = close_daily > ema21_daily
-    daily_uptrend_aligned = align_htf_to_ltf(prices, df_daily, daily_uptrend.astype(float)) > 0.5
-    
-    # Calculate Camarilla pivot levels from previous day
-    # Using high, low, close from previous daily bar
+    # Calculate previous day's Camarilla pivot levels (R1, S1)
+    # Using prior day's high, low, close
     prev_high = df_daily['high'].shift(1).values
     prev_low = df_daily['low'].shift(1).values
     prev_close = df_daily['close'].shift(1).values
     
-    # Calculate pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3.0
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    r1 = pivot + range_hl * 1.1 / 12
+    s1 = pivot - range_hl * 1.1 / 12
     
-    # Calculate Camarilla levels
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    rang = prev_high - prev_low
-    r1 = prev_close + rang * 1.1 / 12.0
-    s1 = prev_close - rang * 1.1 / 12.0
-    
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
     s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
     
-    # Volume confirmation: current volume > 1.5x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_surge = volume > (vol_ma_50 * 1.5)
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema21_daily_aligned[i]) or np.isnan(r1_aligned[i]) or 
+        if (np.isnan(ema34_daily_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions with daily trend alignment and volume surge
-        long_entry = close[i] > r1_aligned[i] and daily_uptrend_aligned[i] and volume_surge[i]
-        short_entry = close[i] < s1_aligned[i] and not daily_uptrend_aligned[i] and volume_surge[i]
+        long_entry = close[i] > r1_aligned[i] and daily_uptrend[i] and volume_surge[i]
+        short_entry = close[i] < s1_aligned[i] and daily_downtrend[i] and volume_surge[i]
         
-        # Exit on opposite Camarilla level touch with volume surge
+        # Exit on opposite Camarilla level with volume surge
         long_exit = close[i] < s1_aligned[i] and volume_surge[i]
         short_exit = close[i] > r1_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
+            signals[i] = -0.30  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
+            signals[i] = 0.30   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_CamarillaPivot_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
