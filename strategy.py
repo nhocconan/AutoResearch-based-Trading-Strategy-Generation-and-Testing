@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_WeeklyPivotTrend_Volume
-Hypothesis: 6-hour Donchian(20) breakouts aligned with weekly pivot trend and volume confirmation. Targets 15-35 trades/year by requiring breakout in direction of weekly trend with volume surge. Works in bull (breakouts continue) and bear (breakouts reverse) markets.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
+Hypothesis: 4-hour breakouts at daily-derived Camarilla R3/S3 levels with daily trend filter and volume confirmation. Targets 20-50 trades/year by requiring strong breakouts, daily trend alignment, and volume surge to reduce false signals and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,68 +18,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 4h data for price action
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week)
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_close = df_1w['close'].shift(1).values
+    # Calculate Camarilla levels from previous 4h bar
+    prev_high = df_4h['high'].shift(1).values
+    prev_low = df_4h['low'].shift(1).values
+    prev_close = df_4h['close'].shift(1).values
     
-    pivot_point = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot_point - prev_week_low
-    s1 = 2 * pivot_point - prev_week_high
+    # Camarilla R3 and S3 levels (stronger support/resistance)
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Weekly trend: price above/below pivot
-    weekly_trend_up = prev_week_close > pivot_point
-    weekly_trend_down = prev_week_close < pivot_point
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Align weekly data to 6h
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
-    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down.astype(float))
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Donchian(20) on 6h data
-    lookback = 20
-    dc_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    dc_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Align all higher timeframe data to 4h
+    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Trend filter: price > EMA34 = bullish, < EMA34 = bearish
+    trend_up = close > ema_34_1d_aligned
+    trend_down = close < ema_34_1d_aligned
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, lookback)  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(weekly_trend_up_aligned[i]) or 
-            np.isnan(weekly_trend_down_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        # Long: price breaks above Donchian high + weekly uptrend + volume surge
-        long_entry = (high[i] > dc_high[i] and 
-                     weekly_trend_up_aligned[i] > 0.5 and 
+        # Entry conditions with trend alignment and volume surge
+        # Long: price breaks above R3 + daily uptrend + volume surge
+        long_entry = (close[i] > R3_aligned[i] and 
+                     trend_up[i] and 
                      volume_surge[i])
         
-        # Short: price breaks below Donchian low + weekly downtrend + volume surge
-        short_entry = (low[i] < dc_low[i] and 
-                      weekly_trend_down_aligned[i] > 0.5 and 
+        # Short: price breaks below S3 + daily downtrend + volume surge
+        short_entry = (close[i] < S3_aligned[i] and 
+                      trend_down[i] and 
                       volume_surge[i])
         
-        # Exit on opposite Donchian break with volume surge
-        long_exit = low[i] < dc_low[i] and volume_surge[i]
-        short_exit = high[i] > dc_high[i] and volume_surge[i]
+        # Exit on opposite level break with volume surge
+        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
+        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -104,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivotTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
