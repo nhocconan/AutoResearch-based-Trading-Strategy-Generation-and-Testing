@@ -24,6 +24,16 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
+    # 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
     # 4h Donchian channels (20-period)
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 20:
@@ -49,6 +59,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or
             np.isnan(highest_high_4h_aligned[i]) or
             np.isnan(lowest_low_4h_aligned[i])):
             signals[i] = 0.0
@@ -58,13 +69,16 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
+        # Volatility filter: avoid low volatility periods
+        vol_filter = atr_14_1d_aligned[i] > 0
+        
         # Breakout conditions
         breakout_up = close[i] > highest_high_4h_aligned[i]
         breakout_down = close[i] < lowest_low_4h_aligned[i]
         
-        # Entry conditions: require trend + breakout + volume confirmation
-        long_entry = uptrend and breakout_up and volume_confirm[i]
-        short_entry = downtrend and breakout_down and volume_confirm[i]
+        # Entry conditions: require trend + breakout + volume confirmation + volatility filter
+        long_entry = uptrend and breakout_up and volume_confirm[i] and vol_filter
+        short_entry = downtrend and breakout_down and volume_confirm[i] and vol_filter
         
         # Exit conditions: when trend reverses or opposite breakout
         if position == 1:
@@ -76,10 +90,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif exit_condition and position != 0:
             signals[i] = 0.0
@@ -87,14 +101,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Volume"
+name = "4h_Donchian20_1dEMA34_Volume_VolFilter"
 timeframe = "4h"
 leverage = 1.0
