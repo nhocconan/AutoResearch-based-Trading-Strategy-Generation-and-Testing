@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
-# Uses 1d primary timeframe targeting 7-25 trades/year (30-100 total over 4 years).
-# 1w EMA50 provides primary trend filter: bull when close > EMA50, bear when close < EMA50.
-# Donchian(20) from 1d provides price channel breakouts with proven edge.
-# Volume spike (>2.0x 20-bar average) confirms breakout strength.
+# Hypothesis: 6h Camarilla H4/L4 breakout with 12h EMA50 trend filter and volume spike confirmation.
+# Uses 6h primary timeframe targeting 12-37 trades/year (50-150 total over 4 years).
+# 12h EMA50 provides primary trend filter: bull when price > EMA50, bear when price < EMA50.
+# Camarilla H4/L4 from 1d provide institutional pivot points with proven edge.
+# Volume spike (>2.0x 24-bar average) confirms breakout strength.
 # Position size 0.25 for balance between return and drawdown control.
 # Discrete levels (0.0, ±0.25) minimize fee churn.
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Camarilla_H4L4_Breakout_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,47 +25,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and volume MA
-    df_1d = prices  # primary timeframe is 1d
+    # Pre-compute session hours (08-20 UTC) to reduce noise
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla pivots (H4, L4) and 12h data for EMA50 trend
+    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_1d) < 4 or len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Donchian(20) channels
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d Camarilla pivot levels (H4, L4)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    h4_1d = close_1d + (high_1d - low_1d) * 1.1 / 2.0  # H4 = Close + 1.1*(Range)/2
+    l4_1d = close_1d - (high_1d - low_1d) * 1.1 / 2.0  # L4 = Close - 1.1*(Range)/2
     
-    # Calculate 1d volume spike: >2.0x 20-bar average volume
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align HTF indicators to 6h timeframe
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate 6h volume spike: >2.0x 24-bar average volume (accounting for session gaps)
+    volume_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient history for Donchian
+    start_idx = 50  # Ensure sufficient history for EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_ma_20[i]) or
-            np.isnan(low_ma_20[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(h4_1d_aligned[i]) or
+            np.isnan(l4_1d_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1w EMA50 direction (close above/below EMA50)
-        price_above_ema = close[i] > ema_50_1w_aligned[i]
-        price_below_ema = close[i] < ema_50_1w_aligned[i]
+        # Skip outside trading session (08-20 UTC)
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > high_ma_20[i]
-        short_breakout = close[i] < low_ma_20[i]
+        # Trend filter: 12h EMA50 direction (price above/below EMA50)
+        price_above_ema = close[i] > ema_50_12h_aligned[i]
+        price_below_ema = close[i] < ema_50_12h_aligned[i]
+        
+        # Camarilla breakout conditions
+        long_breakout = close[i] > h4_1d_aligned[i]
+        short_breakout = close[i] < l4_1d_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
@@ -73,10 +91,9 @@ def generate_signals(prices):
         long_entry = price_above_ema and long_breakout and vol_confirm
         short_entry = price_below_ema and short_breakout and vol_confirm
         
-        # Exit conditions: opposite Donchian level (middle of channel)
-        mid_ma_20 = (high_ma_20[i] + low_ma_20[i]) / 2.0
-        long_exit = close[i] < mid_ma_20  # Exit long at midpoint
-        short_exit = close[i] > mid_ma_20  # Exit short at midpoint
+        # Exit conditions: opposite Camarilla level (L4/H4 for reversion)
+        long_exit = close[i] < l4_1d_aligned[i]  # Exit long at L4
+        short_exit = close[i] > h4_1d_aligned[i]  # Exit short at H4
         
         # Handle entries and exits
         if long_entry and position <= 0:
