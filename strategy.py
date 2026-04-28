@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_WilliamsAlligator_ElderRay_Vortex_1wTrend
-Hypothesis: Combines Williams Alligator (trend), Elder Ray (momentum), and Vortex (direction) on 1d with 1w trend filter.
-Williams Alligator identifies trend presence and direction via SMAs. Elder Ray measures bull/bear power via EMA.
-Vortex confirms trend direction. 1w trend filter ensures trading with higher timeframe trend.
-Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
-Works in bull via long signals, in bear via short signals, avoids whipsaw via confluence.
+6h_DonchianBreakout_1dTrend_VolumeConfirmation
+Hypothesis: Donchian(20) breakouts on 6h with 1d EMA50 trend filter and volume confirmation capture momentum in both bull and bear markets. The Donchian channel provides clear breakout levels, the 1d EMA ensures we trade with the daily trend, and volume confirmation filters false breakouts. Targets 15-30 trades/year.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,35 +18,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams Alligator (13,8,5 SMAs shifted)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Donchian Channel (20-period high/low)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Vortex Indicator (14-period)
-    tr1 = np.abs(high - np.roll(low, 1))
-    tr2 = np.abs(low - np.roll(high, 1))
-    tr = np.maximum(tr1, tr2)
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / tr14
-    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / tr14
+    # Volume confirmation: >1.5x 20-period MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,36 +42,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vi_plus[i]) or np.isnan(vi_minus[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # 1w trend filter
-        uptrend_1w = close[i] > ema_50_1w_aligned[i]
-        downtrend_1w = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Williams Alligator: aligned (jaws < teeth < lips) = uptrend, reversed = downtrend
-        alligator_long = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])
-        alligator_short = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
+        # Breakout conditions: break of Donchian Channel
+        breakout_upper = close[i] > donchian_high[i]
+        breakdown_lower = close[i] < donchian_low[i]
         
-        # Elder Ray: bull power > 0 and rising, bear power < 0 and falling
-        elder_long = bull_power[i] > 0 and (i == start_idx or bull_power[i] > bull_power[i-1])
-        elder_short = bear_power[i] < 0 and (i == start_idx or bear_power[i] < bear_power[i-1])
+        # Volume confirmation
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Vortex: VI+ > VI- = uptrend, VI- > VI+ = downtrend
-        vortex_long = vi_plus[i] > vi_minus[i]
-        vortex_short = vi_minus[i] > vi_plus[i]
+        # Entry logic: breakout in direction of trend with volume
+        long_entry = vol_confirm and uptrend and breakout_upper
+        short_entry = vol_confirm and downtrend and breakdown_lower
         
-        # Entry logic: confluence of all three indicators in same direction
-        long_entry = alligator_long and elder_long and vortex_long and uptrend_1w
-        short_entry = alligator_short and elder_short and vortex_short and downtrend_1w
-        
-        # Exit logic: any indicator fails or 1w trend changes
-        long_exit = (not alligator_long) or (not elder_long) or (not vortex_long) or (not uptrend_1w)
-        short_exit = (not alligator_short) or (not elder_short) or (not vortex_short) or (not downtrend_1w)
+        # Exit logic: opposite breakout or trend change
+        long_exit = breakdown_lower or (not uptrend)
+        short_exit = breakout_upper or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -113,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsAlligator_ElderRay_Vortex_1wTrend"
-timeframe = "1d"
+name = "6h_DonchianBreakout_1dTrend_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
