@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Aroon_Oscillator_Trend_With_1dVolume_Spike
-Hypothesis: On 6-hour timeframe, use Aroon Oscillator (25-period) to detect strong trends (|AO|>50) and enter in trend direction only when confirmed by 1d volume spike (volume > 1.5x 20-day average). Exit when Aroon Oscillator weakens (|AO|<25) or reverses sign. Designed for moderate trade frequency (~20-40/year) to capture trending moves while avoiding whipsaws in ranging markets. Works in both bull (strong uptrends) and bear (strong downtrends) markets by following the trend direction with volume confirmation.
+12h_Pivot_Reversal_1dTrend_Filter
+Hypothesis: On 12-hour timeframe, enter long at daily pivot support with bullish 1d trend (close > EMA50) and volume confirmation, short at daily pivot resistance with bearish 1d trend (close < EMA50) and volume confirmation. Exit on opposite pivot level break. Uses daily pivot points (based on prior day's OHLC) for precise reversal entries in ranging markets, filtered by 1d trend to avoid counter-trend trades. Designed for low trade frequency (~20-40/year) to minimize fee decay in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,63 +13,65 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume spike filter
+    # Get 1d data for pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Aroon Oscillator (25-period)
-    period = 25
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
+    # Calculate daily pivot points from previous day
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    for i in range(period - 1, n):
-        # Find highest high and lowest low in the period
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        
-        # Find periods since high/low
-        periods_since_high = np.where(high[i - period + 1:i + 1] == highest_high)[0][-1]
-        periods_since_low = np.where(low[i - period + 1:i + 1] == lowest_low)[0][-1]
-        
-        aroon_up[i] = ((period - 1 - periods_since_high) / (period - 1)) * 100
-        aroon_down[i] = ((period - 1 - periods_since_low) / (period - 1)) * 100
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
     
-    aroon_osc = aroon_up - aroon_down  # Range: -100 to +100
+    # 1d EMA50 for trend filter
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1d volume spike: volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (vol_ma_20 * 1.5)
+    # Align all 1d data to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Align volume spike to 6h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Trend: bullish when price > EMA50, bearish when price < EMA50
+    d1_uptrend = close > ema_50_aligned
+    d1_downtrend = close < ema_50_aligned
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = period  # Wait for Aroon calculation
+    start_idx = 50  # Wait for sufficient warmup (EMA50)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(aroon_osc[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        ao = aroon_osc[i]
-        vol_spike = volume_spike_aligned[i]
+        # Entry conditions with 1d EMA50 trend alignment and volume confirmation
+        long_entry = close[i] <= s1_aligned[i] and d1_uptrend[i] and volume_surge[i]
+        short_entry = close[i] >= r1_aligned[i] and d1_downtrend[i] and volume_surge[i]
         
-        # Entry: strong trend (|AO|>50) with volume spike
-        long_entry = ao > 50 and vol_spike
-        short_entry = ao < -50 and vol_spike
-        
-        # Exit: trend weakens (|AO|<25) or reverses sign
-        long_exit = (ao < 25) or (ao < 0 and position == 1)
-        short_exit = (ao > -25) or (ao > 0 and position == -1)
+        # Exit on opposite pivot level break
+        long_exit = close[i] >= r1_aligned[i]
+        short_exit = close[i] <= s1_aligned[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -94,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Aroon_Oscillator_Trend_With_1dVolume_Spike"
-timeframe = "6h"
+name = "12h_Pivot_Reversal_1dTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
