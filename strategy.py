@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA(50) trend filter and volume confirmation.
-# Uses Donchian(20) from the previous day to identify breakouts. Breakouts above upper band or below lower band
-# trigger entries in the direction of the 1-week EMA(50) trend. Volume confirmation (1.5x 20-period average)
-# filters false breakouts. Designed for 1d timeframe with ~7-25 trades per year to minimize fee drag.
+# Hypothesis: 12h Camarilla Pivot (R1/S1) breakout with 1d trend filter and volume confirmation.
+# Uses Camarilla pivot levels from the previous 1d bar to identify breakouts.
+# Breakouts above R1 or below S1 trigger entries in the direction of the 1d EMA(34) trend.
+# Volume confirmation (1.5x 20-period average) filters false breakouts.
+# Designed for 12h timeframe with ~12-37 trades per year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
@@ -18,38 +19,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation
+    # Get 1d data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Donchian(20) from previous day (to avoid look-ahead)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Shift by 1 to use previous day's high/low
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan  # First value invalid
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: P = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_high_1d = np.roll(df_1d['high'].values, 1)
+    prev_low_1d = np.roll(df_1d['low'].values, 1)
+    prev_close_1d = np.roll(df_1d['close'].values, 1)
+    prev_high_1d[0] = np.nan
     prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Calculate rolling max/min of previous 20 periods
-    donchian_high = pd.Series(prev_high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(prev_low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate pivot and levels
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_r1 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
+    camarilla_s1 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
     
-    # Align Donchian levels to 1d timeframe (they are constant for the day)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align Camarilla levels to 12h timeframe (they are constant for the bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume filter: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,30 +54,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for EMA and Donchian
+    start_idx = max(34, 20)  # Wait for EMA and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1w EMA(50)
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA(34)
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Entry conditions: breakout from Donchian bands in trend direction with volume
-        long_breakout = close[i] > donchian_high_aligned[i]
-        short_breakout = close[i] < donchian_low_aligned[i]
+        # Entry conditions: breakout from Camarilla levels in trend direction with volume
+        long_breakout = close[i] > camarilla_r1_aligned[i]
+        short_breakout = close[i] < camarilla_s1_aligned[i]
         
         long_entry = long_breakout and uptrend and volume_confirm[i]
         short_entry = short_breakout and downtrend and volume_confirm[i]
         
-        # Exit conditions: price returns to Donchian midpoint or trend reversal
-        donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
-        long_exit = close[i] < donchian_mid
-        short_exit = close[i] > donchian_mid
+        # Exit conditions: price returns to pivot or trend reversal
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+        long_exit = close[i] < pivot_aligned[i]
+        short_exit = close[i] > pivot_aligned[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -107,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_20_1wEMA50_VolumeConfirm"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_1dEMA34_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
