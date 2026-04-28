@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation
-# Long when price breaks above Camarilla R3 AND close > 1d EMA50 AND volume > 2.0x 20-bar avg
-# Short when price breaks below Camarilla S3 AND close < 1d EMA50 AND volume > 2.0x 20-bar avg
-# Exit when price crosses back inside Camarilla H3-L3 range (mean reversion of breakout failure)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 12h.
-# Camarilla pivot levels provide mathematically derived support/resistance that work in ranging and trending markets.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation
+# Long when price breaks above Camarilla R3 level AND close > 1w EMA50 AND volume > 2.0x 20-bar avg
+# Short when price breaks below Camarilla S3 level AND close < 1w EMA50 AND volume > 2.0x 20-bar avg
+# Exit when price crosses back inside the Camarilla H3-L3 range (mean reversion of breakout failure)
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 7-25 trades/year on 1d.
+# Camarilla pivot levels provide objective intraday support/resistance that work in ranging markets.
 # Volume confirmation ensures breakouts have conviction, reducing false signals.
-# 1d EMA50 filter ensures we only trade with the higher timeframe trend.
-# Works in bull markets via upward breakouts at resistance, works in bear via downward breakouts at support with volume spikes.
+# 1w EMA50 filter ensures we only trade with the higher timeframe trend.
+# Works in bull markets via upward breakouts from R3, works in bear via downward breakouts from S3.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R3S3_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,39 +27,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need sufficient data for EMA50
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1d close
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(50) on 1w close
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1w EMA50 to 1d timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla pivot levels from previous 1d bar (using 1d OHLC)
-    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    # H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
-    # We use H3/L3 for entries and H4/L4 as stronger levels
-    # For intraday trading, we use previous day's OHLC to calculate today's levels
-    # Since we're on 12h timeframe, we calculate from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels on 1d data (using previous day's OHLC)
+    # Camarilla levels: H5 = close + 1.1*(high-low)*1.1/2, H4 = close + 1.1*(high-low)*1.1/4, etc.
+    # We need previous day's OHLC to calculate today's levels
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
-    camarilla_h4 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l4 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    # Handle first bar (no previous day)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Calculate Camarilla levels
+    rang = prev_high - prev_low
+    camarilla_h3 = prev_close + rang * 1.1 / 4
+    camarilla_l3 = prev_close - rang * 1.1 / 4
+    camarilla_h4 = prev_close + rang * 1.1 / 2
+    camarilla_l4 = prev_close - rang * 1.1 / 2
     
     # Volume confirmation: >2.0x 20-bar average volume (strict filter for appropriate trade frequency)
     volume_series = pd.Series(volume)
@@ -69,32 +66,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Need sufficient history for volume MA and EMA
+    start_idx = max(50, 20)  # Need sufficient history for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_h3[i]) or 
+            np.isnan(camarilla_l3[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        ema_trend = ema_50_1d_aligned[i]
-        h3 = camarilla_h3_aligned[i]
-        l3 = camarilla_l3_aligned[i]
-        h4 = camarilla_h4_aligned[i]
-        l4 = camarilla_l4_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
+        h3 = camarilla_h3[i]
+        l3 = camarilla_l3[i]
+        h4 = camarilla_h4[i]
+        l4 = camarilla_l4[i]
         curr_close = close[i]
-        prev_close = close[i-1]
+        prev_close_val = close[i-1]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price breaks above Camarilla H3 AND close > 1d EMA50 AND volume confirmation
-            if curr_close > h3 and prev_close <= h3 and curr_close > ema_trend and vol_conf:
+            # Long when price breaks above Camarilla H3 level AND close > 1w EMA50 AND volume confirmation
+            if curr_close > h3 and prev_close_val <= h3 and curr_close > ema_trend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Camarilla L3 AND close < 1d EMA50 AND volume confirmation
-            elif curr_close < l3 and prev_close >= l3 and curr_close < ema_trend and vol_conf:
+            # Short when price breaks below Camarilla L3 level AND close < 1w EMA50 AND volume confirmation
+            elif curr_close < l3 and prev_close_val >= l3 and curr_close < ema_trend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
