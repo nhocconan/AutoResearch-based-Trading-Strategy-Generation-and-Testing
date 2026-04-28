@@ -13,9 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and volatility regime
+    # Get daily data for ATR and Donchian channel
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Daily ATR(20) for volatility regime
@@ -29,7 +29,7 @@ def generate_signals(prices):
     tr2[0] = np.inf
     tr3[0] = np.inf
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_1d = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     # Get weekly data for trend filter (EMA34)
     df_1w = get_htf_data(prices, '1w')
@@ -41,18 +41,14 @@ def generate_signals(prices):
     ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Get daily data for Donchian channel (20-period standard)
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
     # Daily Donchian(20) breakout levels
     high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Session filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -60,12 +56,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 40  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(atr_20_aligned[i])):
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -84,8 +80,8 @@ def generate_signals(prices):
         
         # Volatility filter: only trade when ATR is above its 50-period median (avoid chop)
         if i >= 50:
-            atr_ma = np.median(atr_20_aligned[i-49:i+1])
-            vol_filter = atr_20_aligned[i] > atr_ma
+            atr_ma = np.median(atr_1d_aligned[i-49:i+1])
+            vol_filter = atr_1d_aligned[i] > atr_ma
         else:
             vol_buffer = True  # Not enough data for median, allow trade
         
@@ -107,10 +103,10 @@ def generate_signals(prices):
         short_exit = (close[i] > high_20_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif long_exit:
             signals[i] = 0.0
@@ -121,14 +117,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian20_1wEMA34_VolatilityFilter"
-timeframe = "12h"
+name = "4h_Donchian20_1wEMA34_VolatilityFilter_Session"
+timeframe = "4h"
 leverage = 1.0
