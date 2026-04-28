@@ -3,128 +3,101 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme reversal with 1d ADX trend filter and volume spike confirmation.
-# Williams %R(14) identifies overbought/oversold conditions (<-80 for long, >-20 for short).
-# 1d ADX(14) > 25 filters for trending markets to avoid false reversals in chop.
-# Volume spike (>1.8x 20-bar average) confirms reversal strength.
-# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing.
-# Works in both bull and bear markets by fading extremes only when trend is strong.
+# Hypothesis: 12h Williams Alligator + Elder Ray combination with 1d trend filter.
+# Uses 12h primary timeframe targeting 12-37 trades/year (50-150 total over 4 years).
+# Williams Alligator (13,8,5 SMAs) provides trend direction and entry signals.
+# Elder Ray (Bull/Bear Power from 1d EMA13) confirms trend strength.
+# 1d EMA34 acts as higher timeframe trend filter: only trade in direction of 1d trend.
+# Position size 0.25 for balance between return and drawdown control.
+# Discrete levels (0.0, ±0.25) minimize fee churn.
 
-name = "6h_WilliamsR_Extreme_1dADX25_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_ElderRay_1dEMA34_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) to reduce noise
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 1d data for ADX trend filter
+    # Get 12h data for Williams Alligator and 1d data for Elder Ray/1d trend
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_12h) < 20 or len(df_1d) < 34:
         return np.zeros(n)
     
+    close_12h = df_12h['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX(14) for trend strength
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
+    # Williams Alligator on 12h: Jaw(13), Teeth(8), Lips(5)
+    # All SMAs with proper min_periods
+    jaw = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().values  # 13-period SMA
+    teeth = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().values   # 8-period SMA
+    lips = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().values    # 5-period SMA
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Elder Ray on 1d: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema_13_1d
+    bear_power = low_1d - ema_13_1d  # Negative values indicate bearish pressure
     
-    # Smoothed TR, DM+ , DM- (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # 1d EMA34 for higher timeframe trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    period = 14
-    atr = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
-    di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smoothing(dx, period)
-    
-    # Calculate 6h Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          (highest_high - close) / (highest_high - lowest_low) * -100, -50)
-    
-    # Align HTF ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 6h volume spike: >1.8x 20-bar average
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.8 * volume_ma_20
+    # Align all HTF indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure sufficient history for indicators
+    start_idx = 34  # Ensure sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Skip outside trading session (08-20 UTC)
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
+        # Williams Alligator conditions:
+        # Lips > Teeth > Jaw = bullish alignment (green)
+        # Lips < Teeth < Jaw = bearish alignment (red)
+        bullish_alligator = (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i])
+        bearish_alligator = (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i])
         
-        # Williams %R extremes
-        williams_oversold = williams_r[i] < -80  # Long signal
-        williams_overbought = williams_r[i] > -20  # Short signal
+        # Elder Ray conditions:
+        # Bull Power > 0 = bullish pressure
+        # Bear Power < 0 = bearish pressure (more negative = stronger bearish)
+        bullish_elder = bull_power_aligned[i] > 0
+        bearish_elder = bear_power_aligned[i] < 0
         
-        # Trend filter: 1d ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # 1d EMA34 trend filter:
+        # Price above EMA34 = bullish trend
+        # Price below EMA34 = bearish trend
+        price_above_ema34 = close[i] > ema_34_1d_aligned[i]
+        price_below_ema34 = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume_spike[i]
+        # Entry conditions require ALL three to agree:
+        # 1. Alligator alignment
+        # 2. Elder Ray confirmation
+        # 3. 1d trend filter
+        long_entry = bullish_alligator and bullish_elder and price_above_ema34
+        short_entry = bearish_alligator and bearish_elder and price_below_ema34
         
-        long_entry = williams_oversold and strong_trend and vol_confirm
-        short_entry = williams_overbought and strong_trend and vol_confirm
-        
-        # Exit conditions: Williams %R returns to neutral zone (-50) or opposite extreme
-        long_exit = williams_r[i] > -50  # Exit long when %R crosses above -50
-        short_exit = williams_r[i] < -50  # Exit short when %R crosses below -50
+        # Exit conditions: opposite Alligator alignment (trend change)
+        long_exit = bearish_alligator  # Exit long when Alligator turns bearish
+        short_exit = bullish_alligator  # Exit short when Alligator turns bullish
         
         # Handle entries and exits
         if long_entry and position <= 0:
