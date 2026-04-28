@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,22 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for volatility filter
+    # Get daily data for volatility filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1d ATR(14) for volatility filter
+    # Daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -40,9 +40,19 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Get 6h data for Donchian breakout signals
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    
+    # 6h Donchian(20) channels
+    donch_high_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_6h, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_6h, donch_low_20)
     
     # Volume confirmation: current volume > 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,41 +65,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter
-        if not session_mask[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Trend filter from 4h EMA
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # Trend filter from weekly EMA
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Volatility filter: avoid low volatility periods
-        vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.8
+        vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.7
         
-        # Entry conditions: require alignment of 4h trend and volume confirmation
-        long_entry = uptrend and vol_filter and volume_confirm[i]
-        short_entry = downtrend and vol_filter and volume_confirm[i]
+        # Breakout conditions: price breaks Donchian(20) channel
+        long_breakout = close[i] > donch_high_20_aligned[i]
+        short_breakout = close[i] < donch_low_20_aligned[i]
         
-        # Exit conditions: trend reversal or volatility collapse
+        # Entry conditions: require alignment of weekly trend and breakout
+        long_entry = long_breakout and uptrend and vol_filter and volume_confirm[i]
+        short_entry = short_breakout and downtrend and vol_filter and volume_confirm[i]
+        
+        # Exit conditions: reverse signal or volatility collapse
         if position == 1:
-            exit_condition = not uptrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.6)
+            exit_condition = not uptrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
         elif position == -1:
-            exit_condition = not downtrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.6)
+            exit_condition = not downtrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
         else:
             exit_condition = False
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif exit_condition and position != 0:
             signals[i] = 0.0
@@ -97,14 +106,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA50_4hTrend_VolumeFilter_Session"
-timeframe = "1h"
+name = "6h_Donchian20_1wEMA50_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
