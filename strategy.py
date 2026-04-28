@@ -3,20 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
-# Long when price > Donchian(20) high AND ADX > 25 (trending) AND volume > 1.5x 20-bar avg
-# Short when price < Donchian(20) low AND ADX > 25 (trending) AND volume > 1.5x 20-bar avg
-# Exit when price crosses Donchian(10) midpoint or ADX < 20 (range) or volume drops
-# Target: 12-37 trades/year via regime filter reducing whipsaw in ranging markets
-# Works in both bull and bear markets by only trading when ADX confirms trending conditions
+# Hypothesis: 6h Weekly Pivot Breakout with 1d Volume Spike and ADX25 Trend Filter
+# Uses weekly Camarilla pivots (R3/S3 for breakout, R4/S4 for acceleration)
+# Long when price breaks above weekly R3 with volume > 2x 20-bar average and ADX > 25
+# Short when price breaks below weekly S3 with volume > 2x 20-bar average and ADX > 25
+# Exits when price returns to weekly pivot center (PP) or ADX drops below 20
+# Weekly pivots calculated from prior week's H/L/C, providing structural levels
+# Volume spike filters breakout authenticity, ADX ensures trending conditions
+# Target: 15-30 trades/year via tight weekly pivot levels reducing false breakouts
+# Works in bull/bear by trading breakouts in direction of higher timeframe trend
 
-name = "12h_Donchian20_1dADX25_Regime_VolumeFilter_v1"
-timeframe = "12h"
+name = "6h_WeeklyPivot_R3S3_Breakout_1dADX25_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,9 +27,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX calculation
+    # Get weekly data for pivot calculations
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 10:
+        return np.zeros(n)
+    
+    # Calculate weekly Camarilla pivots from prior week's OHLC
+    # PP = (H + L + C) / 3
+    # R3 = PP + (H - L) * 1.1
+    # S3 = PP - (H - L) * 1.1
+    # R4 = PP + (H - L) * 1.5
+    # S4 = PP - (H - L) * 1.5
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
+    
+    pp_w = (high_w + low_w + close_w) / 3.0
+    range_w = high_w - low_w
+    r3_w = pp_w + range_w * 1.1
+    s3_w = pp_w - range_w * 1.1
+    r4_w = pp_w + range_w * 1.5
+    s4_w = pp_w - range_w * 1.5
+    
+    # Get daily data for ADX and volume MA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need sufficient data for ADX
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate ADX(14) on 1d data
@@ -61,23 +86,22 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Prepend zeros for alignment (since we lost first bar in calculations)
-    adx = np.concatenate([np.full(27, np.nan), adx])  # 14 (TR) + 14 (ADX smoothing) - 1
+    adx = np.concatenate([np.full(27, np.nan), adx])  # 1 (TR) + 14 (DM smoothing) + 14 (ADX smoothing) - 2
     
-    # Align 1d ADX to 12h timeframe
+    # Align weekly pivots to 6h timeframe
+    pp_w_aligned = align_htf_to_ltf(prices, df_w, pp_w)
+    r3_w_aligned = align_htf_to_ltf(prices, df_w, r3_w)
+    s3_w_aligned = align_htf_to_ltf(prices, df_w, s3_w)
+    r4_w_aligned = align_htf_to_ltf(prices, df_w, r4_w)
+    s4_w_aligned = align_htf_to_ltf(prices, df_w, s4_w)
+    
+    # Align daily ADX to 6h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate Donchian channels on 12h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high_20 = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid_10 = (high_series.rolling(window=10, min_periods=10).max().values + 
-                       low_series.rolling(window=10, min_periods=10).min().values) / 2
-    
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -86,39 +110,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high_20[i]) or 
-            np.isnan(donchian_low_20[i]) or np.isnan(donchian_mid_10[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(pp_w_aligned[i]) or np.isnan(r3_w_aligned[i]) or np.isnan(s3_w_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
         adx_val = adx_aligned[i]
         price = close[i]
-        upper = donchian_high_20[i]
-        lower = donchian_low_20[i]
-        midpoint = donchian_mid_10[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price > Donchian(20) high AND ADX > 25 (trending) AND volume confirmation
-            if price > upper and adx_val > 25 and vol_conf:
+            # Long when price breaks above weekly R3 with volume confirmation and ADX > 25
+            if price > r3_w_aligned[i] and vol_conf and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short when price < Donchian(20) low AND ADX > 25 (trending) AND volume confirmation
-            elif price < lower and adx_val > 25 and vol_conf:
+            # Short when price breaks below weekly S3 with volume confirmation and ADX > 25
+            elif price < s3_w_aligned[i] and vol_conf and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price < Donchian(10) midpoint or ADX < 20 (range) or no volume
-            if price < midpoint or adx_val < 20 or not vol_conf:
+        elif position == 1:  # Long - exit when price returns to weekly PP or ADX < 20 (range) or no volume
+            if price < pp_w_aligned[i] or adx_val < 20 or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when price > Donchian(10) midpoint or ADX < 20 (range) or no volume
-            if price > midpoint or adx_val < 20 or not vol_conf:
+        elif position == -1:  # Short - exit when price returns to weekly PP or ADX < 20 (range) or no volume
+            if price > pp_w_aligned[i] or adx_val < 20 or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
