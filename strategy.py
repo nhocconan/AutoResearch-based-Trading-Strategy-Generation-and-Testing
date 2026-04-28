@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Enter long when price breaks above 4h Donchian high with 1d EMA50 uptrend and volume > 1.8x 20-bar average.
-# Enter short when price breaks below 4h Donchian low with 1d EMA50 downtrend and volume confirmation.
-# Exit when price retraces to the 4h Donchian midpoint.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Enter long when price breaks above 1d Donchian high with 1w EMA50 uptrend and volume > 2.0x 20-bar average.
+# Enter short when price breaks below 1d Donchian low with 1w EMA50 downtrend and volume confirmation.
+# Exit when price retraces to the 1d Donchian midpoint.
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year).
-# Donchian breakouts capture strong momentum moves. EMA50 filter ensures we only trade with the daily trend,
+# Target: 30-100 total trades over 4 years (7-25/year).
+# Donchian breakouts capture strong momentum moves. 1w EMA50 filter ensures we only trade with the weekly trend,
 # avoiding counter-trend whipsaws. Volume confirmation filters weak breakouts.
-# This combination has shown promise on 4h timeframe with SOLUSDT and should work on BTC/ETH.
+# This combination has shown promise on lower timeframes and should work on 1d timeframe with BTC/ETH.
 
-name = "4h_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,45 +27,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channel calculation
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for Donchian channel calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 20:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channel (20-period high/low)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 1d Donchian channel (20-period high/low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Donchian high: rolling max of high over 20 periods
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     # Donchian low: rolling min of low over 20 periods
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     # Donchian midpoint: average of high and low
     donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Align Donchian levels to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
+    # Align Donchian levels to 1d (same timeframe, so identity alignment)
+    donchian_high_aligned = donchian_high
+    donchian_low_aligned = donchian_low
+    donchian_mid_aligned = donchian_mid
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:  # Need sufficient data for EMA calculation
+    if len(df_1w) < 50:  # Need sufficient data for EMA calculation
         return np.zeros(n)
     
-    # Calculate 1d EMA (50-period)
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA (50-period)
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align EMA to 4h
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align EMA to 1d
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Volume confirmation: >1.8x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.8 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,7 +83,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 1d EMA trend filter: price > EMA50 = uptrend, price < EMA50 = downtrend
+        # 1w EMA trend filter: price > EMA50 = uptrend, price < EMA50 = downtrend
         ema_trend_up = close[i] > ema_50_aligned[i]
         ema_trend_down = close[i] < ema_50_aligned[i]
         
