@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for HTF context
+    # Get daily data once for HTF context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Daily high/low/close for calculations
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate daily range for pivot calculations
+    daily_range = high_1d - low_1d
+    
+    # Weekly data for context
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
@@ -25,26 +38,18 @@ def generate_signals(prices):
     # Calculate weekly range for pivot calculations
     weekly_range = high_1w - low_1w
     
-    # Daily data for pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily range for pivot calculations
-    daily_range = high_1d - low_1d
-    
-    # Camarilla pivot levels (based on previous day)
-    camarilla_r4 = close_1d + daily_range * 1.1 / 2
-    camarilla_s4 = close_1d - daily_range * 1.1 / 2
+    # Camarilla pivot levels (based on previous day) - using close of previous day
+    # Shift by 1 to use previous day's data for today's levels
+    camarilla_r4 = np.roll(close_1d, 1) + daily_range * 1.1 / 2
+    camarilla_s4 = np.roll(close_1d, 1) - daily_range * 1.1 / 2
+    # First day has no previous day, so set to NaN
+    camarilla_r4[0] = np.nan
+    camarilla_s4[0] = np.nan
     
     # Weekly trend: EMA21
     ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align Camarilla levels and weekly EMA to 12h timeframe
+    # Align Camarilla levels and weekly EMA to 6h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
@@ -120,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R4S4_Breakout_WeeklyEMA21"
-timeframe = "12h"
+name = "6h_Camarilla_R4S4_Breakout_WeeklyEMA21"
+timeframe = "6h"
 leverage = 1.0
