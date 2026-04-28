@@ -35,6 +35,16 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
+    # Get 1w data for higher timeframe trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
+        return np.zeros(n)
+    
+    # 1w EMA(21) for higher timeframe trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
     # Get 4h data for breakout signals (ATR-based breakout)
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 14:
@@ -70,14 +80,16 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(upper_breakout_aligned[i]) or np.isnan(lower_breakout_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(upper_breakout_aligned[i]) or np.isnan(lower_breakout_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
+        # Trend filter from 1d EMA (primary) and 1w EMA (higher timeframe)
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
+        htf_uptrend = close[i] > ema_21_1w_aligned[i]
+        htf_downtrend = close[i] < ema_21_1w_aligned[i]
         
         # Volatility filter: avoid low volatility periods
         vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.8
@@ -86,15 +98,15 @@ def generate_signals(prices):
         long_breakout = close[i] > upper_breakout_aligned[i]
         short_breakout = close[i] < lower_breakout_aligned[i]
         
-        # Entry conditions
-        long_entry = long_breakout and uptrend and vol_filter and volume_confirm[i]
-        short_entry = short_breakout and downtrend and vol_filter and volume_confirm[i]
+        # Entry conditions: require alignment of 1d and 1w trends
+        long_entry = long_breakout and uptrend and htf_uptrend and vol_filter and volume_confirm[i]
+        short_entry = short_breakout and downtrend and htf_downtrend and vol_filter and volume_confirm[i]
         
         # Exit conditions: reverse signal or volatility collapse
         if position == 1:
-            exit_condition = not uptrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
+            exit_condition = not uptrend or not htf_uptrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
         elif position == -1:
-            exit_condition = not downtrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
+            exit_condition = not downtrend or not htf_downtrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
         else:
             exit_condition = False
         
@@ -119,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATRBreakout_1dEMA34_VolumeFilter"
+name = "4h_ATRBreakout_1dEMA34_1wEMA21_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
