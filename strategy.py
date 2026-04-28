@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,39 +13,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and close
+    # Get daily data for weekly pivot and EMA200
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # first bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate weekly pivot using last 5 days (approximation)
+    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max()
+    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min()
+    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).last()
     
-    # Align daily ATR to 4h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    pivot_weekly = (high_5d + low_5d + close_5d) / 3.0
+    range_5d = high_5d - low_5d
+    r3_weekly = pivot_weekly + (range_5d * 1.1 / 2.0)
+    s3_weekly = pivot_weekly - (range_5d * 1.1 / 2.0)
     
-    # Calculate 4-period ATR-based channel (similar to Donchian but ATR-based)
-    # Upper channel: highest high over last 4 periods + ATR
-    # Lower channel: lowest low over last 4 periods - ATR
-    high_roll_max = pd.Series(high).rolling(window=4, min_periods=4).max().values
-    low_roll_min = pd.Series(low).rolling(window=4, min_periods=4).min().values
+    # Calculate weekly EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    upper_channel = high_roll_max + atr_aligned
-    lower_channel = low_roll_min - atr_aligned
+    # Align weekly indicators to 6h timeframe
+    r3_weekly_aligned = align_htf_to_ltf(prices, df_1d, r3_weekly)
+    s3_weekly_aligned = align_htf_to_ltf(prices, df_1d, s3_weekly)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate average volume over 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate average volume over 24 periods (4 days on 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -55,13 +51,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 20
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_aligned[i]) or 
-            np.isnan(upper_channel[i]) or
-            np.isnan(lower_channel[i]) or
+        if (np.isnan(r3_weekly_aligned[i]) or 
+            np.isnan(s3_weekly_aligned[i]) or
+            np.isnan(ema200_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -71,21 +67,24 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR must be above its 20-period average to avoid low-vol chop
-        atr_ma = pd.Series(atr_aligned).rolling(window=20, min_periods=20).mean().values
-        vol_filter = atr_aligned[i] > atr_ma[i]
+        # Trend filter: price above/below EMA200
+        uptrend = close[i] > ema200_aligned[i]
+        downtrend = close[i] < ema200_aligned[i]
         
         # Volume filter: current volume above average
-        vol_filter = vol_filter and (volume[i] > vol_ma[i])
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Entry conditions: breakout of ATR-based channel with volume and volatility filter
-        long_entry = (close[i] > upper_channel[i]) and vol_filter
-        short_entry = (close[i] < lower_channel[i]) and vol_filter
+        # Breakout conditions: price breaks weekly R3/S3 with volume and trend
+        long_breakout = close[i] > r3_weekly_aligned[i]
+        short_breakout = close[i] < s3_weekly_aligned[i]
         
-        # Exit conditions: return to middle of channel or volatility drops
-        mid_channel = (upper_channel[i] + lower_channel[i]) / 2.0
-        long_exit = (close[i] < mid_channel[i]) or (atr_aligned[i] < atr_ma[i])
-        short_exit = (close[i] > mid_channel[i]) or (atr_aligned[i] < atr_ma[i])
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
+        
+        # Exit conditions: price returns to weekly pivot level or trend reverses
+        pivot_weekly_aligned = align_htf_to_ltf(prices, df_1d, pivot_weekly)
+        long_exit = close[i] < pivot_weekly_aligned[i] or not uptrend
+        short_exit = close[i] > pivot_weekly_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -110,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATR_Breakout_Channel_Volume_VolFilter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume"
+timeframe = "6h"
 leverage = 1.0
