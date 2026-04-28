@@ -44,7 +44,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 1h timeframe
+    # Align HTF indicators to 12h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
@@ -99,10 +99,10 @@ def generate_signals(prices):
         short_exit = not trend_down or not rsi_bearish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -113,14 +113,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA50_RSI_Volume_Session"
-timeframe = "1h"
+name = "12h_EMA50_RSI_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
