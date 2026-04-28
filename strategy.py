@@ -3,9 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation
+# Works in bull (breakouts capture momentum) and bear (trend filter avoids false breakouts)
+# Target: 20-40 trades/year to minimize fee drag
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,85 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for daily pivot calculation
+    # Get 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate daily pivot using last 2 days (24h)
-    high_2d = pd.Series(high_12h).rolling(window=2, min_periods=2).max()
-    low_2d = pd.Series(low_12h).rolling(window=2, min_periods=2).min()
-    close_2d = pd.Series(close_12h).rolling(window=2, min_periods=2).last()
+    # Calculate Donchian channels (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    pivot_daily = (high_2d + low_2d + close_2d) / 3.0
-    range_2d = high_2d - low_2d
-    r2_daily = pivot_daily + (range_2d * 0.5)  # R2 = Pivot + 0.5 * Range
-    s2_daily = pivot_daily - (range_2d * 0.5)  # S2 = Pivot - 0.5 * Range
-    
-    # Calculate daily EMA50 for trend filter
+    # Calculate 12h EMA50 for trend filter
     ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily indicators to 4h timeframe
-    r2_daily_aligned = align_htf_to_ltf(prices, df_12h, r2_daily)
-    s2_daily_aligned = align_htf_to_ltf(prices, df_12h, s2_daily)
     ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate volume ratio (current vs 20-period average)
+    # Volume filter: current volume above 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma20 + 1e-10)
-    
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 100
+    # Start after warmup
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_daily_aligned[i]) or 
-            np.isnan(s2_daily_aligned[i]) or
+        if (np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or
             np.isnan(ema50_aligned[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during active hours
-        if not session_mask[i]:
-            signals[i] = 0.0
-            continue
+        # Donchian breakout conditions
+        long_breakout = close[i] > high_20[i-1]  # Break above previous high
+        short_breakout = close[i] < low_20[i-1]  # Break below previous low
         
-        # Trend filter: price above/below EMA50
+        # Trend filter: price above/below 12h EMA50
         uptrend = close[i] > ema50_aligned[i]
         downtrend = close[i] < ema50_aligned[i]
         
-        # Volume filter: current volume above 1.8x average
-        vol_filter = vol_ratio[i] > 1.8
+        # Volume filter
+        vol_filter = vol_ratio[i] > 2.0
         
-        # Breakout conditions: price breaks daily R2/S2 with volume and trend
-        long_breakout = close[i] > r2_daily_aligned[i]
-        short_breakout = close[i] < s2_daily_aligned[i]
-        
+        # Entry conditions
         long_entry = long_breakout and uptrend and vol_filter
         short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: price returns to daily pivot level or trend reverses
-        pivot_daily_aligned = align_htf_to_ltf(prices, df_12h, pivot_daily)
-        long_exit = close[i] < pivot_daily_aligned[i] or not uptrend
-        short_exit = close[i] > pivot_daily_aligned[i] or not downtrend
+        # Exit conditions: opposite breakout or trend reversal
+        long_exit = (close[i] < low_20[i-1]) or (not uptrend)
+        short_exit = (close[i] > high_20[i-1]) or (not downtrend)
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -102,14 +85,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_DailyPivot_R2S2_Breakout_12hEMA50_VolumeFilter_v1"
+name = "4h_Donchian20_12hEMA50_Volume2x"
 timeframe = "4h"
 leverage = 1.0
