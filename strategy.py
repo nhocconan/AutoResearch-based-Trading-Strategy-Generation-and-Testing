@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_Range_Reversal_at_Liquidity_Pools
-Hypothesis: Price reverses at prior day's high/low liquidity pools when RSI shows exhaustion.
-Works in both bull/bear markets by fading extremes with mean reversion logic.
-Targets 15-25 trades/year on 6h timeframe to minimize fee drag.
+12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Control_v1
+Hypothesis: Focus on high-probability breakouts at daily Camarilla R3/S3 levels with 1d trend filter and volume confirmation on 12h timeframe.
+Targets 12-37 trades/year by requiring multiple confluence factors (breakout, trend, volume) to reduce false signals and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -12,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,61 +19,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for liquidity pools (prior day high/low)
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Prior day high and low as liquidity pools
-    prev_day_high = df_1d['high'].shift(1).values
-    prev_day_low = df_1d['low'].shift(1).values
+    # Calculate Camarilla levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Align to 6h timeframe
-    liquidity_high = align_htf_to_ltf(prices, df_1d, prev_day_high)
-    liquidity_low = align_htf_to_ltf(prices, df_1d, prev_day_low)
+    # Camarilla R3 and S3 levels
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # RSI(14) for exhaustion detection
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # 1d EMA50 for trend filter (more responsive than 100)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume filter: avoid low-volume false signals
+    # Align all higher timeframe data to 12h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
+    d1_uptrend = close > ema_50_1d_aligned
+    d1_downtrend = close < ema_50_1d_aligned
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma_20 * 0.5)  # At least 50% of average volume
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup period
+    start_idx = 200  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(liquidity_high[i]) or np.isnan(liquidity_low[i]) or 
-            np.isnan(rsi_values[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Long setup: price at liquidity low (support) + RSI oversold
-        near_support = low[i] <= liquidity_low[i] * 1.002  # Within 0.2% of liquidity low
-        rsi_oversold = rsi_values[i] < 30
+        # Entry conditions with trend alignment and volume surge
+        # Long: price breaks above R3 + daily uptrend + volume surge
+        long_entry = (close[i] > R3_aligned[i] and 
+                     d1_uptrend[i] and 
+                     volume_surge[i])
         
-        # Short setup: price at liquidity high (resistance) + RSI overbought
-        near_resistance = high[i] >= liquidity_high[i] * 0.998  # Within 0.2% of liquidity high
-        rsi_overbought = rsi_values[i] > 70
+        # Short: price breaks below S3 + daily downtrend + volume surge
+        short_entry = (close[i] < S3_aligned[i] and 
+                      d1_downtrend[i] and 
+                      volume_surge[i])
         
-        # Entry conditions with volume filter
-        long_entry = near_support and rsi_oversold and volume_filter[i]
-        short_entry = near_resistance and rsi_overbought and volume_filter[i]
-        
-        # Exit when price moves away from liquidity level or RSI normalizes
-        long_exit = (close[i] > liquidity_low[i] * 1.01) or (rsi_values[i] > 50)
-        short_exit = (close[i] < liquidity_high[i] * 0.99) or (rsi_values[i] < 50)
+        # Exit on opposite level break with volume surge
+        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
+        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -83,11 +84,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Close long
-            position = 0
+            signals[i] = -0.25  # Reverse to short
+            position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Close short
-            position = 0
+            signals[i] = 0.25   # Reverse to long
+            position = 1
         else:
             # Hold current position
             if position == 1:
@@ -99,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Range_Reversal_at_Liquidity_Pools"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Control_v1"
+timeframe = "12h"
 leverage = 1.0
