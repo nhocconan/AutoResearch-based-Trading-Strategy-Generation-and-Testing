@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla R3/S3 pivot breakout with 12h EMA50 trend filter and volume confirmation.
-# Enter long when price breaks above 1d Camarilla R3 level with volume > 2.0x average and close > 12h EMA50 (bullish bias).
-# Enter short when price breaks below 1d Camarilla S3 level with volume > 2.0x average and close < 12h EMA50 (bearish bias).
-# Exit when price returns to the 1d Camarilla midpoint (R3-S3)/2 or opposite level (S3/R3) is touched.
-# Uses Camarilla pivot structure for key levels, higher timeframe EMA for trend filter, and volume for confirmation.
-# Works in bull markets (breakouts continue up with trend) and bear markets (breakdowns continue down with trend).
-# Uses discrete position sizing (0.25) to control risk. Target: 75-200 total trades over 4 years.
+# Hypothesis: 12h strategy using 1d Donchian(20) breakout with volume confirmation and ATR-based stoploss.
+# Enter long when price breaks above 1d Donchian upper channel with volume > 2.0x average.
+# Enter short when price breaks below 1d Donchian lower channel with volume > 2.0x average.
+# Exit when price closes below/above ATR-based trailing stop from extreme.
+# Uses Donchian structure for breakouts, volume for confirmation, and ATR for risk management.
+# Works in bull markets (breakouts continue up) and bear markets (breakdowns continue down).
+# Uses discrete position sizing (0.25) to control risk. Target: 50-150 total trades over 4 years.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Donchian20_VolumeBreakout_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,89 +25,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (HTF)
+    # Get 1d data for Donchian channel calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 1:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (R3, S3, midpoint)
-    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
-    #          S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
+    # Calculate 1d Donchian(20) channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla width
-    width_1d = high_1d - low_1d
+    # Donchian upper and lower channels (20-period)
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # R3 and S3 levels
-    r3_1d = close_1d + 1.1 * width_1d * 1.1 / 4.0
-    s3_1d = close_1d - 1.1 * width_1d * 1.1 / 4.0
-    midpoint_1d = (r3_1d + s3_1d) / 2.0  # Equivalent to close_1d
+    # Align Donchian levels to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
+    # Calculate 12h ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 12h data for EMA50 trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Calculate 4h volume confirmation: >2.0x 20-bar average volume
+    # Calculate 12h volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_stop = 0.0
+    short_stop = 0.0
     
     start_idx = 100  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(midpoint_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 12h EMA50 bias
-        bullish_bias = close[i] > ema_50_12h_aligned[i]
-        bearish_bias = close[i] < ema_50_12h_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper_aligned[i]
+        short_breakout = close[i] < lower_aligned[i]
         
-        # Camarilla breakout conditions
-        long_breakout = close[i] > r3_aligned[i]
-        short_breakout = close[i] < s3_aligned[i]
+        # Update trailing stops
+        if position == 1:
+            long_stop = max(long_stop, high[i] - 2.5 * atr[i])
+        elif position == -1:
+            short_stop = min(short_stop, low[i] + 2.5 * atr[i])
+        elif position == 0:
+            long_stop = 0.0
+            short_stop = 0.0
         
-        # Exit conditions: return to midpoint or opposite level touched
-        long_exit = close[i] < midpoint_aligned[i]
-        short_exit = close[i] > midpoint_aligned[i]
+        # Exit conditions: ATR trailing stop hit
+        long_exit = position == 1 and close[i] < long_stop
+        short_exit = position == -1 and close[i] > short_stop
         
         # Entry conditions
-        long_entry = long_breakout and vol_confirm and bullish_bias
-        short_entry = short_breakout and vol_confirm and bearish_bias
+        long_entry = long_breakout and vol_confirm and position <= 0
+        short_entry = short_breakout and vol_confirm and position >= 0
         
         # Handle entries and exits
-        if long_entry and position <= 0:
+        if long_entry:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+            long_stop = high[i] - 2.5 * atr[i]  # Initialize stop
+        elif short_entry:
             signals[i] = -0.25
             position = -1
-        elif (position == 1 and long_exit) or (position == -1 and short_exit):
+            short_stop = low[i] + 2.5 * atr[i]  # Initialize stop
+        elif long_exit or short_exit:
             signals[i] = 0.0
             position = 0
+            long_stop = 0.0
+            short_stop = 0.0
         else:
             # Hold current position
             if position == 1:
