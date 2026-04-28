@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -32,16 +32,17 @@ def generate_signals(prices):
     r3_weekly = pivot_weekly + (range_5d * 1.1 / 2.0)
     s3_weekly = pivot_weekly - (range_5d * 1.1 / 2.0)
     
-    # Calculate weekly EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly EMA200 for trend filter (stronger filter)
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Align weekly indicators to 4h timeframe
     r3_weekly_aligned = align_htf_to_ltf(prices, df_1d, r3_weekly)
     s3_weekly_aligned = align_htf_to_ltf(prices, df_1d, s3_weekly)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate average volume over 2 periods (1 day on 4h)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Calculate volume ratio (current vs 20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma20 + 1e-10)
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -51,14 +52,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_weekly_aligned[i]) or 
             np.isnan(s3_weekly_aligned[i]) or
-            np.isnan(ema50_aligned[i]) or
-            np.isnan(vol_ma[i])):
+            np.isnan(ema200_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -67,12 +68,12 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        uptrend = close[i] > ema50_aligned[i]
-        downtrend = close[i] < ema50_aligned[i]
+        # Trend filter: price above/below EMA200 (strong trend filter)
+        uptrend = close[i] > ema200_aligned[i]
+        downtrend = close[i] < ema200_aligned[i]
         
-        # Volume filter: current volume above average
-        vol_filter = volume[i] > vol_ma[i]
+        # Volume filter: current volume above 1.5x average
+        vol_filter = vol_ratio[i] > 1.5
         
         # Breakout conditions: price breaks weekly R3/S3 with volume and trend
         long_breakout = close[i] > r3_weekly_aligned[i]
@@ -89,10 +90,10 @@ def generate_signals(prices):
         short_exit = close[i] > pivot_weekly_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -103,14 +104,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_WeeklyPivot_R3S3_Breakout_1dEMA50_Volume_v11"
+name = "4h_WeeklyPivot_R3S3_Breakout_1dEMA200_VolumeFilter_v1"
 timeframe = "4h"
 leverage = 1.0
