@@ -1,9 +1,3 @@
-# 12h_1d_PV_Wave_Strategy
-# Hypothesis: Price-volume wave (PV Wave) on daily chart filters noise and identifies strong directional moves.
-# Uses 12h for entries aligned with PV Wave direction. Works in bull/bear by following institutional flow.
-# Volume-weighted price deviation signals accumulation/distribution.
-# Target: 20-50 trades/year, low turnover, high win rate via volume confirmation.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,95 +13,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for PV Wave
+    # Get daily data for weekly pivot and EMA200
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate typical price and money flow
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    raw_money_flow = typical_price * volume_1d
+    # Calculate weekly pivot using last 5 days (approximation)
+    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max()
+    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min()
+    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).last()
     
-    # Calculate positive and negative money flow
-    delta_tp = np.diff(typical_price, prepend=typical_price[0])
-    positive_flow = np.where(delta_tp > 0, raw_money_flow, 0)
-    negative_flow = np.where(delta_tp < 0, raw_money_flow, 0)
+    pivot_weekly = (high_5d + low_5d + close_5d) / 3.0
+    range_5d = high_5d - low_5d
+    r3_weekly = pivot_weekly + (range_5d * 1.1 / 2.0)
+    s3_weekly = pivot_weekly - (range_5d * 1.1 / 2.0)
     
-    # Money flow ratio and index (14-period)
-    pos_sum = pd.Series(positive_flow).rolling(window=14, min_periods=14).sum()
-    neg_sum = pd.Series(negative_flow).rolling(window=14, min_periods=14).sum()
-    mfr = pos_sum / (neg_sum + 1e-10)
-    mfi = 100 - (100 / (1 + mfr))
+    # Calculate weekly EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # PV Wave: deviation of price from volume-weighted average price
-    vwap = (typical_price * volume_1d).cumsum() / (volume_1d.cumsum() + 1e-10)
-    pv_wave = typical_price - vwap
+    # Align weekly indicators to 6h timeframe
+    r3_weekly_aligned = align_htf_to_ltf(prices, df_1d, r3_weekly)
+    s3_weekly_aligned = align_htf_to_ltf(prices, df_1d, s3_weekly)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Smooth PV Wave with 3-period SMA
-    pv_wave_smooth = pd.Series(pv_wave).rolling(window=3, min_periods=3).mean().values
+    # Calculate average volume over 24 periods (4 days on 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # Align daily indicators to 12h timeframe
-    pv_wave_aligned = align_htf_to_ltf(prices, df_1d, pv_wave_smooth)
-    mfi_aligned = align_htf_to_ltf(prices, df_1d, mfi.values)
-    
-    # Calculate 12h RSI for entry timing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: 20-period volume average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
+    # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Start after warmup period
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(pv_wave_aligned[i]) or 
-            np.isnan(mfi_aligned[i]) or
-            np.isnan(rsi[i]) or
+        # Skip if any required data is NaN
+        if (np.isnan(r3_weekly_aligned[i]) or 
+            np.isnan(s3_weekly_aligned[i]) or
+            np.isnan(ema200_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Session filter: only trade during active hours
         if not session_mask[i]:
             signals[i] = 0.0
             continue
         
-        # PV Wave signals: zero-cross with MFI confirmation
-        pv_bullish = pv_wave_aligned[i] > 0 and pv_wave_aligned[i-1] <= 0
-        pv_bearish = pv_wave_aligned[i] < 0 and pv_wave_aligned[i-1] >= 0
+        # Trend filter: price above/below EMA200
+        uptrend = close[i] > ema200_aligned[i]
+        downtrend = close[i] < ema200_aligned[i]
         
-        # MFI confirms momentum (not overbought/oversold)
-        mfi_bullish = mfi_aligned[i] > 50
-        mfi_bearish = mfi_aligned[i] < 50
+        # Volume filter: current volume above average
+        vol_filter = volume[i] > vol_ma[i]
         
-        # RSI for entry timing (avoid chasing)
-        rsi_not_extreme = (rsi[i] > 30) and (rsi[i] < 70)
+        # Breakout conditions: price breaks weekly R3/S3 with volume and trend
+        long_breakout = close[i] > r3_weekly_aligned[i]
+        short_breakout = close[i] < s3_weekly_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > vol_ma[i]
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
         
-        long_entry = pv_bullish and mfi_bullish and rsi_not_extreme and vol_confirm
-        short_entry = pv_bearish and mfi_bearish and rsi_not_extreme and vol_confirm
-        
-        # Exit on opposite PV Wave cross
-        long_exit = pv_wave_aligned[i] < 0
-        short_exit = pv_wave_aligned[i] > 0
+        # Exit conditions: price returns to weekly pivot level or trend reverses
+        pivot_weekly = pd.Series(pivot_weekly).rolling(window=5, min_periods=5).last().values
+        pivot_weekly_aligned = align_htf_to_ltf(prices, df_1d, pivot_weekly)
+        long_exit = close[i] < pivot_weekly_aligned[i] or not uptrend
+        short_exit = close[i] > pivot_weekly_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -122,6 +100,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             position = 0
         else:
+            # Hold position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -131,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_PV_Wave_Strategy"
-timeframe = "12h"
+name = "6h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume"
+timeframe = "6h"
 leverage = 1.0
