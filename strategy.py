@@ -1,9 +1,11 @@
-#!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R1/S1 breakout with weekly EMA34 trend filter and volume confirmation.
-# R1/S1 levels provide tighter risk-reward with more frequent breakouts while maintaining significance.
-# Weekly EMA34 filters for long-term trend alignment, reducing counter-trend trades.
+# 12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeFilter
+# Hypothesis: 12h Camarilla R3/S3 breakout with daily EMA34 trend filter and volume confirmation.
+# Uses 12h primary timeframe with 1d higher timeframe for pivot points and trend filter.
+# R3/S3 levels represent stronger support/resistance than R1/S1, leading to fewer but higher-quality breakouts.
+# Daily EMA34 filters for trend alignment, reducing counter-trend trades.
 # Volume confirmation ensures breakouts have participation.
-# Target: 20-40 trades/year to avoid fee drag.
+# This combination should work in both bull and bear markets by filtering for momentum with trend alignment.
+# Target: 12-37 trades/year to avoid fee drag.
 
 import numpy as np
 import pandas as pd
@@ -11,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,14 +21,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:  # Need enough for EMA34
-        return np.zeros(n)
-    
-    # Get daily data for Camarilla pivot points
+    # Get daily data for Camarilla pivot points and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 35:  # Need enough for EMA34
         return np.zeros(n)
     
     # Calculate daily Camarilla pivot points
@@ -40,50 +37,54 @@ def generate_signals(prices):
     close_prev[0] = close_1d[0]  # First day uses its own close
     
     # Camarilla levels
-    r1 = close_prev + 1.1 * range_1d / 12
-    s1 = close_prev - 1.1 * range_1d / 12
+    r3 = close_prev + 1.1 * range_1d / 2
+    s3 = close_prev - 1.1 * range_1d / 2
+    r4 = close_prev + 1.1 * range_1d
+    s4 = close_prev - 1.1 * range_1d
     
     # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Weekly EMA34 for trend filter
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Daily EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: volume > 1.5x 20-period average to avoid noise
+    # Volume filter: volume > 1.8x 20-period average to avoid noise
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    volume_filter = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter
-        trend_up = close[i] > ema34_1w_aligned[i]
-        trend_down = close[i] < ema34_1w_aligned[i]
+        trend_up = close[i] > ema34_1d_aligned[i]
+        trend_down = close[i] < ema34_1d_aligned[i]
         
         # Entry conditions
-        # Long: break above R1 with upward trend and volume
-        long_breakout = close[i] > r1_aligned[i]
+        # Long: break above R3 with upward trend and volume
+        long_breakout = close[i] > r3_aligned[i]
         long_entry = long_breakout and trend_up and volume_filter[i]
         
-        # Short: break below S1 with downward trend and volume
-        short_breakout = close[i] < s1_aligned[i]
+        # Short: break below S3 with downward trend and volume
+        short_breakout = close[i] < s3_aligned[i]
         short_entry = short_breakout and trend_down and volume_filter[i]
         
-        # Exit conditions: opposite S1/R1 levels (mean reversion)
-        long_exit = close[i] < s1_aligned[i] and position == 1
-        short_exit = close[i] > r1_aligned[i] and position == -1
+        # Exit conditions: opposite S3/R3 levels (mean reversion)
+        long_exit = close[i] < s3_aligned[i] and position == 1
+        short_exit = close[i] > r3_aligned[i] and position == -1
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -109,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_1wEMA34_VolumeFilter"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeFilter"
 timeframe = "12h"
 leverage = 1.0
