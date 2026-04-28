@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_Weekly_Filter
-Hypothesis: Uses KAMA (adaptive moving average) on daily timeframe with weekly trend filter and volume confirmation to capture major trend moves while avoiding whipsaws. Designed for very low trade frequency (7-25/year) to minimize fee decay. KAMA adapts to market efficiency, reducing lag in trends and increasing noise filtering in ranges. Weekly filter ensures alignment with higher-timeframe momentum, improving win rate in both bull and bear markets.
+4h_Vortex_Trend_With_Volume_Regime_Filter
+Hypothesis: Uses Vortex Indicator (VI+) and (VI-) for trend direction, combined with volume spike (>2x 48-bar average) and Choppiness Index regime filter (CHOP > 61.8 = range, CHOP < 38.2 = trend) to avoid whipsaws. Trades only in trending regimes with volume confirmation. Designed for low trade frequency (15-40/year) to minimize fee drag while capturing sustained trends. Works in both bull and bear by following Vortex crossover signals only when aligned with higher-timeframe trend (12h EMA50).
 """
 
 import numpy as np
@@ -10,76 +10,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate KAMA on daily close
-    # KAMA parameters: ER fast=2, slow=30
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
+    # Calculate Vortex Indicator (VI+ and VI-) over 14 periods
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with original index
     
-    # Efficiency Ratio
-    price_change = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
-    er = np.where(volatility_sum > 0, price_change / volatility_sum, 0)
+    # VM+ and VM-
+    vm_plus = np.abs(high - low[:-1])
+    vm_minus = np.abs(low - high[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
+    # Sum over 14 periods
+    n_periods = 14
+    tr_sum = pd.Series(tr).rolling(window=n_periods, min_periods=n_periods).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=n_periods, min_periods=n_periods).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=n_periods, min_periods=n_periods).sum().values
     
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # VI+ and VI-
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
     
-    # Volume confirmation: >1.5x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Choppiness Index (CHOP) over 14 periods
+    # CHOP = 100 * log10(sum(TR14) / (ATR14 * n)) / log10(n)
+    atr = pd.Series(tr).rolling(window=n_periods, min_periods=n_periods).mean().values
+    chop_sum = pd.Series(tr).rolling(window=n_periods, min_periods=n_periods).sum().values
+    chop = 100 * np.log10(chop_sum / (atr * n_periods)) / np.log10(n_periods)
+    
+    # Volume confirmation: >2x 48-period MA (8 days of 4h bars)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicators to stabilize
+    start_idx = max(50, n_periods)  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(kama[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vi_plus[i]) or
+            np.isnan(vi_minus[i]) or
+            np.isnan(chop[i]) or
+            np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]
-        weekly_downtrend = ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # KAMA direction
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Vortex crossover signals
+        vi_cross_up = vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1]
+        vi_cross_down = vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        # Volume confirmation (>2x average)
+        vol_confirm = volume[i] > (2.0 * vol_ma_48[i])
+        
+        # Regime filter: only trade in trending markets (CHOP < 38.2)
+        trending_regime = chop[i] < 38.2
         
         # Entry conditions
-        long_entry = price_above_kama and weekly_uptrend and vol_confirm
-        short_entry = price_below_kama and weekly_downtrend and vol_confirm
+        long_entry = vi_cross_up and vol_confirm and trending_regime and uptrend
+        short_entry = vi_cross_down and vol_confirm and trending_regime and downtrend
         
-        # Exit conditions: reverse signal
-        long_exit = price_below_kama or not weekly_uptrend
-        short_exit = price_above_kama or not weekly_downtrend
+        # Exit conditions: opposite Vortex crossover or loss of trend
+        long_exit = vi_cross_down or not uptrend
+        short_exit = vi_cross_up or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -104,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_With_Weekly_Filter"
-timeframe = "1d"
+name = "4h_Vortex_Trend_With_Volume_Regime_Filter"
+timeframe = "4h"
 leverage = 1.0
