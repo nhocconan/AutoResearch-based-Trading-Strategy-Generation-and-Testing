@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + Elder Ray + volume spike.
-# Uses proven Williams Alligator (jaw/teeth/lips) for trend direction and Elder Ray
-# (bull/bear power) for momentum confirmation. Volume spike (>2.0x 20-bar average)
-# confirms breakout strength. Works in both bull and bear via Alligator alignment
-# (jaws < teeth < lips for uptrend, jaws > teeth > lips for downtrend).
+# Hypothesis: 4h Williams %R extreme with 1d ADX25 trend filter and volume spike.
+# Williams %R identifies overbought/oversold conditions; extremes signal reversals.
+# Long when %R < -80 (oversold) with ADX > 25 (trending) and volume spike.
+# Short when %R > -20 (overbought) with ADX > 25 (trending) and volume spike.
+# Volume spike (>2.0x 20-bar average) confirms reversal strength.
 # Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
-# Primary timeframe: 12h, HTF: 1w for regime filter (optional).
+# Works in both bull and bear via 1d ADX25 trend filter (avoids ranging markets).
 
-name = "12h_WilliamsAlligator_ElderRay_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_Extreme_1dADX25_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,39 +25,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator and Elder Ray calculations
+    # Get 1d data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 13:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Williams Alligator: SMAs of median price
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    # SMMA = smoothed moving average (similar to EMA but with different alpha)
-    # We'll use EMA as proxy for SMMA with appropriate spans
-    median_price = (high + low) / 2.0
-    df_1d_median = pd.Series(median_price)
+    # Calculate 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Jaw (13), Teeth (8), Lips (5) - using EMA as SMMA approximation
-    jaw = df_1d_median.ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth = df_1d_median.ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips = df_1d_median.ewm(span=5, adjust=False, min_periods=5).mean().values
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
     
-    # Align Alligator components to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13 = df_1d_median.ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
+    # Smooth TR, DM+ and DM- with Wilder's smoothing (alpha = 1/period)
+    def WilderSmooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period]) if not np.all(np.isnan(data[1:period])) else np.nan
+        # Wilder smoothing: today = (yesterday * (period-1) + today) / period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+            else:
+                result[i] = np.nan
+        return result
     
-    bull_power = high - ema_13  # 1d values
-    bear_power = low - ema_13   # 1d values
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    atr = WilderSmooth(tr, 14)
+    dm_plus_smooth = WilderSmooth(dm_plus, 14)
+    dm_minus_smooth = WilderSmooth(dm_minus, 14)
     
-    # Volume spike: >2.0x 20-bar average volume (stricter confirmation)
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = WilderSmooth(dx, 14)
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 4h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Calculate 4h volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
@@ -65,47 +96,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient history for volume MA and indicators
+    start_idx = 35  # Ensure sufficient history for Williams %R and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or 
-            np.isnan(ema_13_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(adx_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator trend conditions
-        # Uptrend: jaws < teeth < lips
-        # Downtrend: jaws > teeth > lips
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
+        # Williams %R extremes
+        williams_r_oversold = williams_r[i] < -80
+        williams_r_overbought = williams_r[i] > -20
         
-        is_uptrend = (jaw_val < teeth_val) and (teeth_val < lips_val)
-        is_downtrend = (jaw_val > teeth_val) and (teeth_val > lips_val)
-        
-        # Elder Ray momentum conditions
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
-        
-        # Strong bullish momentum: bull power > 0 and increasing
-        # Strong bearish momentum: bear power < 0 and decreasing
-        # We'll use current values as proxy for momentum
-        is_bullish_momentum = bull_val > 0
-        is_bearish_momentum = bear_val < 0
+        # Trend filter: 1d ADX > 25 (trending market)
+        strong_trend = adx_aligned[i] > 25
         
         # Entry conditions with volume confirmation
-        long_entry = is_uptrend and is_bullish_momentum and volume_spike[i]
-        short_entry = is_downtrend and is_bearish_momentum and volume_spike[i]
+        long_entry = williams_r_oversold and strong_trend and volume_spike[i]
+        short_entry = williams_r_overbought and strong_trend and volume_spike[i]
         
-        # Exit conditions: opposite Alligator alignment or loss of momentum
-        long_exit = not is_uptrend or not is_bullish_momentum
-        short_exit = not is_downtrend or not is_bearish_momentum
+        # Exit conditions: opposite Williams %R level or trend weakening
+        long_exit = williams_r[i] > -20 or adx_aligned[i] < 20
+        short_exit = williams_r[i] < -80 or adx_aligned[i] < 20
         
         # Handle entries and exits
         if long_entry and position <= 0:
