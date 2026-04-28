@@ -73,7 +73,6 @@ def generate_signals(prices):
         vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.8
         
         # Volume confirmation: current 4h volume > 1.5x 20-period average
-        # Get current 4h volume by finding the corresponding 4h bar
         vol_confirm = volume[i] > (volume_ma_4h_aligned[i] * 1.5)
         
         # Breakout conditions
