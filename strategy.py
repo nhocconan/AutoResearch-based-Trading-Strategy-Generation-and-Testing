@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeTrend
-Hypothesis: On 4h timeframe, enter long when price breaks above Donchian upper channel (20-period high) with volume > 1.5x 20-period average volume, and short when price breaks below Donchian lower channel with volume confirmation. Use 1d EMA50 trend filter to align with higher timeframe trend, reducing counter-trend trades. Exit on opposite Donchian breakout with volume confirmation. This structure captures breakouts with institutional participation (volume) while filtering with 1d trend, aiming for low-moderate trade frequency (target: 20-50 trades/year) to minimize fee drag and work in bull/bear markets via trend alignment.
+4H_382_Camarilla_Reversal
+Hypothesis: On 4-hour timeframe, long when price touches Camarilla S3 level with bullish divergence and volume confirmation, short when price touches R3 level with bearish divergence. Uses 1-day trend filter to avoid counter-trend trades. Designed for low trade frequency (<30/year) to minimize fee drift and work in both bull/bear markets via mean reversion at key levels.
 """
 
 import numpy as np
@@ -18,49 +18,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current volume > 1.5x 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
-    
-    # Get daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
+    # Get 1-day data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    close_daily = df_daily['close'].values
-    ema50_daily = pd.Series(close_daily).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels for each day using previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # Align daily EMA50 to 4h timeframe
-    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    # Camarilla levels
+    R3 = prev_close + (prev_range * 1.1 / 4)
+    S3 = prev_close - (prev_range * 1.1 / 4)
     
-    # Daily trend: bullish when price > EMA50, bearish when price < EMA50
-    daily_uptrend = close > ema50_daily_aligned
-    daily_downtrend = close < ema50_daily_aligned
+    # Align Camarilla levels to 4h timeframe
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # 1-day trend filter: EMA34 > EMA50 = uptrend
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    daily_uptrend = ema34_4h > ema50_4h
+    
+    # RSI divergence (14-period)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Bullish divergence: price makes lower low, RSI makes higher low
+    # Bearish divergence: price makes higher high, RSI makes lower high
+    lookback = 5
+    bullish_div = np.zeros(n, dtype=bool)
+    bearish_div = np.zeros(n, dtype=bool)
+    
+    for i in range(lookback, n):
+        if low[i] < low[i-lookback] and rsi_values[i] > rsi_values[i-lookback]:
+            bullish_div[i] = True
+        if high[i] > high[i-lookback] and rsi_values[i] < rsi_values[i-lookback]:
+            bearish_div[i] = True
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for Donchian and EMA50 to stabilize
+    start_idx = 50  # Wait for EMA50 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_surge[i]) or np.isnan(ema50_daily_aligned[i])):
+        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or 
+            np.isnan(ema34_4h[i]) or np.isnan(ema50_4h[i]) or
+            np.isnan(rsi_values[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with daily trend alignment and volume surge
-        long_entry = close[i] > donchian_high[i] and daily_uptrend[i] and volume_surge[i]
-        short_entry = close[i] < donchian_low[i] and daily_downtrend[i] and volume_surge[i]
+        # Entry conditions
+        long_entry = (close[i] <= S3_4h[i] * 1.002) and bullish_div[i] and volume_surge[i] and daily_uptrend[i]
+        short_entry = (close[i] >= R3_4h[i] * 0.998) and bearish_div[i] and volume_surge[i] and not daily_uptrend[i]
         
-        # Exit on opposite Donchian breakout with volume surge (to avoid whipsaw)
-        long_exit = close[i] < donchian_low[i] and volume_surge[i]
-        short_exit = close[i] > donchian_high[i] and volume_surge[i]
+        # Exit on opposite touch of Camarilla level
+        long_exit = close[i] >= R3_4h[i] * 0.998
+        short_exit = close[i] <= S3_4h[i] * 1.002
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -85,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeTrend"
+name = "4H_382_Camarilla_Reversal"
 timeframe = "4h"
 leverage = 1.0
