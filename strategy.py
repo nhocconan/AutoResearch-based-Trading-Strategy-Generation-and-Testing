@@ -25,55 +25,62 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (H4/L4 for entries, H3/L3 for exits)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    H4 = close_1d + (range_hl * 1.1 / 2)
-    L4 = close_1d - (range_hl * 1.1 / 2)
-    H3 = close_1d + (range_hl * 1.1 / 4)
-    L3 = close_1d - (range_hl * 1.1 / 4)
+    # Calculate 1d weekly pivot levels (monthly close for weekly pivot)
+    weekly_high = pd.Series(high_1d).rolling(window=7, min_periods=7).max().values
+    weekly_low = pd.Series(low_1d).rolling(window=7, min_periods=7).min().values
+    weekly_close = pd.Series(close_1d).rolling(window=7, min_periods=7).last().values
     
-    # Align pivot levels to 12h
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    range_hl = weekly_high - weekly_low
     
-    # Get 12h data for volume and volatility
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Weekly resistance/support levels (similar to Camarilla but weekly)
+    R1 = pivot + (range_hl * 1.1 / 2)
+    S1 = pivot - (range_hl * 1.1 / 2)
+    R2 = pivot + (range_hl * 1.1)
+    S2 = pivot - (range_hl * 1.1)
+    
+    # Align weekly levels to daily
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    
+    # Get weekly data for volume and volatility confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    volume_12h = df_12h['volume'].values
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    volume_1w = df_1w['volume'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Volume ratio (current 12h volume / 20-period average)
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # Volume ratio (current weekly volume / 4-period average)
+    vol_ma_4 = pd.Series(volume_1w).rolling(window=4, min_periods=4).mean().values
+    vol_ma_4_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_4)
     
-    # ATR(14) for volatility filter
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_12h = np.concatenate([[np.nan], tr_12h])
-    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # ATR(4) for volatility filter
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w = np.concatenate([[np.nan], tr_1w])
+    atr_1w = pd.Series(tr_1w).ewm(span=4, adjust=False, min_periods=4).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 20, 14)
+    start_idx = max(100, 34, 7, 4)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or 
-            np.isnan(L4_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(atr_12h_aligned[i])):
+            np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or
+            np.isnan(vol_ma_4_aligned[i]) or
+            np.isnan(atr_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -81,22 +88,22 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 12h volume above average
-        volume_filter = volume_12h[i] > vol_ma_20_aligned[i]
+        # Volume filter: current weekly volume above average
+        volume_filter = volume_1w[i] > vol_ma_4_aligned[i]
         
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_12h_aligned[i] > 0.001 * close[i]  # At least 0.1% ATR
+        vol_filter = atr_1w_aligned[i] > 0.005 * close[i]  # At least 0.5% ATR
         
-        # Entry conditions: Camarilla H4/L4 breakout with volume and trend
-        long_breakout = close[i] > H4_aligned[i]
-        short_breakout = close[i] < L4_aligned[i]
+        # Entry conditions: Weekly R1/S1 breakout with volume and trend
+        long_breakout = close[i] > R1_aligned[i]
+        short_breakout = close[i] < S1_aligned[i]
         
         long_entry = uptrend and long_breakout and volume_filter and vol_filter
         short_entry = downtrend and short_breakout and volume_filter and vol_filter
         
-        # Exit conditions: Camarilla H3/L3 retracement
-        long_exit = close[i] < H3_aligned[i]
-        short_exit = close[i] > L3_aligned[i]
+        # Exit conditions: Weekly S2/R2 retracement (deeper pullback)
+        long_exit = close[i] < S2_aligned[i]
+        short_exit = close[i] > R2_aligned[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -119,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_VolumeTrend"
-timeframe = "12h"
+name = "1d_WeeklyPivot_R1S1_Breakout_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
