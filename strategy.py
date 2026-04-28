@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_LongOnly_WeakTrend_Momentum
-Hypothesis: On daily timeframe, capture momentum in weak trending markets (ADX 20-25) using RSI(2) pullbacks to 50 EMA. Avoids overtrading by requiring both momentum and pullback alignment. Works in bull (momentum continuations) and bear (mean reversion within weak trends).
+6h_RSI_Extreme_12hTrend_VolumeSpike
+Hypothesis: Enter long when RSI(14) < 25 (deep oversold) on 6h with 12h uptrend (price > EMA50) and volume spike (>2x 20-period MA). Enter short when RSI > 75 (overbought) with 12h downtrend (price < EMA50) and volume spike. This targets mean-reversion bounces within established trends, filtering counter-trend noise. Works in both bull/bear markets by aligning with intermediate trend while capturing exhaustion moves.
 """
 
 import numpy as np
@@ -18,68 +18,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA 50 for trend/pullback reference
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # RSI(2) for short-term momentum/pullback
+    # Calculate 12h EMA50 for trend
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # RSI(14) on 6h
     delta = pd.Series(close).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    rsi = rsi.fillna(100).values  # Handle div/0
     
-    # ADX(14) for weak trend filter
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Volume confirmation: above 20-day average
+    # Volume confirmation: >2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Weak trend condition: ADX between 20 and 25 (not too strong, not too weak)
-        weak_trend = (adx[i] >= 20) and (adx[i] <= 25)
-        
-        # Price above EMA50 for long bias (avoid fighting strong downtrends)
-        price_above_ema = close[i] > ema_50[i]
-        
-        # RSI(2) pullback to 50: RSI crossing above 50 from below
-        rsi_cross_up = (rsi[i-1] < 50) and (rsi[i] >= 50)
+        # Trend from 12h: price vs EMA50
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Entry: weak trend + price above EMA50 + RSI pullback up + volume
-        if weak_trend and price_above_ema and rsi_cross_up and vol_confirm:
+        # RSI extremes
+        rsi_oversold = rsi[i] < 25
+        rsi_overbought = rsi[i] > 75
+        
+        # Entry logic: RSI extreme in direction of 12h trend with volume
+        long_entry = vol_confirm and trend_up and rsi_oversold
+        short_entry = vol_confirm and trend_down and rsi_overbought
+        
+        # Exit logic: RSI returns to neutral zone (40-60) or trend change
+        long_exit = (rsi[i] > 40) or (not trend_up)
+        short_exit = (rsi[i] < 60) or (not trend_down)
+        
+        if long_entry and position <= 0:
             signals[i] = 0.25
+            position = 1
+        elif short_entry and position >= 0:
+            signals[i] = -0.25
+            position = -1
+        elif long_exit and position == 1:
+            signals[i] = 0.0
+            position = 0
+        elif short_exit and position == -1:
+            signals[i] = 0.0
+            position = 0
         else:
-            # Exit when RSI drops below 40 or ADX strengthens beyond 25
-            rsi_drop = rsi[i] < 40
-            adx_strong = adx[i] > 25
-            if rsi_drop or adx_strong:
-                signals[i] = 0.0
+            # Hold position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
             else:
-                # Hold previous signal
-                signals[i] = signals[i-1]
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_LongOnly_WeakTrend_Momentum"
-timeframe = "1d"
+name = "6h_RSI_Extreme_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
