@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and ATR-based volume spike confirmation.
-# Enter long when price breaks above Donchian upper band, 1d EMA34 trending up, and volume > 1.5x ATR-scaled average.
-# Enter short when price breaks below Donchian lower band, 1d EMA34 trending down, and volume > 1.5x ATR-scaled average.
-# Exit when price crosses the 1d EMA34 or reaches opposite Donchian band.
-# Uses discrete position sizing (0.25) to minimize fee drag while maintaining profitability.
-# Target: 80-150 total trades over 4 years (20-38/year) to avoid excessive fee churn.
-# Donchian channels provide clear trend-following structure; 1d EMA34 filters for higher-timeframe trend alignment;
-# ATR-scaled volume confirmation ensures breakouts have genuine momentum rather than random spikes.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Enter long when price breaks above Camarilla R3 level, 1d EMA34 trending up, and volume > 2.0x 20-bar average.
+# Enter short when price breaks below Camarilla S3 level, 1d EMA34 trending down, and volume > 2.0x 20-bar average.
+# Exit when price reaches opposite Camarilla level (R3/S3) or crosses the 1d EMA34.
+# Uses discrete position sizing (0.30) to balance return and fee drag.
+# Target: 100-180 total trades over 4 years (25-45/year) to avoid excessive fee churn.
+# Camarilla levels provide precise intraday support/resistance; EMA34 filters for 1d trend alignment;
+# Volume spike confirms institutional participation in breakouts.
 
-name = "4h_Donchian20_1dEMA34_ATRVol_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,34 +37,40 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate ATR(14) for volume scaling and stoploss reference
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Camarilla levels from previous 1d OHLC
+    # Need to get 1d data for Camarilla calculation (different from EMA data)
+    df_1d_cam = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels (20-period)
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    if len(df_1d_cam) < 2:
+        return np.zeros(n)
     
-    # Calculate ATR-scaled average volume for confirmation
-    # Volume > 1.5 * (20-period average volume) * (ATR / 20-period average ATR)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    atr_ma_20 = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = 1.5 * vol_ma_20 * (atr / atr_ma_20)
-    volume_confirm = volume > vol_threshold
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d_cam['close'].shift(1).values
+    prev_high = df_1d_cam['high'].shift(1).values
+    prev_low = df_1d_cam['low'].shift(1).values
+    
+    # Camarilla levels: R3/S3 = C ± (H-L)*1.1/2
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d_cam, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d_cam, camarilla_s3)
+    
+    # Volume confirmation: >2.0x 20-bar average volume
+    volume_series = pd.Series(volume)
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 20)  # Ensure sufficient history for all indicators
+    start_idx = max(34, 20)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(volume_confirm[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -80,20 +86,20 @@ def generate_signals(prices):
             ema_trend_up = False
             ema_trend_down = False
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > upper[i]
-        breakout_down = close[i] < lower[i]
+        # Camarilla breakout conditions
+        breakout_up = close[i] > camarilla_r3_aligned[i]
+        breakout_down = close[i] < camarilla_s3_aligned[i]
         
-        # Exit conditions: price crosses 1d EMA34 or reaches opposite Donchian band
-        exit_long = close[i] < ema_34_aligned[i] or close[i] < lower[i]
-        exit_short = close[i] > ema_34_aligned[i] or close[i] > upper[i]
+        # Exit conditions: price reaches opposite Camarilla level or crosses 1d EMA34
+        exit_long = close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_aligned[i]
+        exit_short = close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_aligned[i]
         
         # Handle entries and exits
         if breakout_up and ema_trend_up and vol_confirm and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif breakout_down and ema_trend_down and vol_confirm and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif position == 1 and exit_long:
             signals[i] = 0.0
@@ -104,9 +110,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
