@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla Pivot (R1/S1) breakout with 1d trend filter and volume confirmation.
-# Uses Camarilla pivot levels from the previous 1d bar to identify breakouts.
-# Breakouts above R1 or below S1 trigger entries in the direction of the 1d EMA(34) trend.
-# Volume confirmation (1.5x 20-period average) filters false breakouts.
-# Designed for 12h timeframe with ~12-37 trades per year to minimize fee drag.
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,65 +13,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1d data for trend filter and volatility
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
+    # 1d EMA(34) for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: P = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    prev_high_1d = np.roll(df_1d['high'].values, 1)
-    prev_low_1d = np.roll(df_1d['low'].values, 1)
-    prev_close_1d = np.roll(df_1d['close'].values, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate pivot and levels
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    camarilla_r1 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
-    camarilla_s1 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
+    # 4h Donchian(20) for breakout signals
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # Align Camarilla levels to 12h timeframe (they are constant for the bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Volume filter: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    # 4h volume confirmation
+    volume_4h = df_4h['volume'].values
+    volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for EMA and Camarilla
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(volume_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA(34)
+        # Trend filter
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Entry conditions: breakout from Camarilla levels in trend direction with volume
-        long_breakout = close[i] > camarilla_r1_aligned[i]
-        short_breakout = close[i] < camarilla_s1_aligned[i]
+        # Volatility filter: avoid low volatility periods
+        vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.8
         
-        long_entry = long_breakout and uptrend and volume_confirm[i]
-        short_entry = short_breakout and downtrend and volume_confirm[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        # Get current 4h volume by finding the corresponding 4h bar
+        vol_confirm = volume[i] > (volume_ma_4h_aligned[i] * 1.5)
         
-        # Exit conditions: price returns to pivot or trend reversal
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-        long_exit = close[i] < pivot_aligned[i]
-        short_exit = close[i] > pivot_aligned[i]
+        # Breakout conditions
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
+        
+        # Entry conditions
+        long_entry = long_breakout and uptrend and vol_filter and vol_confirm
+        short_entry = short_breakout and downtrend and vol_filter and vol_confirm
+        
+        # Exit conditions: ATR-based trailing stop
+        if position == 1:
+            # Long position: exit if price drops 2*ATR from highest high since entry
+            # Simplified: exit if price < EMA(34) - ATR
+            long_exit = close[i] < (ema_34_1d_aligned[i] - atr_14_aligned[i])
+        elif position == -1:
+            # Short position: exit if price rises 2*ATR from lowest low since entry
+            # Simplified: exit if price > EMA(34) + ATR
+            short_exit = close[i] > (ema_34_1d_aligned[i] + atr_14_aligned[i])
+        else:
+            long_exit = False
+            short_exit = False
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -103,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_1dEMA34_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_ATR_Volume"
+timeframe = "4h"
 leverage = 1.0
