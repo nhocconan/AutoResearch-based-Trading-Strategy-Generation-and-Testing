@@ -18,25 +18,36 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Get weekly data for additional context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
     # Daily high/low/close for calculations
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily range for pivot calculations
+    # Weekly high/low/close for calculations
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Daily range for pivot calculations
     daily_range = high_1d - low_1d
     
     # Daily Camarilla pivot levels (based on previous day)
     camarilla_r4 = close_1d + daily_range * 1.1 / 2
     camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align Daily Camarilla levels to 12h timeframe
+    # Align Daily Camarilla levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # 12h trend filter: EMA20
-    close_series = pd.Series(close)
-    ema20_12h = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Weekly trend filter: EMA21
+    close_1w_series = pd.Series(close_1w)
+    ema21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,7 +63,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema20_12h[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema21_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -72,9 +83,9 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below 12h EMA20
-        trend_up = close[i] > ema20_12h[i]
-        trend_down = close[i] < ema20_12h[i]
+        # Trend filter: price above/below weekly EMA21
+        trend_up = close[i] > ema21_1w_aligned[i]
+        trend_down = close[i] < ema21_1w_aligned[i]
         
         # Entry conditions: 
         # Long: price breaks above daily R4 with volume and trend up
@@ -109,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyCamarilla_R4S4_Trend_Volume_Session"
-timeframe = "12h"
+name = "4h_DailyCamarilla_R4S4_WeeklyTrend_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
