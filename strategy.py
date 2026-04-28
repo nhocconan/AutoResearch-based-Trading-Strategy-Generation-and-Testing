@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,69 +13,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (HTF)
+    # Get weekly data for Donchian and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Weekly Donchian(20) - breakout levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate Donchian channels with proper lookback
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
+        return res
+    
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
+    
+    donchian_high = rolling_max(high_1w, 20)
+    donchian_low = rolling_min(low_1w, 20)
+    
+    # Align to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    
+    # Weekly trend: EMA(50) on close
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Daily volume spike filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Get 4h data for ATR calculation (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate ATR(14) on 4h
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_4h = np.concatenate([[np.nan], tr_4h])  # Align with original index
-    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = vol_1d / vol_ma_20
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 14)
+    start_idx = max(100, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_4h_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry conditions: trend following with volatility filter
-        long_entry = uptrend and close[i] > high[i-1] and volume[i] > 1.2 * np.nanmean(volume[max(0,i-5):i]) if i >= 5 else False
-        short_entry = downtrend and close[i] < low[i-1] and volume[i] > 1.2 * np.nanmean(volume[max(0,i-5):i]) if i >= 5 else False
+        # Volume filter: require above average daily volume
+        vol_filter = vol_ratio_aligned[i] > 1.5
         
-        # Exit conditions: ATR-based stop loss
-        if position == 1:
-            # Trail stop: exit if price drops 2*ATR from highest high since entry
-            # We'll use a simple trailing stop based on recent high
-            recent_high = np.nanmax(high[max(0,i-10):i+1]) if i >= 10 else high[i]
-            exit_condition = close[i] < recent_high - 2.0 * atr_4h_aligned[i]
-        elif position == -1:
-            # Trail stop: exit if price rises 2*ATR from lowest low since entry
-            recent_low = np.nanmin(low[max(0,i-10):i+1]) if i >= 10 else low[i]
-            exit_condition = close[i] > recent_low + 2.0 * atr_4h_aligned[i]
-        else:
-            exit_condition = False
+        # Breakout conditions
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
+        
+        # Entry conditions: breakout with trend and volume confirmation
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
+        
+        # Exit conditions: reverse signal or volatility exhaustion
+        long_exit = close[i] < ema_50_1w_aligned[i]  # trend reversal
+        short_exit = close[i] > ema_50_1w_aligned[i]  # trend reversal
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -84,7 +96,10 @@ def generate_signals(prices):
         elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif exit_condition and position != 0:
+        elif long_exit and position == 1:
+            signals[i] = 0.0
+            position = 0
+        elif short_exit and position == -1:
             signals[i] = 0.0
             position = 0
         else:
@@ -98,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TrendBreakout_ATRStop_1dEMA34"
-timeframe = "4h"
+name = "6h_WeeklyDonchian20_EMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
