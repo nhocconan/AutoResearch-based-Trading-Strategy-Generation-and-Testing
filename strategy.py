@@ -30,9 +30,13 @@ def generate_signals(prices):
     camarilla_r4 = close_1d + daily_range * 1.1 / 2
     camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align Camarilla levels to 1h timeframe
+    # Align Camarilla levels to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Daily EMA34 for trend
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -68,21 +72,25 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Entry conditions: 
-        # Long: price breaks above daily R4 with volume
-        # Short: price breaks below daily S4 with volume
-        long_entry = (close[i] > r4_aligned[i]) and vol_filter
-        short_entry = (close[i] < s4_aligned[i]) and vol_filter
+        # Daily trend filter: price above/below daily EMA34
+        price_above_daily_ema = close[i] > ema_34_aligned[i]
+        price_below_daily_ema = close[i] < ema_34_aligned[i]
         
-        # Exit conditions: price returns to opposite daily S4/R4 levels
-        long_exit = (close[i] < s4_aligned[i])
-        short_exit = (close[i] > r4_aligned[i])
+        # Entry conditions: 
+        # Long: price breaks above daily R4 with volume and daily uptrend
+        # Short: price breaks below daily S4 with volume and daily downtrend
+        long_entry = (close[i] > r4_aligned[i]) and price_above_daily_ema and vol_filter
+        short_entry = (close[i] < s4_aligned[i]) and price_below_daily_ema and vol_filter
+        
+        # Exit conditions: price returns to opposite daily S4/R4 levels or daily trend reversal
+        long_exit = (close[i] < s4_aligned[i]) or (not price_above_daily_ema)
+        short_exit = (close[i] > r4_aligned[i]) or (not price_below_daily_ema)
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -93,14 +101,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Camarilla_R4S4_Breakout_Volume_Session"
-timeframe = "1h"
+name = "12h_Camarilla_R4S4_DailyEMA34_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
