@@ -32,7 +32,7 @@ def generate_signals(prices):
     H4 = close_1d + (range_hl * 1.1 / 2)
     L4 = close_1d - (range_hl * 1.1 / 2)
     
-    # Align pivot levels to 12h
+    # Align pivot levels to 4h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
@@ -57,7 +57,7 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 12h volume above average
+        # Volume filter: current 4h volume above average
         volume_filter = volume[i] > vol_ma_20[i]
         
         # Entry conditions: Camarilla H4/L4 breakout with volume and trend
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_VolumeTrend_v5"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_v4"
+timeframe = "4h"
 leverage = 1.0
