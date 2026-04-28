@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Price breaking above/below Camarilla R3/S3 levels with 1-day EMA trend filter and volume spike captures strong momentum moves. Works in bull/bear by following the 1-day trend. Targets 12-37 trades/year (50-150 over 4 years) to avoid fee drag.
+1d_WilliamsAlligator_BullBear
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips SMAs) defines market regime: 
+- Bull when Lips > Teeth > Jaw (green alignment) 
+- Bear when Lips < Teeth < Jaw (red alignment)
+Trades only in direction of Alligator alignment with volume confirmation and ATR volatility filter.
+Avoids choppy markets by requiring clear alignment. Targets 10-25 trades/year on daily timeframe.
+Works in bull (rides trends) and bear (shorts declines) by following Alligator's jaw alignment.
 """
 
 import numpy as np
@@ -10,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,63 +23,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Williams Alligator on weekly: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs
+    close_1w = df_1w['close'].values
+    jaw = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Align weekly Alligator to daily
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
     
-    # Align Camarilla levels to 12h timeframe (wait for day to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Daily ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1-day EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: >1.8x 30-period MA (12h = 6 days)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: >1.3x 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Alligator alignment: Bullish (green) or Bearish (red)
+        bullish_align = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        bearish_align = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
         
-        # Breakout conditions: break of Camarilla R3/S3
-        breakout_r3 = close[i] > camarilla_r3_aligned[i]
-        breakdown_s3 = close[i] < camarilla_s3_aligned[i]
+        # Volatility filter: avoid low volatility chop
+        vol_filter = atr[i] > 0.5 * np.nanmedian(atr[max(0, i-50):i+1])
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.8 * vol_ma_30[i])
+        vol_confirm = volume[i] > (1.3 * vol_ma_20[i])
         
-        # Entry logic: breakout in direction of trend with volume
-        long_entry = vol_confirm and uptrend and breakout_r3
-        short_entry = vol_confirm and downtrend and breakdown_s3
+        # Entry: follow Alligator direction with filters
+        long_entry = bullish_align and vol_filter and vol_confirm
+        short_entry = bearish_align and vol_filter and vol_confirm
         
-        # Exit logic: opposite breakout or trend change
-        long_exit = breakdown_s3 or (not uptrend)
-        short_exit = breakout_r3 or (not downtrend)
+        # Exit: opposite Alligator alignment or loss of volume/volatility
+        long_exit = bearish_align or (not vol_filter) or (not vol_confirm)
+        short_exit = bullish_align or (not vol_filter) or (not vol_confirm)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -99,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_WilliamsAlligator_BullBear"
+timeframe = "1d"
 leverage = 1.0
