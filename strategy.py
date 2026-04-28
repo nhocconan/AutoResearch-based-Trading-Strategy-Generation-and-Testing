@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and session timing
-# RSI(2) captures extreme short-term momentum exhaustion for mean reversion entries.
-# 4h EMA(50) provides trend bias: long only when price > EMA50, short only when price < EMA50.
-# Session filter (08-20 UTC) avoids low-liquidity Asian session noise.
-# Target 15-37 trades/year by requiring confluence of RSI extreme + trend alignment + session.
-# Works in bull/bear markets: in uptrends, buy RSI(2) pullbacks; in downtrends, sell RSI(2) bounces.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and volume spike confirmation
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Long when: Bull Power > 0 AND price > 1d EMA34 (uptrend) AND volume > 2.0x 20-bar average
+# Short when: Bear Power < 0 AND price < 1d EMA34 (downtrend) AND volume > 2.0x 20-bar average
+# Works in bull/bear markets by aligning with higher-timeframe trend while capturing momentum via Elder Ray.
+# Volume spike filters weak signals. Target 12-37 trades/year to minimize fee drag.
 
-name = "1h_RSI2_4hEMA50_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_ElderRay_BullBearPower_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,59 +19,96 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get daily data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend bias
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate EMA34 on daily close
+    close_1d = pd.Series(df_1d['close'])
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1h RSI(2) for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_2 = 100 - (100 / (1 + rs))
-    rsi_2_values = rsi_2.fillna(50).values  # fill NaN with 50 (neutral)
+    # Align daily EMA34 to 6h timeframe (completed daily EMA34 only)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Session filter: 08-20 UTC (avoid low-liquidity sessions)
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    in_session = (hours >= 8) & (hours <= 20)
+    # Elder Ray components: need EMA13 on 6h
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
+    
+    # Volume confirmation: >2.0x 20-bar average volume
+    volume_series = pd.Series(volume)
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Start after RSI(2) and EMA(50) warmup
-    start_idx = max(2, 50)
+    start_idx = max(20, 13)  # volume MA20, EMA13
     
     for i in range(start_idx, n):
-        # Skip if required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_2_values[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema13[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade during session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
+        vol_confirm = volume_spike[i]
         price = close[i]
-        ema_trend = ema_50_4h_aligned[i]
-        rsi_val = rsi_2_values[i]
+        ema34_val = ema34_1d_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         
-        # Mean reversion entries with trend filter
-        if rsi_val < 10 and price > ema_trend:  # Oversold in uptrend -> long
-            signals[i] = 0.20
-        elif rsi_val > 90 and price < ema_trend:  # Overbought in downtrend -> short
-            signals[i] = -0.20
-        else:
-            signals[i] = 0.0
+        # Handle entries and exits
+        if position == 0:  # Flat - look for new entries
+            # Long entry: Bull Power > 0 AND price > daily EMA34 (uptrend) AND volume spike
+            if bull_val > 0 and price > ema34_val and vol_confirm:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+            # Short entry: Bear Power < 0 AND price < daily EMA34 (downtrend) AND volume spike
+            elif bear_val < 0 and price < ema34_val and vol_confirm:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+            else:
+                signals[i] = 0.0
+        elif position == 1:  # Long - exit on stoploss or Bear Power turns negative
+            # ATR-based stoploss: 2.0 * ATR below entry (using 6h ATR)
+            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
+            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr = np.maximum(np.maximum(tr1, tr2), tr3)
+            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
+            stop_loss = entry_price - 2.0 * atr_val
+            # Exit on stoploss or Bear Power < 0 (momentum shift)
+            if price < stop_loss or bear_val < 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # Short - exit on stoploss or Bull Power turns positive
+            # ATR-based stoploss: 2.0 * ATR above entry
+            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
+            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr = np.maximum(np.maximum(tr1, tr2), tr3)
+            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
+            stop_loss = entry_price + 2.0 * atr_val
+            # Exit on stoploss or Bull Power > 0 (momentum shift)
+            if price > stop_loss or bull_val > 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
