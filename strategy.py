@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,55 +13,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter and 1d for daily context
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 30 or len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h EMA200 for trend filter
-    ema200_4h = pd.Series(df_4h['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # Get daily data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # 1h ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1h Bollinger Bands (20,2) for mean reversion signals
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1h RSI(14) for momentum confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Weekly trend filter: EMA(21)
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Weekly EMA(50) for stronger trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Precompute session filter (08-20 UTC)
+    # Daily Donchian channels (20-period)
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly and daily indicators to 6h timeframe
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    
+    # Volume filter: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC (active trading hours)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 200)  # Ensure enough data for indicators
+    # Start after warmup period
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200_4h_aligned[i]) or 
-            np.isnan(atr14[i]) or
-            np.isnan(upper_bb[i]) or
-            np.isnan(lower_bb[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(ema21_1w_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -70,32 +74,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr14[i] > np.nanpercentile(atr14[:i+1], 20) if i >= 20 else False
+        # Weekly trend filter: price above/both EMAs for uptrend, below/both for downtrend
+        uptrend = close[i] > ema21_1w_aligned[i] and close[i] > ema50_1w_aligned[i]
+        downtrend = close[i] < ema21_1w_aligned[i] and close[i] < ema50_1w_aligned[i]
         
-        # Trend filter: 4h EMA200
-        uptrend = close[i] > ema200_4h_aligned[i]
-        downtrend = close[i] < ema200_4h_aligned[i]
+        # Volume filter: current volume above average
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Mean reversion signals: Bollinger Band touches with RSI extremes
-        bb_lower_touch = close[i] <= lower_bb[i]
-        bb_upper_touch = close[i] >= upper_bb[i]
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
         
-        # Entry conditions
-        long_entry = bb_lower_touch and rsi_oversold and uptrend and vol_filter
-        short_entry = bb_upper_touch and rsi_overbought and downtrend and vol_filter
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: return to middle of Bollinger Bands or trend reversal
-        long_exit = close[i] >= sma20[i] or not uptrend
-        short_exit = close[i] <= sma20[i] or not downtrend
+        # Exit: Donchian opposite breakout or trend reversal
+        long_exit = close[i] < donchian_low_aligned[i] or not uptrend
+        short_exit = close[i] > donchian_high_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -106,14 +107,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_BollingerRSI_TrendFilter_Session"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyEMA21_50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
