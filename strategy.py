@@ -1,4 +1,3 @@
-# 103301
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -6,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d data once for HTF context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     # Calculate 1d indicators
@@ -25,17 +24,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d EMA(34) for trend
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # 1d RSI(14)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean().values
-    avg_loss = loss.rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d EMA(50) for trend
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # 1d ATR(14) for volatility
     tr1 = high_1d - low_1d
@@ -45,9 +35,8 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align HTF indicators to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # Hour filter: 8-20 UTC
@@ -56,12 +45,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 60  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_14_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -78,26 +66,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA34
-        trend_up = close[i] > ema_34_aligned[i]
-        trend_down = close[i] < ema_34_aligned[i]
+        # Trend filter: price above/below EMA50
+        trend_up = close[i] > ema_50_aligned[i]
+        trend_down = close[i] < ema_50_aligned[i]
         
-        # Momentum filter: RSI in favorable range (not extreme)
-        rsi_bullish = rsi_aligned[i] > 50 and rsi_aligned[i] < 70
-        rsi_bearish = rsi_aligned[i] < 50 and rsi_aligned[i] > 30
+        # Volatility filter: low volatility environment (avoid choppy markets)
+        vol_ma = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values
+        low_vol = atr_14_aligned[i] < vol_ma[i]
         
         # Volume filter: above average volume
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_filter = volume[i] > vol_ma[i]
+        vol_ma_price = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_filter = volume[i] > vol_ma_price[i]
         
-        # Entry conditions - more restrictive to reduce trade frequency
-        long_entry = trend_up and rsi_bullish and vol_filter
-        short_entry = trend_down and rsi_bearish and vol_filter
+        # Entry conditions: trend + low volatility + volume
+        long_entry = trend_up and low_vol and vol_filter
+        short_entry = trend_down and low_vol and vol_filter
         
-        # Exit conditions: opposite conditions or volatility spike
-        atr_ma = pd.Series(atr_14_aligned).rolling(window=10, min_periods=10).mean().values
-        long_exit = not trend_up or not rsi_bullish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
-        short_exit = not trend_down or not rsi_bearish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
+        # Exit conditions: trend reversal or volatility expansion
+        long_exit = not trend_up or not low_vol
+        short_exit = not trend_down or not low_vol
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -122,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_RSI_Volume_Session_103301"
-timeframe = "4h"
+name = "12h_EMA50_LowVol_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
