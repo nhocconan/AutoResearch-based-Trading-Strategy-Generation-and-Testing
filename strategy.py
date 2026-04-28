@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Slope_Trend_WeakLong_Short
-Hypothesis: On daily timeframe, enter long when KAMA slope turns positive and short when KAMA slope turns negative, with weak position sizing (0.25 long, -0.15 short) to profit from trends while limiting drawdown in sideways/choppy markets. Uses weekly trend filter (price above/below weekly EMA50) to avoid counter-trend trades. Designed for low trade frequency (~10-25/year) to minimize fee decay. Targets BTC/ETH primarily with proven KAMA trend-following edge.
+6h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: On 6-hour timeframe, enter long when price breaks above Camarilla R3 level with volume surge and daily uptrend (price above daily EMA34), short when price breaks below S3 level with volume surge and daily downtrend. Exit on opposite breakout. Uses daily trend filter to avoid counter-trend trades. Designed for low trade frequency (~15-30/year) to minimize fee decay in both bull and bear markets. Targets BTC/ETH primarily with proven edge from Camarilla structure + volume + trend alignment.
 """
 
 import numpy as np
@@ -14,97 +14,87 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get daily data for trend filter and Camarilla levels
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 34:
         return np.zeros(n)
     
-    # Calculate weekly 50 EMA for trend filter
-    close_weekly = df_weekly['close'].values
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily 34 EMA for trend filter
+    close_daily = df_daily['close'].values
+    ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align weekly EMA to daily timeframe
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    # Align daily EMA to 6h timeframe
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
     
-    # Weekly trend: bullish when price > EMA50, bearish when price < EMA50
-    weekly_uptrend = close > ema50_weekly_aligned
-    weekly_downtrend = close < ema50_weekly_aligned
+    # Daily trend: bullish when price > EMA34, bearish when price < EMA34
+    daily_uptrend = close > ema34_daily_aligned
+    daily_downtrend = close < ema34_daily_aligned
     
-    # Calculate KAMA ( Kaufman Adaptive Moving Average )
-    # Parameters: ER length = 10, Fast EMA = 2, Slow EMA = 30
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None
+    # Calculate Camarilla levels from previous day
+    high_prev = df_daily['high'].shift(1).values
+    low_prev = df_daily['low'].shift(1).values
+    close_prev = df_daily['close'].shift(1).values
     
-    # Proper ER calculation
-    er = np.zeros(n)
-    for i in range(n):
-        if i < 10:
-            er[i] = np.nan
-        else:
-            direction = np.abs(close[i] - close[i-10])
-            volatility_sum = np.sum(np.abs(np.diff(close[i-9:i+1])))  # 10-period volatility
-            er[i] = direction / volatility_sum if volatility_sum != 0 else 0
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    R3 = close_prev + range_prev * 1.1 / 2
+    S3 = close_prev - range_prev * 1.1 / 2
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)      # EMA(2)
-    slow_sc = 2 / (30 + 1)     # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Align daily Camarilla levels to 6h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_daily, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_daily, S3)
     
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # KAMA slope (1-period difference)
-    kama_slope = np.diff(kama, prepend=0)
+    # Volume confirmation: current volume > 2.0x 24-period average
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_surge = volume > (vol_ma_24 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 30  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_weekly_aligned[i]) or np.isnan(kama_slope[i])):
+        if (np.isnan(ema34_daily_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with weekly trend alignment
-        long_entry = kama_slope[i] > 0 and weekly_uptrend[i]
-        short_entry = kama_slope[i] < 0 and weekly_downtrend[i]
+        # Entry conditions with daily trend alignment and volume surge
+        long_entry = close[i] > R3_aligned[i] and daily_uptrend[i] and volume_surge[i]
+        short_entry = close[i] < S3_aligned[i] and daily_downtrend[i] and volume_surge[i]
         
-        # Exit when slope reverses
-        long_exit = kama_slope[i] < 0
-        short_exit = kama_slope[i] > 0
+        # Exit on opposite Camarilla level break with volume surge
+        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
+        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
-            signals[i] = 0.25   # Weak long
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.15  # Weak short
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to weak short
+            signals[i] = -0.25  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to weak long
+            signals[i] = 0.25   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.15
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_KAMA_Slope_Trend_WeakLong_Short"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
