@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_LongTermTrend_Pullback_With_VolumeConfirmation
-Hypothesis: Uses 6-hour price action with long-term trend filter from 1-day EMA200 and pullback entries.
-Looks for pullbacks to the 6-hour EMA21 during strong daily trends with volume confirmation.
-Designed to work in both bull and bear markets by following the dominant daily trend.
-Targets 12-37 trades per year to minimize fee decay while capturing meaningful trend continuation moves.
+6h_WeeklyPivot_R3S3_Breakout_DailyTrend_VolumeSpike
+Hypothesis: Uses weekly R3/S3 levels from the 1-week timeframe for breakout trades.
+Trades breakouts above weekly R3 in uptrend (daily EMA34 up) or below weekly S3 in downtrend (daily EMA34 down).
+Confirmed by volume spikes (>2x 20-period MA). Uses 6h timeframe to capture intermediate-term moves.
+Designed to work in bull markets (breakouts above R3) and bear markets (breakdowns below S3).
+Targets 12-37 trades per year to minimize fee drag while capturing significant momentum moves.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,52 +22,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for long-term trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get 1-week data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day EMA200 for long-term trend filter
+    # Get 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1-day EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6-hour EMA21 for pullback entries
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate weekly pivot points (standard floor pivot)
+    # Using previous week's OHLC
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate volume confirmation (>1.5x 20-period MA)
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    R3 = pivot + 2 * (weekly_high - weekly_low)
+    S3 = pivot - 2 * (weekly_high - weekly_low)
+    
+    # Align weekly levels to 6h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    
+    # Calculate volume spike (>2x 20-period MA for strong confirmation)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma_20)
+    vol_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(ema_21[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long-term trend direction from 1-day EMA200
-        trend_up = close[i] > ema_200_1d_aligned[i]
-        trend_down = close[i] < ema_200_1d_aligned[i]
+        # Trend direction from 1-day EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
         
-        # Price relative to 6-hour EMA21
-        price_above_ema21 = close[i] > ema_21[i]
-        price_below_ema21 = close[i] < ema_21[i]
+        # Volume confirmation
+        vol_confirm = vol_spike[i]
+        
+        # Price relative to weekly R3/S3
+        price_above_R3 = close[i] > R3_aligned[i]
+        price_below_S3 = close[i] < S3_aligned[i]
         
         # Entry logic:
-        # Long: Pullback to EMA21 in uptrend with volume confirmation
-        long_entry = trend_up and price_below_ema21 and vol_confirm[i] and (close[i] > close[i-1])
+        # Long: Breakout above weekly R3 in uptrend with volume
+        long_entry = vol_confirm and trend_up and price_above_R3 and (close[i-1] <= R3_aligned[i-1])
         
-        # Short: Pullback to EMA21 in downtrend with volume confirmation
-        short_entry = trend_down and price_above_ema21 and vol_confirm[i] and (close[i] < close[i-1])
+        # Short: Breakdown below weekly S3 in downtrend with volume
+        short_entry = vol_confirm and trend_down and price_below_S3 and (close[i-1] >= S3_aligned[i-1])
         
-        # Exit logic: Opposite EMA21 cross or trend reversal
-        long_exit = price_above_ema21 or not trend_up
-        short_exit = price_below_ema21 or not trend_down
+        # Exit logic: Opposite level or trend reversal
+        long_exit = (price_below_S3 and close[i] > S3_aligned[i-1]) or not trend_up
+        short_exit = (price_above_R3 and close[i] < R3_aligned[i-1]) or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -91,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_LongTermTrend_Pullback_With_VolumeConfirmation"
+name = "6h_WeeklyPivot_R3S3_Breakout_DailyTrend_VolumeSpike"
 timeframe = "6h"
 leverage = 1.0
