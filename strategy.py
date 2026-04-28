@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,7 +31,7 @@ def generate_signals(prices):
     r3_w = high_w + 2 * (pivot_w - low_w)
     s3_w = low_w - 2 * (high_w - pivot_w)
     
-    # Align to 12h timeframe
+    # Align to 1d timeframe
     r3_w_aligned = align_htf_to_ltf(prices, df_1w, r3_w)
     s3_w_aligned = align_htf_to_ltf(prices, df_1w, s3_w)
     r2_w_aligned = align_htf_to_ltf(prices, df_1w, r2_w)
@@ -58,7 +58,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 60  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -123,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_S3_R3_Breakout_DailyTrend_Volume_Session"
-timeframe = "12h"
+name = "1d_WeeklyPivot_S3_R3_Breakout_DailyTrend_Volume_Session"
+timeframe = "1d"
 leverage = 1.0
