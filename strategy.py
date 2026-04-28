@@ -1,9 +1,3 @@
-# 4h_Macd_Histogram_Zero_Cross_Trend_Filter
-# Hypothesis: MACD histogram crossing zero with trend filter (EMA50) and volume confirmation captures sustained momentum moves in both bull and bear markets.
-# The MACD histogram crossing zero indicates a change in short-term momentum relative to longer-term trend, which when aligned with the EMA50 trend and confirmed by volume, provides high-probability entries.
-# Target: 20-40 trades/year on 4h timeframe to minimize fee drag while capturing significant moves.
-# Uses EMA50 for trend filter and volume > 20-period average for confirmation.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,25 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get daily data for Donchian channels and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily EMA(50) for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily Donchian channels (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate MACD (12,26,9) on close prices
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
+    # Calculate daily ADX (14-period) for trend strength
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(abs(high_1d[1:] - high_1d[:-1]), 
+                               abs(low_1d[1:] - low_1d[:-1])))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Align daily EMA50 to 4h timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / \
+              pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / \
+               pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align daily indicators to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Calculate average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,9 +63,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_aligned[i]) or 
-            np.isnan(macd_hist[i]) or
-            np.isnan(macd_hist[i-1]) or
+        if (np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -66,26 +75,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        uptrend = close[i] > ema50_aligned[i]
-        downtrend = close[i] < ema50_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
         # Volume filter: current volume above average
         vol_filter = volume[i] > vol_ma[i]
         
-        # MACD histogram zero cross signals
-        macd_bullish_cross = macd_hist[i] > 0 and macd_hist[i-1] <= 0
-        macd_bearish_cross = macd_hist[i] < 0 and macd_hist[i-1] >= 0
+        # Breakout conditions: price breaks Donchian channels with trend and volume
+        long_breakout = close[i] > high_20_aligned[i]
+        short_breakout = close[i] < low_20_aligned[i]
         
-        long_entry = macd_bullish_cross and uptrend and vol_filter
-        short_entry = macd_bearish_cross and downtrend and vol_filter
+        long_entry = long_breakout and strong_trend and vol_filter
+        short_entry = short_breakout and strong_trend and vol_filter
         
-        # Exit when MACD histogram crosses back in opposite direction or trend fails
-        macd_bearish_exit = macd_hist[i] < 0 and macd_hist[i-1] >= 0
-        macd_bullish_exit = macd_hist[i] > 0 and macd_hist[i-1] <= 0
-        
-        long_exit = macd_bearish_exit or not uptrend
-        short_exit = macd_bullish_exit or not downtrend
+        # Exit conditions: price returns to opposite Donchian level
+        long_exit = close[i] < low_20_aligned[i]
+        short_exit = close[i] > high_20_aligned[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -110,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Macd_Histogram_Zero_Cross_Trend_Filter"
-timeframe = "4h"
+name = "12h_Donchian20_ADX25_Volume"
+timeframe = "12h"
 leverage = 1.0
