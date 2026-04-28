@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_PriceAction_Retracement_Trend_Filter
-Hypothesis: Price retracement to key moving averages (EMA21/50) on 12h timeframe with trend filter from 1w EMA200 and volume confirmation works in both bull and bear markets. The 1w trend filter ensures we only trade with the major trend, reducing whipsaw in sideways markets. Price retracement to EMA21/50 provides high-probability entries during pullbacks. Target: 20-40 trades/year per symbol to minimize fee drag while capturing meaningful moves.
+1d_WK_Trend_With_WK_Trend_Filter
+Hypothesis: On daily timeframe, use weekly trend (via 8/21 EMA crossover) as filter for entries triggered by price closing above/below prior day's high/low with volume confirmation. Weekly trend filter avoids counter-trend trades in choppy markets, while daily breakouts capture momentum. Volume surge confirms institutional participation. Designed for low trade frequency (<20/year) to minimize fee drag and work in both bull/bear markets via trend alignment.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,59 +18,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 21:
         return np.zeros(n)
     
-    # Calculate 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate weekly 8 and 21 EMA for trend filter
+    close_weekly = df_weekly['close'].values
+    ema8_weekly = pd.Series(close_weekly).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Get 1d data for EMA21/EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Align weekly EMAs to daily timeframe
+    ema8_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema8_weekly)
+    ema21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema21_weekly)
     
-    # Calculate 1d EMA21 and EMA50
-    close_1d = df_1d['close'].values
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly trend: bullish when EMA8 > EMA21
+    weekly_uptrend = ema8_weekly_aligned > ema21_weekly_aligned
+    weekly_downtrend = ema8_weekly_aligned < ema21_weekly_aligned
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Daily breakout: close above prior day's high or below prior day's low
+    # Use shift(1) to access prior day's high/low (available at close of current day)
+    prior_day_high = np.roll(high, 1)
+    prior_day_low = np.roll(low, 1)
+    # First bar has no prior day, set to current values to avoid false signals
+    prior_day_high[0] = high[0]
+    prior_day_low[0] = low[0]
+    
+    breakout_long = close > prior_day_high
+    breakout_short = close < prior_day_low
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (vol_ma_20 * 1.5)
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for all indicators to stabilize
+    start_idx = 21  # Wait for weekly EMA21 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(ema_21_1d_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema8_weekly_aligned[i]) or np.isnan(ema21_weekly_aligned[i]) or
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from 1w EMA200
-        uptrend = close[i] > ema_200_1w_aligned[i]
-        downtrend = close[i] < ema_200_1w_aligned[i]
+        # Entry conditions with weekly trend alignment and volume surge
+        long_entry = breakout_long[i] and weekly_uptrend[i] and volume_surge[i]
+        short_entry = breakout_short[i] and weekly_downtrend[i] and volume_surge[i]
         
-        # Price retracement to EMA21 or EMA50 (within 1%)
-        near_ema21 = abs(close[i] - ema_21_1d_aligned[i]) / ema_21_1d_aligned[i] < 0.01
-        near_ema50 = abs(close[i] - ema_50_1d_aligned[i]) / ema_50_1d_aligned[i] < 0.01
-        
-        # Entry conditions: retracement to EMA in direction of trend with volume
-        long_entry = uptrend and (near_ema21 or near_ema50) and volume_confirmed[i]
-        short_entry = downtrend and (near_ema21 or near_ema50) and volume_confirmed[i]
-        
-        # Exit when price moves away from EMA or trend changes
-        long_exit = not uptrend or (close[i] > ema_21_1d_aligned[i] * 1.02 and close[i] > ema_50_1d_aligned[i] * 1.02)
-        short_exit = not downtrend or (close[i] < ema_21_1d_aligned[i] * 0.98 and close[i] < ema_50_1d_aligned[i] * 0.98)
+        # Exit on opposite breakout with volume surge (to avoid whipsaw)
+        long_exit = breakout_short[i] and volume_surge[i]
+        short_exit = breakout_long[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -95,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_PriceAction_Retracement_Trend_Filter"
-timeframe = "12h"
+name = "1d_WK_Trend_With_WK_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
