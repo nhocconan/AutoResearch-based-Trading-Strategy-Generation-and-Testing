@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-Hypothesis: Focus on high-probability breakouts at daily Camarilla R1/S1 levels with 4h EMA50 trend filter and volume confirmation on 1h timeframe.
-Targets 15-37 trades/year by requiring multiple confluence factors (breakout, trend, volume) to reduce false signals and work in both bull and bear markets.
-Uses 4h trend for directional bias and 1h for precise entry timing, with session filter (08-20 UTC) to avoid low-liquidity hours.
+6h_ElderRay_BullBearPower_1wTrend_Filter
+Hypothesis: Elder Ray (Bull/Bear Power) signals combined with 1-week EMA trend filter to capture momentum in both bull and bear markets. 
+Weekly trend filter reduces whipsaws during reversals. Targets 20-40 trades/year by requiring Elder Ray divergence and weekly trend alignment.
+Works in bull markets via Bull Power strength and in bear markets via Bear Power divergence with trend filter.
 """
 
 import numpy as np
@@ -18,97 +18,82 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1-week EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Camarilla R1 and S1 levels
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Elder Ray calculations (13-period EMA as base)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all higher timeframe data to 1h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-    h4_uptrend = close > ema_50_4h_aligned
-    h4_downtrend = close < ema_50_4h_aligned
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
-    
-    # Session filter: 08:00-20:00 UTC
-    session_mask = (prices.index.hour >= 8) & (prices.index.hour <= 20)
+    # Bull Power = High - EMA13
+    bull_power = high - ema_13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema_13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for EMA stabilization
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_surge[i]) or
-            not session_mask[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_13[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R1 + 4h uptrend + volume surge
-        long_entry = (close[i] > R1_aligned[i] and 
-                     h4_uptrend[i] and 
-                     volume_surge[i])
+        # Trend filter: 1-week EMA34 slope
+        # Only consider uptrend if current EMA > EMA 5 periods ago
+        uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[max(i-5, start_idx)]
+        downtrend = ema_34_1w_aligned[i] < ema_34_1w_aligned[max(i-5, start_idx)]
         
-        # Short: price breaks below S1 + 4h downtrend + volume surge
-        short_entry = (close[i] < S1_aligned[i] and 
-                      h4_downtrend[i] and 
-                      volume_surge[i])
+        # Elder Ray signals with divergence
+        # Long: Bull Power rising AND above zero (bullish momentum) + weekly uptrend
+        long_signal = (bull_power[i] > 0 and 
+                      bull_power[i] > bull_power[i-1] and  # Rising bull power
+                      uptrend)
         
-        # Exit on opposite level break with volume surge
-        long_exit = close[i] < S1_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R1_aligned[i] and volume_surge[i]
+        # Short: Bear Power falling AND below zero (bearish momentum) + weekly downtrend
+        short_signal = (bear_power[i] < 0 and 
+                       bear_power[i] < bear_power[i-1] and  # Falling bear power (more negative)
+                       downtrend)
         
-        if long_entry and position <= 0:
-            signals[i] = 0.20
+        # Exit when power signals reverse against position
+        long_exit = (position == 1 and 
+                    (bull_power[i] <= 0 or bull_power[i] < bull_power[i-1]))
+        short_exit = (position == -1 and 
+                     (bear_power[i] >= 0 or bear_power[i] > bear_power[i-1]))
+        
+        if long_signal and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
-            signals[i] = -0.20
+        elif short_signal and position >= 0:
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.20  # Reverse to short
-            position = -1
+            signals[i] = 0.0
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.20   # Reverse to long
-            position = 1
+            signals[i] = 0.0
+            position = 0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_BullBearPower_1wTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
