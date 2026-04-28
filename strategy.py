@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d EMA34 trend filter and volume confirmation.
-# Williams Alligator (JAW=13, TEETH=8, LIPS=5) identifies trending vs ranging markets.
-# In strong trends (Alligator aligned), we trade breakouts in direction of trend.
-# 1d EMA34 provides higher timeframe trend bias to avoid counter-trend trades.
-# Volume confirmation ensures breakouts have momentum.
-# Position size 0.25 for balanced risk. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in both bull and bear markets by trading with the higher timeframe trend.
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+# Uses 12h primary timeframe for lower trade frequency and better generalization.
+# Donchian channel provides structured breakouts with moderate frequency.
+# 1w EMA34 filters for trend alignment on higher timeframe, reducing counter-trend trades.
+# Volume spike confirms breakout strength and filters low-momentum false breakouts.
+# Position size 0.25 for balanced risk/return. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,29 +28,24 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1w EMA34 to 12h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Williams Alligator components (6h timeframe)
-    # JAW: 13-period SMMA, shifted 8 bars ahead
-    # TEETH: 8-period SMMA, shifted 5 bars ahead  
-    # LIPS: 5-period SMMA, shifted 3 bars ahead
-    # Using EMA as proxy for SMMA (similar smoothing properties)
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().shift(3).values
+    # Calculate 12h Donchian channels (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6h volume spike: >2.0x 20-bar average volume
+    # 12h volume spike: >2.0x 20-bar average volume (stricter for lower TF)
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
     
@@ -62,10 +56,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(jaw[i]) or
-            np.isnan(teeth[i]) or
-            np.isnan(lips[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(highest_high_20[i]) or
+            np.isnan(lowest_low_20[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -75,34 +68,25 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator alignment check
-        # Bullish alignment: Lips > Teeth > Jaw (green alignment)
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        # Bearish alignment: Jaw > Teeth > Lips (red alignment)
-        bearish_alignment = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        # Trend filter: 1w EMA34 direction
+        price_above_ema = close[i] > ema_34_1w_aligned[i]
+        price_below_ema = close[i] < ema_34_1w_aligned[i]
         
-        # Trend filter: 1d EMA34 direction
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
-        
-        # Breakout conditions: price outside Alligator mouth
-        # Long: price above highest of Alligator components
-        # Short: price below lowest of Alligator components
-        alligator_high = np.maximum(jaw[i], np.maximum(teeth[i], lips[i]))
-        alligator_low = np.minimum(jaw[i], np.minimum(teeth[i], lips[i]))
-        price_above_alligator = close[i] > alligator_high
-        price_below_alligator = close[i] < alligator_low
+        # Donchian breakout conditions
+        long_breakout = close[i] > highest_high_20[i]
+        short_breakout = close[i] < lowest_low_20[i]
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Entry conditions: Alligator aligned + price breakout + volume + HTF trend
-        long_entry = bullish_alignment and price_above_alligator and price_above_ema and vol_confirm
-        short_entry = bearish_alignment and price_below_alligator and price_below_ema and vol_confirm
+        long_entry = price_above_ema and long_breakout and vol_confirm
+        short_entry = price_below_ema and short_breakout and vol_confirm
         
-        # Exit conditions: price re-enters Alligator mouth or opposite signal
-        long_exit = close[i] < alligator_high
-        short_exit = close[i] > alligator_low
+        # Exit conditions: opposite Donchian level (10-period for faster exit)
+        highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+        lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+        long_exit = close[i] < lowest_low_10[i]
+        short_exit = close[i] > highest_high_10[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
