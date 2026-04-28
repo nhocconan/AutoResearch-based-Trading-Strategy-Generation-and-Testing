@@ -3,140 +3,113 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
-# Enter long when price breaks above R3 with volume > 2x 24-bar average and 1w EMA50 trending up.
-# Enter short when price breaks below S3 with volume > 2x 24-bar average and 1w EMA50 trending down.
-# Exit when price retouches the 1d EMA34 or after 8 bars (max hold).
-# Uses discrete position sizing (0.30) to limit drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Camarilla levels provide intraday support/resistance; 1w EMA50 ensures higher timeframe alignment;
-# volume spike confirms institutional interest. Works in both bull (strong breakouts) and bear (strong breakdowns).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR(14) stoploss.
+# Enter long when price breaks above Donchian upper band (20-bar high) and 1d EMA50 is rising.
+# Enter short when price breaks below Donchian lower band (20-bar low) and 1d EMA50 is falling.
+# Exit when price touches Donchian middle band (20-bar average of high/low) or ATR-based stoploss.
+# Uses discrete position sizing (0.30) to balance return and drawdown.
+# Target: 100-200 total trades over 4 years (25-50/year).
+# Donchian channels provide clear breakout levels; 1d EMA50 ensures higher timeframe alignment;
+# ATR stoploss manages risk in volatile markets. Works in bull (breakouts up) and bear (breakouts down).
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Trend_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA34 exit
+    # Calculate ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Donchian(20) channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for exit condition
+    # Calculate 1d EMA50
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Align EMA50 to 4h
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # EMA50 trend: slope over 3 periods
+    ema_50_slope = np.zeros_like(ema_50_aligned)
+    ema_50_slope[3:] = (ema_50_aligned[3:] - ema_50_aligned[:-3]) / 3
+    ema_trend_up = ema_50_slope > 0
+    ema_trend_down = ema_50_slope < 0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
+    entry_price = 0.0
     
-    start_idx = 50  # Ensure sufficient history for indicators
+    start_idx = max(20, 14)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
-        # Calculate Camarilla levels from previous 1d bar
-        # Need to get the index of the last completed 1d bar
-        # Since we're on 12h timeframe, we look back 2 bars for previous day
-        if i >= 2:
-            prev_day_idx = i - 2
-            if prev_day_idx < len(prices):
-                # Get high, low, close from previous day (2 bars ago on 12h TF)
-                ph = high[prev_day_idx]
-                pl = low[prev_day_idx]
-                pc = close[prev_day_idx]
-                
-                # Calculate Camarilla levels
-                range_ = ph - pl
-                if range_ > 0:
-                    r3 = pc + (range_ * 1.1 / 4)
-                    s3 = pc - (range_ * 1.1 / 4)
-                else:
-                    r3 = pc
-                    s3 = pc
-            else:
-                # Not enough history, skip
-                signals[i] = 0.0
-                continue
-        else:
-            signals[i] = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r3) or np.isnan(s3)):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: >2x 24-bar average volume (2 days on 12h TF)
-        if i >= 24:
-            volume_ma_24 = np.mean(volume[i-24:i])
-            volume_confirm = volume[i] > 2.0 * volume_ma_24
+        # ATR-based stoploss levels
+        if position == 1:  # Long position
+            stop_loss = entry_price - 2.0 * atr[i]
+        elif position == -1:  # Short position
+            stop_loss = entry_price + 2.0 * atr[i]
         else:
-            volume_confirm = False
+            stop_loss = 0.0
         
-        # 1w EMA50 trend: slope over 3 periods
-        if i >= 3:
-            ema_slope = (ema_50_1w_aligned[i] - ema_50_1w_aligned[i-3]) / 3
-            ema_trend_up = ema_slope > 0
-            ema_trend_down = ema_slope < 0
-        else:
-            ema_trend_up = False
-            ema_trend_down = False
-        
-        # Price action
         price = close[i]
         
-        # Handle entries and exits
-        if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above R3 with volume confirm and 1w EMA50 up
-            if price > r3 and volume_confirm and ema_trend_up:
+        # Handle exits
+        if position == 1:  # Long - exit on middle band touch or stoploss
+            if price <= donchian_middle[i] or price <= stop_loss:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.30
+        elif position == -1:  # Short - exit on middle band touch or stoploss
+            if price >= donchian_middle[i] or price >= stop_loss:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.30
+        else:  # Flat - look for new entries
+            # Long entry: price breaks above Donchian upper band and EMA50 trending up
+            if price > donchian_upper[i] and ema_trend_up[i]:
                 signals[i] = 0.30
                 position = 1
-                bars_since_entry = 0
-            # Short entry: price breaks below S3 with volume confirm and 1w EMA50 down
-            elif price < s3 and volume_confirm and ema_trend_down:
+                entry_price = price
+            # Short entry: price breaks below Donchian lower band and EMA50 trending down
+            elif price < donchian_lower[i] and ema_trend_down[i]:
                 signals[i] = -0.30
                 position = -1
-                bars_since_entry = 0
+                entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - hold or exit
-            bars_since_entry += 1
-            # Exit conditions: price retouches 1d EMA34 or max hold (8 bars = 4 days)
-            if price <= ema_34_1d_aligned[i] or bars_since_entry >= 8:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.30
-        elif position == -1:  # Short - hold or exit
-            bars_since_entry += 1
-            # Exit conditions: price retouches 1d EMA34 or max hold (8 bars = 4 days)
-            if price >= ema_34_1d_aligned[i] or bars_since_entry >= 8:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = -0.30
     
     return signals
