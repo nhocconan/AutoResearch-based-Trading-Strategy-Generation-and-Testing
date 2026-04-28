@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extremes with 1d EMA34 trend filter and volume confirmation.
-# Enter long when Williams %R crosses above -80 (oversold), 1d EMA34 trending up, and volume > 1.8x 20-bar average.
-# Enter short when Williams %R crosses below -20 (overbought), 1d EMA34 trending down, and volume > 1.8x 20-bar average.
-# Exit when Williams %R returns to the opposite extreme zone (long exit at -20, short exit at -80).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
+# Bull Power = High - EMA(34), Bear Power = EMA(34) - Low.
+# Enter long when Bull Power > 0 and rising, Bear Power < 0 and falling, 1d EMA34 trending up, and volume > 1.5x 20-bar average.
+# Enter short when Bear Power > 0 and rising, Bull Power < 0 and falling, 1d EMA34 trending down, and volume > 1.5x 20-bar average.
+# Exit when Bull Power and Bear Power converge (|Bull Power - Bear Power| < 0.1 * ATR(14)).
 # Uses discrete position sizing (0.25) to limit drawdown. Target: 80-160 total trades over 4 years (20-40/year).
-# Williams %R identifies momentum extremes that often precede reversals in ranging markets, while 1d EMA34
-# ensures alignment with higher timeframe trend. Volume confirmation filters weak signals. Works in both bull
-# (mean reversion from oversold) and bear (mean reversion from overbought) regimes.
+# Elder Ray measures trend strength via price relative to EMA; 1d EMA34 ensures higher timeframe alignment;
+# volume confirmation filters weak signals. Works in both bull (strong trends) and bear (strong downtrends).
 
-name = "4h_WilliamsR_Extremes_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,35 +26,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation and EMA34 trend
+    # Calculate ATR(14) for exit condition
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA34
     close_1d = df_1d['close'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Calculate 1d EMA34 for trend filter
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Williams %R and EMA34 to 4h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align EMA34 to 6h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume confirmation: >1.8x 20-bar average volume
+    # Calculate Elder Ray components: Bull Power = High - EMA(34), Bear Power = EMA(34) - Low
+    # First calculate EMA(34) on 6h data
+    ema_34_6h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    bull_power = high - ema_34_6h
+    bear_power = ema_34_6h - low
+    
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.8 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,8 +67,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(ema_34_6h[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -80,43 +85,46 @@ def generate_signals(prices):
             ema_trend_up = False
             ema_trend_down = False
         
-        # Williams %R levels
-        wr = williams_r_aligned[i]
+        # Elder Ray conditions
+        bull_rising = bull_power[i] > bull_power[i-1]
+        bear_rising = bear_power[i] > bear_power[i-1]
+        bull_falling = bull_power[i] < bull_power[i-1]
+        bear_falling = bear_power[i] < bear_power[i-1]
         
-        # Extreme zones
-        oversold = wr < -80
-        overbought = wr > -20
+        # Convergence exit: |Bull Power - Bear Power| < 0.1 * ATR(14)
+        power_diff = np.abs(bull_power[i] - bear_power[i])
+        convergence_exit = power_diff < 0.1 * atr[i]
         
-        # Exit conditions: return to opposite extreme
-        exit_long = wr > -20  # Exit long when no longer oversold
-        exit_short = wr < -80  # Exit short when no longer overbought
-        
-        # Entry conditions: cross into extreme with trend and volume
-        # Long: Williams %R crosses above -80 from below
-        long_entry = (wr > -80) and (i > start_idx) and (williams_r_aligned[i-1] <= -80)
-        # Short: Williams %R crosses below -20 from above
-        short_entry = (wr < -20) and (i > start_idx) and (williams_r_aligned[i-1] >= -20)
+        # Price action
+        price = close[i]
         
         # Handle entries and exits
-        if long_entry and ema_trend_up and vol_confirm and position <= 0:
-            signals[i] = 0.25
-            position = 1
-        elif short_entry and ema_trend_down and vol_confirm and position >= 0:
-            signals[i] = -0.25
-            position = -1
-        elif position == 1 and exit_long:
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and exit_short:
-            signals[i] = 0.0
-            position = 0
-        else:
-            # Hold current position
-            if position == 1:
+        if position == 0:  # Flat - look for new entries
+            # Long entry: Bull Power > 0 and rising, Bear Power < 0 and falling, EMA34 up, volume confirm
+            if (bull_power[i] > 0 and bull_rising and 
+                bear_power[i] < 0 and bear_falling and 
+                ema_trend_up and vol_confirm):
                 signals[i] = 0.25
-            elif position == -1:
+                position = 1
+            # Short entry: Bear Power > 0 and rising, Bull Power < 0 and falling, EMA34 down, volume confirm
+            elif (bear_power[i] > 0 and bear_rising and 
+                  bull_power[i] < 0 and bull_falling and 
+                  ema_trend_down and vol_confirm):
                 signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
+        elif position == 1:  # Long - hold or exit on convergence
+            if convergence_exit:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # Short - hold or exit on convergence
+            if convergence_exit:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
