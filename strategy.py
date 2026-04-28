@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,25 +13,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for HTF context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Get daily data for additional context
+    # Get daily data for HTF context (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly high/low/close for calculations
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get weekly data for additional context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
     # Daily high/low/close for calculations
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Weekly high/low/close for calculations
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Calculate weekly range for pivot calculations
     weekly_range = high_1w - low_1w
@@ -40,7 +40,7 @@ def generate_signals(prices):
     camarilla_r4 = close_1w + weekly_range * 1.1 / 2
     camarilla_s4 = close_1w - weekly_range * 1.1 / 2
     
-    # Align Weekly Camarilla levels to 1d timeframe
+    # Align Weekly Camarilla levels to 6h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
@@ -58,7 +58,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 60  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -120,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyCamarilla_R4S4_DailyTrend_Volume_Session"
-timeframe = "1d"
+name = "6h_WeeklyCamarilla_R4S4_DailyTrend_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
