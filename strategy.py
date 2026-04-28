@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_RSI_ChopFilter
-Hypothesis: Daily KAMA direction with RSI overbought/oversold and Choppiness Index regime filter.
-KAMA adapts to market noise, reducing whipsaw in chop. RSI extremes provide mean-reversion entries.
-Chop filter (>61.8) ensures we only mean-revert in ranging markets, avoiding trending whipsaw.
-Targets 15-25 trades/year by requiring KAMA trend, RSI extreme, and chop regime alignment.
-Works in bull/bear: mean reversion in ranges, trend following via KAMA in strong trends.
+12h_Vortex_Volume_Spike_Trend_Filter
+Hypothesis: 12h Vortex Indicator identifies trend direction, filtered by volume spikes and 1d trend alignment. Works in bull/bear by capturing strong moves with confirmation.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,89 +18,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations
+    # Get 12h data for Vortex calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # Calculate Vortex Indicator (VI) on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    
+    # VM+ and VM-
+    vm_plus = np.abs(high_12h[1:] - low_12h[:-1])
+    vm_minus = np.abs(low_12h[1:] - high_12h[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
+    
+    # Sum over 14 periods
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus_14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # VI+ and VI-
+    vi_plus = vm_plus_14 / tr14
+    vi_minus = vm_minus_14 / tr14
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # KAMA (Kaufman Adaptive Moving Average) parameters
-    er_len = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close, k=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Handle first er_len values
-    er = np.full_like(close, np.nan, dtype=np.float64)
-    for i in range(er_len, len(close)):
-        if volatility[i] != 0:
-            er[i] = change[i-er_len] / volatility[i]
-        else:
-            er[i] = 0
+    # Align all higher timeframe data to 12h
+    vi_plus_aligned = align_htf_to_ltf(prices, df_12h, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_12h, vi_minus)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
+    d_uptrend = close > ema_50_1d_aligned
+    d_downtrend = close < ema_50_1d_aligned
     
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[er_len] = close[er_len]  # Seed
-    for i in range(er_len + 1, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    
-    # First average
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    
-    # Wilder smoothing
-    for i in range(15, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index (14-period)
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
-    
-    tr = np.full_like(close, np.nan)
-    for i in range(1, len(close)):
-        tr[i] = true_range(high[i], low[i], close[i-1])
-    
-    atr14 = np.full_like(close, np.nan)
-    for i in range(14, len(close)):
-        atr14[i] = np.mean(tr[i-13:i+1])
-    
-    # Highest high and lowest low over 14 periods
-    hh = np.full_like(close, np.nan)
-    ll = np.full_like(close, np.nan)
-    for i in range(13, len(close)):
-        hh[i] = np.max(high[i-13:i+1])
-        ll[i] = np.min(low[i-13:i+1])
-    
-    chop = np.full_like(close, np.nan)
-    for i in range(13, len(close)):
-        if atr14[i] > 0 and hh[i] > ll[i]:
-            chop[i] = 100 * np.log10(sum(tr[i-13:i+1]) / (hh[i] - ll[i])) / np.log10(14)
-        else:
-            chop[i] = 50
-    
-    # Align KAMA, RSI, Chop to 1d (already 1d but ensure alignment)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -113,72 +78,49 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: Chop > 61.8 = ranging market (mean revert)
-        ranging = chop_aligned[i] > 61.8
+        # Entry conditions with trend alignment and volume spike
+        # Long: VI+ > VI- + daily uptrend + volume spike
+        long_entry = (vi_plus_aligned[i] > vi_minus_aligned[i] and 
+                     d_uptrend[i] and 
+                     volume_spike[i])
         
-        # KAMA trend: price above KAMA = bullish bias, below = bearish bias
-        price_above_kama = close[i] > kama_aligned[i]
-        price_below_kama = close[i] < kama_aligned[i]
+        # Short: VI- > VI+ + daily downtrend + volume spike
+        short_entry = (vi_minus_aligned[i] > vi_plus_aligned[i] and 
+                      d_downtrend[i] and 
+                      volume_spike[i])
         
-        # RSI extremes for mean reversion
-        rsi_oversold = rsi_aligned[i] < 30
-        rsi_overbought = rsi_aligned[i] > 70
+        # Exit on opposite vortex crossover with volume spike
+        long_exit = vi_minus_aligned[i] > vi_plus_aligned[i] and volume_spike[i]
+        short_exit = vi_plus_aligned[i] > vi_minus_aligned[i] and volume_spike[i]
         
-        # Entry logic: only in ranging markets
-        if ranging:
-            # Long: RSI oversold + price above KAMA (bullish bias in range)
-            if rsi_oversold and price_above_kama and position <= 0:
-                signals[i] = 0.25
-                position = 1
-            # Short: RSI overbought + price below KAMA (bearish bias in range)
-            elif rsi_overbought and price_below_kama and position >= 0:
-                signals[i] = -0.25
-                position = -1
-            # Exit when RSI returns to neutral (40-60) or opposite extreme
-            elif position == 1 and (rsi_aligned[i] > 50 or rsi_overbought):
-                signals[i] = -0.25  # Close long
-                position = 0
-            elif position == -1 and (rsi_aligned[i] < 50 or rsi_oversold):
-                signals[i] = 0.25   # Close short
-                position = 0
-            else:
-                # Hold current position
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+        if long_entry and position <= 0:
+            signals[i] = 0.25
+            position = 1
+        elif short_entry and position >= 0:
+            signals[i] = -0.25
+            position = -1
+        elif long_exit and position == 1:
+            signals[i] = -0.25  # Reverse to short
+            position = -1
+        elif short_exit and position == -1:
+            signals[i] = 0.25   # Reverse to long
+            position = 1
         else:
-            # In trending markets, follow KAMA direction
-            if price_above_kama and position <= 0:
+            # Hold current position
+            if position == 1:
                 signals[i] = 0.25
-                position = 1
-            elif price_below_kama and position >= 0:
+            elif position == -1:
                 signals[i] = -0.25
-                position = -1
-            elif position == 1 and price_below_kama:
-                signals[i] = 0.0  # Exit long
-                position = 0
-            elif position == -1 and price_above_kama:
-                signals[i] = 0.0  # Exit short
-                position = 0
             else:
-                # Hold current position
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "12h_Vortex_Volume_Spike_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
