@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d ADX trend filter and volume confirmation.
-# Enter long when BB width < 20th percentile (squeeze) + price breaks above upper band + 1d ADX > 25 + volume > 2x 20-bar average.
-# Enter short when BB width < 20th percentile + price breaks below lower band + 1d ADX > 25 + volume > 2x 20-bar average.
-# Exit when price crosses back to middle band (20-period SMA).
-# Uses discrete position sizing (0.25) to limit drawdown. Target: 60-120 total trades over 4 years (15-30/year).
-# Bollinger Squeeze captures low volatility breakouts; 1d ADX ensures higher timeframe trend strength;
-# volume confirmation avoids false breakouts. Works in both bull (upward breakouts) and bear (downward breakdowns).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Enter long when price breaks above R3 level with volume > 2x 20-bar average and 1d EMA34 trending up.
+# Enter short when price breaks below S3 level with volume > 2x 20-bar average and 1d EMA34 trending down.
+# Exit when price returns to the Camarilla pivot level (PP) or opposite S1/R1 level.
+# Uses discrete position sizing (0.30) to limit drawdown. Target: 60-120 total trades over 4 years (15-30/year).
+# Camarilla levels provide precise intraday support/resistance; 1d EMA34 ensures higher timeframe alignment;
+# volume spike filters breakout strength. Works in both bull (strong breakouts) and bear (strong breakdowns).
 
-name = "6h_BollingerSqueeze_Breakout_1dADX_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,122 +25,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
-    
-    # Calculate BB width percentile (20-period lookback for regime)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=100).rank(pct=True).values
-    
-    # Get 1d data for ADX trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14)
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align EMA34 to 12h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Calculate 1d EMA34 trend (slope over 3 periods)
+    ema_34_slope = pd.Series(ema_34_aligned).diff(3) / 3
+    ema_trend_up = ema_34_slope > 0
+    ema_trend_down = ema_34_slope < 0
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: PP = (H+L+C)/3, R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We use R3, S3, PP, S1, R1 for entries/exits
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # First bar has no previous day
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Smoothed values
-    tr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Camarilla levels
+    pp = (prev_high + prev_low + prev_close) / 3
+    r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    r1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
+    s1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align ADX to 6h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align Camarilla levels to 12h
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume confirmation: >2x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 100)  # Ensure sufficient history for indicators
+    start_idx = max(34, 20)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(bb_width_percentile[i]) or np.isnan(adx_aligned[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Squeeze condition: BB width < 20th percentile
-        squeeze = bb_width_percentile[i] < 0.20
-        
         # Volume confirmation
-        vol_confirm = volume_confirm[i]
+        vol_spike = volume_spike[i]
         
-        # 1d ADX trend: >25 indicates strong trend
-        adx_trend = adx_aligned[i] > 25
+        # 1d EMA34 trend
+        trend_up = ema_trend_up.iloc[i] if hasattr(ema_trend_up, 'iloc') else ema_trend_up[i]
+        trend_down = ema_trend_down.iloc[i] if hasattr(ema_trend_down, 'iloc') else ema_trend_down[i]
         
-        # Breakout conditions
+        # Price action
         price = close[i]
-        breakout_up = price > bb_upper[i]
-        breakout_down = price < bb_lower[i]
-        
-        # Exit condition: price crosses back to middle band
-        reentry_middle = (position == 1 and price < bb_middle[i]) or \
-                         (position == -1 and price > bb_middle[i])
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            if squeeze and vol_confirm and adx_trend:
-                if breakout_up:
-                    signals[i] = 0.25
-                    position = 1
-                elif breakout_down:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long entry: price > R3, volume spike, EMA34 up
+            if (price > r3_aligned[i] and vol_spike and trend_up):
+                signals[i] = 0.30
+                position = 1
+            # Short entry: price < S3, volume spike, EMA34 down
+            elif (price < s3_aligned[i] and vol_spike and trend_down):
+                signals[i] = -0.30
+                position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - hold or exit on reentry to middle
-            if reentry_middle:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # Short - hold or exit on reentry to middle
-            if reentry_middle:
+        elif position == 1:  # Long - hold or exit
+            # Exit when price returns to PP or drops below S1
+            if (price <= pp_aligned[i] or price < s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = 0.30
+        elif position == -1:  # Short - hold or exit
+            # Exit when price returns to PP or rises above R1
+            if (price >= pp_aligned[i] or price > r1_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.30
     
     return signals
