@@ -45,29 +45,29 @@ def generate_signals(prices):
     ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Get 6h data for breakout signals (ATR-based breakout)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 14:
+    # Get 12h data for breakout signals (ATR-based breakout)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    open_6h = df_6h['open'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    open_12h = df_12h['open'].values
     
-    # 6h ATR(14) for breakout threshold
-    tr1_6h = high_6h - low_6h
-    tr2_6h = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3_6h = np.abs(low_6h - np.roll(close_6h, 1))
-    tr1_6h[0] = tr2_6h[0] = tr3_6h[0] = 0
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    atr_6h_14 = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # 12h ATR(14) for breakout threshold
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1_12h[0] = tr2_12h[0] = tr3_12h[0] = 0
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    atr_12h_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     # Breakout threshold: 0.5 * ATR(14) from open
-    upper_breakout = open_6h + 0.5 * atr_6h_14
-    lower_breakout = open_6h - 0.5 * atr_6h_14
-    upper_breakout_aligned = align_htf_to_ltf(prices, df_6h, upper_breakout)
-    lower_breakout_aligned = align_htf_to_ltf(prices, df_6h, lower_breakout)
+    upper_breakout = open_12h + 0.5 * atr_12h_14
+    lower_breakout = open_12h - 0.5 * atr_12h_14
+    upper_breakout_aligned = align_htf_to_ltf(prices, df_12h, upper_breakout)
+    lower_breakout_aligned = align_htf_to_ltf(prices, df_12h, lower_breakout)
     
     # Volume confirmation: current volume > 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -94,7 +94,7 @@ def generate_signals(prices):
         # Volatility filter: avoid low volatility periods
         vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.8
         
-        # Breakout conditions: price breaks 0.5*ATR from 6h open
+        # Breakout conditions: price breaks 0.5*ATR from 12h open
         long_breakout = close[i] > upper_breakout_aligned[i]
         short_breakout = close[i] < lower_breakout_aligned[i]
         
@@ -131,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ATRBreakout_1dEMA34_1wEMA21_VolumeFilter"
-timeframe = "6h"
+name = "12h_ATRBreakout_1dEMA34_1wEMA21_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
