@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extremes with 1d EMA34 trend filter and volume confirmation.
-# Enter long when Williams %R < -80 (oversold), 1d EMA34 trending up, and volume > 1.5x 20-bar average.
-# Enter short when Williams %R > -20 (overbought), 1d EMA34 trending down, and volume > 1.5x 20-bar average.
-# Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
-# Uses discrete position sizing (0.25) to limit drawdown in bear markets like 2022.
-# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and fee drag.
-# Williams %R identifies exhaustion points; 1d EMA34 ensures alignment with higher timeframe trend;
-# volume confirms participation. Works in both bull (fades overextended moves) and bear (fades relief rallies).
+# Hypothesis: 4h Donchian breakout with 1d volume spike and choppiness regime filter.
+# Enter long when price breaks above Donchian(20) high, 1d volume > 2x 20-bar average, and choppiness < 38.2 (trending).
+# Enter short when price breaks below Donchian(20) low, 1d volume > 2x 20-bar average, and choppiness < 38.2.
+# Exit when price crosses Donchian midpoint.
+# Uses discrete position sizing (0.25) to limit drawdown.
+# Target: 100-180 total trades over 4 years (25-45/year) to balance opportunity and fee drag.
+# Donchian breakouts capture strong moves; volume confirms institutional participation; choppiness filter avoids whipsaws in ranging markets.
+# Works in bull markets (catching breakouts) and bear markets (catching breakdowns) with volume confirmation reducing false signals.
 
-name = "4h_WilliamsR_Extremes_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_Donchian20_VolumeSpike_ChopFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,76 +26,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R and EMA34
+    # Get 1d data for volume and choppiness
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Williams %R(14) on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Calculate 1d volume and volume MA
+    volume_1d = df_1d['volume'].values
+    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d choppiness index (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Rolling highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # True Range
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d)
+    tr2 = pd.Series(high_1d).shift(1) - pd.Series(close_1d)
+    tr3 = pd.Series(close_1d).shift(1) - pd.Series(low_1d)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA34
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Sum of True Range over 14 periods
+    sum_tr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
     
-    # Align to 4h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Volume confirmation: >1.5x 20-bar average volume
-    volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    # Choppiness Index: 100 * log10(sum_tr / (hh - ll)) / log10(14)
+    # Avoid division by zero
+    hh_ll = hh - ll
+    chop = np.where(hh_ll > 0, 100 * np.log10(sum_tr / hh_ll) / np.log10(14), 50)
+    
+    # Align 1d indicators to 4h
+    volume_ma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure sufficient history for indicators
+    start_idx = 20  # Ensure sufficient history for Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma_20_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume_confirm[i]
+        # Volume confirmation: >2x 20-bar average volume
+        vol_confirm = volume[i] > 2 * volume_ma_20_aligned[i]
         
-        # 1d EMA34 trend: slope over 3 periods
-        if i >= 3:
-            ema_slope = (ema_34_aligned[i] - ema_34_aligned[i-3]) / 3
-            ema_trend_up = ema_slope > 0
-            ema_trend_down = ema_slope < 0
-        else:
-            ema_trend_up = False
-            ema_trend_down = False
+        # Choppiness filter: < 38.2 indicates trending market
+        chop_filter = chop_aligned[i] < 38.2
         
-        # Williams %R conditions
-        williams_r_val = williams_r_aligned[i]
-        williams_oversold = williams_r_val < -80
-        williams_overbought = williams_r_val > -20
-        williams_exit_long = williams_r_val > -50  # Exit long when crosses above -50
-        williams_exit_short = williams_r_val < -50  # Exit short when crosses below -50
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i]
+        breakout_down = close[i] < lowest_low[i]
+        
+        # Exit conditions: price crosses Donchian midpoint
+        exit_long = close[i] < donchian_mid[i]
+        exit_short = close[i] > donchian_mid[i]
         
         # Handle entries and exits
-        if williams_oversold and ema_trend_up and vol_confirm and position <= 0:
+        if breakout_up and vol_confirm and chop_filter and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif williams_overbought and ema_trend_down and vol_confirm and position >= 0:
+        elif breakout_down and vol_confirm and chop_filter and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif position == 1 and williams_exit_long:
+        elif position == 1 and exit_long:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and williams_exit_short:
+        elif position == -1 and exit_short:
             signals[i] = 0.0
             position = 0
         else:
