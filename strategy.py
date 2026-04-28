@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w HMA21 trend filter with Donchian(20) breakout and volume confirmation.
-# Enter long when price breaks above Donchian(20) high with volume > 1.8x 20-bar average and price > 1w HMA21 (uptrend).
-# Enter short when price breaks below Donchian(20) low with volume > 1.8x 20-bar average and price < 1w HMA21 (downtrend).
-# Uses discrete position sizing (0.25) to limit drawdown. Target: 30-100 trades over 4 years.
-# Donchian provides objective breakout levels, volume confirms momentum, 1w HMA21 filters counter-trend noise.
-# Works in bull (breakouts with trend) and bear (failed breaks via exits) markets.
+# Hypothesis: 12h strategy using Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation.
+# Enter long when price breaks above Donchian(20) high with volume > 1.8x 20-bar average and price > 1d EMA34 (uptrend).
+# Enter short when price breaks below Donchian(20) low with volume > 1.8x 20-bar average and price < 1d EMA34 (downtrend).
+# Exit on opposite Donchian level break or when price crosses 1d EMA34 in opposite direction.
+# Uses discrete position sizing (0.25) to limit drawdown. Target: 50-150 total trades over 4 years (12-37/year).
+# Donchian provides objective breakout levels, volume confirms momentum, 1d EMA34 filters counter-trend noise.
+# Works in bull (breakouts with trend) and bear (failed breaks via exits) markets by avoiding false breakouts.
 
-name = "1d_Donchian20_1wHMA21_Volume_Breakout_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA34_Volume_Breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +25,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HMA21 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for EMA34 trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w HMA21
-    close_1w = df_1w['close'].values
-    half_length = 21 // 2
-    sqrt_length = int(np.sqrt(21))
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # WMA function
-    def wma(values, window):
-        if len(values) < window:
-            return np.full_like(values, np.nan)
-        weights = np.arange(1, window + 1)
-        wma_vals = np.convolve(values, weights, mode='valid') / weights.sum()
-        result = np.full_like(values, np.nan)
-        result[window-1:] = wma_vals
-        return result
+    # Align 1d EMA34 to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    wma_half = wma(close_1w, half_length)
-    wma_full = wma(close_1w, 21)
-    hma_21_1w = wma(2 * wma_half - wma_full, sqrt_length)
-    
-    # Align 1w HMA21 to 1d timeframe
-    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
-    
-    # Calculate 1d Donchian channels (20)
+    # Calculate 12h Donchian channels (20)
     def donchian_channels(high, low, length=20):
         upper = np.full_like(high, np.nan)
         lower = np.full_like(low, np.nan)
@@ -63,7 +49,7 @@ def generate_signals(prices):
     
     donchian_upper, donchian_lower = donchian_channels(high, low, 20)
     
-    # Calculate 1d volume confirmation: >1.8x 20-bar average volume
+    # Calculate 12h volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 1.8 * volume_ma_20
@@ -75,18 +61,18 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(hma_21_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
             np.isnan(donchian_lower[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Donchian breakout conditions with volume confirmation and trend filter
-        long_breakout = close[i] > donchian_upper[i] and volume_confirm[i] and close[i] > hma_21_1w_aligned[i]
-        short_breakout = close[i] < donchian_lower[i] and volume_confirm[i] and close[i] < hma_21_1w_aligned[i]
+        long_breakout = close[i] > donchian_upper[i] and volume_confirm[i] and close[i] > ema_34_1d_aligned[i]
+        short_breakout = close[i] < donchian_lower[i] and volume_confirm[i] and close[i] < ema_34_1d_aligned[i]
         
-        # Exit conditions: opposite Donchian level
-        long_exit = close[i] < donchian_lower[i]
-        short_exit = close[i] > donchian_upper[i]
+        # Exit conditions: opposite Donchian level break or EMA34 cross in opposite direction
+        long_exit = close[i] < donchian_lower[i] or close[i] < ema_34_1d_aligned[i]
+        short_exit = close[i] > donchian_upper[i] or close[i] > ema_34_1d_aligned[i]
         
         # Handle entries and exits
         if long_breakout and position <= 0:
